@@ -255,10 +255,11 @@ def _event_types(types: object) -> str | None:
 
 
 class _Reference(Namespace):
-    """`m.reference`: the cross-asset reference data datasets of a session.
+    """The reference datasets across asset classes, reached as `m.reference`.
 
-    Created once by `MassiveSession` and reached as `m.reference`. It holds no state of its
-    own, so it is safe to use from any thread; each method builds a query and never blocks.
+    Its methods cover tickers and their details, types, events, and related companies, news, the
+    exchanges, the trade and quote condition codes, the market status, and the market holidays. Each
+    method only builds a query, so it never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -267,7 +268,7 @@ class _Reference(Namespace):
 
             m = dm.MassiveSession()
             details = m.reference.ticker_details(["AAPL", "MSFT"]).fetch()
-            news = m.reference.news("AAPL", start="2025-06-01").poll(60)
+            headlines = m.reference.news("AAPL", start="2026-11-01").poll(60)
     """
 
     __slots__ = ()
@@ -293,34 +294,34 @@ class _Reference(Namespace):
     ) -> Query:
         """Every ticker Massive supports, across asset classes, with its listing details.
 
-        Each row is one ticker. `poll()` re-fetches the list, keyed by `Symbol`. The endpoint takes
-        one ticker per request, so named tickers are one request each and `limit` then caps each
-        ticker's rows; `symbols=None` lists every ticker in one request series.
+        Each row holds one ticker's name, market, type, primary exchange, and identifiers. With
+        `symbols` left out, the call lists every ticker that matches the other arguments.
 
         Args:
-            symbols: Tickers of any classes; None for every ticker (`dm.ALL` is refused).
-            market: The market to list; None for every market.
-            ticker_type: The type, such as `dm.TickerType.CS` (`ticker_types()` lists them),
-                sent as Massive's parameter `type`; None for every type.
-            exchange: The primary exchange's MIC, such as `"XNAS"`; None for every exchange.
-            cusip: The CUSIP to look up; None for any.
-            cik: The SEC Central Index Key to look up; None for any.
-            as_of: The day the listing is as of, sent as `date`; None for today.
-            active: True (the default) lists tickers traded on `as_of`; False lists delisted ones.
-            search: Text matched against the ticker and the company name; None for no search.
-            sort: The field to sort by.
+            symbols: Tickers of any asset class; leave it out for every ticker.
+            market: The market to list, such as `dm.Market.STOCKS`; leave it out for every market.
+            ticker_type: The type, such as `dm.TickerType.ETF`; `ticker_types()` lists them. Leave
+                it out for every type.
+            exchange: The primary exchange's MIC, such as `"XNAS"`; leave it out for every exchange.
+            cusip: The CUSIP to look up.
+            cik: The SEC Central Index Key to look up.
+            as_of: The day the listing is as of; leave it out for today.
+            active: True, the default, lists tickers traded on `as_of`; False lists delisted ones.
+            search: Text to match against the ticker and the company name.
+            sort: Any field of the rows, such as `"name"`.
             order: The direction of `sort`.
             limit: Per ticker when tickers are named, else in total.
             filters: Further endpoint parameters.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.tickers.md.
 
         Raises:
-            TypeError: If `active` is not a `bool`, or another argument has the wrong type.
-            ValueError: For `dm.ALL`, an invalid symbol, a `datetime` as `as_of`, or an unknown
-                filter.
+            TypeError: If `active` isn't a `bool`, or another argument has the wrong type.
+            ValueError: If `symbols` is `dm.ALL` or holds a ticker that isn't Massive's exact
+                ticker; `as_of` is a time instead of a date; or a filter isn't one the dataset
+                takes, or its value doesn't fit.
 
         Example:
             ::
@@ -359,21 +360,21 @@ class _Reference(Namespace):
     def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
         """One ticker's company and listing details: address, branding, shares, and more.
 
-        One row per symbol, one request each; a symbol Massive does not know is left out with a
-        WARNING. `poll()` re-fetches them, keyed by `Symbol`.
+        Each row holds one ticker's company details. A ticker Massive doesn't know gets no row and
+        logs a WARNING.
 
         Args:
-            symbols: Tickers of any classes (`dm.ALL` is refused: `tickers()` lists every ticker).
-            as_of: The day the details are as of, sent as `date`; None for the latest.
+            symbols: Tickers of any asset class; `tickers()` lists every ticker.
+            as_of: The day the details are as of; leave it out for the latest.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_details.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For `dm.ALL`, an invalid symbol, or a `datetime` as `as_of`. Also for
-                `symbols` of None, with a message that names the forms it takes.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is None or `dm.ALL`, or holds a ticker that isn't Massive's
+                exact ticker; or `as_of` is a time instead of a date.
 
         Example:
             ::
@@ -398,20 +399,22 @@ class _Reference(Namespace):
     ) -> Query:
         """The ticker type codes Massive uses, such as `CS` for common stock, with their names.
 
-        One row per type; `poll()` re-fetches them, keyed by `AssetClass`, `Locale`, and `Code`.
+        Each row holds one type's code, its description, its asset class, and its locale. The codes
+        are the values of `dm.TickerType`, which `tickers()` filters by.
 
         Args:
-            asset_class: The class whose types to list (forex is sent as `fx`); None for every
-                class. The endpoint has no futures types.
-            locale: The locale whose types to list; None for both.
+            asset_class: The asset class whose types to list; leave it out for every class. Massive
+                lists no futures types.
+            locale: The locale whose types to list; leave it out for both.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_types.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For an `asset_class` the endpoint does not accept (`FUTURES`).
+            TypeError: If an argument has the wrong type.
+            ValueError: If `asset_class` is `dm.AssetClass.FUTURES`, which the endpoint doesn't
+                take.
 
         Example:
             ::
@@ -428,22 +431,22 @@ class _Reference(Namespace):
     def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> Query:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
-        One request per symbol; the symbol may also be a CUSIP or a Composite FIGI, and `Symbol` is
-        the identifier asked about. `poll()` re-fetches them, keyed by `Symbol`, `Date`, and `Type`.
+        Each row holds the event's date and type, such as a change of ticker. A symbol may also be a
+        CUSIP or a Composite FIGI, and `Symbol` holds the identifier you asked about.
 
         Args:
-            symbols: Tickers of any classes (`dm.ALL` is refused).
-            types: The event types to include, such as `["ticker_change"]` (one `str` is one
-                type); None for every type.
+            symbols: Tickers of any asset class, CUSIPs, or Composite FIGIs.
+            types: The event types to include, such as `["ticker_change"]`; one `str` is one type.
+                Leave it out for every type.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_events.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For `dm.ALL`, an invalid symbol, or an empty `types`. Also for `symbols` of
-                None, with a message that names the forms it takes.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is None or `dm.ALL`, or holds a ticker that isn't Massive's
+                exact ticker; or `types` is empty.
 
         Example:
             ::
@@ -463,21 +466,19 @@ class _Reference(Namespace):
     def related_companies(self, symbols: Symbols) -> Query:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
-        One request per symbol. Each row names one peer: `Symbol` is the related company and
-        `Underlying` the ticker asked about. `poll()` re-fetches them, keyed by `Underlying` and
-        `Symbol`.
+        `Symbol` is the related company, and `Underlying` is the ticker you asked about.
 
         Args:
-            symbols: The tickers to find peers of (`dm.ALL` is refused).
+            symbols: The tickers to find related companies of.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.related_companies.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For `dm.ALL` or an invalid symbol. Also for `symbols` of None, with a
-                message that names the forms it takes.
+            TypeError: If an argument has the wrong type.
+            ValueError: If `symbols` is None or `dm.ALL`, or holds a ticker that isn't Massive's
+                exact ticker.
 
         Example:
             ::
@@ -503,31 +504,29 @@ class _Reference(Namespace):
     ) -> Query:
         """News articles about tickers, with their publishers and sentiment insights.
 
-        One row per article. An article names several tickers, in its `Tickers` array, and is listed
-        under each ticker it was read for, in `Symbol`. The endpoint takes one ticker per request,
-        so each ticker is its own request, `limit`, `sort`, and `order` apply to each ticker's
-        request (newest first by default). `poll()` appends new articles, keyed by `Id` and
-        `Symbol`, and needs `start` or `limit`; it re-reads a watchlist table every cycle, and a
-        fixed `start` widens the window of a poll that runs for days.
+        Each row holds one article's headline, publisher, publication time, and Massive's sentiment
+        insights. An article lists every ticker it names in `Tickers`, and appears once under each
+        of your tickers it names, in `Symbol`. With tickers named, `sort`, `order`, and `limit`
+        apply to each ticker's articles, newest first by default.
 
         Args:
-            symbols: The tickers whose articles to read; None for every article (`dm.ALL` is
-                refused).
-            start: The earliest publication.
-            end: The end of the range.
-            sort: Each ticker's sort field, `"published_utc"` by default.
-            order: Each ticker's order, newest first by default.
+            symbols: The tickers whose articles to read; leave it out for every article.
+            start: The earliest publication time.
+            end: The latest publication time.
+            sort: Each ticker's sort field; `"published_utc"`, the default, is the only one.
+            order: Each ticker's direction of `sort`, newest first by default.
             limit: Articles per ticker, or in total without `symbols`.
             filters: Further endpoint parameters.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.news.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: For `dm.ALL`, an empty list, an invalid symbol, a naive `datetime`, a
-                range that ends before it starts, or an unknown filter.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date or a time with a time zone; the range ends before
+                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -553,20 +552,22 @@ class _Reference(Namespace):
     ) -> Query:
         """The exchanges, trade reporting facilities, and SIPs Massive knows, with their codes.
 
-        One row per exchange; `poll()` re-fetches them, keyed by `AssetClass` and `Id`.
+        Each row holds one venue's id, name, type, MIC, and asset class. The ids are the exchange
+        codes that trades and quotes carry.
 
         Args:
-            asset_class: The class whose exchanges to list (forex is sent as `fx`); None for every
-                class. The endpoint has no indices exchanges.
-            locale: The locale whose exchanges to list; None for both.
+            asset_class: The asset class whose exchanges to list; leave it out for every class.
+                Massive lists no index exchanges.
+            locale: The locale whose exchanges to list; leave it out for both.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.exchanges.md.
 
         Raises:
-            TypeError: For an argument of the wrong type.
-            ValueError: For an `asset_class` the endpoint does not accept (`INDICES`).
+            TypeError: If an argument has the wrong type.
+            ValueError: If `asset_class` is `dm.AssetClass.INDICES`, which the endpoint doesn't
+                take.
 
         Example:
             ::
@@ -594,29 +595,30 @@ class _Reference(Namespace):
     ) -> Query:
         """The trade and quote condition codes, with what each means and how it updates bars.
 
-        One row per condition. Massive lists two different conditions under one stocks quote id,
-        so a `poll()` table is keyed by every column Massive sends and merges only exact repeats.
+        Each row holds one condition's id, name, and the SIP codes it maps to, and whether a trade
+        with it updates a bar's high and low, open and close, and volume. Massive lists two
+        different conditions under one stocks quote id, so a `poll()` table keeps every distinct
+        row.
 
         Args:
-            asset_class: The class whose conditions to list (forex is sent as `fx`); None for every
-                class. The endpoint has no futures or indices conditions.
-            data_type: The kind of data the conditions apply to; None for every kind.
-            condition_id: One condition's id, sent as Massive's parameter `id`; None for every
-                condition.
-            sip: The SIP whose condition mapping to list; None for every SIP.
-            sort: The field to sort by.
+            asset_class: The asset class whose conditions to list; leave it out for every class.
+                Massive lists no futures or index conditions.
+            data_type: The kind of data the conditions apply to; leave it out for every kind.
+            condition_id: One condition's id; leave it out for every condition.
+            sip: The SIP whose condition codes to list; leave it out for every SIP.
+            sort: Any field of the rows, such as `"name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.conditions.md.
 
         Raises:
-            TypeError: If `condition_id` is neither None nor an `int`, or another argument has the
-                wrong type.
-            ValueError: For an `asset_class` the endpoint does not accept, or an unknown filter.
+            TypeError: If `condition_id` isn't an `int`, or another argument has the wrong type.
+            ValueError: If `asset_class` is one the endpoint doesn't take; or a filter isn't one the
+                dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -649,11 +651,11 @@ class _Reference(Namespace):
     def market_status(self) -> Query:
         """Whether the markets are open now, by exchange, currency market, and index group.
 
-        One row, with the nested exchange, currency, and index-group maps flattened into columns.
-        `poll()` keeps only the latest status in its one row.
+        The table has one row, with a column for each exchange, currency market, and index group. A
+        `poll()` table keeps the latest status in that row.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_status.md.
 
         Example:
@@ -666,10 +668,11 @@ class _Reference(Namespace):
     def market_holidays(self) -> Query:
         """The upcoming market holidays and early closes, one row per exchange and day.
 
-        `poll()` re-fetches them, keyed by `Exchange` and `Date`.
+        Each row holds the holiday's name and the exchange's status that day, with its open and
+        close times on an early close.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_holidays.md.
 
         Example:

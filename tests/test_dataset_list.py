@@ -89,14 +89,15 @@ def test_every_dataset_has_its_call() -> None:
         # Each argument's entry of the docstring's `Args`, its lines joined.
         descriptions=(
             "Stock tickers, or `dm.ALL`.",
-            "The bar unit, any but `SESSION`; required.",
-            "Units per bar, 1 by default; only 1 streams.",
-            "Split-adjusted prices, served by REST only.",
+            "The bar's unit, any but `dm.Timespan.SESSION`.",
+            "Units per bar.",
+            "Adjusts volume as well as prices.",
         ),
     )
     # An entry that runs over several lines is joined into one.
-    assert calls["stocks.dividends"].descriptions[2] == (
-        "The last ex-dividend date; without it, announced dividends still to come are returned too."
+    assert calls["stocks.previous_day_bar"].descriptions[0] == (
+        "Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use "
+        "`m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`."
     )
     # The session's own dataset method, and defaults written as a user types them.
     assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")

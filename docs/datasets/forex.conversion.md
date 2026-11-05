@@ -22,9 +22,9 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `from_currency` | The currency to convert from, a three-letter code such as `"AUD"`, written exactly: upper case, nothing around it. |  |
+| `from_currency` | The currency to convert from, as three upper-case letters, such as `"AUD"`. |  |
 | `to_currency` | The currency to convert to, such as `"USD"`. |  |
-| `amount` | The amount to convert, a positive, finite `int` or `float`; 1.0 by default. |  |
+| `amount` | The amount to convert, positive and finite; 1.0 by default. |  |
 | `precision` | The decimal places of the result, 0 to 4; 2 by default. |  |
 
 ## Plan access

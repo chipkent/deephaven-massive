@@ -22,8 +22,8 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `asset_class` | The class whose exchanges to list (forex is sent as `fx`); None for every class. The endpoint has no indices exchanges. |  |
-| `locale` | The locale whose exchanges to list; None for both. |  |
+| `asset_class` | The asset class whose exchanges to list; leave it out for every class. Massive lists no index exchanges. |  |
+| `locale` | The locale whose exchanges to list; leave it out for both. |  |
 
 ## Plan access
 

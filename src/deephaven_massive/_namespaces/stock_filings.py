@@ -441,12 +441,15 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 class _StockFilings(Namespace):
-    """`m.stocks.filings`: SEC filings, the insider data built from them, and taxonomies.
+    """The SEC filing datasets, reached as `m.stocks.filings`.
 
-    Created once per session by `_Stocks`; holds no state of its own, so it is safe to use from
-    any thread. Each method builds a query and never blocks. By default `poll()` on a filings
-    dataset appends only the rows it has not seen before, while the insider activity, the
-    insider holdings, and the two taxonomies replace their table each cycle.
+    Its methods cover the EDGAR filing index, 10-K sections, 8-K text and disclosures, risk factors,
+    institutional holdings from Form 13-F, insider ownership and transactions from Forms 3 and 4,
+    Massive's daily insider summaries, and the taxonomies that classify risk factors and
+    disclosures. A `poll()` of a filings dataset adds only rows it hasn't seen, and it needs a
+    `start` or a `limit`; the two insider summaries and the two taxonomies replace their rows each
+    cycle instead. Each method only builds a query, so it never blocks, and you can call it from any
+    thread.
 
     Example:
         ::
@@ -454,7 +457,7 @@ class _StockFilings(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            latest = m.stocks.filings.index(form_type="8-K", start="2025-06-02").fetch()
+            reports = m.stocks.filings.index(form_type="8-K", start="2026-06-01").fetch()
     """
 
     __slots__ = ()
@@ -475,30 +478,29 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
-        Each row names a filing's form type, filer CIK, issuer, ticker, filing date, and EDGAR URL.
-        A filing with several filers has a row under each filer's CIK, as EDGAR's index lists it.
-        `poll()` appends new rows, told apart by `Cik` and `AccessionNumber`, and needs a `start` or
-        a `limit`. A filing whose company has no ticker keeps a null `Symbol`.
+        Each row holds a filing's form type, filer CIK, issuer, ticker, filing date, and EDGAR URL.
+        A filing with several filers appears under each filer's CIK, as EDGAR's index lists it. A
+        filing whose company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer.
-            form_type: The SEC form type, such as `"10-K"`; None, the default, for every form.
+            symbols: Stock tickers; leave it out for every filer.
+            form_type: The SEC form type, such as `"10-K"`; leave it out for every form.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"form_type"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.index.md.
 
         Raises:
-            TypeError: If an argument has the wrong type, such as a non-`str` form type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            TypeError: If an argument has the wrong type, such as a form type that isn't a `str`.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date; `end` is before `start`; `order` is given
+                without `sort`; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -533,34 +535,35 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The text of sections of 10-K annual reports, one row per filing and section.
 
-        Each row holds one section (the business description or the risk factors) of a company's
-        10-K, with its ticker, CIK, period end, and filing date. `poll()` appends new rows, told
-        apart by the dataset's key columns, and needs a `start` or a `limit`. A filing whose company
-        has no ticker keeps a null `Symbol`.
+        Each row holds one section of a company's 10-K, such as the business description or the risk
+        factors, with its ticker, CIK, period end, and filing date. A filing whose company has no
+        ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer.
+            symbols: Stock tickers; leave it out for every filer.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"period_end"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"section": "risk_factors"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.sections_10k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date; `end` is before `start`; `order` is given
+                without `sort`; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.sections_10k("AAPL", filters={"section": "business"}).fetch()
+                business = m.stocks.filings.sections_10k(
+                    "AAPL", filters={"section": "business"}
+                ).fetch()
         """
         return list_query(
             self._core,
@@ -590,34 +593,32 @@ class _StockFilings(Namespace):
         """The item text of 8-K current reports, one row per filing and filer.
 
         Each row holds the text of the items a company reported on an 8-K or an amendment, with its
-        ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants can have a
-        row under each filer's CIK. `poll()` appends new rows, told apart by `Cik` and
-        `AccessionNumber`, and needs a `start` or a `limit`. A filing whose company has no ticker
-        keeps a null `Symbol`.
+        ticker, CIK, form type, and filing date. A joint 8-K of several co-registrants can appear
+        under each filer's CIK. A filing whose company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer.
+            symbols: Stock tickers; leave it out for every filer.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"form_type"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.text_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date; `end` is before `start`; `order` is given
+                without `sort`; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.text_8k("TSLA", start="2025-01-01").fetch()
+                reports = m.stocks.filings.text_8k("TSLA", start="2026-01-01").fetch()
         """
         return list_query(
             self._core,
@@ -646,36 +647,37 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Disclosures in 8-K current reports, classified by category, one row per disclosure.
 
-        Each row is one disclosure of an 8-K, with its primary, secondary, and tertiary categories
-        (see `disclosure_taxonomy()`), the supporting text, and the filing's accession number and
-        date. A filing can name several share classes, so its `Tickers` column holds the filing's
-        tickers, `symbols` selects the filings that list any of them, and a row is listed under each
-        named ticker it lists, in `Symbol`. `poll()` appends new rows, told apart by the dataset's
-        key columns, and needs a `start` or a `limit`.
+        Each row holds one disclosure of an 8-K: its primary, secondary, and tertiary categories
+        from `disclosure_taxonomy()`, the supporting text, and the filing's accession number and
+        date. A filing can name several share classes, and `Tickers` holds them all. `symbols`
+        selects the filings that list any of your tickers, and a filing appears once for each of
+        your tickers it lists, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
+            symbols: Tickers whose filings to return; leave it out for every filing.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.disclosures_8k.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or empty, a bound is not a date or ISO date, `end`
-                is before `start`, `order` is given without `sort`, or a filter is unknown,
-                reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL` or empty; a bound isn't a date; `end` is before
+                `start`; `order` is given without `sort`; or a filter isn't one the dataset takes,
+                or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.disclosures_8k(["AAPL", "MSFT"], start="2025-01-01").fetch()
+                disclosures = m.stocks.filings.disclosures_8k(
+                    ["AAPL", "MSFT"], start="2026-01-01"
+                ).fetch()
         """
         return list_query(
             self._core,
@@ -704,34 +706,33 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Risk factors disclosed in company filings, classified by category, one row each.
 
-        Each row is one risk factor a company disclosed, with its primary, secondary, and tertiary
-        categories (see `risk_factor_taxonomy()`), the supporting text, and the filing date.
-        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
-        `limit`. A filing whose company has no ticker keeps a null `Symbol`.
+        Each row holds one risk factor a company disclosed: its primary, secondary, and tertiary
+        categories from `risk_factor_taxonomy()`, the supporting text, and the filing date. A filing
+        whose company has no ticker has a null `Symbol`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every filer.
+            symbols: Stock tickers; leave it out for every filer.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.risk_factors.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date; `end` is before `start`; `order` is given
+                without `sort`; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.risk_factors("AAPL").fetch()
+                risks = m.stocks.filings.risk_factors("AAPL").fetch()
         """
         return list_query(
             self._core,
@@ -760,36 +761,35 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Holdings that institutional managers report on Form 13-F, one row per position.
 
-        Each row is one security an institutional investment manager held at the end of a quarter:
-        the issuer, CUSIP, share count, market value, and voting authority, with the filer's CIK
-        (`FilerCik`) and the filing's accession number and date. Rows name a CUSIP, not a ticker, so
-        the dataset takes no `symbols`. `poll()` appends new rows, told apart by the dataset's key
-        columns, and needs a `start` or a `limit`.
+        Each row holds one security that an institutional investment manager held at a quarter's
+        end, with its issuer, CUSIP, share count, market value, and voting authority. `FilerCik`
+        names the manager, and the row also holds the filing's accession number and date. Rows name
+        a CUSIP, not a ticker, so the dataset takes no `symbols`; select managers with `filer_cik`.
 
         Args:
-            filer_cik: The filing manager's SEC CIK, as text with its leading zeros, such as
-                `"0001067983"`, or a sequence of them; None, the default, for every filer.
+            filer_cik: The manager's SEC CIK, as text with its leading zeros, such as
+                `"0001067983"`, or a sequence of them; leave it out for every manager.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"market_value"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.institutional_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If a CIK sequence is empty, a bound is not a date or ISO date, `end` is
-                before `start`, `order` is given without `sort`, or a filter is unknown, reserved,
-                or of the wrong kind.
+            ValueError: If a sequence of CIKs is empty; a bound isn't a date; `end` is before
+                `start`; `order` is given without `sort`; or a filter isn't one the dataset takes,
+                or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.institutional_holdings(filer_cik="0001067983").fetch()
+                berkshire = m.stocks.filings.institutional_holdings(filer_cik="0001067983").fetch()
         """
         return list_query(
             self._core,
@@ -820,40 +820,40 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Initial insider ownership statements (SEC Form 3), one row per reported holding.
 
-        Each row is a security an officer, director, or 10% owner held on becoming an insider: the
-        issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
-        filing can name several share classes, so its `Tickers` column holds the filing's tickers,
-        `symbols` selects the filings that list any of them, and a row is listed under each named
-        ticker it lists, in `Symbol`. `poll()` appends new rows, told apart by the dataset's key
-        columns, and needs a `start` or a `limit`.
+        Each row holds a security an officer, director, or 10% owner held on becoming an insider:
+        the issuer and owner CIKs and names, the owner's role, the security, and the shares owned. A
+        filing can name several share classes, and `Tickers` holds them all. `symbols` selects the
+        filings that list any of your tickers, and a filing appears once for each of your tickers it
+        lists, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
-            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
-                of them; None, the default, for every issuer.
-            owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
-                default, for every owner.
+            symbols: Tickers whose filings to return; leave it out for every filing.
+            issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
+                them; leave it out for every company.
+            owner_cik: The insider's SEC CIK, or a sequence of them; leave it out for every insider.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"owner_name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.initial_insider_ownership.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL` or empty; a sequence of CIKs is empty; a bound
+                isn't a date; `end` is before `start`; `order` is given without `sort`; or a filter
+                isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.initial_insider_ownership("NVDA", start="2024-01-01").fetch()
+                insiders = m.stocks.filings.initial_insider_ownership(
+                    "NVDA", start="2025-01-01"
+                ).fetch()
         """
         return _insider_query(
             self._core,
@@ -885,41 +885,39 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Insider transactions (SEC Form 4), one row per reported transaction or holding.
 
-        Each row is a purchase, sale, grant, or exercise an officer, director, or 10% owner
+        Each row holds a purchase, sale, grant, or exercise an officer, director, or 10% owner
         reported, or a holding reported beside them: the transaction code, date, shares, price, and
-        the shares owned afterwards, with the issuer and owner. A filing can name several share
-        classes, so its `Tickers` column holds the filing's tickers, `symbols` selects the filings
-        that list any of them, and a row is listed under each named ticker it lists, in `Symbol`.
-        `poll()` appends new rows, told apart by the dataset's key columns, and needs a `start` or a
-        `limit`.
+        the shares owned afterward, with the issuer and owner. A filing can name several share
+        classes, and `Tickers` holds them all. `symbols` selects the filings that list any of your
+        tickers, and a filing appears once for each of your tickers it lists, named in `Symbol`.
 
         Args:
-            symbols: Tickers whose filings to return; None, the default, for every filing.
-            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
-                of them; None, the default, for every issuer.
-            owner_cik: The reporting owner's SEC CIK, one or a sequence, as `issuer_cik`; None, the
-                default, for every owner.
+            symbols: Tickers whose filings to return; leave it out for every filing.
+            issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
+                them; leave it out for every company.
+            owner_cik: The insider's SEC CIK, or a sequence of them; leave it out for every insider.
             start: The first filing date.
             end: The last filing date.
-            sort: The field to sort by, such as `"filing_date"`.
+            sort: Any field of the rows, such as `"transaction_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Further endpoint parameters, such as `{"transaction_code": "P"}`.
+            filters: Further endpoint parameters, such as `{"transaction_code": "P"}` for
+                open-market purchases.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_transactions.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL` or empty; a sequence of CIKs is empty; a bound
+                isn't a date; `end` is before `start`; `order` is given without `sort`; or a filter
+                isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                buys = m.stocks.filings.insider_transactions("AAPL", start="2025-01-01").fetch()
+                trades = m.stocks.filings.insider_transactions("AAPL", start="2026-01-01").fetch()
         """
         return _insider_query(
             self._core,
@@ -950,43 +948,42 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Open-market insider purchases and sales, summed per company and transaction day.
 
-        Insiders (directors, officers, and holders of over 10%) report each trade on SEC Form 4 or
-        5. Massive sums one issuer's insider buys and sells of one day into one row: counts, shares
-        and dollar values, their net (`NetShares`, `NetValue`, negative for net selling), and the
-        part traded under a prearranged Rule 10b5-1 plan. `insider_transactions()` returns the Form
-        4 lines themselves. A company can have several share classes, so its `Tickers` column holds
-        the issuer's tickers, `symbols` selects the issuers that list any of them, and a row is
-        listed under each named ticker it lists, in `Symbol`. The totals cover the issuer, not each
-        ticker. `poll()` replaces the table each cycle, keyed by `IssuerCik`, `TransactionDate`, and
-        `Symbol`, so a late filing revises its day in place. Massive updates the data daily.
+        Insiders, meaning directors, officers, and holders of over 10%, report each trade on SEC
+        Form 4 or 5. Massive sums one company's insider buys and sells of one day into one row:
+        counts, shares, and dollar values, their net in `NetShares` and `NetValue`, negative for net
+        selling, and the part traded under a prearranged Rule 10b5-1 plan. The totals cover the
+        company, not each share class. A company can have several share classes, and `Tickers` holds
+        them all; a row appears once for each of your tickers it lists, named in `Symbol`. A
+        `poll()` revises a day in place when a late filing changes it. `insider_transactions()`
+        returns the Form 4 lines themselves.
 
         Args:
-            symbols: Tickers whose issuers to return; None, the default, for every issuer.
-            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
-                of them; None, the default, for every issuer.
+            symbols: Tickers whose companies to return; leave it out for every company.
+            issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
+                them; leave it out for every company.
             start: The first transaction date.
             end: The last transaction date.
-            sort: The field to sort by, such as `"net_value"`; the default is the newest transaction
-                date first.
+            sort: Any field of the rows, such as `"net_value"`. Massive's default is the newest
+                transaction date first.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Unused today: the arguments above reserve every endpoint parameter, so any key
+            filters: None today: the arguments above cover every endpoint parameter, so any key
                 raises `ValueError`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_activity.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL` or empty; a sequence of CIKs is empty; a bound
+                isn't a date; `end` is before `start`; `order` is given without `sort`; or a filter
+                isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.insider_activity("NVDA", start="2026-01-01").fetch()
+                activity = m.stocks.filings.insider_activity("NVDA", start="2026-01-01").fetch()
         """
         return list_query(
             self._core,
@@ -1019,41 +1016,39 @@ class _StockFilings(Namespace):
     ) -> Query:
         """Each company's insiders and the shares each one holds now, one row per insider.
 
-        Massive combines one insider's Form 3, 4, and 5 filings for one issuer into one current row:
-        the owner, roles, and title; the first and latest filing dates; the shares owned directly,
-        indirectly, and in total, as filed (not split-adjusted, no derivatives); and `OwnershipPct`,
-        in percent (0.0198 means 0.0198%). `OldestPositionDate` far behind `LastFilingDate` warns
-        that a position may be stale. A company can have several share classes, so its `Tickers`
-        column holds the issuer's tickers, `symbols` selects the issuers that list any of them, and
-        a row is listed under each named ticker it lists, in `Symbol`. `poll()` replaces the table
-        each cycle, keyed by `IssuerCik` and `OwnerCik`, so a new filing updates its insider's row
-        in place. Massive updates the data daily.
+        Massive combines one insider's Form 3, 4, and 5 filings for one company into one current
+        row: the owner, roles, and title; the first and latest filing dates; and the shares owned
+        directly, indirectly, and in total, as filed, without split adjustment or derivatives.
+        `OwnershipPct` is in percent, so 0.0198 means 0.0198%. An `OldestPositionDate` far behind
+        `LastFilingDate` warns that a position may be stale. A company can have several share
+        classes, and `Tickers` holds them all; a row appears once for each of your tickers it lists,
+        named in `Symbol`. A `poll()` updates an insider's row in place when a new filing arrives.
 
         Args:
-            symbols: Tickers whose issuers' insiders to return; None, the default, for every issuer.
-            issuer_cik: The issuing company's SEC CIK, as text with its leading zeros, or a sequence
-                of them; None, the default, for every issuer.
+            symbols: Tickers whose companies' insiders to return; leave it out for every company.
+            issuer_cik: The company's SEC CIK, as text with its leading zeros, or a sequence of
+                them; leave it out for every company.
             owner_cik: The insider's SEC CIK, or a sequence of them, to list every company one
-                person is an insider of; None, the default, for every insider.
-            start: The earliest latest-filing date (`LastFilingDate`); an insider who has not filed
-                since is left out.
+                person is an insider of; leave it out for every insider.
+            start: The first latest-filing date, `LastFilingDate`; an insider who hasn't filed since
+                is left out.
             end: The last latest-filing date.
-            sort: The field to sort by, such as `"shares_owned"`; the default is the most recent
-                latest-filing date first.
+            sort: Any field of the rows, such as `"shares_owned"`. Massive's default is the most
+                recent `LastFilingDate` first.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Unused today: the arguments above reserve every endpoint parameter, so any key
+            filters: None today: the arguments above cover every endpoint parameter, so any key
                 raises `ValueError`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.insider_holdings.md.
 
         Raises:
             TypeError: If an argument has the wrong type, such as an `int` CIK.
-            ValueError: If `symbols` is `dm.ALL` or empty, a CIK sequence is empty, a bound is not a
-                date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL` or empty; a sequence of CIKs is empty; a bound
+                isn't a date; `end` is before `start`; `order` is given without `sort`; or a filter
+                isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1086,30 +1081,29 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The taxonomy that classifies filing risk factors, one row per category.
 
-        Each row is one tertiary category of the risk-factor classification with its primary and
-        secondary parents, its description, and the taxonomy version; the categories of
-        `risk_factors()` come from it. The dataset takes no `symbols`. `poll()` replaces the table
-        each cycle, keyed by `Taxonomy` and the three categories.
+        Each row holds one tertiary category of the risk-factor classification, with its primary and
+        secondary parents, its description, and the taxonomy version. `risk_factors()` takes its
+        categories from this taxonomy. The dataset takes no `symbols`.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`.
+            sort: Any field of the rows, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.risk_factor_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `order` is given without `sort`, or a filter is unknown, reserved, or of
-                the wrong kind.
+            ValueError: If `order` is given without `sort`, or a filter isn't one the dataset takes,
+                or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.risk_factor_taxonomy().fetch()
+                categories = m.stocks.filings.risk_factor_taxonomy().fetch()
         """
         return list_query(
             self._core,
@@ -1132,30 +1126,29 @@ class _StockFilings(Namespace):
     ) -> Query:
         """The taxonomy that classifies 8-K disclosures, one row per category.
 
-        Each row is one tertiary category of the 8-K disclosure classification with its primary and
-        secondary parents, its description, and the taxonomy version; the categories of
-        `disclosures_8k()` come from it. The dataset takes no `symbols`. `poll()` replaces the table
-        each cycle, keyed by `Taxonomy` and the three categories.
+        Each row holds one tertiary category of the 8-K disclosure classification, with its primary
+        and secondary parents, its description, and the taxonomy version. `disclosures_8k()` takes
+        its categories from this taxonomy. The dataset takes no `symbols`.
 
         Args:
-            sort: The field to sort by, such as `"primary_category"`.
+            sort: Any field of the rows, such as `"primary_category"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`.
 
         Returns:
-            A query. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.filings.disclosure_taxonomy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `order` is given without `sort`, or a filter is unknown, reserved, or of
-                the wrong kind.
+            ValueError: If `order` is given without `sort`, or a filter isn't one the dataset takes,
+                or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.filings.disclosure_taxonomy().fetch()
+                categories = m.stocks.filings.disclosure_taxonomy().fetch()
         """
         return list_query(
             self._core,

@@ -22,8 +22,8 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `asset_class` | The class whose types to list (forex is sent as `fx`); None for every class. The endpoint has no futures types. |  |
-| `locale` | The locale whose types to list; None for both. |  |
+| `asset_class` | The asset class whose types to list; leave it out for every class. Massive lists no futures types. |  |
+| `locale` | The locale whose types to list; leave it out for both. |  |
 
 ## Plan access
 

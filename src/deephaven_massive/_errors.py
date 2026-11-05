@@ -101,20 +101,19 @@ it imports nothing else of the library."""
 
 
 class ErrorCause(StrEnum):
-    """Whose problem a `MassiveError` is: what sets its log level and what to do about it.
+    """Whose problem a `MassiveError` is, which tells you what to do about it.
 
-    Read it from `MassiveError.cause`. The values are the library's own names, not values Massive
-    sends.
+    Read it from an error's `cause`. The library logs a defect at ERROR and an expected condition
+    below ERROR. The values are the library's own names, not values Massive sends.
 
     Example:
-        Report a defect of the library, and handle everything else as the application's own
-        failure::
+        Report a bug in the library, and handle every other failure as your application's own::
 
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
             try:
-                divs = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
+                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
             except dm.MassiveError as e:
                 if e.cause is dm.ErrorCause.LIBRARY_DEFECT:
                     print(f"please report: {e}")
@@ -123,34 +122,38 @@ class ErrorCause(StrEnum):
     """
 
     EXPECTED = "expected"
-    """A condition the library expects and reports: a refusal, a plan or rate limit, a
-    network failure, a closed session. Logged below ERROR."""
+    """A condition the library expects and reports, such as a refused request, a plan or rate
+    limit, a network failure, or a closed session. Logged below ERROR."""
 
     USER_DEFECT = "user_defect"
-    """A defect in the user's code or input that the library caught, such as a symbol table
-    that failed upstream. Logged at ERROR; the message names what to fix."""
+    """A mistake in your code or input that the library caught, such as a table of symbols
+    of yours that failed. Logged at ERROR, with a message that names the fix."""
 
     LIBRARY_DEFECT = "library_defect"
-    """A bug in the library, or data from Massive it cannot convert or read. Logged at ERROR;
-    the message says how to report it (`LIBRARY_BUG`)."""
+    """A bug in the library, or data from Massive it can't read. Logged at ERROR, with a
+    message that says how to report it."""
 
 
 class MassiveError(Exception):
-    """Base class of every error that Massive or this library reports.
+    """The base class of every error Massive or the library reports.
 
-    Raised directly for failures that are neither authentication nor entitlement problems: a
-    network error, an HTTP error other than 401 or 403, a rate limit that outlasted the
-    retries, or a closed session. The message carries what you need to act on it: the host,
-    the dataset, and Massive's text. `status`, `request_id`, and `cause` are read-only.
+    One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for a
+    failure that is neither an `AuthenticationError` nor an `EntitlementError`: a network error, an
+    HTTP error other than 401 or 403, a rate limit that outlasted the retries, or a closed session.
+    The message names the host, the dataset, and Massive's own text. To branch on the failure, read
+    `status`, such as 404 or 429, instead of the message.
+
+    A static verb raises the error. A live table, or a static verb called with `wait=False`, fails
+    with it instead: the table shows the error, the log records it, and `m.streams()` lists it.
 
     Example:
-        Catch every library failure in one place, and branch on the HTTP status::
+        Catch every failure of the library, and branch on the HTTP status::
 
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
             try:
-                divs = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
+                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
             except dm.MassiveError as e:
                 if e.status == 429:
                     print(f"slow down (request {e.request_id}): {e}")
@@ -185,28 +188,29 @@ class MassiveError(Exception):
 
     @property
     def status(self) -> int | None:
-        """The HTTP status of the response the error came from (such as 404 or 429), or `None`."""
+        """The HTTP status of the response behind the error, such as 404 or 429, or `None`."""
         return self._status
 
     @property
     def request_id(self) -> str | None:
-        """The `request_id` of Massive's response, for a support request, or `None`."""
+        """The `request_id` of Massive's response, for a support request to Massive, or `None`."""
         return self._request_id
 
     @property
     def cause(self) -> ErrorCause:
-        """Whose problem the error is: expected, a defect of the user's, or the library's."""
+        """Whose problem the error is: expected, a mistake in your code, or a library bug."""
         return self._cause
 
 
 class AuthenticationError(MassiveError):
-    """The API key is missing or Massive rejected it, or the S3 credentials were rejected.
+    """Massive refused your keys: the API key is missing or rejected, or the S3 keys are.
 
-    Raised by `MassiveConfig()` when `MASSIVE_API_KEY` is not set and no `api_key` was
-    passed. A live table fails with this error when the WebSocket server
-    answers `auth_failed`; every stream on that connection fails with it. `history()` raises it
-    when Massive's S3 endpoint rejects the flat-file credentials (`InvalidAccessKeyId`,
-    `SignatureDoesNotMatch`); the message names `s3_access_key_id` and `s3_secret_access_key`.
+    `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
+    live table fails with it when Massive's streaming server rejects the key, and so does every
+    other stream on that connection. Massive gives the streaming server's answer for a plan with no
+    streams of the asset class too, and the message says so. `history()` raises it when Massive's
+    flat-file server rejects the S3 keys, and the message names `s3_access_key_id` and
+    `s3_secret_access_key`.
 
     Example:
         ::
@@ -214,31 +218,29 @@ class AuthenticationError(MassiveError):
             import deephaven_massive as dm
 
             try:
-                cfg = dm.MassiveConfig()
+                config = dm.MassiveConfig()
             except dm.AuthenticationError:
-                cfg = dm.MassiveConfig(api_key="...")
+                config = dm.MassiveConfig(api_key="...")
     """
 
 
 class EntitlementError(MassiveError):
-    """The key is valid, but the plan does not include what was requested.
+    """Your key is valid, but your plan doesn't include what you asked for.
 
-    Raised when Massive answers HTTP 403 (`NOT_AUTHORIZED`) to a REST request, when a WebSocket
-    subscription is refused with an explicit error for its topic, when S3 refuses a flat file,
-    or when Massive labels current data `DELAYED`, or shows a stream's data is delayed, for a
-    subscription not in `MassiveConfig.delayed_subscriptions` (the message names the line
-    to add). Only the affected table fails; other tables on the same connection keep running.
+    Massive refused the request: a REST request with HTTP 403, a stream subscription, or a flat
+    file. The library raises it too when Massive marks current data as delayed and its subscription
+    isn't in `MassiveConfig.delayed_subscriptions`, and the message names the line to add. Only the
+    table that asked fails, and other tables on the same connection keep running.
 
-    The message reports what Massive refused, without guessing at what your plan holds: the
-    subscription (stocks, options, indices, currencies, or futures), whether REST, WebSocket, or
-    flat files refused it, the request, and Massive's own text. When the refused request was
-    one the library makes for you, such as the snapshot request that checks which host a
-    plan streams from before the first stream of a class, the message says so. Where the library
-    has another way to read the same data, the message names it: a refused flat-file
-    `history()` names `source=dm.HistorySource.REST` when REST can serve the read.
+    The message says what Massive refused, without guessing at your plan, and quotes Massive's own
+    text. A REST refusal names the subscription and the request, a stream refusal the host and the
+    subscribed topics, and a flat-file refusal the file. A refused request that the library made for
+    you, such as reading Massive's list of crypto tickers, is named as such. Where another source
+    can serve the same data, the message names it, such as `source=dm.HistorySource.REST` for a
+    refused flat-file `history()`.
 
     Example:
-        Read a day of trades, and report it when the plan lacks them::
+        Read a day of trades, and report it when your plan lacks them::
 
             import deephaven_massive as dm
 

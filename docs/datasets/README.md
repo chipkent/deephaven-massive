@@ -155,7 +155,7 @@ A column such tables share has one name, and one type in every class except thos
 
 | Dataset | Summary | Verbs |
 | --- | --- | --- |
-| [`m.snapshots`](snapshots.md) | The current state of tickers of any asset classes, from Massive's unified snapshot. | fetch, poll |
+| [`m.snapshots`](snapshots.md) | The current state of tickers of any asset class, from Massive's unified snapshot. | fetch, poll |
 
 ## `m.indicators`
 

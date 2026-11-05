@@ -23,7 +23,7 @@ What each argument does for this dataset, and the rule it follows for every data
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
 | `direction` | `dm.Direction.GAINERS` or `dm.Direction.LOSERS`. |  |
-| `include_otc` | True to include OTC securities; False, the default, leaves them out. |  |
+| `include_otc` | True to include OTC securities. |  |
 
 ## Plan access
 

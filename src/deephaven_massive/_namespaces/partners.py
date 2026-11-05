@@ -361,16 +361,11 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 class _Benzinga(Namespace):
-    """`m.partners.benzinga`: Benzinga's analyst, earnings, guidance, and news datasets.
+    """The Benzinga datasets, reached as `m.partners.benzinga`.
 
-    Benzinga is a financial news and data vendor; Massive resells its analyst ratings and their
-    consensus, analyst and firm profiles, analyst insights, bull and bear cases, corporate
-    guidance, earnings, and news, each in its own Benzinga expansion plan. Every dataset here
-    is a REST list endpoint and returns a `Query`.
-
-    Created once per session by `_Partners`, together with the other vendors, and reached as
-    `m.partners.benzinga`. It holds no state of its own, so it is safe to use from any thread;
-    each method validates its arguments and returns a query without touching the network.
+    Its methods cover analyst profiles and their firms, analyst insights, rating actions and their
+    consensus, bull and bear cases, corporate guidance, earnings, and news. Each method only builds
+    a query, so it never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -397,25 +392,25 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.
 
-        One row per analyst: name, firm, ratings issued, and performance measures such as
-        success rate and average return. The rows describe people, so the dataset takes no
-        symbols and has no `Symbol`; select through `filters` (`full_name`, `firm_name`, ...).
-        `poll()` re-reads it, keyed by `BenzingaId`.
+        Each row holds an analyst's name, firm, ratings issued, and performance measures, such as
+        the success rate and the average return. The rows describe people, so the dataset takes no
+        symbols and has no `Symbol`. Select analysts with `filters`, such as by `full_name` or
+        `firm_name`.
 
         Args:
-            sort: Massive's field to sort by, such as `"smart_score"`.
+            sort: Any field of the rows, such as `"smart_score"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"firm_name": "Wedbush"}`.
+            filters: Further endpoint parameters, such as `{"firm_name": "Wedbush"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.analysts.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `limit` isn't positive, or a filter isn't one the dataset takes, or its
+                value doesn't fit.
 
         Example:
             ::
@@ -446,28 +441,27 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga analyst insights on US stocks: a rating, a price target, and the reason.
 
-        One row per insight: the stock, the firm, the rating and its action, the price target,
-        and the analyst's rationale, dated by `Date`. `Symbol` is null on a row Benzinga sends
-        without a ticker. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it
-        has no `start`. `poll()` re-reads it, keyed by `BenzingaId`.
+        Each row holds an insight's stock, firm, rating and rating action, price target, and the
+        analyst's rationale, with its `Date`. `Symbol` is null on a row Benzinga sends without a
+        ticker. The dataset has no `start` or `end`, so narrow the dates with `filters`, such as
+        `date_gte`.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            sort: Massive's field to sort by, such as `"date"`.
+            symbols: US stock tickers; leave it out for every ticker.
+            sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"date_gte": "2025-01-01"}`.
+            filters: Further endpoint parameters, such as `{"date_gte": "2026-01-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.analyst_insights.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -497,29 +491,27 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 
-        One row per action by one analyst at one firm: an upgrade, a downgrade, a reiteration,
-        or a price-target change, with the previous and new rating and target, dated by `Date`.
-        `Symbol` is null on a row Benzinga sends without a ticker. Narrow the dates through
-        `filters` (`date_gte`, `date_lt`, ...): it has no `start`. `poll()` re-reads it, keyed
-        by `BenzingaId`.
+        Each row holds one analyst's action, such as an upgrade, a downgrade, a reiteration, or a
+        price-target change, with the previous and new rating and target and its `Date`. `Symbol` is
+        null on a row Benzinga sends without a ticker. The dataset has no `start` or `end`, so
+        narrow the dates with `filters`, such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            sort: Massive's field to sort by, such as `"date"`.
+            symbols: US stock tickers; leave it out for every ticker.
+            sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"rating_action": "upgrades"}`.
+            filters: Further endpoint parameters, such as `{"rating_action": "upgrades"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.ratings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -543,32 +535,31 @@ class _Benzinga(Namespace):
     ) -> Query:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
-        One row per requested stock: the counts of each rating, the consensus rating, the
-        consensus, high, and low price targets, and the number of analysts. The endpoint takes
-        one ticker per request, so each symbol is its own request, and it has no `limit`. By
-        default the consensus covers every rating Benzinga holds; the `date` filters restrict it
-        to the ratings published in a range. `poll()` re-reads it, keyed by `Symbol`.
+        Each row holds one stock's count of each rating, its consensus rating, its consensus, high,
+        and low price targets, and its number of analysts. The consensus covers every rating
+        Benzinga holds, unless a `date` filter limits it to the ratings of a range. The dataset has
+        no `limit`.
 
         Args:
-            symbols: US stock tickers; required (`dm.ALL` is refused).
-            filters: The `date` range of the ratings to aggregate (`date_gte`, `date_lt`, ...); None
-                aggregates every rating.
+            symbols: US stock tickers; required.
+            filters: The range of the ratings to count, such as `{"date_gte": "2026-01-01"}`; leave
+                it out to count every rating.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.consensus_ratings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that is not
-                Massive's exact ticker; or a filter is unknown, set by a typed argument, or of
-                the wrong kind.
+            ValueError: If `symbols` is None, `dm.ALL`, empty, or holds a ticker that isn't
+                Massive's exact ticker; or a filter isn't one the dataset takes, or its value
+                doesn't fit.
 
         Example:
             ::
 
-                q4 = m.partners.benzinga.consensus_ratings(
-                    "AAPL", filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
+                recent = m.partners.benzinga.consensus_ratings(
+                    "AAPL", filters={"date_gte": "2026-01-01", "date_lt": "2026-07-01"}
                 ).fetch()
         """
         return list_query(
@@ -591,27 +582,25 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga's bull case and bear case summaries for US stocks.
 
-        One row per summary: the stock, the bull and the bear case as text, and when it was last
-        updated (`LastUpdated`, filterable as `last_updated_gte` and so on). `Symbol` is null on
-        a row Benzinga sends without a ticker. `poll()` re-reads it, keyed by `BenzingaId`.
+        Each row holds a stock's bull case and bear case as text, and when they were last updated,
+        in `LastUpdated`. `Symbol` is null on a row Benzinga sends without a ticker.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            sort: Massive's field to sort by, such as `"last_updated"`.
+            symbols: US stock tickers; leave it out for every ticker.
+            sort: Any field of the rows, such as `"last_updated"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"last_updated_gte": "2025-06-01"}`.
+            filters: Further endpoint parameters, such as `{"last_updated_gte": "2026-06-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.bulls_bears_say.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -641,29 +630,27 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
-        One row per guidance release: the stock, the fiscal period, the guided EPS and revenue
-        ranges with the previous ones, and whether the figure is the primary one
-        (`Positioning`), dated by `Date`. `Symbol` is null on a row Benzinga sends without a
-        ticker. Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it has no
-        `start`. `poll()` re-reads it, keyed by `BenzingaId`.
+        Each row holds one guidance release: the stock, the fiscal period, the guided EPS and
+        revenue ranges with the previous ones, whether the figure is the primary one
+        (`Positioning`), and its `Date`. `Symbol` is null on a row Benzinga sends without a ticker.
+        The dataset has no `start` or `end`, so narrow the dates with `filters`, such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            sort: Massive's field to sort by, such as `"date"`.
+            symbols: US stock tickers; leave it out for every ticker.
+            sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"positioning": "primary"}`.
+            filters: Further endpoint parameters, such as `{"positioning": "primary"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.guidance.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -693,34 +680,32 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Earnings announcements of US companies from Benzinga, with estimates and surprises.
 
-        One row per announcement, past or scheduled: the stock, the fiscal period, the date and
-        time and whether they are confirmed, and the estimated, actual, and previous EPS and
-        revenue with their surprises. `Symbol` is null on a row Benzinga sends without a ticker.
-        Narrow the dates through `filters` (`date_gte`, `date_lt`, ...): it has no `start`.
-        `poll()` re-reads it, keyed by `BenzingaId`.
+        Each row holds one announcement, past or scheduled: the stock, the fiscal period, the date
+        and time and whether they're confirmed, and the estimated, actual, and previous EPS and
+        revenue with their surprises. `Symbol` is null on a row Benzinga sends without a ticker. The
+        dataset has no `start` or `end`, so narrow the dates with `filters`, such as `date_gte`.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            sort: Massive's field to sort by, such as `"date"`.
+            symbols: US stock tickers; leave it out for every ticker.
+            sort: Any field of the rows, such as `"date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"importance_gte": 3}`.
+            filters: Further endpoint parameters, such as `{"importance_gte": 3}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.earnings.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
 
-                upcoming = m.partners.benzinga.earnings(filters={"date_gte": "2025-07-01"}).fetch()
+                upcoming = m.partners.benzinga.earnings(filters={"date_gte": "2026-11-01"}).fetch()
         """
         return list_query(
             self._core,
@@ -744,25 +729,25 @@ class _Benzinga(Namespace):
     ) -> Query:
         """The research firms behind Benzinga's analyst ratings.
 
-        One row per firm: its Benzinga id, name, currency, and last update. Join `BenzingaId` to
-        the `BenzingaFirmId` of `ratings()`, `analyst_insights()`, or `analysts()`. The rows
-        describe firms, so the dataset takes no symbols and has no `Symbol`. `poll()` re-reads
-        it, keyed by `BenzingaId`.
+        Each row holds a firm's Benzinga id, name, currency, and last update. To name the firm of a
+        rating, an insight, or an analyst, join its `BenzingaId` to the `BenzingaFirmId` of
+        `ratings()`, `analyst_insights()`, or `analysts()`. The rows describe firms, so the dataset
+        takes no symbols and has no `Symbol`.
 
         Args:
-            sort: Massive's field to sort by, such as `"name"`.
+            sort: Any field of the rows, such as `"name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
+            filters: Further endpoint parameters, such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.firms.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `limit` isn't positive, or a filter isn't one the dataset takes, or its
+                value doesn't fit.
 
         Example:
             ::
@@ -793,37 +778,35 @@ class _Benzinga(Namespace):
     ) -> Query:
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
-        One row per article, at its publication `Timestamp`. An article names any number of tickers,
-        in its `Tickers` array; `symbols` selects the articles that name any of them, and an article
-        is listed under each named ticker it names, in `Symbol`. `poll()` appends the articles it
-        has not seen, keyed by `BenzingaId` and `Symbol`, and needs `start` or `limit`, since each
-        cycle reads the whole range; a fixed `start` widens the window of a poll that runs for days.
+        Each row holds one article with its publication `Timestamp`. `Tickers` lists every ticker an
+        article names, and `symbols` selects the articles that name any of yours. An article appears
+        once for each of your tickers it names, with that ticker in `Symbol`. A `poll()` adds only
+        articles it hasn't seen, so it needs a `start` or a `limit`.
 
         Args:
-            symbols: US stock tickers; None, the default, for no ticker filter (`dm.ALL` is
-                refused).
-            start: The earliest publication time; `poll()` needs it or a `limit`.
+            symbols: US stock tickers; leave it out for every article.
+            start: The earliest publication time.
             end: The end of the range.
-            sort: Massive's field to sort by, such as `"published"`.
+            sort: Any field of the rows, such as `"published"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"channels_any_of": ["earnings"]}`.
+            filters: Further endpoint parameters, such as `{"channels_any_of": ["earnings"]}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.benzinga.news.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; a bound cannot be parsed or is naive, or the range ends before it
-                starts; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; a bound isn't a date or a time with a time zone; the range ends before
+                it starts; `limit` isn't positive; or a filter isn't one the dataset takes, or its
+                value doesn't fit.
 
         Example:
             ::
 
-                feed = m.partners.benzinga.news(["AAPL", "NVDA"], start="2025-06-02").poll(30)
+                feed = m.partners.benzinga.news(["AAPL", "NVDA"], start="2026-11-02").poll(30)
         """
         return list_query(
             self._core,
@@ -840,18 +823,14 @@ class _Benzinga(Namespace):
 
 
 class _EtfGlobal(Namespace):
-    """`m.partners.etf_global`: ETF Global's fund analytics, holdings, flows, and profiles.
+    """The ETF Global datasets, reached as `m.partners.etf_global`.
 
-    ETF Global covers US-listed exchange-traded funds; Massive resells its quantitative scores,
-    constituents, fund flows, profiles, and taxonomies. Every row describes one fund, named by
-    its ticker in `Symbol` (ETF Global's `composite_ticker`), on an `EffectiveDate` (the date
-    the data is valid for) and a `ProcessedDate` (when ETF Global processed it; some issuers
-    publish weeks late). Narrow the dates through `filters` (`effective_date_gte`, ...).
-    Every dataset here is a REST list endpoint and returns a `Query`.
-
-    Created once per session by `_Partners` and reached as `m.partners.etf_global`. It holds no
-    state of its own, so it is safe to use from any thread; each method validates its arguments
-    and returns a query without touching the network.
+    Its methods cover scores, holdings, fund flows, profiles, and classifications of US-listed ETFs.
+    Each row describes one fund, named by its ticker in `Symbol`, as of an `EffectiveDate`, the date
+    the data is valid for. `ProcessedDate` is when ETF Global processed the row; some issuers
+    publish weeks late, and a later processing can restate an effective date. The datasets have no
+    `start` or `end`, so narrow the dates with `filters`, such as `effective_date_gte`. Each method
+    only builds a query, so it never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -860,7 +839,7 @@ class _EtfGlobal(Namespace):
 
             m = dm.MassiveSession()
             spy = m.partners.etf_global.constituents(
-                "SPY", filters={"effective_date": "2025-09-18"}
+                "SPY", filters={"effective_date": "2026-09-18"}
             ).fetch()
     """
 
@@ -879,27 +858,25 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 
-        One row per fund and date: the risk and reward scores, the quant grade and total score,
-        and their components. The fund is `Symbol`, the data's date `EffectiveDate`, and
-        `ProcessedDate` when ETF Global processed it; narrow dates through `filters`. `poll()`
-        re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
+        Each row holds a fund's risk and reward scores, its quant grade and total score, and their
+        components, on one `EffectiveDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: Massive's field to sort by, such as `"effective_date"`.
+            symbols: ETF tickers; leave it out for every fund.
+            sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+            filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.analytics.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -929,33 +906,32 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """The holdings of US-listed ETFs from ETF Global, one row per fund, date, and holding.
 
-        Each row is one security a fund (`Symbol`) holds on a date: its ticker
-        (`ConstituentTicker`), name, identifiers, rank by weight, weight, market value, and
-        shares. A fund holds hundreds of securities on many dates, so filter by date. `poll()`
-        re-reads it, keyed by `Symbol`, `EffectiveDate`, `ProcessedDate`, and `ConstituentRank`.
+        Each row holds a security the fund in `Symbol` holds on an `EffectiveDate`: its ticker in
+        `ConstituentTicker`, its name and identifiers, its rank by weight, and its weight, market
+        value, and shares. A fund holds hundreds of securities on many dates, so filter by date.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: Massive's field to sort by, such as `"effective_date"`.
+            symbols: ETF tickers; leave it out for every fund.
+            sort: Any field of the rows, such as `"weight"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"effective_date": "2025-09-18"}`.
+            filters: Further endpoint parameters, such as `{"effective_date": "2026-09-18"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.constituents.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
 
                 spy = m.partners.etf_global.constituents(
-                    "SPY", filters={"effective_date": "2025-09-18"}
+                    "SPY", filters={"effective_date": "2026-09-18"}
                 ).fetch()
         """
         return list_query(
@@ -981,26 +957,25 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 
-        One row per fund and date, from ETF Global: the money that flowed into or out of the
-        fund, its net asset value, and its shares outstanding. `poll()` re-reads it, keyed by
-        `Symbol`, `EffectiveDate`, and `ProcessedDate`.
+        Each row holds, from ETF Global, the money that flowed into or out of a fund on an
+        `EffectiveDate`, its net asset value, and its shares outstanding.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: Massive's field to sort by, such as `"effective_date"`.
+            symbols: ETF tickers; leave it out for every fund.
+            sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+            filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.fund_flows.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -1030,27 +1005,26 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
-        One row per fund and date: issuer, inception, fees, assets under management, holdings
-        count, trading activity, and the sector, geographic, currency, and other exposures, each
-        exposure a JSON text column. `poll()` re-reads it, keyed by `Symbol`, `EffectiveDate`,
-        and `ProcessedDate`.
+        Each row holds a fund's issuer, inception, fees, assets under management, holdings count,
+        and trading activity on an `EffectiveDate`. Its sector, geographic, currency, and other
+        exposures are each a column of JSON text.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: Massive's field to sort by, such as `"effective_date"`.
+            symbols: ETF tickers; leave it out for every fund.
+            sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+            filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.profiles.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -1080,26 +1054,25 @@ class _EtfGlobal(Namespace):
     ) -> Query:
         """ETF Global's classification of US-listed ETFs by strategy, structure, and exposure.
 
-        One row per fund and date: asset class, category, focus, region, objective, selection
-        and weighting method, leverage, rebalancing, ESG, and tax classification. `poll()`
-        re-reads it, keyed by `Symbol`, `EffectiveDate`, and `ProcessedDate`.
+        Each row holds a fund's asset class, category, focus, region, objective, selection and
+        weighting methods, leverage, rebalancing, ESG, and tax classification on an `EffectiveDate`.
 
         Args:
-            symbols: ETF tickers; None, the default, for no ticker filter (`dm.ALL` is refused).
-            sort: Massive's field to sort by, such as `"effective_date"`.
+            symbols: ETF tickers; leave it out for every fund.
+            sort: Any field of the rows, such as `"effective_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"effective_date_gte": "2025-01-01"}`.
+            filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.etf_global.taxonomies.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
+                exact ticker; `limit` isn't positive; or a filter isn't one the dataset takes, or
+                its value doesn't fit.
 
         Example:
             ::
@@ -1119,15 +1092,12 @@ class _EtfGlobal(Namespace):
 
 
 class _Tmx(Namespace):
-    """`m.partners.tmx`: corporate events from TMX's Wall Street Horizon calendar.
+    """The TMX dataset, reached as `m.partners.tmx`.
 
-    TMX Group's Wall Street Horizon tracks scheduled corporate events worldwide: earnings
-    dates and calls, dividends, splits, conferences, and shareholder meetings. Its one dataset
-    is a REST list endpoint and returns a `Query`.
-
-    Created once per session by `_Partners` and reached as `m.partners.tmx`. It holds no state
-    of its own, so it is safe to use from any thread; its method validates its arguments and
-    returns a query without touching the network.
+    Its one method reads corporate events from TMX's Wall Street Horizon calendar, which covers
+    companies worldwide: earnings dates and calls, dividends, splits, conferences, and shareholder
+    meetings. The method only builds a query, so it never blocks, and you can call it from any
+    thread.
 
     Example:
         ::
@@ -1136,7 +1106,7 @@ class _Tmx(Namespace):
 
             m = dm.MassiveSession()
             events = m.partners.tmx.corporate_events(
-                ["AAPL"], start="2025-07-01", end="2025-09-30"
+                ["AAPL"], start="2026-07-01", end="2026-09-30"
             ).fetch()
     """
 
@@ -1157,37 +1127,34 @@ class _Tmx(Namespace):
     ) -> Query:
         """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
-        One row per event: the company's ticker (`Symbol`), name, ISIN, and venue, and the
-        event's type, name, status, scheduled `Date`, and announcement link. The calendar is
-        global: tickers are taken exactly as TMX writes them, and a company without one has a
-        null `Symbol` but keeps its `Isin`. Events are dated by day, so there is no `Timestamp`.
-        `poll()` re-reads it, keyed by `TmxRecordId`.
+        Each row holds an event's company ticker in `Symbol`, the company's name, ISIN, and venue,
+        and the event's type, name, status, scheduled `Date`, and announcement link. The calendar is
+        global, so tickers stay exactly as TMX writes them. A company without a ticker has a null
+        `Symbol` and keeps its `Isin`.
 
         Args:
-            symbols: Tickers as TMX writes them; None, the default, for no ticker filter (`dm.ALL`
-                is refused).
+            symbols: Tickers as TMX writes them; leave it out for every event.
             start: The first event day.
-            end: The end of the range.
-            sort: Massive's field to sort by, such as `"date"`.
+            end: The last event day.
+            sort: Any field of the rows, such as `"type"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"type": "earnings"}`.
+            filters: Further endpoint parameters, such as `{"type": "earnings"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.tmx.corporate_events.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that is not Massive's
-                exact ticker; a bound cannot be parsed or is naive, or the range ends before it
-                starts; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `symbols` is `dm.ALL`, empty, or holds text that can't be a ticker; a
+                bound isn't a date; the range ends before it starts; `limit` isn't positive; or a
+                filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                events = m.partners.tmx.corporate_events("AAPL", start="2025-07-01").fetch()
+                events = m.partners.tmx.corporate_events("AAPL", start="2026-07-01").fetch()
         """
         return list_query(
             self._core,
@@ -1204,18 +1171,15 @@ class _Tmx(Namespace):
 
 
 class _Fable(Namespace):
-    """`m.partners.fable`: Fable Data's European consumer-spending datasets.
+    """The Fable Data datasets, reached as `m.partners.fable`.
 
-    Fable Data aggregates card and open-banking transactions of a European consumer panel (the
-    UK, Germany, France, Italy, Spain, and Austria) per merchant and day, and maps the merchants
-    to their parent companies and, for about 250 US public companies, tickers. Merchant names
-    join the two: an aggregate's `Name` is a hierarchy row's `LookupName`. The tickers are
-    Bloomberg tickers (`"AMZN US"`), not Massive symbols, so neither dataset takes `symbols`;
-    filter them through `filters`. Both are REST list endpoints and return a `Query`.
-
-    Created once per session by `_Partners` and reached as `m.partners.fable`. It holds no
-    state of its own, so it is safe to use from any thread; each method validates its arguments
-    and returns a query without touching the network.
+    Fable Data totals the card and open-banking spending of a consumer panel in six European
+    countries (the UK, Germany, France, Italy, Spain, and Austria) per merchant and day. It maps
+    about 3,500 merchants to their parent companies, about 250 of them US public companies with
+    tickers. To join the two datasets, match an aggregate's `Name` to a hierarchy row's
+    `LookupName`. The tickers are Bloomberg's, such as `"AMZN US"`, not Massive's, so neither
+    dataset takes `symbols`; filter with `filters` instead. Each method only builds a query, so it
+    never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -1224,7 +1188,7 @@ class _Fable(Namespace):
 
             m = dm.MassiveSession()
             amazon = m.partners.fable.merchant_aggregates(
-                start="2025-06-01", filters={"parent_name": "Amazon Inc"}
+                start="2026-06-01", filters={"parent_name": "Amazon Inc"}
             ).fetch()
     """
 
@@ -1244,36 +1208,33 @@ class _Fable(Namespace):
     ) -> Query:
         """Daily European consumer spending per merchant, from Fable Data's transaction panel.
 
-        One row per merchant, transaction day, consumer country, channel, and panel: spend,
-        transaction and account counts, and the panel sizes that normalize them, in the row's
-        `TransactionCurrency` (EUR or GBP). A restated day returns with a later `PublishedDate`.
-        The tickers are Bloomberg's, so it takes no `symbols`: filter by name through `filters`.
-        `poll()` re-reads it, keyed by every dimension column, from `TransactionDate` and
-        `PublishedDate` to `TransactionCurrency`.
+        Each row holds a merchant's spending, transaction and account counts, and the panel sizes
+        that normalize them, for one transaction day, consumer country, channel, and panel. Amounts
+        are in the row's `TransactionCurrency`, EUR or GBP. A restated day comes back with a later
+        `PublishedDate`.
 
         Args:
             start: The first transaction day.
-            end: The end of the range.
-            sort: Massive's field to sort by, such as `"transaction_date"`.
+            end: The last transaction day.
+            sort: Any field of the rows, such as `"transaction_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"parent_name": "Amazon Inc"}`.
+            filters: Further endpoint parameters, such as `{"parent_name": "Amazon Inc"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.fable.merchant_aggregates.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound cannot be parsed or is naive, or the range ends before it
-                starts; `limit` is not positive; or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If a bound isn't a date; the range ends before it starts; `limit` isn't
+                positive; or a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
                 uk = m.partners.fable.merchant_aggregates(
-                    start="2025-06-01", filters={"user_country": "UK"}
+                    start="2026-06-01", filters={"user_country": "UK"}
                 ).fetch()
         """
         return list_query(
@@ -1299,26 +1260,25 @@ class _Fable(Namespace):
     ) -> Query:
         """Fable Data's map from merchants to parent companies, tickers, and industries.
 
-        One row per merchant and period of validity: its names, its parent companies with their
-        Bloomberg tickers, whether it is listed, and its sector and industry. Join an
-        aggregate's `Name` to `LookupName` between `ActiveFrom` and `ActiveTo` (`0001-01-01` and
-        `9999-12-31` mean unbounded) for a point-in-time map. `poll()` re-reads it, keyed by
-        `LookupName` and `ActiveFrom`.
+        Each row holds a merchant's names, its parent companies with their Bloomberg tickers,
+        whether it's listed, and its sector and industry, for one period between `ActiveFrom` and
+        `ActiveTo`. `0001-01-01` and `9999-12-31` mark a period with no start or no end. For a
+        point-in-time map, join an aggregate's `Name` to `LookupName` on a day inside the period.
 
         Args:
-            sort: Massive's field to sort by, such as `"lookup_name"`.
+            sort: Any field of the rows, such as `"lookup_name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
-            filters: Such as `{"listing_status": "public"}`.
+            filters: Further endpoint parameters, such as `{"listing_status": "public"}`.
 
         Returns:
-            A `Query`. Columns:
+            A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/partners.fable.merchant_hierarchy.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `limit` is not positive, or a filter is unknown, set by a typed
-                argument, or of the wrong kind.
+            ValueError: If `limit` isn't positive, or a filter isn't one the dataset takes, or its
+                value doesn't fit.
 
         Example:
             ::
@@ -1339,10 +1299,12 @@ class _Fable(Namespace):
 
 
 class _Partners(Namespace):
-    """`m.partners`: one attribute per data vendor.
+    """The datasets Massive resells from its partners, reached as `m.partners`.
 
-    Created once by `MassiveSession`, together with its four vendor namespaces. Holds no
-    mutable state, so it is safe to use from any thread.
+    Each partner has its own namespace: `m.partners.benzinga` for analyst ratings, earnings,
+    guidance, and news; `m.partners.etf_global` for ETF analytics, holdings, flows, and profiles;
+    `m.partners.tmx` for corporate events; and `m.partners.fable` for European consumer spending.
+    Their methods only build queries, so they never block, and you can call them from any thread.
 
     Example:
         ::
@@ -1350,7 +1312,7 @@ class _Partners(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            m.partners.benzinga  # <MassiveSession #1 partners.benzinga>, the Benzinga datasets
+            ratings = m.partners.benzinga.ratings("AAPL").fetch()
     """
 
     __slots__ = ("_benzinga", "_etf_global", "_fable", "_tmx")

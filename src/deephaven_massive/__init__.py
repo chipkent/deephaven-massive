@@ -1,116 +1,86 @@
-"""Massive.com market data as live and static Deephaven tables.
+"""Market data from Massive as live and historical Deephaven tables, for traders and quants.
 
-`deephaven-massive` connects a Deephaven server to Massive.com (formerly Polygon.io). It turns
-the three ways Massive serves data into ordinary Deephaven tables:
-
-- **WebSocket streams** (trades, quotes, bars, fair market value, index values, and more)
-  become live tables: blink, append-only, ring, or one row per symbol.
-- **REST endpoints** (snapshots, reference data, fundamentals, filings, economy, and partner
-  datasets) become static tables, or live tables that poll again on an interval.
-- **S3 flat files** (full-day trades, quotes, and bars) become static historical tables.
-
-Every dataset is a method on a namespace grouped by asset class (`stocks`, `options`,
-`futures`, `indices`, `forex`, `crypto`) or by topic (`reference`, `indicators`, `economy`,
-`partners`). Each method returns an immutable query, and a verb on that query picks the table
-shape: `blink()`, `append_only()`, `ring(n)`, `last_by()`, `fetch()`, `poll(interval)`, or
-`history(start, end=None)`. Every query also has `columns()`, a table of its columns and what
-each one means. Live data is real-time by default: Massive's Starter and Developer plans
-stream stocks, options, indices, and futures 15 minutes late (10 for futures), so on those plans
-list the subscription in `MassiveConfig(delayed_subscriptions=...)`, or its live tables and its
-current snapshots fail with a message that names that setting. A dataset your plan lacks fails
-with a message that says what was refused and, where the library has another way to read the
-data, names it. The library runs inside a Deephaven server you start, and never starts one
-itself.
+Where a dataset both streams and keeps history, one query gives both the history and the live
+table, with the same columns, so the same Deephaven code runs on each. Every dataset works the
+same way: create
+a session, call a dataset method to get a query, and call one of the query's methods to get
+a Deephaven table. A query names the data and reads nothing.
 
 Example:
-    In the Deephaven console, with your key in `MASSIVE_API_KEY`::
+    In the Deephaven console, with your API key in `MASSIVE_API_KEY`::
 
         import deephaven_massive as dm
 
         m = dm.MassiveSession()
 
-        # A history table: Apple's daily bars for one week, read once. Works on every plan,
-        # the free one included.
-        bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
-        week = bars.history("2025-06-02", "2025-06-06")
+        # Apple's daily bars for one week, on any Stocks plan.
+        apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 
-        # What each column of those bars means.
-        columns = bars.columns()
-
-        # A live table: the latest minute bar of each symbol, updated as each minute closes.
-        # Needs a paid Stocks plan. On a delayed one, such as Stocks Starter, create the
-        # session with
-        # dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})).
+        # Each stock's latest minute bar, live, on Stocks Advanced; see Settings for Starter.
         latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
-Status:
-    Every dataset is implemented over REST, WebSocket, and flat files and tested against simulated
-    Massive servers built from Massive's documentation. The live tests have also run against Massive
-    on a mix of paid and free plans. Questions those plans cannot settle remain open (which host a
-    delayed plan streams from, how index daily bars and futures sessions are stamped, parts of the
-    flat files); there the library follows its best reading of the documentation. Where Massive
-    sends something unexpected, the library serves what it can: a value that doesn't fit is null, a
-    row missing its symbol or time is dropped, and each is logged once. The library is not on PyPI
-    yet.
+Datasets:
+    Each dataset is a method of a namespace on the session. The namespaces by asset class are
+    `m.stocks`, `m.options`, `m.futures`, `m.indices`, `m.forex`, and `m.crypto`, and the ones
+    by topic are `m.reference`, `m.indicators`, `m.economy`, and `m.partners`.
+    `m.snapshots()` reads symbols of several asset classes at once. `dm.datasets()` lists every
+    dataset in a table, and `columns()` on any query lists its columns and what each one means.
+
+Query methods:
+    A query has only the methods its dataset supports:
+
+    - `history(start, end)`: a static table of a past range.
+    - `fetch()`: a static table of what Massive has now.
+    - `poll(interval)`: a live table that fetches again every `interval` seconds.
+    - `blink()`: a live table of a stream's rows from the latest update cycle.
+    - `append_only()`: a live table of every row a stream sends after the call.
+    - `ring(capacity)`: a live table of a stream's latest `capacity` rows.
+    - `last_by()`: a live table of each symbol's latest row from a stream.
+
+    A live table updates until you release it with `m.release(table)` or nothing refers to it
+    any more. A panel or a table made from it keeps it updating either way. `m.close()` stops
+    every live table of the session.
+
+Settings:
+    `dm.MassiveConfig` holds a session's settings; pass it as `dm.MassiveSession(config)`. Two
+    settings match a session to your plans: `delayed_subscriptions` for plans that stream
+    delayed data, such as Stocks Starter, and `rest_basic_subscriptions` for the free Basic
+    plans. `help(dm.MassiveConfig)` lists every setting.
+
+Symbols:
+    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY251219C00600000`,
+    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. Where a dataset takes it, `dm.ALL` means every
+    symbol. A table with a `Symbol` column works too, and a live one, a watchlist, is followed as
+    you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols` convert other
+    spellings, such as Yahoo's `BRK-B`.
+
+Enums:
+    An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.
+    `dm.Timespan("minute")` converts text to a member.
+
+Errors:
+    Every error from Massive, and every failed read or live table, is a `dm.MassiveError`.
+    `dm.AuthenticationError` means Massive refused your keys, and `dm.EntitlementError` means
+    your plan doesn't include the data. Each error's `cause`, a `dm.ErrorCause`, says whether
+    it's expected, a mistake in your code, or a bug in the library to report. A wrong argument
+    raises `TypeError` or `ValueError` at the call instead. `dm.enable_debug_logging()` records
+    what the library does, for a bug report.
+
+Where it runs:
+    Sessions run inside a Deephaven server: in its console, in an application script, or in
+    Python after starting `deephaven_server.Server`. Without a server, you can import the
+    package and use its errors, enums, and logging functions.
 
 Read next:
-    The README, https://github.com/chipkent/deephaven-massive; the dataset finder,
-    https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md, whose page
-    for each dataset gives its arguments, their rules, and its columns; troubleshooting,
-    https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md; and
-    `help()` on any object.
-
-`import deephaven_massive` is fast and needs no running server. `MassiveSession`,
-`MassiveConfig`, `ALL`, `datasets()`, the `canonical_symbol*` converters, and
-`canonicalize_symbols` need one: use them inside a Deephaven server, or after starting
-`deephaven_server.Server`.
-The exceptions, the enums, `enable_debug_logging`, `disable_debug_logging`, `LogOutput`, and
-`__version__` do not.
-
-Public API:
-    - `MassiveSession(config=None)`: the entry point; namespaces, `snapshots()`,
-      `connections()`, `streams()`, `rate_limits()`, `symbol_reads()`, `release(table)`,
-      `close()`, and use as a context manager.
-    - `MassiveConfig`: the frozen configuration; `MassiveConfig()` reads `MASSIVE_API_KEY`.
-    - `datasets()`: a static table of every dataset, with its summary, verbs, data sources, and
-      the link to its columns; it needs no session and no API key.
-    - `MassiveError`, `AuthenticationError`, `EntitlementError`: the exceptions; each one's
-      `cause`, an `ErrorCause`, says whose problem it is: expected, a defect in the user's code
-      or input, or a defect of the library (whose message says how to report it).
-    - `ALL`: every symbol on a stream, in a flat file, or in a snapshot.
-    - The symbol converters. Every dataset takes, and every `Symbol` column holds, Massive's exact
-      REST ticker (`AAPL`, `BRK.B`, `KIMpL`, `O:AAPL250117C00150000`, `I:SPX`, `C:EURUSD`,
-      `X:BTCUSD`). A dataset's `symbols` can also be a table with a `Symbol` column, and a live one
-      is followed as rows are added and deleted. The converters turn other spellings into Massive's:
-      `canonical_symbol(text, asset_class, convention=SymbolConvention.MASSIVE)`, one function per
-      class for query strings (`canonical_symbol_stock`, `canonical_symbol_option`,
-      `canonical_symbol_future`, `canonical_symbol_future_spread`, `canonical_symbol_index`,
-      `canonical_symbol_forex`, `canonical_symbol_crypto`), one per stock convention
-      (`canonical_symbol_stock_yahoo`, `canonical_symbol_stock_nasdaq`,
-      `canonical_symbol_stock_cms`), and the table form `canonicalize_symbols`. In a query string,
-      import a converter by bare name for a `String` column
-      (`from deephaven_massive import canonical_symbol_forex`); called as `dm.…` it makes an
-      `Object` column unless cast, `(String) dm.canonical_symbol_forex(Pair)`.
-    - The enums (all `StrEnum`s; a value is Massive's wire string where the enum reaches the
-      wire): `AssetClass`, `Timespan`, `PollMode`, `HistorySource`, `Reread`, `FuturesVenue`,
-      `Direction`, `ContractType`, `SeriesType`, `Timeframe`, `Order`, `Market`, `TickerType`,
-      `Locale`, `ConditionDataType`, `Sip`, `SymbolConvention`, `OnError` (what a bad symbol does,
-      in `canonicalize_symbols` and in `MassiveConfig`'s `noncanonical_symbols`, `unlisted_symbols`,
-      `unreadable_symbols`, and `unavailable_symbols`); and `Subscription`, Massive's five
-      subscriptions. Parameters take only enum members; convert text with, for example,
-      `Timespan("minute")`.
-    - `enable_debug_logging(output=LogOutput.STDERR)` and `LogOutput`: send the library's log,
-      DEBUG and up, to stderr (which Deephaven shows in its log panel) or to a file; the
-      environment variable `DEEPHAVEN_MASSIVE_LOG=DEBUG` (and `DEEPHAVEN_MASSIVE_LOG_FILE`)
-      does the same when the first session is created. Attach that log to a bug report. It
-      never holds a secret. `disable_debug_logging()` turns it off again.
-
-    The query classes (`Query`, `StreamQuery`, `HistoryQuery`, `StreamHistoryQuery`) and the
-    argument types (`Symbols`, `DateLike`, `FilterValue`) are in the public module
-    `deephaven_massive.queries`, for type annotations; this package does not import it.
+    - The README and its tutorial: https://github.com/chipkent/deephaven-massive
+    - Every dataset's arguments, plans, and columns:
+      https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md
+    - Error messages and their fixes:
+      https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md
+    - `help()` on any object, such as `help(m.stocks.bars)`.
 
 Attributes:
-    __version__: The installed version, such as `"0.1.0"`, as pip or uv installed it.
+    __version__: The installed version, such as `"0.1.0"`.
 """
 
 from importlib import import_module as _import_module
