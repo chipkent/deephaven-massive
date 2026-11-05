@@ -521,6 +521,7 @@ import deephaven_massive as dm
 
 m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 streams = m.streams()
+connections = m.connections()
 
 try:
     m.stocks.last_trade(["AAPL"]).fetch()
@@ -560,7 +561,7 @@ these the live minute bars show on the free plan:
 |---|---|
 | Rejected the key | The `stocks.bars` row of `streams` turns `FAILED`, and its `Error` says Massive rejected the API key. |
 | Refused the subscription | The row turns `FAILED`, and its `Error` quotes a refusal of `AM.AAPL`. |
-| Closed the connection | `m.connections()` shows the connection reconnecting again and again. |
+| Closed the connection | `connections` shows the connection reconnecting again and again. |
 
 #### 11. Convert symbols from other sources
 

@@ -32,7 +32,7 @@ optional:
 
 | Variable | What you get | Without it |
 |---|---|---|
-| `MASSIVE_DELAYED_API_KEY` | Two checks of a delayed Stocks key, which a second key on Stocks Starter serves. Your main key serves the stream check on Stocks Starter or Developer, and the past-data check on Stocks Basic or Starter. | The checks it can't serve skip |
+| `MASSIVE_DELAYED_API_KEY` | A key on Stocks Basic or Starter, for the check of past stock data that Massive labels `DELAYED`, when your main key is on a higher Stocks plan. On Stocks Advanced or higher, a key on Starter also serves the check of a delayed key on the real-time feed. | The checks it can't serve skip |
 | `MASSIVE_LIVE_PLANS` | Your plans, declared instead of asked of Massive ([Declare your plans](#declare-the-plans)) | The run asks Massive |
 
 <a id="run-order"></a>
@@ -42,22 +42,12 @@ optional:
 The connection-limit tests run last and alone, because they disturb the key's connections:
 
 1. Stop every other program that uses the key.
-2. Run the evidence, smoke, and rate-limit tests in one command, or in two at different times.
-   A weekday run in market hours covers more, because a stream test checks rows only while its
-   market is open. The rate-limit tests need one asset class still on Basic, and no open
-   market.
-
-   In one command:
+2. Run the evidence, smoke, and rate-limit tests. A weekday run in market hours covers more,
+   because a stream test checks rows only while its market is open. The rate-limit tests run
+   only while one asset class is still on Basic:
 
    ```bash
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
-   ```
-
-   In two, the second outside market hours:
-
-   ```bash
-   uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log
-   uv run pytest -m integration_rate_limits 2>&1 | tee -a live-checks.log
    ```
 
 3. Run the connection-limit tests, one command after the other:
@@ -88,7 +78,7 @@ Declare your plans in `MASSIVE_LIVE_PLANS` when the probe can't tell them:
 
 | Case | What you declare |
 |---|---|
-| The run stops and asks you to: a snapshot came back empty, or the run started between 03:30 and 04:30 New York time | Every paid plan you hold, or wait until 04:30 |
+| The run stops and asks you to | Every paid plan you hold. Between 03:30 and 04:30 New York time, you can wait until 04:30 instead. |
 | Stocks or Options Business with the trades and quotes expansion | Every paid plan you hold, with `business_expansion` for that asset class |
 | Indices Business | Every paid plan you hold, with `indices=business` |
 | Futures Business | Every paid plan you hold, with `futures=business` |
@@ -118,7 +108,8 @@ A test fails when:
 
 - a request it needs fails or returns nothing
 - a stream delivers no row while rows are due
-- Massive refuses a request although your plans, probed or declared, include it
+- Massive refuses a request although your plans, probed or declared, include the plan the test
+  needs
 - a `verifies` test gets an answer other than the one the library assumes
 
 A refusal of data your plans include means your plans don't match what Massive serves. Check
@@ -175,8 +166,8 @@ The run writes the library's DEBUG log to `live-debug-logs/<UTC time>-<process i
 and prints its path under `live debug log`. With `DEEPHAVEN_MASSIVE_LOG_FILE` set, it writes to
 that file instead, at the level `DEEPHAVEN_MASSIVE_LOG` names.
 
-The run scans the log for your keys. If it finds one, the same section says where. Don't share
-that log, and open an issue that names the file.
+Unless you set `DEEPHAVEN_MASSIVE_LOG_FILE`, the run scans the log for your keys. If it finds
+one, the same section says where. Don't share that log, and open an issue that names the file.
 
 <a id="checks-to-read-by-hand"></a>
 
@@ -189,13 +180,14 @@ the owner, and attach the evidence file and the stream day's debug log to their 
 | Check | Run | Plans | What to read | The answer the library assumes |
 |---|---|---|---|---|
 | `test_the_options_cap_counts_contracts_or_topics` | The first [connection-limit command](#run-order) | Options Advanced | Whether Massive acknowledges all 2,000 topics of 1,000 contracts, or refuses those past 1,000 or closes the socket | The cap counts topics |
-| `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | The file's rows outside the New York day | None. This check fails otherwise. |
-| `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | An index day bar covers the Chicago day, which ends at 01:00 New York time |
+| `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | The file's rows outside the New York day, and the minutes REST has that the file lacks | The file holds its own New York day. This check fails otherwise. |
+| `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | None. Index day bars end at 01:00 New York time until this is read. |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | The evidence tests | Futures Starter | Its `VERDICT` lines | Each bar of a session or longer holds the whole sessions that open in its UTC days |
 | A quiet connection | The [stream day](#live-run-program) of the live-run program | Any plan that streams stocks | The stocks connection's `status` lines from 03:45 to 04:00 New York time, and the longest gap between them; every `no frame for ... during ... trading hours` WARNING of the day, with its time | None. The check records it. |
 
-The options check skips as inconclusive when Massive refuses topics for want of a plan, or when
-the socket reconnects without saying why. Run the first connection-limit command again then.
+The options check skips when Massive refuses the topics for want of a plan. It also skips as
+inconclusive when the socket reconnects without saying why: run the first connection-limit
+command again then.
 
 To run one of the other checks alone, use `-k` with a word of its name:
 
@@ -224,8 +216,8 @@ contradicts:
 | [README 8, settings file](../README.md#what-your-plan-allows) | Stocks Starter or higher | Whether the snapshot returns rows with your plan's file, and on Starter or Developer, raises `dm.EntitlementError` without it |
 | [README 9, streaming](../README.md#stream-minute-bars) | Stocks Starter or higher | Whether minute bars arrive in pre-market and after-hours trading, and `latest` stays empty overnight. On Currencies Starter, whether the crypto line fills at any hour. |
 | [README 10, change since close](../README.md#change-since-close) | Stocks Starter or higher | Whether each row shows `PrevClose` before the stock's first minute bar, then `Close` and `ChangePct` with each bar |
-| [README 12, backfill](../README.md#backfill-then-live) | Stocks Starter or higher | Whether `spy` has one row per minute of the day so far, with no gap or repeat where history meets the stream |
-| [README 4 and 13, charts](../README.md#chart-closes) | The plan each names | Whether the chart of `Date` text draws a date axis, and the dashboard opens with both panels and its chart grows each minute |
+| [README 12, backfill](../README.md#backfill-then-live) | Stocks Starter or higher | Whether `spy` has one row per traded minute of the day so far, with no gap or repeat where history meets the stream |
+| [README 4 and 13, charts](../README.md#chart-closes) | The plan each names | Whether Example 4's chart draws Nvidia's closes for the year, and the dashboard opens with both panels and its chart grows each minute |
 | [`GreeksGamma`](datasets/options.snapshots.md) of `m.options.snapshots` | Options Starter or higher, with `delayed_subscriptions` listing options on Starter or Developer | For one contract, enter the underlying's price, the strike, the days to expiration, and `ImpliedVolatility` into a standard Black-Scholes calculator, which gives gamma per $1 move of the underlying. Record whether `GreeksGamma` matches that, or a hundredth of it, per $0.01 move as Massive's description says. |
 
 <a id="live-run-program"></a>
@@ -246,14 +238,14 @@ uv run python scripts/live_run.py status --out ~/massive-live # from a second te
 uv run python scripts/live_run.py pack --out ~/massive-live   # after Control-C; writes live-results-<date>.zip
 ```
 
-- `check` prints an `OK`, `WARN`, or `FAIL` line for each part of the computer and each
+- `check` prints an `OK`, `WARN`, or `FAIL` line for each part of the computer, then each
   subscription's plan, then `ready: yes` or `ready: no`.
 - `run --any-time` starts the checks that need no market hours at once. The option counts only
   the first time you give it for a results folder. `run` resumes after any stop, with every
   result kept, unless the clone has moved to another commit.
 - `status` prints the latest probe, each check's status and reason, and a count per group.
 - `pack` refuses unless your terminal holds the keys the run used, and refuses to zip a folder in
-  which it finds a key. `run` also packs a zip by itself whenever a group finishes.
+  which it finds a key. While nothing is due, `run` also packs a zip by itself.
 
 Run `upgrade-check` only when the owner asks. It asks you to upgrade a plan while it runs. The
 [tester guide](tester-guide.md#live-run) walks through a run step by step.
@@ -271,7 +263,7 @@ The program runs its checks in groups, each at a set New York time:
 | `luld` | `-m integration -k luld` | 09:28, except on a stream day and the day after |
 | `smoke` | `-m integration_smoke` | From 11:30 |
 | `responses` | A fixed set of library calls, with every raw reply recorded | From 11:30 |
-| `limits-ws` | The WebSocket connection-limit tests | From 16:15 |
+| `limits-ws` | The WebSocket subscription-limit tests | From 16:15 |
 | `limits-second-connection` | The second-connection test, with nothing else open | From 11:30, after the groups before it |
 | `stream-day` | Streams for every asset class the key can stream | 03:45 to 20:30 on a planned day |
 | `throughput` | Every symbol's busiest streams, over an hour | 09:15 to 11:00 the next day |
@@ -317,5 +309,5 @@ Crypto and futures each fail when:
 - an hour the market was open brought no row
 - a row near a boundary carries the wrong `Date`
 
-The next day, `stream-night-reconcile` records a failure if a minute bar's `Date` differs from
-REST history. `REPORT.md` in each zip has a section per night.
+The next day, `stream-night-reconcile` compares the night's minute bars with REST history, and
+records a failure for a bar whose `Date` is wrong. `REPORT.md` in each zip has a section per night.

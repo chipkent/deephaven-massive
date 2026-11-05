@@ -3,6 +3,7 @@ import deephaven_massive as dm
 
 m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 streams = m.streams()
+connections = m.connections()
 
 try:
     m.stocks.last_trade(["AAPL"]).fetch()
