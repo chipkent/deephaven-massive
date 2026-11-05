@@ -3,7 +3,7 @@
 Most error messages from the library name their fix. For the rest, and for symptoms with no
 message, find what you see in these tables and follow its fix. If nothing matches, check the
 [diagnostics tables](#diagnostics), [turn on the debug log](#the-log), and
-[report a bug](#report-a-bug). Both examples here run on any Stocks plan.
+[report a bug](#report-a-bug).
 
 <a id="error-messages"></a>
 
@@ -48,13 +48,12 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | A stock table stays empty | No stock trades while the market is closed. | Check whether the market is open with `m.reference.market_status().fetch()`. |
 | Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. For a long read, pass `wait=False` to `fetch()` or `history()`: the call returns at once, and its table fills in the background. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
-| `... refused the subscription to ...` | Your plan doesn't stream this dataset, though it may stream others of the same asset class. | Find a dataset your plan streams in the plan table of its [reference page](datasets/README.md), or read this one with `history()` or `poll()`. |
 | A symbol on your watchlist never appears | The table skips a row that isn't Massive's exact ticker, or a crypto pair Massive doesn't list. `Error` lists the skipped rows. | Fix or delete the row. `help(dm.canonicalize_symbols)` shows how to convert a table of other spellings to Massive's. |
 | `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise `max_outage` in [`MassiveConfig`](../README.md#massive-config). |
-| `over capacity: <n>/1000; <k> deferred` in `Error` | One connection streams at most 1,000 option contracts. The library counts each channel of a contract, such as its trades or its quotes, as one contract. | Watch fewer contracts. The waiting ones subscribe as others leave. |
+| `over capacity: <n>/1000; <k> deferred` in `Error` | Massive allows 1,000 option contracts on one connection, and the library counts a contract's trades and its quotes as two. | Watch fewer contracts. The waiting ones subscribe as others leave. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
-| A table keeps updating after you delete its variable | Python hasn't garbage-collected it yet, or a panel still shows it. | Call `m.release(table)` before you delete the variable, as [Stopping live tables](../README.md#stop-live-tables) shows, and close the table's panels. |
+| A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels. Next time, stop a table with `m.release(table)` instead of deleting its variable, as [Stopping live tables](../README.md#stop-live-tables) shows. |
 
 <a id="diagnostics"></a>
 
@@ -70,8 +69,8 @@ checking:
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
 | `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |
 
-Start with `m.streams()`. This example makes a new session, `demo`, so it leaves your `m` alone.
-It polls Apple's news, then shows the poll's row:
+Start with `m.streams()`. This example, on any Stocks plan, makes a new session, `demo`, so it
+leaves your `m` alone. It polls Apple's news, then shows the poll's row:
 
 ```python
 import deephaven_massive as dm
@@ -109,21 +108,19 @@ Deephaven IDE's **Log** panel. The debug log adds INFO and DEBUG lines:
 | DEBUG | The details of a decision, such as each request sent. |
 
 To record what the library does while some code runs, turn the debug log on before the code and
-off after it. This example records a read of Apple's daily bars:
+off after it, in the console where the problem happened:
 
 ```python
 import deephaven_massive as dm
 
 dm.enable_debug_logging()
-m = dm.MassiveSession()
-week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
+# Run the code that failed here.
 dm.disable_debug_logging()
 ```
 
-The server's terminal and the **Log** panel show the session's settings, each request the read
-sent, and what came back. To write the lines to a file instead, pass its path, as in
-`dm.enable_debug_logging("/tmp/massive.log")`. The file grows with every request, so turn the
-log off once it holds the problem.
+The server's terminal and the **Log** panel then show the settings of each session the code
+makes, each request it sends, and what comes back. To write the lines to a file for a bug
+report, pass its path, as in `dm.enable_debug_logging("/tmp/massive.log")`.
 
 To log from the first session on, set `DEEPHAVEN_MASSIVE_LOG` or `DEEPHAVEN_MASSIVE_LOG_FILE`,
 as [Environment variables](../README.md#environment-variables) describes.
