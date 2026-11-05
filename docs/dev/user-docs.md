@@ -260,7 +260,7 @@ followed by one or two plain sentences on how little it took. Code that shows no
 Everything else moves down the page: plan details, dataset counts, prerequisites, and
 definitions. The hook has no asides, no history ("formerly ..."), and no caveats. Link
 "Massive" and "Deephaven" instead of explaining them. The hero image goes after the title,
-with light and dark variants in a `<picture>` element and alt text that says what it shows.
+with alt text that says what it shows.
 
 <a id="headings"></a>
 

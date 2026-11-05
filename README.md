@@ -1,10 +1,6 @@
 # deephaven-massive
 
-<!-- Placeholder images: the owner's hero screenshot replaces docs/images/hero-light.png and docs/images/hero-dark.png. -->
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
-  <img alt="Placeholder for the hero screenshot: the project name on a plain background." src="docs/images/hero-light.png">
-</picture>
+![A Deephaven dashboard: type a symbol into the focus table, and its live trades, today's news, and a chart of minute closes with a moving average and bands switch to that symbol.](docs/images/hero.webp)
 
 [![CI](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml/badge.svg)](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml)
 
