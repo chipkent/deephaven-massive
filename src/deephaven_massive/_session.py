@@ -207,18 +207,18 @@ class MassiveSession:
     settings come from `dm.MassiveConfig`. Without one, it reads your API key from
     `MASSIVE_API_KEY`.
 
+    Each dataset is a method of a namespace, such as `m.stocks.bars`, and returns a query. A method
+    of the query, such as `history()` or `last_by()`, returns a table. A live table updates while
+    anything uses it. `m.release(table)` drops your variable's hold on one, and `m.close()` stops
+    them all. In a `with` block, the session closes when the block ends. See
+    https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
+
     No public attribute or `repr` of the session shows your key, so the key stays out of the
     console's variables.
 
     You can use a session from several threads at once.
 
     Messages name the session by its label, such as `MassiveSession #1`.
-
-    Each dataset is a method of a namespace, such as `m.stocks.bars`, and returns a query. A method
-    of the query, such as `history()` or `last_by()`, returns a table. A live table updates while
-    anything uses it. `m.release(table)` drops your variable's hold on one, and `m.close()` stops
-    them all. In a `with` block, the session closes when the block ends. See
-    https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
     Use one session per API key. Massive allows one streaming connection per asset class by default.
     Two sessions with the same key share it only when their streaming settings match, such as
@@ -605,9 +605,9 @@ class MassiveSession:
         """Release one live table now, instead of waiting for Python to reclaim it.
 
         The table stops updating once nothing else uses it, such as a table made from it or a panel
-        open in the Deephaven IDE. Its poll or background read stops. Its stream unsubscribes once
-        no other table of the stream is in use. In a console command, the release takes effect when
-        the command ends. Releasing a table twice does nothing, and `release()` works after
+        open in the Deephaven IDE. Its poll or background read then stops. Its stream unsubscribes
+        once no other table of the stream is in use. In a console command, the release takes effect
+        when the command ends. Releasing a table twice does nothing, and `release()` works after
         `close()`. A static table needs no release. See
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 

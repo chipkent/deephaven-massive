@@ -1298,15 +1298,15 @@ class StreamQuery(QueryBase):
     tables, or a table made from one, is in use.
 
     A method returns once its table exists, without waiting for Massive to confirm the subscription.
-    A failure Massive reports later, such as a refused subscription or a rejected key, fails the
-    table and shows in `m.streams()`. The next call on an identical query then opens a new stream.
+    Later failures fail the table and show in `m.streams()`. A refused subscription and a rejected
+    key are two such failures. The next call on an identical query then opens a new stream.
 
     A static table of symbols is read once, when you call. A watchlist is followed: the stream
     subscribes and unsubscribes as you add and delete rows. A row that isn't Massive's exact ticker
     is skipped and listed in `m.streams()`.
 
     Massive allows 1,000 option contracts on one connection, and the library counts a contract's
-    trades and quotes as two. Contracts passed as a list or a static table beyond that raise
+    trades and quotes as two. Passing more contracts than that as a list or a static table raises
     `ValueError`. A watchlist's extra contracts wait for room, and `Deferred` in `m.streams()`
     counts them.
 
@@ -1433,8 +1433,9 @@ class StreamQuery(QueryBase):
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
-                - the list lacks every pair of a table of crypto pairs, or, under
-                  `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                - that list lacks every pair of a table of crypto pairs;
+                - that list lacks any pair of such a table, under
+                  `unlisted_symbols=dm.OnError.RAISE`.
         """
         return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
@@ -1474,8 +1475,9 @@ class StreamQuery(QueryBase):
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
-                - the list lacks every pair of a table of crypto pairs, or, under
-                  `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                - that list lacks every pair of a table of crypto pairs;
+                - that list lacks any pair of such a table, under
+                  `unlisted_symbols=dm.OnError.RAISE`.
         """
         return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
@@ -1519,8 +1521,9 @@ class StreamQuery(QueryBase):
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
-                - the list lacks every pair of a table of crypto pairs, or, under
-                  `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                - that list lacks every pair of a table of crypto pairs;
+                - that list lacks any pair of such a table, under
+                  `unlisted_symbols=dm.OnError.RAISE`.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -1609,8 +1612,9 @@ class StreamQuery(QueryBase):
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
-                - the list lacks every pair of a table of crypto pairs, or, under
-                  `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                - that list lacks every pair of a table of crypto pairs;
+                - that list lacks any pair of such a table, under
+                  `unlisted_symbols=dm.OnError.RAISE`.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()
