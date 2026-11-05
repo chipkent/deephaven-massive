@@ -119,10 +119,10 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     # `m.snapshots` is a method of the session, so the index lists it under no namespace, after
     # every namespace.
     index = rendered()[INDEX]
-    assert "\n## Across asset classes\n\n| Dataset | Summary | Query methods |\n" in index
-    assert "[`m.snapshots`](snapshots.md)" in index.partition("## Across asset classes")[2]
+    assert "\n## Any asset class\n\n| Dataset | Summary | Query methods |\n" in index
+    assert "[`m.snapshots`](snapshots.md)" in index.partition("## Any asset class")[2]
     assert "## Snapshots" not in index
-    assert index.index("## Partner data") < index.index("## Across asset classes")
+    assert index.index("## Partner data") < index.index("## Any asset class")
 
 
 def test_the_real_pages_state_each_poll_mode() -> None:
@@ -622,8 +622,7 @@ _CALLS = {
 _FOOTER = (
     "The plan tables and most column descriptions are Massive's, from its documentation as "
     "fetched on 2026-10-27, with a few corrected where Massive's are wrong. The library writes "
-    "its own descriptions of the key columns and the columns it computes, such as `Symbol` and "
-    "`Date`."
+    "its own descriptions of the key columns and the columns it computes."
 )
 
 

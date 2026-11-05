@@ -22,8 +22,6 @@ A dataset method, such as `m.stocks.dividends()`, returns a query. A query names
 
 ## Datasets in several asset classes
 
-The datasets that several asset classes have, linked to each class's page.
-
 | Dataset | Asset classes |
 | --- | --- |
 | `trades` | [Stocks](stocks.trades.md), [Options](options.trades.md), [Futures](futures.trades.md), [Crypto](crypto.trades.md) |
@@ -199,7 +197,7 @@ The datasets that several asset classes have, linked to each class's page.
 | [`m.partners.fable.merchant_aggregates`](partners.fable.merchant_aggregates.md) | Daily European consumer spending per merchant, from Fable Data's transaction panel. | `fetch()`, `poll()` |
 | [`m.partners.fable.merchant_hierarchy`](partners.fable.merchant_hierarchy.md) | Fable Data's map from merchants to parent companies, tickers, and industries. | `fetch()`, `poll()` |
 
-## Across asset classes
+## Any asset class
 
 | Dataset | Summary | Query methods |
 | --- | --- | --- |
@@ -227,9 +225,9 @@ Each symbol is Massive's ticker, spelled exactly:
 | Futures | `ESZ6` |
 
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
-- A live table of symbols is followed. Each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and a `poll()` in `dm.PollMode.REPLACE` mode also drop a deleted symbol's rows. `APPEND` and `UPSERT` polls keep them.
+- A live table of symbols works as a watchlist. Each symbol you add is read, and each one you delete stops being read. `fetch()`, `history()`, `last_by()` keyed by `Symbol`, and a `poll()` in `dm.PollMode.REPLACE` mode also drop a deleted symbol's rows. `APPEND` and `UPSERT` polls keep them.
 - `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no filter by symbol. Each dataset's page says which of the two it takes.
-- Text or a list with a misspelled symbol, such as `aapl`, raises `ValueError` at the call. A misspelled row of a table is skipped and logged by default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table whose every row is misspelled is refused at the call.
+- Text or a list with a symbol that isn't Massive's exact ticker, such as `aapl`, raises `ValueError` at the call. Such a row of a table is skipped and logged by default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table with no valid row is refused at the call.
 - `dm.canonical_symbol` converts other spellings to Massive's: `dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.
 - A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists.
 
@@ -250,7 +248,7 @@ The first day or moment of the range. Give `start` and `end` as two dates or two
 The last day, or the moment the range stops, in the same form as `start`.
 
 - A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all of June 2. An instant `end` is excluded from the range.
-- Leave it out to send Massive no end. The rows then include records still to come, such as dividends announced but not yet paid. A query's `history()` without `end` reads through now.
+- Leave it out to include records still to come, such as dividends announced but not yet paid. A query's `history()` without `end` reads through now.
 
 <a id="date"></a>
 
@@ -274,7 +272,7 @@ The field to order the rows by, as Massive names it, such as `"ex_dividend_date"
 
 ### order
 
-The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. Where Massive's endpoint has no `order` parameter of its own, `order` alone raises `ValueError`.
+The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. On some datasets, `order` alone raises `ValueError`.
 
 <a id="limit"></a>
 
@@ -284,7 +282,7 @@ The most rows Massive returns for the whole request, across every symbol you nam
 
 - To keep the latest rows, sort newest first, such as `sort="ex_dividend_date", order=dm.Order.DESC`.
 - A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol.
-- A `fetch()` that follows a table of symbols applies the limit to each request: one per symbol, or for a snapshot dataset one per group of up to 250 symbols. A dataset's page notes any other case where it applies to each symbol.
+- A `fetch()` that follows a table of symbols applies the limit to each request it sends. A request carries one symbol, or a group of symbols on a dataset that takes several at once. A dataset's page notes any other case where it applies to each symbol.
 
 <a id="filters"></a>
 
@@ -351,4 +349,4 @@ Tables of one kind from two asset classes share these columns with different typ
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes, such as `Symbol` and `Date`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the key columns and the columns it computes.

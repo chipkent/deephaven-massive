@@ -34,16 +34,16 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "| Futures | `ESZ6` |\n"
             "\n"
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
-            "- A live table of symbols is followed. Each symbol you add is read, and each one "
-            "you delete stops being read. `last_by()`, `fetch()`, `history()`, and a `poll()` in "
-            "`dm.PollMode.REPLACE` mode also drop a deleted symbol's rows. `APPEND` and `UPSERT` "
-            "polls keep them.\n"
+            "- A live table of symbols works as a watchlist. Each symbol you add is read, and "
+            "each one you delete stops being read. `fetch()`, `history()`, `last_by()` keyed "
+            "by `Symbol`, and a `poll()` in `dm.PollMode.REPLACE` mode also drop a deleted "
+            "symbol's rows. `APPEND` and `UPSERT` polls keep them.\n"
             "- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no "
             "filter by symbol. Each dataset's page says which of the two it takes.\n"
-            "- Text or a list with a misspelled symbol, such as `aapl`, raises `ValueError` at "
-            "the call. A misspelled row of a table is skipped and logged by default, and the "
-            "table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table "
-            "whose every row is misspelled is refused at the call.\n"
+            "- Text or a list with a symbol that isn't Massive's exact ticker, such as `aapl`, "
+            "raises `ValueError` at the call. Such a row of a table is skipped and logged by "
+            "default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes "
+            "that. A table with no valid row is refused at the call.\n"
             "- `dm.canonical_symbol` converts other spellings to Massive's: "
             '`dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, '
             'convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.\n'
@@ -70,8 +70,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
             "of June 2. An instant `end` is excluded from the range.\n"
-            "- Leave it out to send Massive no end. The rows then include records still to "
-            "come, such as dividends announced but not yet paid. A query's `history()` without "
+            "- Leave it out to include records still to come, such as dividends announced but "
+            "not yet paid. A query's `history()` without "
             "`end` reads through now."
         ),
         "date": (
@@ -89,8 +89,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             'or `.desc`: `"ticker,ex_dividend_date.desc"`.'
         ),
         "order": (
-            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. "
-            "Where Massive's endpoint has no `order` parameter of its own, `order` alone raises "
+            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. On "
+            "some datasets, `order` alone raises "
             "`ValueError`."
         ),
         "limit": (
@@ -101,9 +101,10 @@ ARGUMENT_RULES: Final = MappingProxyType(
             '`sort="ex_dividend_date", order=dm.Order.DESC`.\n'
             "- A symbol that comes first can use up the whole limit, so leave `limit` out when "
             "you need every row of each symbol.\n"
-            "- A `fetch()` that follows a table of symbols applies the limit to each request: "
-            "one per symbol, or for a snapshot dataset one per group of up to 250 symbols. A "
-            "dataset's page notes any other case where it applies to each symbol."
+            "- A `fetch()` that follows a table of symbols applies the limit to each request it "
+            "sends. A request carries one symbol, or a group of symbols on a dataset that takes "
+            "several at once. A dataset's page notes any other case where it applies to each "
+            "symbol."
         ),
         "filters": (
             "Any other parameter Massive documents for the dataset, as a `dict` from the "

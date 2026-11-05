@@ -127,9 +127,6 @@ _METHODS_GUIDE: Final = (
 _GRID_HEADING: Final = "Datasets in several asset classes"
 """The heading of the index's table of the datasets several asset classes have."""
 
-_GRID_GUIDE: Final = "The datasets that several asset classes have, linked to each class's page."
-"""The paragraph above the index's table of the datasets several asset classes have."""
-
 _NAMESPACE_HEADINGS: Final[Mapping[str, str]] = {
     "reference": "Reference data",
     "indicators": "Technical indicators",
@@ -138,7 +135,7 @@ _NAMESPACE_HEADINGS: Final[Mapping[str, str]] = {
 """The index's heading over a namespace whose capitalized name would not say what it holds;
 every other namespace's heading is its capitalized name, such as `Stocks`."""
 
-_SESSION_HEADING: Final = "Across asset classes"
+_SESSION_HEADING: Final = "Any asset class"
 """The index's heading over the datasets that are methods of the session, such as `m.snapshots`."""
 
 _SHARED_HEADING: Final = "Shared arguments"
@@ -203,8 +200,7 @@ _WIRE_REQUEST: Final = "`request` marks a value the library fills from the reque
 _PROVENANCE: Final = (
     "The plan tables and most column descriptions are Massive's, from its documentation as "
     "fetched on {fetched}, with a few corrected where Massive's are wrong. The library writes "
-    "its own descriptions of the key columns and the columns it computes, such as `Symbol` and "
-    "`Date`."
+    "its own descriptions of the key columns and the columns it computes."
 )
 """Every page's footer, formatted with the fetch date."""
 
@@ -476,7 +472,7 @@ def _index(
             grid.setdefault(rest, {})[namespace] = spec
     grid = {name: by_class for name, by_class in grid.items() if len(by_class) > 1}
     if grid:
-        lines.extend(("", f"## {_GRID_HEADING}", "", _GRID_GUIDE, ""))
+        lines.extend(("", f"## {_GRID_HEADING}", ""))
         lines.append(_row(["Dataset", "Asset classes"]))
         lines.append(_row(["---"] * 2))
         for name, by_class in grid.items():
