@@ -40,9 +40,11 @@ jobs:
         run: |
           args=()
           # Dependabot's titles name the package and both versions, so they cannot be held to
-          # the length limit; every other rule still applies to them.
+          # the length limit, and Dependabot itself, not a setting, decides whether their first
+          # word is capitalized. Only its pull requests get these two exceptions; every other
+          # rule still applies to them, and every rule applies to everyone else.
           if [[ "$PR_AUTHOR" == "dependabot[bot]" ]]; then
-            args+=(--skip-length)
+            args+=(--dependabot)
           fi
           python3 -I scripts/check_pr_title.py "${args[@]}" -- "$PR_TITLE"
 
