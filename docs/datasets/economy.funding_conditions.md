@@ -18,7 +18,7 @@ m.economy.funding_conditions(*, start=None, end=None, sort=None, order=None, lim
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -70,7 +70,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Tgcr75thPercentile` | double | 75th percentile transaction rate of the TGCR distribution as a percentage; posted on business days. |
 | `TriPartyGeneralCollateralRate` | double | Tri-Party General Collateral Rate (TGCR) as a percentage; published by the Federal Reserve Bank of New York as a repo reference rate and reported on business days. |
 | `TriPartyGeneralCollateralVolume` | double | Total transaction volume underlying the TGCR calculation, in billions of U.S. dollars; reported on business days. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

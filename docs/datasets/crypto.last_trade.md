@@ -19,7 +19,7 @@ m.crypto.last_trade(symbols)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -46,7 +46,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Size` | double | The size of a trade (also known as volume). |
 | `Conditions` | long[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. |
 | `Exchange` | long | The exchange that this crypto trade happened on. See Exchanges (https://massive.com/docs/rest/crypto/market-operations/exchanges) for a mapping of exchanges to IDs. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

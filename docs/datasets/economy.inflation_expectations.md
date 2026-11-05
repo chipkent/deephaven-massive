@@ -18,7 +18,7 @@ m.economy.inflation_expectations(*, start=None, end=None, sort=None, order=None,
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -56,7 +56,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Model1Year` | double | The Cleveland Fed’s 1-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. |
 | `Model30Year` | double | The Cleveland Fed’s 30-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. |
 | `Model5Year` | double | The Cleveland Fed’s 5-year inflation expectations data estimated expected inflation, risk premiums, and the real interest rate using a model based on Treasury yields, inflation data, swaps, and surveys. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

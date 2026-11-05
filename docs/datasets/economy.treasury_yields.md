@@ -18,7 +18,7 @@ m.economy.treasury_yields(*, start=None, end=None, sort=None, order=None, limit=
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -60,7 +60,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Yield5Year` | double | Market Yield on U.S. Treasury Securities at 5-Year Constant Maturity, Quoted on an Investment Basis |
 | `Yield6Month` | double | Market Yield on U.S. Treasury Securities at 6-Month Constant Maturity, Quoted on an Investment Basis |
 | `Yield7Year` | double | Market Yield on U.S. Treasury Securities at 7-Year Constant Maturity, Quoted on an Investment Basis |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

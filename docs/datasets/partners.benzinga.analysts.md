@@ -18,7 +18,7 @@ m.partners.benzinga.analysts(*, sort=None, order=None, limit=None, filters=None)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -53,7 +53,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `SmartScore` | double | A weighted average of the total_ratings_percentile, overall_avg_return_percentile, and overall_success_rate. |
 | `TotalRatings` | double | The total number of ratings issued by the analyst included in the performance calculation. |
 | `TotalRatingsPercentile` | double | The analyst's percentile rank based on the total number of ratings issued, relative to other analysts. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

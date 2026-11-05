@@ -18,7 +18,7 @@ m.stocks.short_volume(symbols=None, *, start=None, end=None, sort=None, order=No
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -47,7 +47,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `AdfShortVolume` | long | Short volume reported via the Alternative Display Facility (ADF), excluding exempt volume. |
 | `AdfShortVolumeExempt` | long | Short volume reported via ADF that was marked as exempt. |
 | `Date` | String | The date of trade activity reported in the format YYYY-MM-DD |
@@ -62,7 +62,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ShortVolume` | double | Total number of shares sold short across all venues for the ticker on the given date. |
 | `ShortVolumeRatio` | double | The percentage of total volume that was sold short. Calculated as (short_volume / total_volume) * 100. |
 | `TotalVolume` | double | Total reported volume across all venues for the ticker on the given date. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

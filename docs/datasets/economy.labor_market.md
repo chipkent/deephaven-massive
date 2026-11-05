@@ -18,7 +18,7 @@ m.economy.labor_market(*, start=None, end=None, sort=None, order=None, limit=Non
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -53,7 +53,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `JobOpenings` | double | Total nonfarm job openings in thousands (JTSJOL series from FRED). |
 | `LaborForceParticipationRate` | double | Civilian labor force participation rate as a percentage of the civilian noninstitutional population (CIVPART series from FRED). |
 | `UnemploymentRate` | double | Civilian unemployment rate as a percentage of the labor force (UNRATE series from FRED). |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

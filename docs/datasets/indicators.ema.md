@@ -18,7 +18,7 @@ m.indicators.ema(symbols, window=50, *, timespan=dm.Timespan.DAY, series_type=dm
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -57,7 +57,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TimestampStart` | Instant | The start of the bar the value is computed at, as an Instant. A bar of a day or longer starts at 00:00 of its window's first day in the day zone of the symbol's class (UTC for forex and crypto, New York otherwise). A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which day it covers is not known. From REST `timestamp`: "The Unix Msec timestamp from the last aggregate used in this calculation." |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `t.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00, in the day zone of the symbol's class, after its window's last day. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
 | `Value` | double | The MACD line value, calculated as the difference between the short-term and long-term exponential moving averages (EMAs) based on the periods specified in the request parameters. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

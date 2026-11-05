@@ -18,7 +18,7 @@ m.partners.benzinga.firms(*, sort=None, order=None, limit=None, filters=None)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -46,7 +46,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Currency` | String | Primary currency used by the financial firm, with some entries having null values. |
 | `LastUpdated` | Instant | Timestamp indicating when the firm's information was last modified or verified in the database. |
 | `Name` | String | The name of a research firm or investment bank which issues ratings. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

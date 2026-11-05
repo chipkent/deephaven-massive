@@ -18,7 +18,7 @@ m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=Non
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -60,7 +60,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. |
@@ -76,7 +76,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `PrimaryExchange` | String | The ISO code of the primary listing exchange for this asset. |
 | `ShareClassFigi` | String | The share Class OpenFIGI number for this ticker. Find more information here (https://www.openfigi.com/about/figi) |
 | `Type` | String | The type of the asset. Find the types that we support via our Ticker Types API (https://massive.com/docs/rest/stocks/tickers/ticker-types). |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

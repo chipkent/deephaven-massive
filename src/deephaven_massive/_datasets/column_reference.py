@@ -106,8 +106,8 @@ _NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
-    "This index lists every dataset by asset class, with the query methods, argument rules, and "
-    "column types they share. Each dataset links its own page, with its call, arguments, plans, "
+    "This index lists every dataset by asset class, with the query methods, shared arguments, "
+    "and column types. Each dataset links its own page, with its call, arguments, plans, "
     "and columns. In the Deephaven IDE, column descriptions show as tooltips. `dm.datasets()` "
     "lists every dataset as a table."
 )
@@ -228,7 +228,8 @@ _POLL_MODES: Final[Mapping[PollMode, str]] = {
 """What each default `poll()` mode does to the table, as a page says it."""
 
 _ARGUMENTS_GUIDE: Final = (
-    f"A linked argument follows the [shared rules]({INDEX}#{_SHARED_ANCHOR}) on the dataset index."
+    f"A linked argument follows its rule under [shared arguments]({INDEX}#{_SHARED_ANCHOR}) on the "
+    "dataset index."
 )
 """The paragraph under a page's Arguments heading, when an argument links a shared rule."""
 
@@ -416,7 +417,7 @@ def render(
     if missing:
         raise KeyError(f"no call given for the datasets {missing}")
     footer = ["---", "", _PROVENANCE.format(fetched=provenance.fetched.isoformat())]
-    pages = {INDEX: _index(specs, calls, footer, catalog=catalog)}
+    pages = {INDEX: _index(specs, calls, catalog=catalog)}
     for spec in specs:
         pages[page_name(spec)] = _page(
             spec, calls[spec.name], catalog=catalog, provenance=provenance, footer=footer
@@ -427,7 +428,6 @@ def render(
 def _index(
     specs: Sequence[DatasetSpec],
     calls: Mapping[str, DatasetCall],
-    footer: list[str],
     *,
     catalog: Catalog,
 ) -> str:
@@ -436,12 +436,11 @@ def _index(
     Under the title and its guide come the query methods, the datasets several asset classes
     have, every dataset by namespace, the shared arguments' rules, what each column type the
     datasets use holds, and the columns whose type differs between classes
-    (`_type_differences`).
+    (`_type_differences`). It has no footer: it holds no plan table or column description.
 
     Args:
         specs: Every dataset, in catalog order.
         calls: Each dataset's call, by name.
-        footer: The footer's lines.
         catalog: The catalog that merges each dataset's schema, for the columns' types.
 
     Returns:
@@ -523,7 +522,6 @@ def _index(
         lines.append(_row(["Dataset", "Column", "Types"]))
         lines.append(_row(["---"] * 3))
         lines.extend(_row(cells) for cells in differences)
-    lines.extend(("", *footer))
     return "\n".join(lines) + "\n"
 
 

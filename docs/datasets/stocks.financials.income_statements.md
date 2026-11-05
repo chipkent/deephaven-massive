@@ -18,7 +18,7 @@ m.stocks.financials.income_statements(symbols=None, *, timeframe=None, start=Non
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -84,7 +84,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Timeframe` | String | The reporting period type. Possible values include: quarterly, annual, trailing_twelve_months. |
 | `TotalOperatingExpenses` | double | Sum of all operating expenses including cost of revenue, SG&A, R&D, depreciation, and other operating expenses. |
 | `TotalOtherIncomeExpense` | double | Net total of all non-operating income and expenses including interest income, interest expense, and other items. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

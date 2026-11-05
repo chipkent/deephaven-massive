@@ -64,7 +64,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `IndicesGroupsSocieteGenerale` | String | The status of Societe Generale indices trading hours. From the `indicesGroups` object: Contains the status of various index groups (e.g., MSCI, FTSE Russell). |
 | `Market` | String | The status of the market as a whole. |
 | `ServerTime` | Instant | The current time of the server, returned as a date-time in RFC3339 format. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

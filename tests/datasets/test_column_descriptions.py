@@ -407,15 +407,15 @@ def test_the_library_describes_its_time_columns() -> None:
 def test_the_arrival_time_names_only_what_the_dataset_has() -> None:
     # A REST list: REST pages and polls, no history, flat files, or WebSocket.
     assert description(stocks.SNAPSHOTS, "TimestampInsert") == (
-        "When the library received the row, by the local clock. Rows that arrive together, in "
-        "one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` "
+        "When the library received the row, by the local clock. Rows that arrive together share "
+        "it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` "
         "table, it's the time of the poll the row's values came from."
     )
     # A stream with history from REST and flat files, and no poll.
     assert description(crypto.TRADES, "TimestampInsert") == (
-        "When the library received the row, by the local clock. Rows that arrive together, in "
-        "one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, "
-        "and it isn't monotonic. On `history()` rows, it's the download time."
+        "When the library received the row, by the local clock. Rows that arrive together share "
+        "it. It isn't Massive's time, and later rows can carry earlier times. On `history()` "
+        "rows, it's the download time."
     )
 
 

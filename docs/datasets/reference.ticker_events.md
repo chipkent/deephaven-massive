@@ -18,7 +18,7 @@ m.reference.ticker_events(symbols, *, types=None)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -45,7 +45,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The date the event took place |
 | `Type` | String | The type of historical event for the asset |
 | `TickerChangeTicker` | String | A ticker symbol. From the `ticker_change` object: Details about a ticker change. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

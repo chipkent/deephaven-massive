@@ -18,7 +18,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -74,7 +74,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `UpdateRulesMarketCenterUpdatesHighLow` | boolean | Whether or not trades with this condition update the high/low. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. |
 | `UpdateRulesMarketCenterUpdatesOpenClose` | boolean | Whether or not trades with this condition update the open/close. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. |
 | `UpdateRulesMarketCenterUpdatesVolume` | boolean | Whether or not trades with this condition update the volume. From the `update_rules` object: A list of aggregation rules. From the `update_rules.market_center` object: Describes aggregation rules on a per-market-center basis. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

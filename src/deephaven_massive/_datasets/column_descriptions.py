@@ -99,8 +99,8 @@ DERIVED_SENTENCES: Final[Mapping[str, str]] = {
         "keeps its own root, such as `AAPL1`."
     ),
     RAW_SYMBOL: (
-        "The symbol exactly as Massive sent it, on a row whose symbol the library can't read "
-        "for the dataset's asset class. That row's `Symbol` is null. Null on every other row. "
+        "The symbol exactly as Massive sent it, on a row whose symbol the library can't read. "
+        "That row's `Symbol` is null. Null on every other row. "
         "When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the "
         "table instead, and the column is absent."
     ),
@@ -173,18 +173,10 @@ _NULL_DATE: Final = (
 """The join caveat every bars dataset's `Date` ends with."""
 
 _INSERT_SENTENCE: Final = (
-    "When the library received the row, by the local clock. Rows that arrive together, in one "
-    "{carriers}, share it. It isn't Massive's time, and it isn't monotonic."
+    "When the library received the row, by the local clock. Rows that arrive together share "
+    "it. It isn't Massive's time, and later rows can carry earlier times."
 )
-"""The first sentences of every dataset's `TimestampInsert`, formatted with what carries rows
-on the dataset's transports (`_CARRIERS`)."""
-
-_CARRIERS: Final[Mapping[Transport, str]] = {
-    Transport.REST: "REST page",
-    Transport.FLAT_FILES: "flat-file block",
-    Transport.WS: "WebSocket frame",
-}
-"""What carries rows on each transport, as `TimestampInsert` names it."""
+"""The first sentences of every dataset's `TimestampInsert`."""
 
 _HISTORY_INSERT: Final = "On `history()` rows, it's the download time."
 """The sentence `TimestampInsert` adds on a dataset with `history()`."""
@@ -348,14 +340,10 @@ def _insert_sentence(spec: DatasetSpec) -> str:
         spec: The dataset.
 
     Returns:
-        `_INSERT_SENTENCE` with the row carriers of the dataset's transports, then
-        `_HISTORY_INSERT` for a dataset with `history()` and `_POLL_INSERT` for one with
-        `fetch()`.
+        `_INSERT_SENTENCE`, then `_HISTORY_INSERT` for a dataset with `history()` and
+        `_POLL_INSERT` for one with `fetch()`.
     """
-    used = {transport for transport, _ in spec.sources}
-    carriers = [_CARRIERS[t] for t in TRANSPORT_ORDER if t in used]
-    joined = ", ".join(carriers[:-1]) + (" or " if carriers[1:] else "") + carriers[-1]
-    text = _INSERT_SENTENCE.format(carriers=joined)
+    text = _INSERT_SENTENCE
     for sentence, applies in ((_HISTORY_INSERT, spec.has_history), (_POLL_INSERT, spec.has_fetch)):
         if applies:
             text = f"{text} {sentence}"

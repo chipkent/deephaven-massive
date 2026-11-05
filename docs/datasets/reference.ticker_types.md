@@ -43,7 +43,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Code` | String | A code used by Massive to refer to this ticker type. |
 | `Description` | String | A short description of this ticker type. |
 | `Locale` | String | An identifier for a geographical location. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

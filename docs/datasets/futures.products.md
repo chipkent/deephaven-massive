@@ -18,7 +18,7 @@ m.futures.products(*, product_code=None, as_of=None, sort=None, order=None, limi
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -69,7 +69,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Type` | String | The type of product, one of 'single' or 'combo'. Leaving this filter blank will query for both 'single' and 'combo' types. |
 | `UnitOfMeasure` | String | The unit of measure for this product. |
 | `UnitOfMeasureQty` | double | The quantity of the unit of measure for this product. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 

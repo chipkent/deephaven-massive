@@ -683,7 +683,9 @@ def test_the_rendered_index() -> None:
     )
     assert stocks in index
     assert "\n## Shared arguments\n" in index
-    assert index.endswith(f"\n---\n\n{_FOOTER}\n")
+    # The index holds no plan table or column description, so it has no footer.
+    assert _FOOTER not in index
+    assert index.endswith("| `Instant` | An exact moment in time |\n")
     # A catalog in which no two classes share a dataset has neither the table of shared
     # datasets nor the merge recipe.
     alone = Catalog(
@@ -728,7 +730,8 @@ m.stocks.trades(symbols)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the \
+dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -838,7 +841,7 @@ def test_a_page_whose_arguments_have_no_shared_rule_does_not_link_the_rules() ->
     page = render(_CATALOG, _PROVENANCE, {**_CALLS, "crypto.trades": call})["crypto.trades.md"]
     assert "## Arguments\n\n| Argument | Description |\n" in page
     assert "| `underlying` | The underlying. |\n" in page
-    assert "shared rules" not in page
+    assert "shared arguments" not in page
 
 
 def test_a_plan_column_names_the_class_of_each_differing_term() -> None:

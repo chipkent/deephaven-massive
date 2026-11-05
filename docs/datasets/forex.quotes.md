@@ -17,7 +17,7 @@ m.forex.quotes(symbols)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -40,13 +40,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `fxTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `p`: "The current pair." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the quote was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the quote was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. | REST, flat files, WebSocket |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket |
 | `BidExchange` | long | The bid exchange ID | REST, flat files |
 | `AskExchange` | long | The ask exchange ID | REST, flat files |
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. | WebSocket |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, flat-file block or WebSocket frame, share it. It isn't Massive's time, and it isn't monotonic. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. On `history()` rows, it's the download time. | REST, flat files, WebSocket |
 
 <a id="massive-fields"></a>
 

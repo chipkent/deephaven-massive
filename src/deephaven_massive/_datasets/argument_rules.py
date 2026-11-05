@@ -38,11 +38,10 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
             "- A live table works as a watchlist. Symbols you add are read, and symbols you "
             "delete stop being read.\n"
-            "- Each dataset's page says whether `dm.ALL` or leaving `symbols` out reads every "
-            "symbol.\n"
-            "- Where a dataset takes Massive's tickers, a misspelled symbol such as `aapl` "
-            "raises `ValueError`. `dm.canonical_symbol` converts other spellings, such as "
-            "Yahoo's, to Massive's."
+            "- A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.\n"
+            "- In text or a list, a misspelled ticker such as `aapl` raises `ValueError`. In a "
+            "table, its row is skipped and logged. `dm.canonical_symbol` converts other "
+            "spellings, such as Yahoo's, to Massive's."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
@@ -58,9 +57,9 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "dates only."
         ),
         "end": (
-            "The last day, included, or the moment the range stops, excluded, in the same form "
-            "as `start`. Leave it out for no end. Rows dated in the future, such as upcoming "
-            "dividends, then come back too."
+            "The last day of the range, which is included, or the instant it stops, which is "
+            "excluded. Give it in the same form as `start`. Leave it out for no end. Rows dated "
+            "in the future, such as upcoming dividends, then come back too."
         ),
         "date": "One calendar day, in the same forms as a `start` date.",
         "as_of": (
@@ -71,7 +70,10 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "The field to order the rows by, as Massive names it, such as "
             '`"ex_dividend_date"`. Each dataset\'s page lists the fields it takes.'
         ),
-        "order": "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`.",
+        "order": (
+            "The direction of the rows: `dm.Order.ASC` or `dm.Order.DESC`. On a dataset with "
+            "`sort`, give the two together."
+        ),
         "limit": (
             "The most rows to return. Each dataset's page says whether the limit counts each "
             "symbol's rows or all of them. To keep the latest rows, sort newest first, such as "

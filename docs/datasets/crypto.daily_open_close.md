@@ -18,7 +18,7 @@ m.crypto.daily_open_close(symbols, date)
 
 ## Arguments
 
-A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
 
 | Argument | Description |
 | --- | --- |
@@ -43,13 +43,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`: "The date requested." |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 UTC of `Date`. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 UTC of the next day. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read for the dataset's asset class. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Open` | double | The open price for the symbol in the given time period. |
 | `Close` | double | The close price for the symbol in the given time period. |
 | `ClosingTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |
 | `IsUtc` | boolean | Whether or not the timestamps are in UTC timezone. |
 | `OpenTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |
-| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together, in one REST page, share it. It isn't Massive's time, and it isn't monotonic. In a `poll()` table, it's the time of the poll the row's values came from. |
+| `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
