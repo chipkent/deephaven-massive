@@ -27,6 +27,24 @@ Read the whole standard first, `docs/dev/user-docs.md`, and especially "This pro
 readers, their pains, the owner's requirements, and the page map. The owner's list of sections
 applies to this project's pages only.
 
+## Grading reference text: docstrings
+
+A public docstring, read with `help()`, is reference text: its reader is about to call the
+thing it documents. When the page to grade is a docstring other than the package front door
+(`__init__.py`), change the passes this way:
+
+- Skip pass 1 and mark Hook N/A. `__init__.py` is graded as a landing page, hook included.
+- Pass 2: "simple?" asks whether the reader could call it correctly after one read.
+  Mechanism and intricate edge cases a caller doesn't need make it seem hard.
+- Pass 3: source each claim in `src/`. An example in the docstring is a command, and FAILS if
+  it wouldn't run against the documented API.
+- Pass 4: the owner's list of sections doesn't apply, and neither does its cap. Judge scope by
+  what a caller needs: arguments, returns, exceptions, and side effects stay; mechanism is a
+  fault of placement. Skip the checks for steps, badges, and headings.
+- Pass 5: mark Teaching N/A; a docstring's example is judged only in pass 3.
+
+Count units by the docstrings' total length.
+
 ## How to judge a finding
 
 Every finding quotes the exact text, gives its line, names the rule it breaks, and gives a

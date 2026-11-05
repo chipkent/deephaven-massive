@@ -1,6 +1,6 @@
 ---
 name: writing-docstrings
-description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or query method, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link their generated docs/datasets/ page (by full GitHub URL) instead of repeating shared argument rules, where user and contributor documentation lives, and how examples stay real code. Not for README.md or docs/troubleshooting.md (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or change a docstring, a dataset method's documentation, a config comment, a pytest marker description, or CLI help text in this repository. That includes adding a module, class, function, dataset, or query method, changing a public signature, and \"document this\". It gives the documentation standard: what each kind of docstring must say, how dataset docstrings link their generated docs/datasets/ page (by full GitHub URL) instead of repeating shared argument rules, where user and contributor documentation lives, how examples stay real code, and how a change to a public docstring is fact-checked and graded. Not for README.md or docs/troubleshooting.md (writing-user-docs), PR descriptions (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing docstrings
@@ -23,6 +23,25 @@ that disagrees with the code is a bug.
   units, accepted values, default); the return value (for a table, its columns); every
   exception and when; side effects (network calls, threads, subscriptions, tables created); and
   blocking and threading constraints.
+
+## Reviewing a public docstring
+
+A public docstring is user documentation: `help()` shows it in the console. Any change to the
+docstring of the package, or of a public module, class, function, method, setting, enum, or
+exception, goes through the `writing-user-docs` review before it is pushed:
+
+- **Describe less.** Say what a caller needs to call it correctly. Leave out the mechanism and
+  intricate edge cases; a reader who needs them reads the code.
+- **Check every fact.** A fresh subagent traces each changed claim to the code and marks it
+  SOURCED, FALSE, or UNSOURCED. Fix every FALSE or UNSOURCED claim before grading.
+- **Grade with two editors.** Spawn two fresh graders with
+  `.claude/skills/writing-user-docs/agents/editor.md` and its four readers, scoped to the
+  changed docstrings. Only `__init__.py`, the front door, is graded as a landing page, with the
+  twenty-second hook and job-level pains; class and method docstrings are graded as reference
+  text. Apply only the fixes both graders agree on, plus any false claim either finds. Grade at
+  most twice; a docstring still short of the bar goes to the owner with both sheets.
+
+Private and internal docstrings keep the lighter rules on this page, with no review round.
 
 ## Dataset methods and query methods link instead of repeating
 
