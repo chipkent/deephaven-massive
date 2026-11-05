@@ -147,6 +147,8 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
    reviewer agent, say whether a blocker is left. A PR missing any of these is not ready, so
    say which. Each open decision (in full the first time; later its title, its
    options in a line each, and the recommendation). Any manual step only the owner can take.
+   A user doc is ready to read only when a fresh calibrated-editor grade passes its bar
+   (`writing-user-docs`); until then, report what blocks it, not the draft.
    If nothing, say "Nothing needs you" first.
 2. **Decided**: one line each.
 3. **In progress**: one plain line each, including what is blocked and on what.

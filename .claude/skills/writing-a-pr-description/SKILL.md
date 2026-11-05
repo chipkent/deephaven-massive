@@ -70,6 +70,12 @@ would. Two passes help:
 
 ## A report to Massive
 
+Report only a clear error that would mislead a user. First read Massive's wording in its market
+context: "the price per share of the underlying" is right for an option premium, since a
+contract usually covers 100 shares, and the same words in two datasets can mean different
+things in each. A copy-pasted description that misleads no one, or a type that differs by asset
+class because the data does (fractional crypto sizes), isn't worth a report.
+
 A report of wrong vendor data (`AGENTS.md` rule 23) or any text for another project goes to a
 maintainer who knows nothing of this library, and an unclear report is declined or ignored.
 Lead with the problem they can see, in one or two plain sentences. Then give a minimal

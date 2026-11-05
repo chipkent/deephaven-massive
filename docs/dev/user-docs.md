@@ -45,7 +45,7 @@ believing the library is simple:
 | Reader | What they bring | What they need from the page |
 |---|---|---|
 | Quant researcher | Statistics, pandas, research habits | The exact data: units, time zones, adjustment, gaps |
-| Trader who barely programs | Markets, Massive's products | Complete code to paste, and what they'll see |
+| Quantitative trader | Markets, Massive's products, and Python for their own signals | Code that runs live as pasted, the plan and delay of its data, and what they'll see |
 | Vibe coder | An AI assistant and a goal | Whole, correct examples an assistant copies faithfully |
 | Software engineer | Python, threads, APIs | Lifetimes, failures, limits |
 
@@ -63,7 +63,7 @@ and keep numbers out of it unless you cite where they come from.
 |---|---|---|
 | Quant researcher | Months go into data infrastructure before an idea is tested, and research code is rewritten for live trading | One query gives history and a live table with the same columns, and the same Deephaven code runs on both |
 | Quant researcher | Finding affordable data and making it usable | 112 datasets, listed by `dm.datasets()`, each with documented columns |
-| Trader | Ideas wait on a developer; screeners don't show what they want, live | A live table of their own stocks is a few lines pasted into a browser console |
+| Quantitative trader | A signal waits on live infrastructure before it trades; screeners don't compute their own signal, live | Their own signal on their own stocks is a live table, a few lines in a browser console |
 | Vibe coder | The assistant builds the prototype but not the real-time parts | Live tables, reconnects, and watchlist-driven subscriptions are already built; the assistant writes table logic |
 | Software engineer | A real-time stack is several systems and most of a year of work | The feed, the processing, and the UI are one Python process of Deephaven tables |
 
@@ -362,8 +362,8 @@ Use each concept's own community's word. Ask whose concept a term names:
 | Python | Python's word | "method", "argument", "virtual environment" |
 | Something only this library has | A coined word, defined at first use | Rare: check that no community already has a word |
 
-There's no list of approved words. The grader reads the page as a quant researcher, a trader
-who barely programs, a vibe coder, and a software engineer, flags each word that reader
+There's no list of approved words. The grader reads the page as a quant researcher, a
+quantitative trader, a vibe coder, and a software engineer, flags each word that reader
 wouldn't use, and names the word they would, with a source. Once you pick a word, use it every
 time: elegant variation reads as AI.
 

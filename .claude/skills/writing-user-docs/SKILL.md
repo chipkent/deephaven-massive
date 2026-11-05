@@ -81,8 +81,9 @@ and rewrite a paragraph with several faults rather than patching it. Answer ever
 on the simplicity question: that verdict alone fails the page. Then grade again with a new
 subagent, giving it the previous sheet to check against.
 
-Stop after two revision rounds (three reads). A draft still short of the pass bar goes to the
-owner with the last sheet and a plain list of what's missing. Never call a failing draft done.
+Stop after two revision rounds (three reads). For a draft still short of the pass bar, report
+to the owner what blocks it, with the last sheet, instead of handing the draft over to read.
+Never call a failing draft done.
 If you can't spawn a subagent, grade it yourself with `editor.md` and say the grade is your own.
 
 ### 6. Check the facts one last time
@@ -93,6 +94,10 @@ run `uv run pytest tests/test_docs.py -q`. If you moved an anchor, rewrite its c
 `src/` docstrings and on the other pages.
 
 ### 7. Show the owner
+
+Never tell the owner a page is ready to read until a fresh editor's grade passes the bar: a
+holistic score of 9 or more, all four readers finding it simple and easy, no unsourced or false
+claim, and no failing command. Until then, report what blocks it.
 
 Hand over the page with the final score sheet, the list of facts only a run with a Massive key
 can confirm (for the owner's test plan), and anything the editor flagged that you chose to keep,

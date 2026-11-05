@@ -64,8 +64,8 @@ well-known category ("an HTTP client for Python") can sell without one.
 ### 2. The reader panel
 
 Read the page again as each of the four readers in the standard's table: a quant researcher, a
-trader who barely programs, a vibe coder working through an AI assistant, and a software
-engineer. Stay in each one's head; they don't share your patience. For each reader:
+quantitative trader who writes Python for their own signals, a vibe coder working through an AI
+assistant, and a software engineer. Stay in each one's head; they don't share your patience. For each reader:
 
 1. **Simple?** Having read the page, does this reader believe the product is simple and easy to
    use? Answer yes or no. For a no, quote every passage that made it seem hard (a needless step
@@ -192,7 +192,7 @@ Return this, in this order, and nothing else:
 | Reader | Simple? | What made it seem hard, and the fix | Words flagged → their word (source) |
 |---|---|---|---|
 | Quant researcher | yes/no | ... | ... |
-| Trader who barely programs | yes/no | ... | ... |
+| Quantitative trader | yes/no | ... | ... |
 | Vibe coder | yes/no | ... | ... |
 | Software engineer | yes/no | ... | ... |
 

@@ -127,12 +127,17 @@ def _section_blocks(page: Path, anchor: str) -> list[Block]:
 
 
 def _write_settings_file(home: Path) -> None:
-    """Run the README's commands that write the settings file, with `HOME` set to `home`.
+    """Run the README's commands that write the delayed plans' settings file, with `HOME` at `home`.
+
+    The section has one block of commands per kind of plan: first Starter and Developer's, which
+    accept the delayed feed, then Advanced and Business's, which are real-time. The first runs,
+    so the examples that load the file accept the delayed feed.
 
     Args:
         home: The folder that stands in for the reader's home folder.
     """
-    [commands] = _BASH.findall(_section(README, "what-your-plan-allows"))
+    commands, real_time = _BASH.findall(_section(README, "what-your-plan-allows"))
+    assert "delayed_subscriptions: []" in real_time
     bash = shutil.which("bash")
     assert bash is not None, "the README's shell commands need bash"
     subprocess.run(  # noqa: S603 - bash running the README's own commands, no shell string
