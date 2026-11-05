@@ -1,9 +1,8 @@
 # Live integration tests
 
-The live tests call Massive's real servers with your keys, and record what Massive sends. The
-owner runs them with pytest, as [Run the tests](#run-the-tests) shows. A tester runs the same
-tests unattended for days through the live-run program, as the
-[tester guide](tester-guide.md#live-run) shows.
+The live tests call Massive's real servers with your keys, and record what Massive sends. This
+is the owner's runbook for running them with pytest and reading what they record. Testers run
+the same tests through the live-run program, and send its results zip on an issue.
 
 <a id="run-the-tests"></a>
 
@@ -32,7 +31,7 @@ optional:
 
 | Variable | What you get | Without it |
 |---|---|---|
-| `MASSIVE_DELAYED_API_KEY` | A key on Stocks Basic or Starter, for the check of past stock data that Massive labels `DELAYED`, when your main key is on a higher Stocks plan. On Stocks Advanced or higher, a key on Starter also serves the check of a delayed key on the real-time feed. | The checks it can't serve skip |
+| `MASSIVE_DELAYED_API_KEY` | Two checks of a delayed Stocks key. With your main key on Stocks Developer, set it to a key on Stocks Basic or Starter. With your main key on Stocks Advanced or higher, set it to a key on Stocks Starter. On Stocks Basic or Starter, leave it unset. | The checks it can't serve skip |
 | `MASSIVE_LIVE_PLANS` | Your plans, declared instead of asked of Massive ([Declare your plans](#declare-the-plans)) | The run asks Massive |
 
 <a id="run-order"></a>
@@ -167,24 +166,22 @@ The run writes the library's DEBUG log to `live-debug-logs/<UTC time>-<process i
 and prints its path under `live debug log`. With `DEEPHAVEN_MASSIVE_LOG_FILE` set, it writes to
 that file instead, at the level `DEEPHAVEN_MASSIVE_LOG` names.
 
-Unless you set `DEEPHAVEN_MASSIVE_LOG_FILE`, the run scans the log for your keys. If it finds
+The run scans the log for your keys, unless you set `DEEPHAVEN_MASSIVE_LOG_FILE`. If it finds
 one, the same section says where. Don't share that log, and open an issue that names the file.
 
 <a id="checks-to-read-by-hand"></a>
 
 ## Read five checks by hand
 
-Four of these checks pass whatever Massive answers, so read each one's evidence, and open an
-issue when it differs from the answer the library assumes. A tester can leave the reading to
-the owner, and attach the evidence file and the `stream-day` group's debug log to their issue instead.
+Four of these checks pass whatever Massive answers, so read each one's evidence:
 
-| Check | Run | Plans | What to read | The answer the library assumes |
-|---|---|---|---|---|
-| `test_the_options_cap_counts_contracts_or_topics` | The first [connection-limit command](#run-order) | Options Advanced | Whether Massive acknowledges all 2,000 topics of 1,000 contracts, or refuses those past 1,000 or closes the socket | The cap counts topics |
-| `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | The file's rows outside the New York day, and the minutes REST has that the file lacks | The file holds its own New York day. This check fails otherwise. |
-| `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | Index day bars end at 01:00 New York time until this check is read |
-| `test_futures_bar_buckets_against_the_bars_inside_them` | The evidence tests | Futures Starter | Its `VERDICT` lines | Each bar of a session or longer holds the whole sessions that open in its UTC days |
-| A quiet connection | The `stream-day` group of the [live-run program](#live-run-groups) | Any plan that streams stocks | The stocks connection's `status` lines from 03:45 to 04:00 New York time, and the longest gap between them; every `no frame for ... during ... trading hours` WARNING of the day, with its time | None. The check records it. |
+| Check | Plans | What to read | Open an issue when |
+|---|---|---|---|
+| `test_the_options_cap_counts_contracts_or_topics` | Options Advanced | Whether Massive acknowledges all 2,000 topics of 1,000 contracts | Massive acknowledges them all, since the library assumes the cap counts topics |
+| `test_an_index_minute_file_holds_its_own_new_york_day` | Indices Starter and `s3` | The minutes REST has that the file lacks | Any minute is missing |
+| `test_index_day_windows_and_files_across_many_indices` | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | Always: index day bars end at 01:00 New York time until this answer is read |
+| `test_futures_bar_buckets_against_the_bars_inside_them` | Futures Starter | Its `VERDICT` lines | A line differs from the library's model: each bar holds the whole sessions that open in its UTC days |
+| A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Any plan that streams stocks | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics for want of a plan. It also skips as
 inconclusive when the socket reconnects without saying why. Then run the first connection-limit
@@ -223,37 +220,33 @@ contradicts:
 
 <a id="live-run-program"></a>
 
-## Run the live-run program
-
-`scripts/live_run.py` runs every live test a key allows, on a fixed New York timetable, and
-packs the results into a zip. Its commands are in the tester guide's
-[Run the live checks](tester-guide.md#live-run). Run `upgrade-check` only when the owner asks.
-It asks you to upgrade a plan while it runs.
-
 <a id="live-run-groups"></a>
 
-### Group timetable
+## Read a tester's results
 
-The program runs its checks in groups, each at a set New York time:
+Testers run the live tests through `scripts/live_run.py`, as the
+[tester guide](tester-guide.md#live-run) shows, and send its `live-results-<date>.zip` on their
+results issue. A comment on that issue can ask them to pack the results again, to rerun a group
+as [Reruns](#live-run-reruns) shows, or to run the [upgrade check](tester-guide.md#upgrade-check).
 
-| Group | What it runs | When (New York time) |
-|---|---|---|
-| `rate-limits` | `-m integration_rate_limits` | From 11:30 |
-| `evidence` | `-m integration -k "not luld"` | From 11:30, after the previous day's flat files |
-| `luld` | `-m integration -k luld` | 09:28, except on a stream day and the day after |
-| `smoke` | `-m integration_smoke` | From 11:30 |
-| `responses` | A fixed set of library calls, with every raw reply recorded | From 11:30 |
-| `limits-ws` | The WebSocket subscription-limit tests | From 16:15 |
-| `limits-second-connection` | The second-connection test, with nothing else open | From 11:30, after the groups before it |
-| `stream-day` | Streams for every asset class the key can stream | 03:45 to 20:30 on a planned day |
-| `throughput` | Every symbol's busiest streams, over an hour | 09:15 to 11:00 the next day |
-| `stream-day-reconcile` | The streamed minute bars against REST history | From 11:30 the next day |
-| `stream-night` | Crypto and futures streams through one night | 16:30 on a planned evening to 09:30 the next morning |
-| `stream-night-reconcile` | The night's minute bars against REST history | From 11:30 the morning after |
-| `half-day` | The bar-stamp tests | The trading day after a half day |
+The program runs the tests in groups, and the zip holds a folder for each attempt of a group,
+`<group>/<date>-<n>/`, with its debug log:
 
-Each attempt of a group gets a folder in the results folder, `<group>/<date>-<n>/`, with its
-debug log. A stream day or night keeps one folder for all its starts.
+| Group | What it runs |
+|---|---|
+| `rate-limits` | `-m integration_rate_limits` |
+| `evidence` | `-m integration -k "not luld"` |
+| `luld` | `-m integration -k luld`, at 09:28 New York time for the opening bands |
+| `smoke` | `-m integration_smoke` |
+| `responses` | A fixed set of library calls, with every raw reply recorded |
+| `limits-ws` | The WebSocket subscription-limit tests |
+| `limits-second-connection` | The second-connection test |
+| `stream-day` | Streams for every asset class the key can stream, from 03:45 to 20:30 New York time |
+| `throughput` | Every symbol's busiest streams, over an hour |
+| `stream-day-reconcile` | The stream day's minute bars against REST history |
+| `stream-night` | Crypto and futures streams, from 16:30 to 09:30 New York time |
+| `stream-night-reconcile` | The night's minute bars against REST history |
+| `half-day` | The bar-stamp tests, on the trading day after a half day |
 
 <a id="live-run-reruns"></a>
 
@@ -268,7 +261,8 @@ The program reruns a check by itself:
 | Skipped for a missing subscription, or refused | When the subscriptions change |
 | Skipped for the moment, such as a closed market | Up to three attempts in all |
 
-To run every check of a group again, failed ones included, name the group in `--redo`:
+To have every check of a group run again, failed ones included, ask the tester to stop the run
+and resume it with `--redo` and the group:
 
 ```bash
 uv run python scripts/live_run.py run --out ~/massive-live --redo luld,smoke

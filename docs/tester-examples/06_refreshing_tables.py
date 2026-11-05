@@ -1,4 +1,3 @@
-# Make a table that asks Massive again every minute, and open the diagnostics tables.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()

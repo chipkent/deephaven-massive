@@ -1,4 +1,3 @@
-# Stream Bitcoin and Ether trades, and count them by the minute. Needs a paid Currencies plan.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()

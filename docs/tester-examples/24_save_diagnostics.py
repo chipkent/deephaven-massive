@@ -1,4 +1,3 @@
-# Save the diagnostics tables of the session in m, the one the last example opened.
 import os
 
 from deephaven.pandas import to_pandas

@@ -1,4 +1,3 @@
-# Ask for more than Basic allows, then let the library stop the table.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()

@@ -1,4 +1,3 @@
-# Compare a year of two stocks: daily returns, growth, volatility, and a chart of the growth.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

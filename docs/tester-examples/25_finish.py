@@ -1,4 +1,3 @@
-# Close a session, and see that a closed session refuses new work.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

@@ -1,4 +1,3 @@
-# Keep the latest minute bar of five stocks, updated live. Needs a paid Stocks plan.
 import deephaven_massive as dm
 
 # Load the settings file that the README's settings example saves for your plan.

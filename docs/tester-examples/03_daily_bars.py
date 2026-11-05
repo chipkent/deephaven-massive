@@ -1,4 +1,3 @@
-# Read two weeks of daily bars for three stocks: three requests to Massive.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

@@ -1,4 +1,3 @@
-# Turn on the debug log, and open a session on your Massive key.
 import os
 
 import deephaven_massive as dm

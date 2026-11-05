@@ -1,4 +1,3 @@
-# Join today's minute bars from history with the live ones that follow. Needs a paid Stocks plan.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 

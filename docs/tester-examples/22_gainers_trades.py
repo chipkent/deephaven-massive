@@ -1,4 +1,3 @@
-# Stream the trades of the day's top gainers. Needs a Stocks plan that streams trades.
 import deephaven_massive as dm
 
 # Load the settings file that the README's settings example saves for your plan.

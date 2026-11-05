@@ -1,4 +1,3 @@
-# Read facts about companies and markets: company details, market hours, Treasury yields.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

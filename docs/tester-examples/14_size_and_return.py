@@ -1,4 +1,3 @@
-# Put each company's market value beside its return over the last three months.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

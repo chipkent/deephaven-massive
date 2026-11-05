@@ -1,4 +1,3 @@
-# Add a column, keep some rows, and summarize by stock, with Deephaven's table operations.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

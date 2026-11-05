@@ -285,7 +285,6 @@ Turn on the library's debug log, and open a session on your key. Every bug repor
 log, `~/massive-test/massive-debug.log`:
 
 ```python
-# Turn on the debug log, and open a session on your Massive key.
 import os
 
 import deephaven_massive as dm
@@ -312,7 +311,6 @@ requests a minute after Massive's first rate-limit error, as the README's
 List every dataset, and the columns of a query, without a request to Massive:
 
 ```python
-# List every dataset, and describe the columns of daily stock bars without a request.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
@@ -329,10 +327,9 @@ row per column of daily bars, with its description.
 
 #### 3. Read two weeks of daily bars
 
-Read two weeks of daily bars for three stocks, with three requests to Massive:
+It reads three stocks, with one request to Massive for each:
 
 ```python
-# Read two weeks of daily bars for three stocks: three requests to Massive.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -357,7 +354,6 @@ Add a column, keep one stock's rows, and summarize each stock, with Deephaven's 
 operations:
 
 ```python
-# Add a column, keep some rows, and summarize by stock, with Deephaven's table operations.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -389,7 +385,6 @@ Read three companies' details, the market's status, the coming market holidays, 
 of Treasury yields:
 
 ```python
-# Read facts about companies and markets: company details, market hours, Treasury yields.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -420,7 +415,6 @@ You should see these panels:
 Poll the market's status every 60 seconds, and open three of the session's diagnostics tables:
 
 ```python
-# Make a table that asks Massive again every minute, and open the diagnostics tables.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
@@ -446,7 +440,6 @@ diagnostics tables:
 Poll six stocks every 30 seconds, more than Basic allows, then release the table:
 
 ```python
-# Ask for more than Basic allows, then let the library stop the table.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
@@ -474,7 +467,6 @@ Start reading a year of two stocks with `wait=False`, which returns at once and 
 when the read is done:
 
 ```python
-# Start reading a year of two stocks in the background, so the console stays free.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -492,10 +484,9 @@ the rows arrive together.
 
 #### 9. Compare two stocks' returns over a year
 
-Compare two stocks' daily returns, growth, and volatility over a year, and chart their growth:
+The code computes AAPL's and MSFT's daily returns, growth, and volatility, and charts the growth:
 
 ```python
-# Compare a year of two stocks: daily returns, growth, volatility, and a chart of the growth.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -553,7 +544,6 @@ Ask Basic for the latest trade, live minute bars, and bars from 2015. Basic incl
 them, and the code prints how Massive refuses each:
 
 ```python
-# Ask for three things the free Basic plan doesn't include, and print how each was refused.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
@@ -603,11 +593,9 @@ these the live minute bars show on the free plan:
 
 #### 11. Convert symbols from other sources
 
-Convert symbols written in other conventions to Massive's, one at a time and as a table. The
-conversion needs no session:
+The functions convert one symbol at a time or a whole table, and need no session:
 
 ```python
-# Convert symbols written in other conventions into Massive's, one at a time and as a table.
 from deephaven import new_table
 from deephaven.column import string_col
 
@@ -639,7 +627,6 @@ convention could convert. The debug log records a `WARNING` for it.
 Count the debug log's lines, its warnings and errors, and the copies of your key in it:
 
 ```python
-# Count the debug log's lines, its warnings and errors, and any copy of your key.
 import os
 
 folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
@@ -656,10 +643,9 @@ don't send the log. You should also see warnings from example 11, and on Basic f
 
 #### 13. Chart a moving average
 
-Chart NVDA's daily closes over six months, with their 20-day moving average:
+It charts NVDA's daily closes over six months, with their 20-day average:
 
 ```python
-# Chart NVDA's daily close over six months with its 20-day moving average: one request.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -692,7 +678,6 @@ smoother than the closes.
 Join each company's market value to its return over three months, on the `Symbol` column:
 
 ```python
-# Put each company's market value beside its return over the last three months.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -725,7 +710,6 @@ Divide each Apple dividend of the past year by the close on the trading day befo
 went ex-dividend:
 
 ```python
-# Find each Apple dividend of the past year, and its yield on the close the day before.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -751,10 +735,9 @@ You should see `dividend_yield`, with a row per dividend, each with its `PriceDa
 
 #### 16. Chart the 10-year to 2-year Treasury spread
 
-Chart the gap between the 10-year and 2-year US Treasury yields over two years:
+The spread is the 10-year yield minus the 2-year yield, over two years:
 
 ```python
-# Chart the gap between the 10-year and 2-year US Treasury yields over two years.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -782,7 +765,6 @@ Keep the latest minute bar of five stocks, with a paid Stocks plan. The session 
 settings file you saved for the README tutorial:
 
 ```python
-# Keep the latest minute bar of five stocks, updated live. Needs a paid Stocks plan.
 import deephaven_massive as dm
 
 # Load the settings file that the README's settings example saves for your plan.
@@ -804,7 +786,6 @@ Start with AAPL's minute bars from earlier today, and add each new minute as it 
 plan and settings file of example 17:
 
 ```python
-# Join today's minute bars from history with the live ones that follow. Needs a paid Stocks plan.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -833,7 +814,6 @@ Stream Bitcoin and Ether trades, and count them by the minute, with a paid Curre
 Crypto trades around the clock, so this example works at any hour:
 
 ```python
-# Stream Bitcoin and Ether trades, and count them by the minute. Needs a paid Currencies plan.
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
@@ -855,7 +835,6 @@ previous day bar every minute, `watched_dividends` reads each stock's dividends,
 `watched_contracts` reads up to 10 contracts of each futures product:
 
 ```python
-# Make two watchlists you can edit, and tables that follow them. Free plan.
 from deephaven import input_table, new_table
 
 import deephaven_massive as dm
@@ -897,11 +876,9 @@ product_watchlist.add(new_table({"ProductCode": ["NQ"]}))
 
 #### 21. Stream a crypto watchlist
 
-Stream the latest trade of each crypto pair on a watchlist, with a paid Currencies plan, at any
-hour:
+You need a paid Currencies plan, and it works at any hour:
 
 ```python
-# Stream the latest trade of each crypto pair on a watchlist. Needs a paid Currencies plan.
 from deephaven import input_table, new_table
 
 import deephaven_massive as dm
@@ -935,7 +912,6 @@ list. You need a Stocks plan that streams trades: Developer, Advanced, or Busine
 trades and quotes expansion:
 
 ```python
-# Stream the trades of the day's top gainers. Needs a Stocks plan that streams trades.
 import deephaven_massive as dm
 
 # Load the settings file that the README's settings example saves for your plan.
@@ -952,11 +928,9 @@ joins or leaves `gainer_trades` and the `Symbols` of the `stocks.trades` row in 
 
 #### 23. Read history that follows a watchlist
 
-Read a month of daily bars for each stock on a watchlist, with one Stocks request per stock you
-add:
+Each stock you add costs one Stocks request, for a month of its daily bars:
 
 ```python
-# Read a month of daily bars that follows a watchlist you can edit. Free plan.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -990,7 +964,6 @@ Save the four diagnostics tables of the session in `m` as files, for a bug repor
 session the last example opened:
 
 ```python
-# Save the diagnostics tables of the session in m, the one the last example opened.
 import os
 
 from deephaven.pandas import to_pandas
@@ -1017,7 +990,6 @@ Close a session, and check that it refuses new work. Then read a week of bars in
 block, which closes its session when the block ends:
 
 ```python
-# Close a session, and see that a closed session refuses new work.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

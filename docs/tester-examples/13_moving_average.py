@@ -1,4 +1,3 @@
-# Chart NVDA's daily close over six months with its 20-day moving average: one request.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

@@ -1,4 +1,3 @@
-# Make two watchlists you can edit, and tables that follow them. Free plan.
 from deephaven import input_table, new_table
 
 import deephaven_massive as dm

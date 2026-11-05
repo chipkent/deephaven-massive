@@ -1,4 +1,3 @@
-# Chart the gap between the 10-year and 2-year US Treasury yields over two years.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

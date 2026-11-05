@@ -1,4 +1,3 @@
-# Count the debug log's lines, its warnings and errors, and any copy of your key.
 import os
 
 folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))

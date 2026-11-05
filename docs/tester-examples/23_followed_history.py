@@ -1,4 +1,3 @@
-# Read a month of daily bars that follows a watchlist you can edit. Free plan.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

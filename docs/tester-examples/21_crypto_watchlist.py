@@ -1,4 +1,3 @@
-# Stream the latest trade of each crypto pair on a watchlist. Needs a paid Currencies plan.
 from deephaven import input_table, new_table
 
 import deephaven_massive as dm

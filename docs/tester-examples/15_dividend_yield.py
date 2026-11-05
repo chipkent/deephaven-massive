@@ -1,4 +1,3 @@
-# Find each Apple dividend of the past year, and its yield on the close the day before.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

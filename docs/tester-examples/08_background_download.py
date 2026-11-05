@@ -1,4 +1,3 @@
-# Start reading a year of two stocks in the background, so the console stays free.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

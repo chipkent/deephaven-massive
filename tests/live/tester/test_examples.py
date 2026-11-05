@@ -366,11 +366,6 @@ def test_the_guide_shows_each_example_exactly_as_its_file() -> None:
     assert blocks == files
 
 
-def test_every_example_starts_with_a_comment() -> None:
-    for path in examples.example_files(EXAMPLES):
-        assert path.read_text(encoding="utf-8").startswith("# "), path.name
-
-
 GUIDE_SAMPLE = """\
 #### 1. First
 Some prose.
