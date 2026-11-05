@@ -34,6 +34,7 @@ from typing import IO, TYPE_CHECKING, Final
 
 from tests._live.live_run.children import run_command
 from tests._live.live_run.cli import credentials
+from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import check_machine, ready
 from tests._live.live_run.run_probe import probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
@@ -59,12 +60,6 @@ CONSOLE_PYTHON: Final = Path("~/dh-massive/bin/python")
 
 CHECK_OUTPUT: Final = "setup-check.txt"
 """The file in the tester's folder where `check` saves what it printed, for the bug report."""
-
-NO_KEY: Final = (
-    "MASSIVE_API_KEY is not set in this terminal. Add it to your shell's startup file, as the "
-    "README's Set your API keys step shows, then open a new terminal and run the command again."
-)
-"""What a command says when the API key is not set."""
 
 
 def parser() -> argparse.ArgumentParser:
@@ -176,9 +171,14 @@ def main(
 
     Returns:
         The exit status: 0; 1 when an item of the check failed, an example failed, or a
-        secret blocked the zip; 2 when the API key is not set.
+        secret blocked the zip; 2 when the API key is not set. `--help` returns 0 after the
+        usage, and a command line the parser refuses returns 2 after the usage and the error,
+        so the script prints no traceback for either.
     """
-    arguments = parser().parse_args(argv)
+    try:
+        arguments = parser().parse_args(argv)
+    except SystemExit as stop:
+        return int(stop.code or 0)
     folder = arguments.folder.expanduser().resolve()
     secrets = SecretFilter.from_environment(environ)
 

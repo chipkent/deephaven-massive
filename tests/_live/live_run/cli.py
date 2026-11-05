@@ -290,9 +290,14 @@ def main(
 
     Returns:
         The exit status: 0, 1 when a check, a pack, or an upgrade check failed, 2 when the
-        command was refused, 130 after Control-C.
+        command was refused, 130 after Control-C. `--help` returns 0 after the usage, and a
+        command line the parser refuses returns 2 after the usage and the error, so the script
+        prints no traceback for either.
     """
-    arguments = parser().parse_args(argv)
+    try:
+        arguments = parser().parse_args(argv)
+    except SystemExit as stop:
+        return int(stop.code or 0)
     out = arguments.out.expanduser().resolve()
     if arguments.command == "_group":
         run_group_child(

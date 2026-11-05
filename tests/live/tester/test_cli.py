@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import FAIL, OK, Item
 from tests._live.live_run.run_probe import ProbeResult
 from tests._live.tester import cli
@@ -69,7 +70,19 @@ def _run(
 def test_every_command_refuses_without_the_key(command: str, tmp_path: Path) -> None:
     status, lines = _run([command, "--folder", str(tmp_path)], {"MASSIVE_API_KEY": " "})
     assert status == cli.REFUSED
-    assert lines == [f"refused: {cli.NO_KEY}"]
+    assert lines == [f"refused: {NO_KEY}"]
+
+
+@pytest.mark.parametrize(("argv", "status"), [(["--help"], 0), (["chek"], 2)])
+def test_help_and_a_refused_command_line_return_their_status(
+    argv: list[str], status: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The script exits through os._exit, so argparse's SystemExit must come back as a status,
+    # not reach the script as an exception it prints with a traceback.
+    assert _run(argv, {"MASSIVE_API_KEY": "k"})[0] == status
+    printed = capsys.readouterr()
+    assert "usage: tester.py" in printed.out + printed.err
+    assert "Traceback" not in printed.out + printed.err
 
 
 def test_check_prints_each_item_and_whether_the_setup_is_ready(tmp_path: Path) -> None:
