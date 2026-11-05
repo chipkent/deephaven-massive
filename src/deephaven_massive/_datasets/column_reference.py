@@ -121,7 +121,7 @@ _METHODS_ANCHOR: Final = "query-methods"
 
 _METHODS_GUIDE: Final = (
     "Create a session with `m = dm.MassiveSession()`. A dataset method, such as "
-    "`m.stocks.dividends()`, returns a query, which names the data and reads nothing. The "
+    "`m.stocks.dividends()`, returns a query. A query names the data and reads nothing. The "
     "methods below read the data and return a Deephaven table."
 )
 """The paragraph above the index's table of query methods."""

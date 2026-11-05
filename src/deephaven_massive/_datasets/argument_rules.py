@@ -8,8 +8,10 @@ and each dataset page's Arguments table links the rule of each such argument bes
 dataset's own line from its method's docstring. A dataset docstring gives each argument one
 line about what is particular to that dataset and links its page.
 
-Rules about a public type, such as `dm.Order`, `dm.Timespan`, or `dm.OnError`, live in that
-type's own docstring; a rule here names the type and says what the argument does with it.
+A rule says what a reader needs to call the method correctly and no more. Edge cases and the
+full list of accepted forms stay in the methods' and the public types' docstrings, which
+`help()` shows; a rule here names a type, such as `dm.Order` or `dm.Timespan`, and says what
+the argument does with it.
 """
 
 from __future__ import annotations
@@ -34,116 +36,70 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "| Futures | `ESZ6` |\n"
             "\n"
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
-            "- A live table of symbols works as a watchlist. Each symbol you add is read, and "
-            "each one you delete stops being read. Deleting a symbol also drops its rows from "
-            "`fetch()`, `history()`, `last_by()` keyed by `Symbol`, and a `poll()` in "
-            "`dm.PollMode.REPLACE` mode. A `poll()` in `dm.PollMode.APPEND` or "
-            "`dm.PollMode.UPSERT` mode keeps them.\n"
-            "- To read every symbol, pass `dm.ALL` on a dataset that takes it, or leave "
-            "`symbols` out on a dataset whose default reads every record. Each dataset's page "
-            "says which.\n"
-            "- Where a dataset takes Massive's tickers, a symbol in text or a list must be "
-            "spelled exactly: `aapl` raises `ValueError` at the call. A table's row that isn't "
-            "Massive's exact ticker is skipped and logged by default, and the table keeps "
-            "running. `MassiveConfig.noncanonical_symbols` changes that. A table with rows, "
-            "none of them Massive's exact ticker, raises `ValueError` at the call.\n"
-            "- `dm.canonical_symbol` converts other spellings to Massive's: "
-            '`dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, '
-            'convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.\n'
-            "- A record that lists several symbols, such as a news article, appears once for "
-            "each symbol you named that it lists. A record that lists none of them appears "
-            "once, with a null `Symbol`."
+            "- A live table works as a watchlist. Symbols you add are read, and symbols you "
+            "delete stop being read.\n"
+            "- Each dataset's page says whether `dm.ALL` or leaving `symbols` out reads every "
+            "symbol.\n"
+            "- Where a dataset takes Massive's tickers, a misspelled symbol such as `aapl` "
+            "raises `ValueError`. `dm.canonical_symbol` converts other spellings, such as "
+            "Yahoo's, to Massive's."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
             "instants.\n"
             "\n"
             '- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven '
-            "`LocalDate`. It means the day in the market's time zone: New York for stocks, "
-            "options, and indices; UTC for forex and crypto; for futures, the trading session "
+            "`LocalDate`. It's the day in the market's time zone: New York for stocks, options, "
+            "and indices, and UTC for forex and crypto. For futures, it's the trading session "
             "that ends that day.\n"
-            "- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a "
-            "`numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or "
-            'a Deephaven time string such as `"2025-06-02T09:30 ET"`. A `datetime` or '
-            "`pandas.Timestamp` without a time zone raises `ValueError`.\n"
+            "- An instant is a Python `datetime` with a time zone, a Deephaven `Instant`, or "
+            'Deephaven time text such as `"2025-06-02T09:30 ET"`.\n'
             "- A dataset whose range is a calendar date, such as an ex-dividend date, takes "
             "dates only."
         ),
         "end": (
-            "The last day, or the moment the range stops, in the same form as `start`.\n"
-            "\n"
-            '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
-            "of June 2. An instant `end` is excluded from the range.\n"
-            "- Leave it out to include records dated in the future, such as dividends with a "
-            "future ex-dividend date. A query's `history()` without "
-            "`end` reads through now."
+            "The last day, included, or the moment the range stops, excluded, in the same form "
+            "as `start`. Leave it out for no end. Rows dated in the future, such as upcoming "
+            "dividends, then come back too."
         ),
-        "date": (
-            "One calendar day, in the same forms as a `start` date, and meaning the same day. A "
-            "`datetime` or an instant raises `ValueError` at the call."
-        ),
+        "date": "One calendar day, in the same forms as a `start` date.",
         "as_of": (
-            "The day to read the data as it stood on, in the same forms as a `start` date. Leave "
-            "it out for Massive's latest data. The dataset's plan table says how far back each "
-            "plan goes."
+            "The day to read the data as it stood on, as a date. Leave it out for Massive's "
+            "latest data."
         ),
         "sort": (
             "The field to order the rows by, as Massive names it, such as "
-            '`"ex_dividend_date"`. Each dataset\'s page lists the fields it takes. Where '
-            "Massive allows, name several, separated by commas, each with an optional `.asc` "
-            'or `.desc`: `"ticker,ex_dividend_date.desc"`.'
+            '`"ex_dividend_date"`. Each dataset\'s page lists the fields it takes.'
         ),
-        "order": (
-            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. On "
-            "some datasets, `order` alone raises "
-            "`ValueError`."
-        ),
+        "order": "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`.",
         "limit": (
-            "The most rows to return, in Massive's order. A dataset that reads one symbol per "
-            "request, such as `m.reference.tickers` with symbols named, caps each symbol's rows. "
-            "Every other dataset caps the whole request, across every symbol you name.\n"
-            "\n"
-            "- To keep the latest rows, sort newest first, such as "
-            '`sort="ex_dividend_date", order=dm.Order.DESC`.\n'
-            "- Where the cap covers the whole request, a symbol that comes first can use it up, "
-            "so leave `limit` out when you need every row of each symbol.\n"
-            "- On a table of symbols, `fetch()` applies the cap to each of its requests, not to "
-            "the whole table."
+            "The most rows to return. Each dataset's page says whether the limit counts each "
+            "symbol's rows or all of them. To keep the latest rows, sort newest first, such as "
+            '`sort="ex_dividend_date", order=dm.Order.DESC`.'
         ),
         "filters": (
-            "Any other parameter Massive documents for the dataset, as a `dict` from the "
-            "parameter's name to its value. Write each dot in a name as `_`: Massive's "
-            "`strike_price.gte` is `strike_price_gte`.\n"
-            "\n"
-            "- Each dataset's page lists the keys it takes. Any other key raises `ValueError` "
-            "listing them. A key that an argument sets, such as `ex_dividend_date_gte` for "
-            "`start`, raises `ValueError` naming that argument.\n"
-            "- A date or time value is ISO 8601 text, with an offset for a time, or a date or "
-            "time object that `start` takes. A Deephaven time string isn't read here."
+            "Any other parameter Massive documents for the dataset, as a `dict`. Write each "
+            "dot in a name as `_`: Massive's `strike_price.gte` is `strike_price_gte`. Each "
+            "dataset's page lists the keys it takes, and any other key raises `ValueError`."
         ),
         "adjusted": (
-            "`True`, the default, adjusts prices and volumes for splits: a value from before a "
-            "split is restated in the split's terms. `False` gives values as traded. Only REST "
-            "adjusts, so bars from flat files and live bars are always as traded."
+            "`True`, the default, adjusts prices and volumes for splits. `False` gives them as "
+            "traded. Live bars and bars from flat files are always as traded."
         ),
         "timespan": (
-            "The unit of each bar, a `dm.Timespan` member: `SECOND`, `MINUTE`, `HOUR`, `DAY`, "
-            "`WEEK`, `MONTH`, `QUARTER`, or `YEAR`. Futures take `SESSION` in place of `DAY`.\n"
-            "\n"
-            '- Text such as `"day"` raises `TypeError`. Write `dm.Timespan.DAY`, or convert '
-            'text with `dm.Timespan("day")`.\n'
-            "- One-second and one-minute bars with `multiplier=1` also stream. Bars of every "
-            "other length are history only."
+            "The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or "
+            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. One-second and "
+            "one-minute bars with `multiplier=1` also stream. Bars of other lengths are history "
+            "only."
         ),
         "multiplier": (
             "How many `timespan` units each bar spans, 1 by default. "
             "`timespan=dm.Timespan.MINUTE, multiplier=5` gives five-minute bars."
         ),
         "venues": (
-            "The exchanges whose futures flat files `history()` reads, as a set of "
-            "`dm.FuturesVenue` members: `CME`, `CBOT`, `NYMEX`, and `COMEX`. The default is all "
-            "four. Massive sells futures flat files by exchange, so pass the ones your plan "
-            "includes. Streams and REST reads ignore it."
+            "The futures exchanges whose flat files `history()` reads, as a set of "
+            "`dm.FuturesVenue` members. The default is all four. Pass the ones your plan "
+            "includes."
         ),
     }
 )
