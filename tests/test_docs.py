@@ -1,8 +1,9 @@
 """Tests of the user docs: every page's examples run, and every link and citation resolves.
 
-The hand-written user documentation is `README.md` and `docs/troubleshooting.md`: the *user
-pages*. Their Python examples are real code: every block of a page runs here on its own, in a
-namespace of its own, as a reader would paste it into a fresh Deephaven console, against the
+The hand-written user documentation is `README.md`, `docs/troubleshooting.md`, and
+`docs/configuration.md`, whose settings reference is generated: the *user pages*. Their Python
+examples are real code: every block of a page runs here on its own, in a namespace of its own,
+as a reader would paste it into a fresh Deephaven console, against the
 fake REST and WebSocket servers, so nothing reaches Massive. Every block therefore carries its
 own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
 the fake REST server and whose streams connect to the fake WebSocket server.
@@ -10,7 +11,8 @@ A block fenced as `python continues` is the second step of an example, which the
 in the same console after the block before it, so it runs in that block's namespace. A block
 fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may be. The
 README's settings file is written by running its shell commands, with `HOME` in a temporary
-folder. Five README sections also run alone against scripted replies, and the tests check that
+folder, and the settings page's example file loads as the page says. Five README sections also
+run alone against scripted replies, and the tests check that
 their tables hold what the README says they hold: the whole-market day, the watchlist that
 adds and removes stocks, the settings file, the change since yesterday's close, and the
 backfill of today's minutes.
@@ -56,7 +58,8 @@ from tests._fakes.ws import FakeMassiveServer
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 TROUBLESHOOTING = ROOT / "docs" / "troubleshooting.md"
-USER_PAGES = [README, TROUBLESHOOTING]
+CONFIGURATION = ROOT / "docs" / "configuration.md"
+USER_PAGES = [README, TROUBLESHOOTING, CONFIGURATION]
 TESTER_GUIDE = ROOT / "docs" / "tester-guide.md"
 SOURCE = ROOT / "src" / "deephaven_massive"
 
@@ -69,13 +72,14 @@ own Deephaven server, or one that reads flat files, which needs S3 keys the fake
 
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _BASH = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
+_YAML = re.compile(r"^```yaml\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
 """The prefix of every section citation in a docstring: the user pages on GitHub's main branch."""
 
 _CITATION = re.compile(re.escape(DOCS_URL) + r"([A-Za-z0-9_./-]+?\.md)\b(?:#([A-Za-z0-9_-]+))?")
 _BARE_CITATION = re.compile(
-    r"(?<!/blob/main/)\b(?:(?:README|docs/troubleshooting)\.md#[A-Za-z0-9_-]+"
+    r"(?<!/blob/main/)\b(?:(?:README|docs/troubleshooting|docs/configuration)\.md#[A-Za-z0-9_-]+"
     r"|docs/datasets/[A-Za-z0-9_.]+?\.md\b)"
 )
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
@@ -680,6 +684,20 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
     assert isinstance(names["snapshot"], Table)
     names.clear()
+
+
+def test_the_settings_pages_example_file_loads_as_its_comments_say(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    [text] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
+    file = tmp_path / "settings.yaml"
+    file.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    config = dm.MassiveConfig.from_file(file)
+    assert config.delayed_subscriptions == {dm.Subscription.STOCKS}
+    assert config.rest_basic_subscriptions == {dm.Subscription.OPTIONS}
+    assert config.max_outage == 600
+    assert config.noncanonical_symbols is dm.OnError.RAISE
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
