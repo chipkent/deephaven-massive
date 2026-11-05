@@ -255,7 +255,6 @@ def test_every_example_runs_against_the_fake_market(
     assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
     assert (out / "tables" / "23_followed_history" / "followed.csv").exists()
-    assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
         "rate_limits.csv",

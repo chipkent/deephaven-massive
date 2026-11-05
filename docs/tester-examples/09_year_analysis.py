@@ -1,10 +1,8 @@
-# Compare a year of two stocks: daily returns, growth, volatility, correlation, a chart, a file.
-import os
+# Compare a year of two stocks: daily returns, growth, volatility, and a chart of the growth.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from deephaven import agg, parquet
-from deephaven.pandas import to_pandas
+from deephaven import agg
 from deephaven.plot.figure import Figure
 from deephaven.updateby import delta
 
@@ -40,25 +38,9 @@ summary_year = growth.agg_by(
     ]
 )
 
-side_by_side = (
-    returns.where("Symbol == `AAPL`")
-    .view(["Date", "AAPL = Return"])
-    .natural_join(
-        returns.where("Symbol == `MSFT`").view(["Date", "MSFT = Return"]),
-        on=["Date"],
-        joins=["MSFT"],
-    )
-    .where(["!isNull(AAPL)", "!isNull(MSFT)"])
-)
-frame = to_pandas(side_by_side)
-print(round(frame["AAPL"].corr(frame["MSFT"]), 2))
-
 growth_chart = (
     Figure()
     .plot_xy(series_name="AAPL", t=growth.where("Symbol == `AAPL`"), x="TimestampStart", y="Growth")
     .plot_xy(series_name="MSFT", t=growth.where("Symbol == `MSFT`"), x="TimestampStart", y="Growth")
     .show()
 )
-
-folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-parquet.write(growth, os.path.join(folder, "growth.parquet"))
