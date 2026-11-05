@@ -12,7 +12,7 @@ m.reference.market_holidays()
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Exchange` and `Date` |
 

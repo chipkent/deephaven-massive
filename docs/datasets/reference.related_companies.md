@@ -12,7 +12,7 @@ m.reference.related_companies(symbols)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Underlying` and `Symbol` |
 

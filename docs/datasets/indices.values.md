@@ -12,7 +12,7 @@ m.indices.values(symbols)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | Served by | flat files, WebSocket |
 
 ## Arguments

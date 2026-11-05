@@ -12,7 +12,7 @@ m.stocks.short_volume(symbols=None, *, start=None, end=None, sort=None, order=No
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `date.gte` and `date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `Date` |

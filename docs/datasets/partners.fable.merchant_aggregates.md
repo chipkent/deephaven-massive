@@ -12,7 +12,7 @@ m.partners.fable.merchant_aggregates(*, start=None, end=None, sort=None, order=N
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `transaction_date.gte` and `transaction_date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `TransactionDate`, `PublishedDate`, `Name`, `Type`, `UserCountry`, `Channel`, `ConsumerType`, `MccGroup` and `TransactionCurrency` |

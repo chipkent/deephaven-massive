@@ -12,7 +12,7 @@ m.options.bars(symbols, timespan, *, multiplier=1, adjusted=True)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | Served by | REST, flat files, WebSocket |
 
 ## Arguments

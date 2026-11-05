@@ -12,7 +12,7 @@ m.partners.benzinga.consensus_ratings(symbols, *, filters=None)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `filters` | `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte` |

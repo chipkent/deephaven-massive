@@ -12,7 +12,7 @@ m.futures.snapshots(symbols, *, product_code=None, sort=None, order=None, limit=
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastQuoteLastUpdated` and `LastTradeLastUpdated` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |

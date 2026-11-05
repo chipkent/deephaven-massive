@@ -12,7 +12,7 @@ m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastTimestamp` |
 

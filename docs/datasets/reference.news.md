@@ -12,7 +12,7 @@ m.reference.news(symbols=None, *, start=None, end=None, sort=None, order=None, l
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published_utc.gte` and `published_utc.lt` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` and `Symbol` |

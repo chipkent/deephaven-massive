@@ -12,7 +12,7 @@ m.partners.tmx.corporate_events(symbols=None, *, start=None, end=None, sort=None
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `date.gte` and `date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `TmxRecordId` |

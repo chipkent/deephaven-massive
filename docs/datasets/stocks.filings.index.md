@@ -12,7 +12,7 @@ m.stocks.filings.index(symbols=None, *, form_type=None, start=None, end=None, so
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Cik` and `AccessionNumber` |

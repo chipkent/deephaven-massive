@@ -12,7 +12,7 @@ m.economy.inflation(*, start=None, end=None, sort=None, order=None, limit=None, 
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `date.gte` and `date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Date` |

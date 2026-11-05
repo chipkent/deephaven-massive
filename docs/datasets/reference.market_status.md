@@ -12,7 +12,7 @@ m.reference.market_status()
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows; `mode=dm.PollMode.APPEND` also keys by `ServerTime` |
 

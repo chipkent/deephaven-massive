@@ -24,7 +24,7 @@ Datasets:
     `m.stocks`, `m.options`, `m.futures`, `m.indices`, `m.forex`, and `m.crypto`. The ones by
     topic are `m.reference`, `m.indicators`, `m.economy`, and `m.partners`. `m.snapshots()`
     reads symbols of several asset classes at once. `dm.datasets()` lists every dataset in a
-    table, with each one's query methods in its `Verbs` column.
+    table, with each one's query methods in its `Methods` column.
 
 Query methods:
     A query reads nothing until you call one of its methods. It has only the methods its

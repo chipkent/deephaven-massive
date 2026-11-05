@@ -12,7 +12,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `SipMappingFinraTdds`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` |
 | `sort` | `asset_class`, `id`, `type`, `name`, `data_types`, `legacy` |

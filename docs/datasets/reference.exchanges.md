@@ -12,7 +12,7 @@ m.reference.exchanges(*, asset_class=None, locale=None)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass` and `Id` |
 

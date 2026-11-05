@@ -12,7 +12,7 @@ m.stocks.financials.cash_flow_statements(symbols=None, *, timeframe=None, start=
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `period_end.gte` and `period_end.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Cik`, `PeriodEnd`, `Timeframe` and `Symbol` |

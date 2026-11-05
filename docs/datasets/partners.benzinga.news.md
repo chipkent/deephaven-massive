@@ -12,7 +12,7 @@ m.partners.benzinga.news(symbols=None, *, start=None, end=None, sort=None, order
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `published.gte` and `published.lt` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `BenzingaId` and `Symbol` |

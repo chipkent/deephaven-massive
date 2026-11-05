@@ -12,7 +12,7 @@ m.options.contracts(symbols=None, *, underlying=None, contract_type=None, as_of=
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `sort` | `ticker`, `underlying_ticker`, `expiration_date`, `strike_price` |

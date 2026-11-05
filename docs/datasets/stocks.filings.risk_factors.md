@@ -12,7 +12,7 @@ m.stocks.filings.risk_factors(symbols=None, *, start=None, end=None, sort=None, 
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Cik`, `FilingDate`, `PrimaryCategory`, `SecondaryCategory`, `TertiaryCategory` and `SupportingText` |

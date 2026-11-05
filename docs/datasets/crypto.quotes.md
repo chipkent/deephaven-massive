@@ -12,7 +12,7 @@ m.crypto.quotes(symbols)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | Served by | WebSocket |
 
 ## Arguments

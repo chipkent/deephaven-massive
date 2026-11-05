@@ -12,7 +12,7 @@ m.indicators.macd(symbols, *, short_window=12, long_window=26, signal_window=9, 
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `timestamp.gte` and `timestamp.lt` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `TimestampStart` |

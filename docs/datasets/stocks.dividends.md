@@ -12,7 +12,7 @@ m.stocks.dividends(symbols=None, *, start=None, end=None, sort=None, order=None,
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `ex_dividend_date.gte` and `ex_dividend_date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Id` |

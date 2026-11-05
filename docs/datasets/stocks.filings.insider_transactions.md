@@ -12,7 +12,7 @@ m.stocks.filings.insider_transactions(symbols=None, *, issuer_cik=None, owner_ci
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `OwnerCik`, `SecurityType`, `SecurityTitle`, `DirectOrIndirect`, `NatureOfOwnership`, `RecordType`, `TransactionDate`, `TransactionCode`, `TransactionShares`, `TransactionPricePerShare`, `TransactionAcquiredDisposed`, `SharesOwnedFollowingTransaction`, `ExercisePrice`, `ExerciseDate`, `ExpirationDate` and `Symbol` |

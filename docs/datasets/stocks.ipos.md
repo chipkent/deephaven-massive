@@ -12,7 +12,7 @@ m.stocks.ipos(symbols=None, *, start=None, end=None, sort=None, order=None, limi
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `listing_date.gte` and `listing_date.lte` |
 | `poll()` | `dm.PollMode.UPSERT`: adds and updates rows, never deletes, keyed by `Symbol` and `IssuerName` |

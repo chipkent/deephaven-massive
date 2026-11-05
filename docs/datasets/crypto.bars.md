@@ -12,7 +12,7 @@ m.crypto.bars(symbols, timespan, *, multiplier=1)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | Served by | REST, flat files, WebSocket |
 
 ## Arguments

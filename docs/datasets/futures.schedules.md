@@ -12,7 +12,7 @@ m.futures.schedules(*, product_code=None, start=None, end=None, sort=None, order
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `session_end_date.gte` and `session_end_date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `ProductCode`, `TradingVenue`, `Timestamp` and `Event` |

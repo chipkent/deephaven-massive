@@ -12,7 +12,7 @@ m.stocks.splits(symbols=None, *, start=None, end=None, sort=None, order=None, li
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `execution_date.gte` and `execution_date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Id` |

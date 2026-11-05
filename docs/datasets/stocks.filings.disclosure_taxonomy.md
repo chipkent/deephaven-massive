@@ -12,7 +12,7 @@ m.stocks.filings.disclosure_taxonomy(*, sort=None, order=None, limit=None, filte
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Taxonomy`, `PrimaryCategory`, `SecondaryCategory` and `TertiaryCategory` |
 | `sort` | any REST field of the rows (see Massive fields below), or several separated by commas, each with an optional `.asc` or `.desc` |

@@ -12,7 +12,7 @@ m.stocks.short_interest(symbols=None, *, start=None, end=None, sort=None, order=
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `settlement_date.gte` and `settlement_date.lte` |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` and `SettlementDate` |

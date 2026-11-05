@@ -12,7 +12,7 @@ m.stocks.filings.institutional_holdings(*, filer_cik=None, start=None, end=None,
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | Time range | `start` and `end` are sent as `filing_date.gte` and `filing_date.lte` |
 | `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `AccessionNumber`, `Cusip`, `TitleOfClass`, `PutCall`, `InvestmentDiscretion`, `OtherManagers`, `SharesOrPrincipalAmount`, `SharesOrPrincipalType`, `VotingAuthoritySole`, `VotingAuthorityShared` and `VotingAuthorityNone` |

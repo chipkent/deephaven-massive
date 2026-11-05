@@ -12,7 +12,7 @@ m.options.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastQuoteLastUpdated` and `LastTradeSipTimestamp` |
 | `sort` | `ticker` |

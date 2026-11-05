@@ -12,7 +12,7 @@ m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVe
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | Served by | REST, flat files, WebSocket |
 | Time range | `start` and `end` are sent as `window_start.gte` and `window_start.lt` |
 

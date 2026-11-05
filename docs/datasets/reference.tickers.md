@@ -12,7 +12,7 @@ m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=Non
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 | `sort` | `ticker`, `name`, `market`, `locale`, `primary_exchange`, `type`, `currency_symbol`, `currency_name`, `base_currency_symbol`, `base_currency_name`, `cik`, `composite_figi`, `share_class_figi`, `last_updated_utc`, `delisted_utc` |

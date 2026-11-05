@@ -31,7 +31,7 @@ def test_one_row_per_dataset_in_catalog_order(dh_to_pylist: ToPylist) -> None:
         "Dataset": dtypes.string,
         "Call": dtypes.string,
         "Summary": dtypes.string,
-        "Verbs": dtypes.string_array,
+        "Methods": dtypes.string_array,
         "Transports": dtypes.string_array,
         "Documentation": dtypes.string,
     }
@@ -44,14 +44,14 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
         "Dataset": "stocks.trades",
         "Call": "m.stocks.trades",
         "Summary": CATALOG.by_name["stocks.trades"].summary,
-        "Verbs": stream_and_history,
+        "Methods": stream_and_history,
         "Transports": ["REST", "flat files", "WebSocket"],
         "Documentation": f"{_PAGES}stocks.trades.md",
     }
-    assert rows["stocks.last_trade"]["Verbs"] == ["fetch", "poll"]
+    assert rows["stocks.last_trade"]["Methods"] == ["fetch", "poll"]
     assert rows["stocks.last_trade"]["Transports"] == ["REST"]
     # Bars stream at some timespans only; the dataset lists every verb one of its calls has.
-    assert rows["stocks.bars"]["Verbs"] == stream_and_history
+    assert rows["stocks.bars"]["Methods"] == stream_and_history
     ratios = rows["stocks.financials.ratios"]
     assert ratios["Documentation"] == f"{_PAGES}stocks.financials.ratios.md"
     assert rows["snapshots"]["Call"] == "m.snapshots"
@@ -59,7 +59,7 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
 
 
 def test_the_list_can_be_filtered_by_verb(dh_to_pylist: ToPylist) -> None:
-    streams = dm.datasets().where("Arrays.asList(Verbs).contains(`blink`)")
+    streams = dm.datasets().where("Arrays.asList(Methods).contains(`blink`)")
     names = {row["Dataset"] for row in dh_to_pylist(streams)}
     assert "stocks.trades" in names
     assert "stocks.last_trade" not in names

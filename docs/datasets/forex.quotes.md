@@ -12,7 +12,7 @@ m.forex.quotes(symbols)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| Methods | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | Served by | REST, flat files, WebSocket |
 | Time range | `start` and `end` are sent as `timestamp.gte` and `timestamp.lt` |
 
