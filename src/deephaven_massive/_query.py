@@ -989,8 +989,8 @@ class Query(QueryBase):
             ValueError: At the call, before any request, if:
                 - it runs on a Deephaven update-graph thread;
                 - the endpoint doesn't take one of the query's parameters or filters;
-                - a static table of symbols or of values is empty;
-                - a table's rows all aren't Massive's exact tickers.
+                - a static `symbols`, `underlying=`, or `product_code=` table is empty;
+                - no row of a table is Massive's exact ticker.
             AuthenticationError: If Massive rejects your API key.
             EntitlementError: If your plan doesn't include the data, or Massive delays current data
                 whose subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
@@ -1246,11 +1246,12 @@ class Query(QueryBase):
                 - it runs on a Deephaven update-graph thread;
                 - `interval` is shorter than 1 second or isn't finite;
                 - a news or filings feed has neither `start` nor `limit`;
-                - a table's rows all aren't Massive's exact tickers;
+                - no row of a table of symbols is Massive's exact ticker;
                 - an endpoint doesn't take one of the query's parameters or filters.
-            AuthenticationError: If Massive rejects your API key while the call reads its list of
+            AuthenticationError: For a crypto dataset, if Massive rejects your API key while the
+                call reads Massive's list of crypto tickers.
+            EntitlementError: For a crypto dataset, if your plan doesn't include Massive's list of
                 crypto tickers.
-            EntitlementError: If your plan doesn't include that list.
             MassiveError: If the session is closed, or a crypto pair you pass in code isn't on
                 Massive's list.
         """
@@ -1416,8 +1417,8 @@ class StreamQuery(QueryBase):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or a table's rows all aren't Massive's exact
-                  tickers;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts listed in code pass the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
@@ -1455,8 +1456,8 @@ class StreamQuery(QueryBase):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or a table's rows all aren't Massive's exact
-                  tickers;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts listed in code pass the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
@@ -1498,8 +1499,8 @@ class StreamQuery(QueryBase):
             ValueError: At the call, before the table exists, if:
                 - `capacity` is out of range;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or a table's rows all aren't Massive's exact
-                  tickers;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts listed in code pass the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
@@ -1586,8 +1587,8 @@ class StreamQuery(QueryBase):
             ValueError: At the call, before the table exists, if:
                 - `by` is empty, repeats a column, or names a column the dataset doesn't have;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or a table's rows all aren't Massive's exact
-                  tickers;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts listed in code pass the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
@@ -1731,8 +1732,7 @@ class HistoryQuery(QueryBase):
                 - a bound is a `datetime` without a time zone, unreadable text, or `NaT`;
                 - one bound is a date and the other a time;
                 - `start` is after `end`, or in the future when `end` is left out;
-                - a static table of symbols is empty, or its rows all aren't Massive's exact
-                  tickers;
+                - a static table of symbols is empty, or none of its rows is Massive's exact ticker;
                 - no source can serve the request; the message gives each reason.
             AuthenticationError: If Massive or its flat-file server rejects your keys.
             EntitlementError: If your plan doesn't include the data from any source the call can

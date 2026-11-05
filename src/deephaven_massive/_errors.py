@@ -228,15 +228,11 @@ class EntitlementError(MassiveError):
 
     Massive refused the request: a REST request with HTTP 403, a stream subscription, or a flat
     file. The library raises it too when Massive marks current data as delayed and its subscription
-    isn't in `MassiveConfig.delayed_subscriptions`. The message then names the line to add. Only the
-    table that asked fails. Other tables on the same connection keep running.
+    isn't in `MassiveConfig.delayed_subscriptions`. The message then names the setting to change.
+    Only the table that asked fails. Other tables on the same connection keep running.
 
-    The message says what Massive refused, without guessing at your plan. It quotes Massive's own
-    text. A REST refusal names the subscription and the request. A stream refusal names the host and
-    the subscribed topics, and a flat-file refusal names the file. When the library made the refused
-    request for you, the message says so, as for its read of Massive's list of crypto tickers. Where
-    another source can serve the same data, the message names it, such as
-    `source=dm.HistorySource.REST` for a refused flat-file `history()`.
+    The message says what Massive refused, in Massive's own words, and names another source when one
+    can serve the same data.
 
     Example:
         Read a day of trades, and report it when your plan lacks them::

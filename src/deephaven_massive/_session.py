@@ -210,8 +210,9 @@ class MassiveSession:
     No public attribute or `repr` of the session shows your key, so the key stays out of the
     console's variables.
 
-    You can use a session from several threads at once. Messages name it by its label, such as
-    `MassiveSession #1`.
+    You can use a session from several threads at once.
+
+    Messages name the session by its label, such as `MassiveSession #1`.
 
     Each dataset is a method of a namespace, such as `m.stocks.bars`, and returns a query. A method
     of the query, such as `history()` or `last_by()`, returns a table. A live table updates while
@@ -250,6 +251,7 @@ class MassiveSession:
         "_stocks",
     )
 
+    @raises_through(MassiveConfig.__post_init__, configure_from_environment)
     def __init__(self, config: MassiveConfig | None = None) -> None:
         """Create a session.
 
@@ -262,8 +264,10 @@ class MassiveSession:
             AuthenticationError: If `config` is left out and `MASSIVE_API_KEY` isn't set.
             ValueError: If:
                 - it runs on a Deephaven update-graph thread, such as inside a table listener;
+                - `DEEPHAVEN_MASSIVE_LOG` isn't a log level name;
                 - `config` is left out and an environment variable isn't valid, such as a key with
                   spaces around it, or only one of the two `MASSIVE_S3_*` variables set.
+            OSError: If `DEEPHAVEN_MASSIVE_LOG_FILE` names a file that can't be opened.
             MassiveError: If it runs on a thread with no Deephaven execution context, or in one made
                 by `make_user_exec_ctx(freeze_vars=...)`, which the library can't use.
         """
@@ -598,9 +602,10 @@ class MassiveSession:
         """Release one live table now, instead of waiting for Python to reclaim it.
 
         The table stops updating once nothing else uses it, such as a table made from it or a panel
-        open in the Deephaven IDE. Its stream unsubscribes, or its poll or background read stops. In
-        a console command, the release takes effect when the command ends. Releasing a table twice
-        does nothing, and `release()` works after `close()`. A static table needs no release. See
+        open in the Deephaven IDE. Its poll or background read stops. Its stream unsubscribes once
+        no other table of the stream is in use. In a console command, the release takes effect when
+        the command ends. Releasing a table twice does nothing, and `release()` works after
+        `close()`. A static table needs no release. See
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Args:
