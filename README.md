@@ -13,15 +13,15 @@ Market data from [Massive](https://massive.com) as live and historical
 [Deephaven](https://deephaven.io) tables, for traders and quants who work in Python.
 
 Testing a trading idea usually starts with data plumbing: one program for history, another for
-the live feed, and a streaming system before you see a live number. Here, one call gives both the
-history and the live table, with the same columns.
+the live feed, and a streaming system before you see a live number. Here, one query gives both
+the history and the live table, with the same columns.
 
-- Read a year of bars, or every US stock on one day, in one line.
+- Read a year of bars, or every listed US stock on one day, in one line.
 - See each stock's change from the previous close, updated every minute.
-- Spend your time on trading ideas, with live feeds and tables that follow your watchlist
-  already built.
+- Live feeds, reconnects, and tables that follow your watchlist come built, so your code is the
+  query and the table logic.
 
-Every US stock's bar for one day, on Massive's free plan:
+On Stocks Basic, Massive's free plan:
 
 ```python
 import deephaven_massive as dm
@@ -98,9 +98,10 @@ uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-expr
 ### Set your API keys
 
 Open your shell's startup file in a text editor: `~/.zshrc` on macOS, `~/.bashrc` on Linux.
-Paste these lines at its end, copy each key from Massive's
-[keys page](https://massive.com/dashboard/keys) over its placeholder, and save the file. The two
-S3 keys are for Massive's flat files. Leave them out if your plan doesn't include flat files:
+Paste the lines below at its end. The first is required; leave out the two S3 lines if your plan
+doesn't include flat files, which [Environment variables](#environment-variables) explains. Copy
+each key from Massive's [keys page](https://massive.com/dashboard/keys) over its placeholder,
+and save the file:
 
 ```bash
 export MASSIVE_API_KEY="your-api-key"
@@ -123,7 +124,9 @@ deephaven server --jvm-args "-Xmx4g"
 
 The server prints a line that starts with `Deephaven is running at` and opens the Deephaven IDE
 in your browser. Keep the terminal open while you work, and press Control-C there to stop the
-server. Your first table is the tutorial's [first example](#read-daily-bars). If a step fails,
+server.
+
+Next, run the tutorial's [first example](#read-daily-bars). If a step fails,
 [Troubleshooting](docs/troubleshooting.md#setup-messages) lists each setup message and its fix.
 
 <a id="configuration"></a>
@@ -141,20 +144,21 @@ the server and start it from a new terminal, as [Start the server](#start-the-se
 
 | Variable | What you get | Default |
 |---|---|---|
-| `MASSIVE_API_KEY` | Access to Massive. Every session needs it. | None |
-| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` from Massive's flat files, on plans that include them: trades, quotes, index values, and as-traded (`adjusted=False`) bars, for the whole market or for 50 or more symbols. Adjusted bars, the default, need no S3 keys. Set both or neither. | Unset |
+| `MASSIVE_API_KEY` | Access to Massive. Every session needs it. | Unset; required |
+| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` from Massive's flat files, on plans that include them. Index values have no other history source, and trades, quotes, and as-traded bars use the files for the whole market or for 50 or more symbols. Set both or neither. | Unset |
 | `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Your settings file, read by `dm.MassiveConfig.from_file()` called with no path | Unset |
 | `DEEPHAVEN_MASSIVE_LOG` | The library's log at the level you name: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Warnings and errors only, in the server's terminal |
 | `DEEPHAVEN_MASSIVE_LOG_FILE` | The log in this file instead of the terminal. Set alone, it logs at `DEBUG`. | Unset |
 | `HTTPS_PROXY`, `NO_PROXY` | A proxy for every connection to Massive, and the hosts that skip it | Your system's proxy on macOS; none on Linux |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own | The `certifi` bundle |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own. Flat-file reads use only `SSL_CERT_FILE`. | The `certifi` bundle |
 
-[The log](docs/troubleshooting.md#the-log) in Troubleshooting explains how to read the log and
-attach it to a bug report.
+[Turn on the debug log](docs/troubleshooting.md#the-log) explains each log level and how to
+record what the library does, and [Report a bug](docs/troubleshooting.md#report-a-bug) says how
+to attach the log to an issue.
 
 <a id="massive-config"></a>
 
-### The MassiveConfig class
+### MassiveConfig
 
 `dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`, or leave
 it out for the defaults. Each Massive subscription (Stocks, Options, and so on) has its own plan,
@@ -163,7 +167,7 @@ and two settings match a session to your plans:
 | Setting | Set it when | What changes |
 |---|---|---|
 | `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
-| `rest_basic_subscriptions` | A subscription's plan is Basic, the free plan, and you want its requests paced from the first one | Its requests wait their turn at Basic's five a minute. Without the setting, the session slows to that rate after Massive's first refusal. |
+| `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
 
 This session is for an account with Stocks Starter and Options Basic:
 
@@ -185,14 +189,13 @@ setting and its default.
 
 ## Tutorial
 
-Paste each example into the **Console** panel of the Deephaven IDE and run it. Examples 1 to 7
-run on Stocks Basic, Massive's free plan. Examples 8 to 13 need Stocks Starter or higher, and
-Examples 9 to 13 read the settings file that Example 8 saves.
+Paste each example into the **Console** panel of the Deephaven IDE and run it. The table gives
+each example's plan, and Examples 9 to 13 read the settings file that Example 8 saves.
 
 | # | Example | Plan |
 |---|---|---|
 | 1 | [Queries: read a week of Apple's daily bars](#read-daily-bars) | Stocks Basic |
-| 2 | [Symbol lists: rank every US stock by one day's dollar volume](#whole-market-day) | Stocks Basic |
+| 2 | [Symbol lists: rank every listed US stock by one day's dollar volume](#whole-market-day) | Stocks Basic |
 | 3 | [Date ranges: compare three stocks' price returns over a year](#compare-stocks) | Stocks Basic |
 | 4 | [Charts: plot a stock's daily closes for a year](#chart-closes) | Stocks Basic |
 | 5 | [Live tables: poll for the latest news headlines](#follow-the-news) | Stocks Basic |
@@ -228,14 +231,14 @@ query's other methods read the data and return a Deephaven table, so Deephaven's
 it. The
 [dataset index](docs/datasets/README.md) lists each dataset's arguments and columns.
 
-Next, one query for every US stock.
+Next, one query for every listed stock at once.
 
 <a id="whole-market-day"></a>
 
-### Symbol lists: rank every US stock by one day's dollar volume
+### Symbol lists: rank every listed US stock by one day's dollar volume
 
 Find the stocks that traded the most dollars on October 30, 2026, with Stocks Basic. Read that
-day's bar for every US stock, then rank them in Deephaven:
+day's bar for every listed US stock, then rank them in Deephaven:
 
 ```python
 import deephaven_massive as dm
@@ -249,7 +252,8 @@ busiest = (
 )
 ```
 
-`day` has a row for every stock that traded that day, and `busiest` keeps the leaders.
+`day` has a row for every listed US stock that traded that day. Over-the-counter (OTC) stocks
+are left out.
 
 A dataset's `symbols` argument names what to read: `dm.ALL` for every symbol, one symbol as
 text, or several as a list, each spelled as Massive does. Daily bars take `dm.ALL`, and each
@@ -278,8 +282,8 @@ returns = year.agg_by(
 ).update_view("ReturnPct = 100 * (End / Start - 1)")
 ```
 
-`agg_by` takes each stock's first and last close by `Date`, so `returns` gives each stock its
-`Start`, its `End`, and its `ReturnPct` over the range.
+`returns` has one row per stock, with its close on the first and last day and its percent
+return.
 
 Dates are `yyyy-MM-dd` text in every table, so they sort by day and join across tables. A range
 includes both of its dates, and for stocks a date is the trading day in New York.
@@ -322,8 +326,8 @@ headlines = m.reference.news(["AAPL", "NVDA", "TSLA"], limit=10).poll(300)
 latest = headlines.view(["PublishedUtc", "Symbol", "Title"]).sort_descending("PublishedUtc")
 ```
 
-`latest` starts with up to ten articles per stock, newest first. Massive updates news hourly, so
-a new article arrives at the first poll after Massive lists it.
+`latest` starts with up to ten articles per stock, newest first. A new article arrives at the
+first poll after Massive lists it.
 
 `poll()` returns a live table. At each poll it asks Massive again, and a news table adds only
 the articles it hasn't seen. `latest` updates with it.
@@ -421,13 +425,13 @@ m = dm.MassiveSession(config)
 snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 ```
 
-`snapshot` has one row per stock, with columns such as `LastTradePrice`, `DayClose`, and
+`snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
 `TodaysChangePerc`. On Starter or Developer without the setting, the same call raises
 `dm.EntitlementError`.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file.
-[The MassiveConfig class](#massive-config) lists the settings.
+[MassiveConfig](#massive-config) lists the settings.
 
 Next, a live table that streams instead of polling.
 
@@ -451,8 +455,8 @@ latest = m.stocks.bars(watchlist, dm.Timespan.MINUTE).last_by()
 `latest` gets a row for each stock with its first minute bar, and the row changes as each minute
 ends.
 
-`last_by()` reads Massive's stream instead of polling. The stream follows the watchlist. Adding
-a stock subscribes to it, and deleting one unsubscribes it and removes its row.
+`last_by()` reads Massive's stream instead of polling, and like the poll in Example 7, the
+stream follows the watchlist.
 
 Massive sends a minute bar only for a minute with trades. Stocks trade in pre-market, regular,
 and after-hours sessions, so a table you start overnight stays empty until pre-market trading.

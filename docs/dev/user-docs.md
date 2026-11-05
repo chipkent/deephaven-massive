@@ -163,7 +163,7 @@ plan, and 8 to 13 on Stocks Starter or higher.
 | # | Title | Builds on | Plan |
 |---|---|---|---|
 | 1 | Queries: read a week of Apple's daily bars | | Stocks Basic |
-| 2 | Symbol lists: rank every US stock by one day's dollar volume | 1 | Stocks Basic |
+| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 | Stocks Basic |
 | 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
 | 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
 | 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
