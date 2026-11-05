@@ -10,7 +10,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive import _dataset_list
 from deephaven_massive._dataset_list import DATASET_LIST_DESCRIPTIONS, dataset_calls
-from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall
+from deephaven_massive._datasets.column_reference import PAGES_URL, DatasetCall, QueryMethod
 from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._session import CATALOG
 
@@ -93,6 +93,19 @@ def test_every_dataset_has_its_call() -> None:
             "Units per bar.",
             "Adjusts volume as well as prices.",
         ),
+        # Each verb's call, with its positional arguments, and its docstring's summary.
+        methods=calls["stocks.bars"].methods,
+    )
+    methods = {m.name: m for m in calls["stocks.bars"].methods}
+    assert list(methods) == ["blink", "append_only", "ring", "last_by", "history"]
+    assert methods["ring"] == QueryMethod(
+        "ring", "ring(capacity)", "The latest `capacity` rows the stream sends."
+    )
+    assert methods["history"].call == "history(start, end=None)"
+    assert methods["last_by"].call == "last_by(by='Symbol')"
+    poll = calls["stocks.dividends"].methods[1]
+    assert poll == QueryMethod(
+        "poll", "poll(interval)", "A live table that fetches the query again every `interval`."
     )
     # An entry that runs over several lines is joined into one.
     assert calls["stocks.previous_day_bar"].descriptions[0] == (

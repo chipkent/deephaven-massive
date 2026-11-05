@@ -519,7 +519,7 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Name": "The column name.",
         "Type": (
-            "The column's Deephaven type: long, int, double, boolean, String, Instant, long[], or "
+            "The column's Deephaven type: long, int, double, Boolean, String, Instant, long[], or "
             "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
         ),
         "Description": "What the column holds; empty when Massive gives no description.",

@@ -8,8 +8,8 @@ the network. What a dataset's columns mean is its query's `columns()` and the da
 page that each row links.
 
 `dataset_calls` pairs each dataset with the session method that serves it, for the generated
-dataset reference: the method's signature as a user writes it, the verbs its queries have, and
-each argument's line from the method's docstring.
+dataset reference: the method's signature as a user writes it, the verbs its queries have, with
+each verb's call and summary, and each argument's line from the method's docstring.
 The dataset layer renders the pages but may not import the methods, so the reference command
 and its parity test build these here and pass them down.
 """
@@ -28,9 +28,14 @@ from deephaven.jcompat import j_hashmap
 from deephaven.table import Table
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._datasets.column_reference import DatasetCall, call_path, page_url
+from deephaven_massive._datasets.column_reference import (
+    DatasetCall,
+    QueryMethod,
+    call_path,
+    page_url,
+)
 from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import verbs
+from deephaven_massive._query import Query, StreamHistoryQuery, verbs
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES, MassiveSession
 
 if TYPE_CHECKING:
@@ -125,6 +130,12 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
     )
 
 
+_QUERY_CLASSES: Final = (Query, StreamHistoryQuery)
+"""The query classes that between them define every verb, read for each verb's call and summary."""
+
+_RETURN: Final = "Return "
+"""The verb a query method's docstring summary starts with, which the reference drops."""
+
 _AS_OF: Final = "as_of"
 """The shared argument for the day a reference list is read as of, which sets `date`."""
 
@@ -193,7 +204,8 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         method: Its method; its first parameter is `self`.
 
     Returns:
-        Its signature as written from a session `m`, its verbs, and its arguments' wire names.
+        Its signature as written from a session `m`, its verbs and their calls, and its
+        arguments' lines and wire names.
     """
     parameters = list(inspect.signature(method).parameters.values())[1:]
     parts: list[str] = []
@@ -219,6 +231,33 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         arguments=tuple(param.name for param in parameters),
         typed=tuple(typed),
         descriptions=tuple(_argument_lines(method).get(param.name, "") for param in parameters),
+        methods=tuple(_query_method(verb) for verb in verbs(spec)),
+    )
+
+
+def _query_method(verb: str) -> QueryMethod:
+    """Describe one query method as the reference shows it.
+
+    Args:
+        verb: The verb, such as `"poll"`; one of the query classes defines it.
+
+    Returns:
+        Its call, with its positional arguments and their defaults (`poll(interval)`,
+        `history(start, end=None)`), and its docstring's first line without its leading
+        "Return ", such as "A live table that fetches the query again every `interval`.".
+    """
+    method = next(getattr(c, verb) for c in _QUERY_CLASSES if hasattr(c, verb))
+    parameters = list(inspect.signature(method).parameters.values())[1:]
+    shown = [
+        param.name
+        if param.default is inspect.Parameter.empty
+        else f"{param.name}={_default(param.default)}"
+        for param in parameters
+        if param.kind is not inspect.Parameter.KEYWORD_ONLY
+    ]
+    summary = (inspect.getdoc(method) or "").split("\n", 1)[0].removeprefix(_RETURN)
+    return QueryMethod(
+        name=verb, call=f"{verb}({', '.join(shown)})", summary=summary[:1].upper() + summary[1:]
     )
 
 

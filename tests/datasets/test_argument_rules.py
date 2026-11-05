@@ -1,4 +1,4 @@
-"""Tests of the shared argument rules that the dataset reference prints on each page."""
+"""Tests of the shared argument rules that the dataset index prints."""
 
 from deephaven_massive._dataset_list import dataset_calls
 from deephaven_massive._datasets.argument_rules import ARGUMENT_RULES
@@ -29,11 +29,13 @@ def test_the_most_shared_arguments_have_rules() -> None:
     } <= ARGUMENT_RULES.keys()
 
 
-def test_every_rule_fits_one_table_cell() -> None:
-    # Each rule is one Markdown cell: sentences, with no line break or column separator.
+def test_every_rule_is_markdown_for_the_index_to_print_under_its_own_heading() -> None:
+    # The index prints each rule under the argument's heading, so a rule has no heading of its
+    # own, no trailing whitespace, and ends a sentence.
     bad = {
         name: rule
         for name, rule in ARGUMENT_RULES.items()
-        if "\n" in rule or "|" in rule or not rule.endswith(".")
+        if any(line.startswith("#") or line != line.rstrip() for line in rule.split("\n"))
+        or not rule.endswith(".")
     }
     assert bad == {}

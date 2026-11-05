@@ -682,9 +682,9 @@ class QueryBase:
             Never: it always raises.
 
         Raises:
-            AttributeError: Always. For a verb's name, the message names the dataset, the verbs
+            AttributeError: Always. For a verb's name, the message names the dataset, the methods
                 its query has, and where one exists the dataset that has the verb, such as
-                `"stocks.trades has no fetch(); its verbs are blink(), append_only(), ring(),
+                `"stocks.trades has no fetch(); its methods are blink(), append_only(), ring(),
                 last_by(), history(); use m.stocks.last_trade(...).fetch()"`
                 (`_missing_verb`); for any other name, Python's own message.
         """
@@ -707,7 +707,7 @@ class QueryBase:
             alternative of `_alternative`, where there is one.
         """
         has = ", ".join(f"{name}()" for name in _VERBS if hasattr(type(self), name))
-        text = f"{self._spec.name} has no {verb}(); its verbs are {has}"
+        text = f"{self._spec.name} has no {verb}(); its methods are {has}"
         alternative = self._alternative(verb)
         return text if alternative is None else f"{text}; {alternative}"
 

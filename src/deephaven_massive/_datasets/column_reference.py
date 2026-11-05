@@ -8,14 +8,15 @@ which readers browse on GitHub before they install anything. This module owns th
 - `render` turns a catalog, the provenance of the generated sources, and each dataset's call
   (`DatasetCall`, which the API layer supplies) into one Markdown page per dataset, named after
   its dotted name (`stocks.trades.md`, `stocks.financials.ratios.md`, `snapshots.md`), and an
-  index, `README.md`, which GitHub shows when a reader opens the directory: a grid of asset
-  classes by dataset and a list of every dataset by namespace, with the methods of the session
-  itself (`m.snapshots`) under a heading of their own. A dataset's page says how to
-  call it, its verbs, its time range, its `poll()` mode, the `sort` values and `filters` keys
-  it accepts, each argument with its docstring line and its shared rule (`argument_rules.py`),
-  which of Massive's plans include it (from the plan tables of Massive's own pages,
-  so they follow every refresh), and its columns, with the Massive field behind each column
-  folded away. It is pure: it reads only its arguments and the schemas the catalog merges,
+  index, `README.md`, which GitHub shows when a reader opens the directory: the datasets
+  several asset classes have, every dataset by namespace, with the methods of the session
+  itself (`m.snapshots`) under a heading of their own, and the rule of each argument many
+  datasets share (`argument_rules.py`), printed once. A dataset's page says how to call it,
+  its query methods, its `poll()` mode, each argument with its docstring line, the `sort`
+  fields and `filters` keys it accepts, and a link to its shared rule, which of Massive's
+  plans include it (from the plan tables of Massive's own pages, so they follow every
+  refresh), and its columns, with the Massive field behind each column folded away. It is
+  pure: it reads only its arguments and the schemas the catalog merges,
   imports no Deephaven (a type cell is the `ColumnType` value), and writes nothing.
 - `column_changes` compares two renderings and says, per dataset, which columns a change
   added or removed, so a refresh or a catalog change shows what it does to each table.
@@ -65,6 +66,7 @@ __all__ = [
     "INDEX",
     "PAGES_URL",
     "DatasetCall",
+    "QueryMethod",
     "SyncResult",
     "call_path",
     "column_changes",
@@ -104,88 +106,152 @@ _NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
-    "Every dataset the library serves, one page each. A page shows how to call the dataset, "
-    "its query methods, the `sort` values and `filters` keys it accepts, each argument and its "
-    "rules, which of Massive's plans include it, and every column of its tables, in the order "
-    "every method returns them. The "
-    "same column descriptions appear in the Deephaven IDE's column tooltips and in a query's "
-    "`columns()`, and `dm.datasets()` lists these datasets as a table."
+    "This index lists every dataset by asset class or subject, with the query methods, shared "
+    "arguments, and column types. Each dataset links its own page, with its call, arguments, "
+    "plans, and columns. In the Deephaven IDE, column descriptions show as tooltips. "
+    "`dm.datasets()` lists every dataset as a table."
 )
 """The paragraph under the index's title."""
 
-_GRID_GUIDE: Final = (
-    "The datasets that several asset classes have, one row each; a mark links that class's "
-    "page. Every other dataset is listed under its namespace below, and a method of the "
-    "session itself, such as `m.snapshots`, under Session methods."
-)
-"""The paragraph above the index's grid."""
+_METHODS_HEADING: Final = "Query methods"
+"""The heading of the index's table of the query methods, which every page's facts link."""
 
-_SESSION_HEADING: Final = "Session methods"
+_METHODS_ANCHOR: Final = "query-methods"
+"""The anchor of the index's table of query methods."""
+
+_METHODS_GUIDE: Final = (
+    "Create a session with `m = dm.MassiveSession()`. A dataset method, such as "
+    "`m.stocks.dividends()`, returns a query. A query names the data and reads nothing. The "
+    "methods below read the data and return a Deephaven table."
+)
+"""The paragraph above the index's table of query methods."""
+
+_GRID_HEADING: Final = "Datasets in several asset classes"
+"""The heading of the index's table of the datasets several asset classes have."""
+
+_NAMESPACE_HEADINGS: Final[Mapping[str, str]] = {
+    "reference": "Reference data",
+    "indicators": "Technical indicators",
+    "partners": "Partner data",
+}
+"""The index's heading over a namespace whose capitalized name would not say what it holds;
+every other namespace's heading is its capitalized name, such as `Stocks`."""
+
+_SESSION_HEADING: Final = "Any asset class"
 """The index's heading over the datasets that are methods of the session, such as `m.snapshots`."""
 
-_MERGE: Final = (
-    "Tables of one kind from two asset classes (stock and forex quotes, say) can differ in "
-    "their columns. To merge them, keep the shared columns: `common = [c for c in "
-    "a.column_names if c in b.column_names]`, then `merge([t.view(common) for t in (a, b)])`. "
-    "To keep every column instead, add each missing one to the other table as a typed null "
-    'first, such as `b.update("Tape = NULL_LONG")`.'
+_SHARED_HEADING: Final = "Shared arguments"
+"""The index's heading over the rules of the arguments many datasets take (`ARGUMENT_RULES`)."""
+
+_SHARED_ANCHOR: Final = "shared-arguments"
+"""The anchor of the index's shared-argument section, which every page's Arguments links."""
+
+_SHARED_GUIDE: Final = (
+    "These arguments follow the same rules on every dataset that takes them. A dataset's page "
+    "gives what is particular to that dataset and links here."
 )
-"""The paragraph of the index on merging tables of different classes."""
+"""The paragraph under the index's shared-argument heading."""
+
+_DIFFERENCES_HEADING: Final = "Columns whose type differs by asset class"
+"""The heading of the index's table of the shared columns whose type differs between classes."""
 
 _TYPE_DIFFERENCES: Final = (
-    "A column such tables share has one name, and one type in every class except those listed "
-    "below, where Massive declares a different type for some classes than for others. Cast one "
-    "table's column to the other's type before a merge, such as "
-    '`a.update("LastTradeSize = (double) LastTradeSize")`.'
+    "These columns have different types in different asset classes of the same dataset, such "
+    "as `m.stocks.snapshots` and `m.crypto.snapshots`. To merge two such tables, select the "
+    "same columns from each, then cast one table's column to the other's type, such as "
+    '`a.update("LastTradeSize = (double) LastTradeSize")`:'
 )
 """The paragraph of the index over the shared columns whose type differs between classes."""
 
+_TYPES_HEADING: Final = "Column types"
+"""The heading of the index's table of the Deephaven types the pages name."""
+
+_TYPES_GUIDE: Final = "Each column has one of these Deephaven types:"
+"""The paragraph above the index's table of types."""
+
 _TYPE_NAMES: Final[Mapping[ColumnType, str]] = {
-    ColumnType.DOUBLE: "a 64-bit decimal number",
-    ColumnType.LONG: "a 64-bit whole number",
-    ColumnType.INT: "a 32-bit whole number",
-    ColumnType.BOOLEAN: "true or false",
-    ColumnType.STRING: "text",
-    ColumnType.INSTANT: "an exact moment in time",
-    ColumnType.LONG_ARRAY: "an array of `long`",
-    ColumnType.STRING_ARRAY: "an array of `String`",
+    ColumnType.DOUBLE: "A 64-bit floating-point number, Python's `float`",
+    ColumnType.LONG: "A 64-bit integer",
+    ColumnType.INT: "A 32-bit integer",
+    ColumnType.BOOLEAN: "True or false",
+    ColumnType.STRING: "Text",
+    ColumnType.INSTANT: "An exact moment in time",
+    ColumnType.LONG_ARRAY: "An array of `long`",
+    ColumnType.STRING_ARRAY: "An array of `String`",
 }
-"""What each Deephaven type a page names holds, as the index's type legend says it."""
+"""What each Deephaven type a column can have holds; the index's table of types lists the ones
+its datasets' columns use."""
+
+_INDEX_LINK: Final = f"[Dataset index]({INDEX})"
+"""The link from every dataset page back to the index."""
+
+_CALL_GUIDE: Final = "Call it from a session `m`, made with `dm.MassiveSession()`:"
+"""The sentence that introduces a dataset page's call."""
+
+_WIRE_ANCHOR: Final = "massive-fields"
+"""The anchor of a page's folded table of Massive fields, which a free-text `sort` links."""
 
 _WIRE_GUIDE: Final = (
-    "The Massive field behind each column, per transport (`request` for a value the library "
-    "fills from the request; empty for a column the library computes)."
+    "The Massive field behind each column, by source. An empty cell means the source doesn't "
+    "carry the column, or the library computes it."
 )
 """The paragraph inside the folded wire-field table."""
 
-_PROVENANCE: Final = (
-    "Generated by `{command}` from Massive's documentation as fetched on {fetched}. The "
-    "descriptions and plan tables are Massive's, descriptions corrected where they are clearly "
-    "wrong; the library writes its own for the key columns and the columns it computes."
-)
-"""Every page's footer, formatted with the command and the fetch date."""
+_WIRE_REQUEST: Final = "`request` marks a value the library fills from the request."
+"""The sentence the wire-field guide adds on a page whose table has a `request` cell."""
 
-_LINKS_HEADING: Final = "Massive's documentation of this dataset:"
-"""The line that introduces the list of a dataset's vendor pages."""
+_PROVENANCE: Final = (
+    "The plan tables and most column descriptions are Massive's, from its documentation as "
+    "fetched on {fetched}, with a few corrected where Massive's are wrong. The library writes "
+    "its own descriptions of the columns it names or computes, such as `Symbol` and "
+    "`TimestampInsert`."
+)
+"""Every page's footer, formatted with the fetch date."""
+
+_LINKS_HEADING: Final = "Massive's documentation"
+"""The heading over the list of a dataset's vendor pages."""
+
+_PLANS_HEADING: Final = "Plans"
+"""The heading of a page's plan table."""
 
 _PLANS_GUIDE: Final = (
-    "Which of Massive's plans include this dataset, how recent its data is on each, and how far "
-    "back its history goes, as Massive's pages state them."
+    "How recent the data is on each of Massive's plans, and how far back its history goes, as "
+    "Massive's pages state them."
 )
 """The paragraph under a page's plan heading."""
 
 _POLL_MODES: Final[Mapping[PollMode, str]] = {
-    PollMode.REPLACE: "holds exactly the latest cycle's rows",
-    PollMode.UPSERT: "adds and updates rows, never deletes",
-    PollMode.APPEND: "appends only rows it has not seen",
+    PollMode.REPLACE: "holds only the latest poll's rows",
+    PollMode.UPSERT: "adds and updates rows and never deletes them",
+    PollMode.APPEND: "appends each row it hasn't seen",
 }
 """What each default `poll()` mode does to the table, as a page says it."""
 
 _ARGUMENTS_GUIDE: Final = (
-    "What each argument does for this dataset, and the rule it follows for every dataset that "
-    "takes it."
+    f"A linked argument follows its rule under [shared arguments]({INDEX}#{_SHARED_ANCHOR}) on the "
+    "dataset index."
 )
-"""The paragraph under a page's Arguments heading."""
+"""The paragraph under a page's Arguments heading, when an argument links a shared rule."""
+
+
+@dataclass(frozen=True, slots=True)
+class QueryMethod:
+    """One query method, as the reference shows it.
+
+    The API layer builds one per verb of a dataset (`dataset_calls` in `_dataset_list.py`),
+    from the query class's method, which this layer may not import. Immutable.
+
+    Attributes:
+        name: The verb, such as `"poll"`.
+        call: How a user calls it, with its positional arguments and their defaults, such as
+            `"poll(interval)"` or `"history(start, end=None)"`.
+        summary: What it returns, from the first line of its docstring, such as
+            `"A live table that fetches the query again every `interval`."`.
+    """
+
+    name: str
+    call: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,8 +276,12 @@ class DatasetCall:
             none appears under its own name, which is harmless.
         descriptions: Each argument's line from the method's docstring, in the order of
             `arguments`, such as `"The first ex-dividend date."`; the page's Arguments table
-            shows it beside the argument's shared rule (`ARGUMENT_RULES`). An argument past
-            the end of the tuple has an empty line.
+            shows it beside the argument's name, which links its shared rule
+            (`ARGUMENT_RULES`) on the index. An argument past the end of the tuple has an
+            empty line.
+        methods: Its query methods, in the order of `verbs`; a verb without one is shown by
+            its name alone, such as `blink()`. The index's table of query methods lists every
+            method of every dataset once, in the order they first appear.
     """
 
     signature: str
@@ -219,6 +289,7 @@ class DatasetCall:
     arguments: tuple[str, ...] = ()
     typed: tuple[str, ...] = ()
     descriptions: tuple[str, ...] = ()
+    methods: tuple[QueryMethod, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,31 +359,32 @@ def render(
     Call it to regenerate the pages (the command passes them to `sync`) or to compare them with
     the committed ones (the parity test).
 
-    The index (`INDEX`) has a title, a short guide, a grid with one row per dataset name that
-    two or more of the six asset-class namespaces have (`trades`, `bars`, `snapshots`, ...)
-    and one column per asset class, each mark linking that class's page, the recipe that
-    merges tables of different classes, and one table per namespace listing each dataset's
-    page, summary, and verbs, in declaration order.
+    The index (`INDEX`) has a title, a short guide, a table of every query method
+    (`DatasetCall.methods`) with its call and what it returns, a table of the dataset names
+    that two or more of the six asset-class namespaces have (`trades`, `bars`, `snapshots`,
+    ...), each linking every class's page, one table per namespace listing each dataset's page,
+    summary, and query methods, in declaration order, the rule of every shared argument
+    (`ARGUMENT_RULES`) under its name and anchor, a table of the column types the datasets use,
+    and the shared columns whose type differs between classes.
 
     A dataset's page has its call path as heading (`call_path`), its `DatasetSpec.summary`, its
-    call (`DatasetCall.signature`) in a code block, and a table of facts: its verbs, the
-    transports that serve it, the wire parameters its time range is sent as (when it has
-    one), its default `poll()` mode and keys (for a dataset with `fetch()`), the `sort` values
-    it takes (an enum's values, or any field of the rows for a free-text `sort`), and the
-    `filters` keys it accepts (`filters.filter_keys`). Then comes an Arguments table, when the
-    method takes arguments: each argument, its line from the method's docstring
-    (`DatasetCall.descriptions`), and its shared rule (`ARGUMENT_RULES`). Then come the plan
-    tables of Massive's pages that document its sources (`_dataset_urls`, from
-    `Provenance.plans`): one row per plan, one column per page, each cell the plan's recency
-    and history (or "Not included"),
-    and the summary of a page that lists no plan. Then the columns, one row per column in
-    result order (**Column**, **Deephaven type**, the `ColumnType` value such as `Instant`,
-    **Description**, **Supplied by**, the transports that fill it), and, folded in
-    `<details>`, the Massive field behind each column per
-    transport the dataset reads (`request` for a key filled from the request). Last come the
-    sorted, distinct vendor pages, each a link to the web page (the fetched URL without its
-    `.md`) labeled with the page's title and documentation area (`Provenance.titles`), and a
-    footer with the generator command and the date Massive's documentation was fetched.
+    call (`DatasetCall.signature`) in a code block, and a list of facts: its query methods as
+    calls, linked to the index's table of them, the
+    transports that serve it, and, for a dataset with `fetch()`, its default `poll()` mode and
+    keys. Then comes an Arguments table, when the method takes arguments: each argument, linked
+    to its shared rule on the index when it has one, and its line from the method's docstring
+    (`DatasetCall.descriptions`), followed for `sort` by the fields it takes and for `filters`
+    by the keys it accepts (`filters.filter_keys`). Then come the plan tables of Massive's pages
+    that document its sources (`_dataset_urls`, from `Provenance.plans`): one row per plan, one
+    column per page, each cell the plan's recency and history (or "Not included"), and the
+    summary of a page that lists no plan. Then the columns, one row per column in result order
+    (**Column**, **Type**, the `ColumnType` value such as `Instant`, **Description**, and, for
+    a dataset read from more than one transport, **Read from**), and, folded in `<details>`,
+    the Massive field behind each column per transport the dataset reads (`request` for a key
+    filled from the request). Last come the sorted, distinct vendor pages, each a link to the
+    web page (the fetched URL without its `.md`) labeled with the page's title and
+    documentation area (`Provenance.titles`), and a footer with the date Massive's
+    documentation was fetched.
 
     A `|` in a table cell is escaped with a backslash, no line has trailing whitespace, and
     every page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -344,9 +416,8 @@ def render(
     missing = [spec.name for spec in specs if spec.name not in calls]
     if missing:
         raise KeyError(f"no call given for the datasets {missing}")
-    fetched = provenance.fetched.isoformat()
-    footer = ["---", "", _PROVENANCE.format(command=COMMAND, fetched=fetched)]
-    pages = {INDEX: _index(specs, calls, footer, catalog=catalog)}
+    footer = ["---", "", _PROVENANCE.format(fetched=provenance.fetched.isoformat())]
+    pages = {INDEX: _index(specs, calls, catalog=catalog)}
     for spec in specs:
         pages[page_name(spec)] = _page(
             spec, calls[spec.name], catalog=catalog, provenance=provenance, footer=footer
@@ -357,35 +428,45 @@ def render(
 def _index(
     specs: Sequence[DatasetSpec],
     calls: Mapping[str, DatasetCall],
-    footer: list[str],
     *,
     catalog: Catalog,
 ) -> str:
-    """Render the index page: the grid of asset classes, then every dataset by namespace.
+    """Render the index page.
 
-    Under the title come what a page shows and what each type a page names holds; under the
-    grid, how to merge tables of one kind from two classes, and the columns they share whose
-    type differs between classes (`_type_differences`).
+    Under the title and its guide come the query methods, the datasets several asset classes
+    have, every dataset by namespace, the shared arguments' rules, what each column type the
+    datasets use holds, and the columns whose type differs between classes
+    (`_type_differences`). It has no footer: it holds no plan table or column description.
 
     Args:
         specs: Every dataset, in catalog order.
         calls: Each dataset's call, by name.
-        footer: The footer's lines.
         catalog: The catalog that merges each dataset's schema, for the columns' types.
 
     Returns:
         The page text, ending in one newline.
     """
-    types = "; ".join(f"`{name.value}`, {meaning}" for name, meaning in _TYPE_NAMES.items())
     lines = [
-        "# Dataset reference",
+        "# Dataset index",
         "",
         f"<!-- Generated by `{COMMAND}`; do not edit by hand. -->",
         "",
         _INDEX_GUIDE,
-        "",
-        f"A column's Deephaven type is one of: {types}.",
     ]
+    methods = {m.name: m for spec in specs for m in calls[spec.name].methods}
+    if methods:
+        lines.extend(
+            (
+                "",
+                f'<a id="{_METHODS_ANCHOR}"></a>',
+                "",
+                f"## {_METHODS_HEADING}",
+                "",
+                _METHODS_GUIDE,
+            )
+        )
+        lines.extend(("", _row(["Method", "Returns"]), _row(["---"] * 2)))
+        lines.extend(_row([f"`{m.call}`", m.summary]) for m in methods.values())
     classes = [c.value for c in AssetClass]
     grid: dict[str, dict[str, DatasetSpec]] = {}
     for spec in specs:
@@ -394,23 +475,24 @@ def _index(
             grid.setdefault(rest, {})[namespace] = spec
     grid = {name: by_class for name, by_class in grid.items() if len(by_class) > 1}
     if grid:
-        lines.extend(("", "## By asset class", "", _GRID_GUIDE, ""))
-        lines.append(_row(["Dataset", *(f"`m.{c}`" for c in classes)]))
-        lines.append(_row(["---"] * (len(classes) + 1)))
+        lines.extend(("", f"## {_GRID_HEADING}", ""))
+        lines.append(_row(["Dataset", "Asset classes"]))
+        lines.append(_row(["---"] * 2))
         for name, by_class in grid.items():
-            cells = [f"[✓]({page_name(by_class[c])})" if c in by_class else "" for c in classes]
-            lines.append(_row([f"`{name}`", *cells]))
-        lines.extend(("", _MERGE))
-        differences = _type_differences(grid, catalog)
-        if differences:
-            lines.extend(("", _TYPE_DIFFERENCES, "", *differences))
+            links = (
+                f"[{c.capitalize()}]({page_name(by_class[c])})" for c in classes if c in by_class
+            )
+            lines.append(_row([f"`{name}`", ", ".join(links)]))
     # A dataset named without a dot, such as `snapshots`, is a method of the session rather than
-    # of a namespace, so it goes under a heading that names no namespace.
+    # of a namespace, so it goes under a heading that names no namespace, after every namespace.
     by_heading: dict[str, list[DatasetSpec]] = {}
     for spec in specs:
         namespace, dot, _ = spec.name.partition(".")
-        heading = f"`m.{namespace}`" if dot else _SESSION_HEADING
-        by_heading.setdefault(heading, []).append(spec)
+        heading = _NAMESPACE_HEADINGS.get(namespace, namespace.capitalize())
+        by_heading.setdefault(heading if dot else _SESSION_HEADING, []).append(spec)
+    session = by_heading.pop(_SESSION_HEADING, None)
+    if session:
+        by_heading[_SESSION_HEADING] = session
     for heading, members in by_heading.items():
         lines.extend(("", f"## {heading}", ""))
         lines.append(_row(["Dataset", "Summary", "Methods"]))
@@ -420,16 +502,58 @@ def _index(
                 [
                     f"[`{call_path(spec)}`]({page_name(spec)})",
                     spec.summary,
-                    ", ".join(calls[spec.name].verbs),
+                    _methods(calls[spec.name]),
                 ]
             )
             for spec in members
         )
-    lines.extend(("", *footer))
+    lines.extend(("", f'<a id="{_SHARED_ANCHOR}"></a>', "", f"## {_SHARED_HEADING}", ""))
+    lines.append(_SHARED_GUIDE)
+    for name, rule in ARGUMENT_RULES.items():
+        lines.extend(("", f'<a id="{name}"></a>', "", f"### {name}", "", rule))
+    lines.extend(("", f"## {_TYPES_HEADING}", "", _TYPES_GUIDE, ""))
+    lines.append(_row(["Type", "Holds"]))
+    lines.append(_row(["---"] * 2))
+    used = {column.type for spec in specs for column in catalog.dataset_schema(spec).columns}
+    lines.extend(_row([f"`{t.value}`", meaning]) for t, meaning in _TYPE_NAMES.items() if t in used)
+    differences = _type_differences(grid, catalog)
+    if differences:
+        lines.extend(("", f"## {_DIFFERENCES_HEADING}", "", _TYPE_DIFFERENCES, ""))
+        lines.append(_row(["Dataset", "Column", "Types"]))
+        lines.append(_row(["---"] * 3))
+        lines.extend(_row(cells) for cells in differences)
     return "\n".join(lines) + "\n"
 
 
-def _type_differences(grid: Mapping[str, Mapping[str, DatasetSpec]], catalog: Catalog) -> list[str]:
+def _methods(call: DatasetCall) -> str:
+    """Name a dataset's query methods, as the index's tables of datasets show them.
+
+    Args:
+        call: The dataset's call.
+
+    Returns:
+        Each verb by its name, in the library's order, such as "`fetch()`, `poll()`".
+    """
+    return ", ".join(f"`{verb}()`" for verb in call.verbs)
+
+
+def _method_calls(call: DatasetCall) -> str:
+    """Show a dataset's query methods as calls, as its page's facts list them.
+
+    Args:
+        call: The dataset's call.
+
+    Returns:
+        Each verb's call, in the library's order, such as "`fetch()`, `poll(interval)`"; a
+        verb without a `QueryMethod` is shown by its name alone.
+    """
+    shown = {method.name: method.call for method in call.methods}
+    return ", ".join(f"`{shown.get(verb, f'{verb}()')}`" for verb in call.verbs)
+
+
+def _type_differences(
+    grid: Mapping[str, Mapping[str, DatasetSpec]], catalog: Catalog
+) -> list[list[str]]:
     """List the columns that tables of one kind share with a different type in some classes.
 
     Massive declares some fields with one type for one asset class and another for the next
@@ -441,26 +565,28 @@ def _type_differences(grid: Mapping[str, Mapping[str, DatasetSpec]], catalog: Ca
         catalog: The catalog that merges each dataset's schema.
 
     Returns:
-        One list item per dataset name with such a column, in grid order, such as
-        ``- `movers`: `LastTradeSize` is long for stocks, double for crypto``; empty when
+        One row of cells per such column, in grid order and then column order: the dataset
+        name, the column, and its types by class, such as
+        ``["`movers`", "`LastTradeSize`", "long for stocks, double for crypto"]``; empty when
         every shared column has one type.
     """
-    items = []
+    rows: list[list[str]] = []
     for name, by_class in grid.items():
         types: dict[str, dict[str, list[str]]] = {}
         for asset_class, spec in by_class.items():
             for column in catalog.dataset_schema(spec).columns:
                 by_type = types.setdefault(column.name, {})
                 by_type.setdefault(column.type.value, []).append(asset_class)
-        differing = [
-            f"`{column}` is "
-            + ", ".join(f"{t} for {joined_with_and(found)}" for t, found in by_type.items())
+        rows.extend(
+            [
+                f"`{name}`",
+                f"`{column}`",
+                ", ".join(f"{t} for {joined_with_and(found)}" for t, found in by_type.items()),
+            ]
             for column, by_type in types.items()
             if len(by_type) > 1
-        ]
-        if differing:
-            items.append(f"- `{name}`: " + "; ".join(differing))
-    return items
+        )
+    return rows
 
 
 def _page(
@@ -484,86 +610,107 @@ def _page(
         The page text, ending in one newline.
     """
     lines = [
-        f"# `{call_path(spec)}`",
+        f"# {call_path(spec)}",
         "",
         f"<!-- Generated by `{COMMAND}`; do not edit by hand. -->",
         "",
         spec.summary,
         "",
+        _CALL_GUIDE,
+        "",
         "```python",
         call.signature,
         "```",
         "",
-        "[All datasets](README.md)",
+        *(f"- {fact}" for fact in _facts(spec, call)),
         "",
-        _row(["", ""]),
-        _row(["---", "---"]),
-        *(_row(fact) for fact in _facts(spec, call, catalog)),
-        *_arguments(call),
+        _INDEX_LINK,
+        *_arguments(spec, call, catalog),
     ]
     urls = _dataset_urls(spec, provenance)
     lines.extend(_plans(urls, provenance))
     lines.extend(_columns(spec, catalog))
     if urls:
-        lines.extend(("", _LINKS_HEADING, ""))
+        lines.extend(("", f"## {_LINKS_HEADING}", ""))
         lines.extend(_links(urls, provenance))
     lines.extend(("", *footer))
     return "\n".join(lines) + "\n"
 
 
-def _facts(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[list[str]]:
-    """Return the rows of a dataset page's table of facts.
+def _transports(spec: DatasetSpec) -> list[Transport]:
+    """Return the transports a dataset reads, in the reference's order.
 
     Args:
         spec: The dataset.
-        call: Its call, for its verbs and its arguments' wire names.
-        catalog: The catalog that holds its REST paths.
 
     Returns:
-        `[label, text]` rows: verbs, transports, time range (for a dataset with one), `poll()`
-        (for a dataset with `fetch()`), and `sort` and `filters` (for a method that takes
-        them).
+        Each transport of its sources once, in `TRANSPORT_ORDER`.
     """
     used = {transport for transport, _ in spec.sources}
+    return [transport for transport in TRANSPORT_ORDER if transport in used]
+
+
+def _facts(spec: DatasetSpec, call: DatasetCall) -> list[str]:
+    """Return the items of a dataset page's list of facts.
+
+    Args:
+        spec: The dataset.
+        call: Its call, for its query methods.
+
+    Returns:
+        "Methods: ..." and "Read from: ...", then, for a dataset with `fetch()`, what
+        `poll()` does by default (`_poll_text`) and, for one whose `APPEND` mode also keys by
+        `revision_keys`, what that mode does.
+    """
     facts = [
-        ["Methods", ", ".join(f"`{verb}()`" for verb in call.verbs)],
-        ["Served by", ", ".join(TRANSPORT_LABELS[t] for t in TRANSPORT_ORDER if t in used)],
+        f"[Methods]({INDEX}#{_METHODS_ANCHOR}): " + _method_calls(call),
+        "Read from: " + ", ".join(TRANSPORT_LABELS[t] for t in _transports(spec)),
     ]
-    if spec.time_axis is not None:
-        low, high = spec.time_axis
-        facts.append(["Time range", f"`start` and `end` are sent as `{low}` and `{high}`"])
     if spec.has_fetch:
-        facts.append(["`poll()`", _poll_text(spec)])
-    if "sort" in call.arguments:
-        facts.append(["`sort`", _sort_text(spec, catalog)])
-    if "filters" in call.arguments:
-        keys = filter_keys(catalog, spec, typed=call.typed)
-        facts.append(["`filters`", ", ".join(f"`{key}`" for key in keys) or "none"])
+        facts.append(f"`poll()` by default: {_poll_text(spec)}")
+        if spec.revision_keys:
+            keys = _column_list((*spec.poll_keys, *spec.revision_keys))
+            facts.append(
+                f"`poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, "
+                f"identified by {keys}"
+            )
     return facts
 
 
-def _arguments(call: DatasetCall) -> list[str]:
+def _arguments(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[str]:
     """Render a dataset page's Arguments section: one row per argument of its method.
 
     Args:
-        call: The dataset's call, for its arguments and their docstring lines.
+        spec: The dataset, for the `sort` fields and `filters` keys it takes.
+        call: The dataset's call, for its arguments, their docstring lines, and the wire
+            parameters they set.
+        catalog: The catalog that holds its REST paths.
 
     Returns:
-        The heading, a guide, and a table of **Argument**, **For this dataset** (the
-        docstring's line), and **For every dataset** (the shared rule in `ARGUMENT_RULES`,
-        empty for an argument without one), each line preceded by a blank line; nothing for
-        a method that takes no argument.
+        The heading, a guide that links the index's shared rules when an argument has one,
+        and a table of **Argument** (linked to its rule in `ARGUMENT_RULES` on the index, when
+        it has one) and **Description** (the docstring's line, then, for `sort`, the fields it
+        takes (`_sort_text`) and, for `filters`, the keys it accepts), each line preceded by a
+        blank line; nothing for a method that takes no argument.
     """
     if not call.arguments:
         return []
     described = dict(zip(call.arguments, call.descriptions, strict=False))
-    lines = ["", "## Arguments", "", _ARGUMENTS_GUIDE, ""]
-    lines.append(_row(["Argument", "For this dataset", "For every dataset"]))
-    lines.append(_row(["---"] * 3))
-    lines.extend(
-        _row([f"`{name}`", described.get(name, ""), ARGUMENT_RULES.get(name, "")])
-        for name in call.arguments
-    )
+    lines = ["", "## Arguments", ""]
+    if any(name in ARGUMENT_RULES for name in call.arguments):
+        lines.extend((_ARGUMENTS_GUIDE, ""))
+    lines.append(_row(["Argument", "Description"]))
+    lines.append(_row(["---"] * 2))
+    for name in call.arguments:
+        text = described.get(name, "")
+        added = ""
+        if name == "sort":
+            added = _sort_text(spec, catalog, text)
+        elif name == "filters":
+            keys = filter_keys(catalog, spec, typed=call.typed)
+            added = "Keys: " + (", ".join(f"`{key}`" for key in keys) or "none") + "."
+        shown = f"[`{name}`]({INDEX}#{name})" if name in ARGUMENT_RULES else f"`{name}`"
+        lines.append(_row([shown, " ".join(part for part in (text, added) if part)]))
     return lines
 
 
@@ -574,14 +721,14 @@ def _poll_text(spec: DatasetSpec) -> str:
         spec: A dataset with `fetch()`.
 
     Returns:
-        The mode, then its effect and keys, such as "`dm.PollMode.REPLACE`: holds exactly the
-        latest cycle's rows, keyed by `Symbol`".
+        The mode, then its effect and keys, such as "`dm.PollMode.REPLACE`, which holds only
+        the latest poll's rows, one row per `Symbol`"; an `APPEND` dataset's rows are
+        "identified by" its keys.
     """
-    text = f"`dm.PollMode.{spec.poll_mode.name}`: {_POLL_MODES[spec.poll_mode]}"
+    text = f"`dm.PollMode.{spec.poll_mode.name}`, which {_POLL_MODES[spec.poll_mode]}"
     if spec.poll_keys:
-        text = f"{text}, keyed by {_column_list(spec.poll_keys)}"
-    if spec.revision_keys:
-        text = f"{text}; `mode=dm.PollMode.APPEND` also keys by {_column_list(spec.revision_keys)}"
+        keyed = "identified by" if spec.poll_mode is PollMode.APPEND else "one row per"
+        text = f"{text}, {keyed} {_column_list(spec.poll_keys)}"
     return text
 
 
@@ -597,17 +744,20 @@ def _column_list(names: Sequence[str]) -> str:
     return joined_with_and([f"`{name}`" for name in names])
 
 
-def _sort_text(spec: DatasetSpec, catalog: Catalog) -> str:
-    """Say which `sort` values a dataset takes, from its REST paths' `sort` parameters.
+def _sort_text(spec: DatasetSpec, catalog: Catalog, line: str) -> str:
+    """Say which `sort` fields a dataset takes, from its REST paths' `sort` parameters.
 
     Args:
         spec: The dataset.
         catalog: The catalog that holds its REST paths.
+        line: The `sort` line of the method's docstring; a list of fields that it already
+            quotes in full is not repeated.
 
     Returns:
-        The enum values, in order and distinct, of every path whose `sort` is an enum; "any
-        field of the rows" for a path whose `sort` is free text (comma-separated fields, each
-        with an optional `.asc` or `.desc`); "not taken" when no path has `sort`.
+        "Fields: " and the enum values, in order and distinct, of every path whose `sort` is an
+        enum, and "any REST field under Massive fields", linked to the page's folded table, for
+        a path whose `sort` is free text; "Fields: none." when no path has `sort`; empty when
+        `line` quotes every value of an enum `sort` and no path's `sort` is free text.
     """
     values: list[str] = []
     free = False
@@ -619,17 +769,20 @@ def _sort_text(spec: DatasetSpec, catalog: Catalog) -> str:
             values.extend(v for v in param.values if v not in values)
         else:
             free = True
+    if values and not free and all(f'"{value}"' in line for value in values):
+        return ""
     parts = [", ".join(f"`{value}`" for value in values)] if values else []
     if free:
-        parts.append(
-            "any REST field of the rows (see Massive fields below), or several separated by "
-            "commas, each with an optional `.asc` or `.desc`"
-        )
-    return "; ".join(parts) or "not taken"
+        parts.append(f"any REST field under [Massive fields](#{_WIRE_ANCHOR})")
+    return "Fields: " + (" or ".join(parts) or "none") + "."
 
 
 def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
     """Render the plan tables of a dataset's vendor pages as one table.
+
+    Pages of one title and area, such as one per asset class, share one column. Where they
+    state different terms for one plan, each term names the class its page's URL names, such
+    as "crypto: Updated as needed, 2 years; forex: Updated hourly, 2 years".
 
     Args:
         urls: The dataset's vendor pages.
@@ -642,18 +795,12 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
     if not pages:
         return []
     listed = [(url, page) for url, page in pages if page.plans]
-    lines = [
-        "",
-        "## Plan access",
-        "",
-        _PLANS_GUIDE,
-    ]
+    lines = ["", f"## {_PLANS_HEADING}", "", _PLANS_GUIDE]
     if listed:
         plans = list(dict.fromkeys(terms.plan for _, page in listed for terms in page.plans))
-        # Pages of one title and area, such as one per asset class, share one column.
         titles = [_label(url, provenance) for url, _ in listed]
         columns = {
-            title: [page for (_, page), own in zip(listed, titles, strict=True) if own == title]
+            title: [pair for pair, own in zip(listed, titles, strict=True) if own == title]
             for title in titles
         }
         header = ["Plan", *columns]
@@ -661,19 +808,56 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
         for plan in plans:
             cells = []
             for column in columns.values():
-                terms = [t for page in column for t in page.plans if t.plan == plan]
-                texts = (_plan_cell(t.access, t.recency, t.history) for t in terms)
-                cells.append("; ".join(dict.fromkeys(texts)))
+                texts = {
+                    url: _plan_cell(t.access, t.recency, t.history)
+                    for url, page in column
+                    for t in page.plans
+                    if t.plan == plan
+                }
+                if len(set(texts.values())) > 1:
+                    texts = {url: _named(url, text) for url, text in texts.items()}
+                cells.append("; ".join(dict.fromkeys(texts.values())))
             lines.append(_row([plan, *cells]))
     unlisted = [(url, page) for url, page in pages if not page.plans]
     if unlisted:
         lines.append("")
         lines.extend(
             f"- {_label(url, provenance)}: "
-            + "; ".join(text for text in (page.access, page.recency, page.history) if text)
+            + "".join(
+                f"{text.removesuffix('.')}. "
+                for text in (page.access, page.recency, page.history)
+                if text
+            ).rstrip()
             for url, page in unlisted
         )
     return lines
+
+
+def _named(url: str, text: str) -> str:
+    """Prefix a plan cell's text with the asset class its page's URL names.
+
+    Args:
+        url: The vendor page the text comes from.
+        text: The plan's terms on that page.
+
+    Returns:
+        Such as "crypto: Updated as needed, 2 years"; the text alone when the URL names no
+        class.
+    """
+    named = _class_named(url)
+    return text if named is None else f"{named}: {text}"
+
+
+def _class_named(url: str) -> str | None:
+    """Return the asset class a vendor page's URL names as a path segment, or None.
+
+    Args:
+        url: The page's URL, such as `"https://massive.com/docs/rest/crypto/tickers.md"`.
+
+    Returns:
+        The class's value, such as `"crypto"`; None for a URL that names none.
+    """
+    return next((c.value for c in AssetClass if c.value in _segments(url)), None)
 
 
 def _plan_cell(access: str, recency: str | None, history: str | None) -> str:
@@ -727,7 +911,7 @@ def _links(urls: Sequence[str], provenance: Provenance) -> list[str]:
     labels = [_label(url, provenance) for url in urls]
     items = []
     for url, label in zip(urls, labels, strict=True):
-        named = next((c.value for c in AssetClass if c.value in _segments(url)), None)
+        named = _class_named(url)
         shown = label
         if labels.count(label) > 1 and named is not None:
             shown = f"{provenance.titles[url]} ({_area(url)}, {named})"
@@ -755,21 +939,25 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
         catalog: The catalog that merges its schema.
 
     Returns:
-        The section's lines, starting with a blank line.
+        The section's lines, starting with a blank line. The columns table has a **Read from**
+        column only for a dataset read from more than one transport; the page's list of facts
+        names the one transport of any other.
     """
-    used = {transport for transport, _ in spec.sources}
-    wire = [transport for transport in TRANSPORT_ORDER if transport in used]
+    wire = _transports(spec)
+    several = len(wire) > 1
     schema = catalog.dataset_schema(spec)  # the default session's columns, RawSymbol included
-    header = ["Column", "Deephaven type", "Description", "Supplied by"]
+    header = ["Column", "Type", "Description", *(["Read from"] if several else [])]
     lines = ["", "## Columns", "", _row(header), _row(["---"] * len(header))]
-    lines.extend(_row(_cells(column)) for column in schema.columns)
+    lines.extend(_row(_cells(column, several=several)) for column in schema.columns)
     fields = ["Column", *(_WIRE_HEADINGS[t] for t in wire)]
     lines.extend(
         (
             "",
+            f'<a id="{_WIRE_ANCHOR}"></a>',
+            "",
             "<details><summary>Massive fields</summary>",
             "",
-            _WIRE_GUIDE,
+            _wire_guide(schema.columns, wire),
             "",
             _row(fields),
             _row(["---"] * len(fields)),
@@ -780,17 +968,35 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
     return lines
 
 
-def _cells(column: Column) -> list[str]:
+def _wire_guide(columns: Sequence[Column], wire: Sequence[Transport]) -> str:
+    """Return the paragraph of a page's folded wire-field table.
+
+    Args:
+        columns: The dataset's columns.
+        wire: The transports it reads.
+
+    Returns:
+        `_WIRE_GUIDE`, then `_WIRE_REQUEST` when a cell of the table shows `request`.
+    """
+    filled = any(key is None for c in columns for t in wire for key in c.wire_keys.get(t, ()))
+    return f"{_WIRE_GUIDE} {_WIRE_REQUEST}" if filled else _WIRE_GUIDE
+
+
+def _cells(column: Column, *, several: bool) -> list[str]:
     """Return the cells of one column's row of the columns table, before escaping.
 
     Args:
         column: The schema column.
+        several: Whether the dataset reads more than one transport, so the row names the
+            transports that fill the column.
 
     Returns:
-        The column's name, type, description, and transports.
+        The column's name, type, and description, then its transports when `several`.
     """
-    supplied = ", ".join(TRANSPORT_LABELS[t] for t in column.supplied_by)
-    return [f"`{column.name}`", column.type.value, column.description, supplied]
+    cells = [f"`{column.name}`", column.type.value, column.description]
+    if several:
+        cells.append(", ".join(TRANSPORT_LABELS[t] for t in column.supplied_by))
+    return cells
 
 
 def _wire_cells(column: Column, wire: Sequence[Transport]) -> list[str]:
@@ -870,7 +1076,7 @@ def _segments(url: str) -> list[str]:
     return url.split("/")
 
 
-_HEADING: Final = re.compile(r"^# `(m\.[^`]+)`$")
+_HEADING: Final = re.compile(r"^# (m\.\S+)$")
 """A dataset page's title, which names its dataset's call path."""
 
 _COLUMNS_HEADING: Final = "## Columns"
@@ -884,7 +1090,7 @@ def _columns_by_dataset(pages: Mapping[str, str]) -> dict[str, dict[str, str]]:
     """Read each dataset's columns and their Deephaven types back from rendered pages.
 
     The pages are the only record of what the reference said before a change, so the report
-    reads them back in the format `_page` writes: a `# `m.…`` title, then, under the
+    reads them back in the format `_page` writes: a `# m.…` title, then, under the
     `## Columns` heading and before the next heading or the folded wire-field table, rows that
     start with the column name in backticks and its type. Every other line is ignored, the
     index's included.

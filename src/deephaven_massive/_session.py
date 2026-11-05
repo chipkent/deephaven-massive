@@ -456,8 +456,8 @@ class MassiveSession:
         data is real-time or delayed, and its last error. A connection that another session with the
         same key shares shows in both sessions' tables. The table also has a `REST` row for each
         asset class and kind of data whose feed the session has found. Each call returns a new
-        table, which keeps its final rows after `close()`. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#connections-table.
+        table, which keeps its final rows after `close()`. What to do about each state:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Transport`, `AssetClass`, and `Family`, with these columns:
@@ -490,8 +490,9 @@ class MassiveSession:
 
         Start here when a live table looks wrong. Each row is one stream, `poll()` table, or
         background read. The tables of identical queries share one stream and one row. Each call
-        returns a new table, which keeps its final rows after `close()`. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#streams-columns.
+        returns a new table, which keeps its final rows after `close()`.
+        What to do about each state:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId`, with these columns:
@@ -535,8 +536,8 @@ class MassiveSession:
         and a paid plan has no limit. The limit counts every request your account makes, from every
         key and session. Each row is one subscription, or `other` for the datasets Massive assigns
         to none. Sessions in this server that use the same key share these rows. Each call returns a
-        new table, which keeps its final rows after `close()`. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#connections-table.
+        new table, which keeps its final rows after `close()`. What to do about each state:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `Bucket`, which is `stocks`, `options`, `indices`, `currencies`,
@@ -569,8 +570,8 @@ class MassiveSession:
         watchlist and add it back.
 
         The rows stay for the session's life. Each call returns a new table, which keeps its final
-        rows after `close()`. How to read it:
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#symbol-reads.
+        rows after `close()`. What to do about each state:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics.
 
         Returns:
             A live table keyed by `StreamId` and `Symbol`, with these columns:

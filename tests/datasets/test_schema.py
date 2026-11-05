@@ -42,7 +42,7 @@ def test_column_types_map_to_arrow() -> None:
         "long",
         "int",
         "String",
-        "boolean",
+        "Boolean",
         "long[]",
         "String[]",
     }
@@ -232,8 +232,8 @@ def test_derived_columns_follow_the_leading_keys() -> None:
     kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
     assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
     assert kept.columns[2].description.endswith(
-        "Present unless the session's `unreadable_symbols` is `dm.OnError.RAISE`, which fails on "
-        "such a row instead."
+        "When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the "
+        "table instead, and the column is absent."
     )
     assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
 
