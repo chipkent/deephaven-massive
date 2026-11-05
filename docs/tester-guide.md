@@ -209,7 +209,7 @@ then `no example failed`, or `failed:` and the examples' names. Each example's o
 
 | Verdict | What you do |
 |---|---|
-| `passed` | Nothing. On the free plan, a stream example also passes when Massive refuses it after the example returns; its row in `streams` shows the refusal. |
+| `passed` | Nothing |
 | `refused by your plan` | Nothing, unless your plan includes that example's data |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
@@ -237,19 +237,22 @@ Docker:
 mkdir -p ~/massive
 docker run --rm --name massive-test -p 10000:10000 \
   -e MASSIVE_API_KEY -e MASSIVE_S3_ACCESS_KEY_ID -e MASSIVE_S3_SECRET_ACCESS_KEY \
-  -e MASSIVE_TEST_FOLDER=/massive-test -v "$HOME/massive-test:/massive-test" \
-  -v "$HOME/massive:/root/massive" \
+  -v "$HOME/massive-test:/root/massive-test" -v "$HOME/massive:/root/massive" \
   -e START_OPTS="-Xmx4g -Dauthentication.psk=massive-test" \
   deephaven-massive-test 2>&1 | tee ~/massive-test/server.log
 ```
 
 The server prints `Server started on port 10000`. Open
-<http://localhost:10000/?psk=massive-test> in your browser, which signs you in. The examples
-write their files to `~/massive-test`, and the README's settings file in `~/massive` reaches
-the server.
+<http://localhost:10000/?psk=massive-test> in your browser, which signs you in. The server runs
+as `root`, so the two `-v` options give it your `~/massive-test` and `~/massive` folders at the
+same `~` paths. To check, run this in a second terminal, and you should see `checklist.md`:
 
-Keep this terminal open while you test, and press Control-C there to stop the server. If the server fails to start, find its message in
-[Troubleshooting](troubleshooting.md#setup-messages).
+```bash
+docker exec massive-test ls /root/massive-test
+```
+
+Keep this terminal open while you test, and press Control-C there to stop the server. If the
+server fails to start, find its message in [Troubleshooting](troubleshooting.md#setup-messages).
 
 <a id="run-the-tutorial"></a>
 
@@ -289,10 +292,7 @@ import os
 
 import deephaven_massive as dm
 
-# tester.py and the Docker setup name the test folder in MASSIVE_TEST_FOLDER.
-folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-os.makedirs(folder, exist_ok=True)
-dm.enable_debug_logging(os.path.join(folder, "massive-debug.log"))
+dm.enable_debug_logging(os.path.expanduser("~/massive-test/massive-debug.log"))
 
 m = dm.MassiveSession()
 print(dm.__version__)
@@ -432,7 +432,7 @@ diagnostics tables:
 | Panel | What you should see |
 |---|---|
 | `rate_limits` | A row per subscription, plus `other` |
-| `streams` | A row for `live_status`, with `State` `RUNNING` |
+| `streams` | A row for `live_status`, with `State` `RUNNING`: the table is updating |
 | `connections` | No streaming connection: a poll doesn't stream |
 
 #### 7. Exceed Basic's request limit
@@ -454,7 +454,8 @@ m.release(paced)
 ```
 
 Watch `rate_limits` and `paced` for two minutes. On Basic, once Massive refuses a request, the
-`stocks` row of `rate_limits` shows `LimitSource` `LEARNED` and `RequestsPerMinute` 5, and reads
+`stocks` row of `rate_limits` shows `RequestsPerMinute` 5 and `LimitSource` `LEARNED`, which
+means the library learned the limit from Massive's refusal. The row reads
 `PACED` while requests wait for a free slot. `paced` gets its six rows either way. On a paid
 Stocks plan, nothing is refused.
 
@@ -479,8 +480,8 @@ year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago, wait=F
 streams = m.streams()
 ```
 
-You should see an empty `year` panel. Its row in `streams` reads `LOADING`, then `DONE`, and
-the rows arrive together.
+You should see an empty `year` panel. Its row in `streams` reads `LOADING` while the read runs,
+then `DONE`, and the rows arrive together.
 
 #### 9. Compare two stocks' returns over a year
 
@@ -574,7 +575,7 @@ On the free plan, you should see three lines:
 | Line | What it says |
 |---|---|
 | The latest trade | `EntitlementError`, quoting Massive's refusal |
-| Live minute bars | That they opened. Then `streams` and `connections` show Massive's answer. |
+| Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` reads `FAILED`, with an `Error` that quotes Massive's refusal of `AM.AAPL`. |
 | Bars from 2015 | `EntitlementError`: your plan's history doesn't reach 2015 |
 
 A line says `no error` on a paid plan that includes that data. An `EntitlementError` that names
@@ -582,14 +583,8 @@ A line says `no error` on a paid plan that includes that data. An `EntitlementEr
 setting.
 
 For each message, including the `Error` in `streams`, note whether it told you what went wrong
-and what to do. Note any that blamed your key when the cause was your plan. Also note which of
-these the live minute bars show on the free plan:
-
-| What Massive did | What you see |
-|---|---|
-| Rejected the key | The `stocks.bars` row of `streams` turns `FAILED`, and its `Error` says Massive rejected the API key. |
-| Refused the subscription | The row turns `FAILED`, and its `Error` quotes a refusal of `AM.AAPL`. |
-| Closed the connection | `connections` shows the connection reconnecting again and again. |
+and what to do. Note any that blamed your key when the cause was your plan. If the live minute
+bars show anything else, such as `connections` reconnecting again and again, report it.
 
 #### 11. Convert symbols from other sources
 
@@ -629,8 +624,7 @@ Count the debug log's lines, its warnings and errors, and the copies of your key
 ```python
 import os
 
-folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-with open(os.path.join(folder, "massive-debug.log"), encoding="utf-8") as log_file:
+with open(os.path.expanduser("~/massive-test/massive-debug.log"), encoding="utf-8") as log_file:
     text = log_file.read()
 lines = text.splitlines()
 print(len(lines), "lines")
@@ -869,8 +863,8 @@ product_watchlist.add(new_table({"ProductCode": ["NQ"]}))
    row joins `watched_bars` at the next poll.
 2. Delete `TSLA`. TSLA's dividends leave `watched_dividends` at once, and its row leaves
    `watched_bars` at the next poll.
-3. In `reads`, the rows of `watched_dividends` show `DONE` for JPM, XOM, and AAPL, and
-   `REMOVED` for TSLA.
+3. In `reads`, the rows of `watched_dividends` show `DONE`, read, for JPM, XOM, and AAPL, and
+   `REMOVED` for TSLA, which left the watchlist.
 4. In `product_watchlist`, add `NQ`. Up to 10 NQ contracts join `watched_contracts` together.
 5. Delete `NQ`. Every NQ contract leaves `watched_contracts` at once, and the ES contracts stay.
 
@@ -950,9 +944,9 @@ followed = m.stocks.bars(watchlist, dm.Timespan.DAY).history(month_ago)
 You should see `followed` with about 20 bars each of AAPL and MSFT, and `reads` with a `DONE`
 row for each. Then edit `watchlist`:
 
-1. Add `NVDA`. NVDA's bars join `followed` in one update. In `reads`, NVDA goes from `QUEUED`
-   to `LOADING` to `DONE`, and its `Rows` equals its number of bars in `followed`.
-2. Delete `NVDA`. Its bars leave `followed` in one update, and its row in `reads` reads
+1. Add `NVDA`. NVDA's bars join `followed` in one update. In `reads`, NVDA goes from `QUEUED`,
+   waiting, to `LOADING`, being read, to `DONE`, and its `Rows` equals its bars in `followed`.
+2. Delete `NVDA`. Its bars leave `followed` in one update, and its row in `reads` shows
    `REMOVED`.
 3. Add `NVDA` again. It's read again, with a newer `ReadAt` in `reads`.
 
@@ -968,8 +962,7 @@ import os
 
 from deephaven.pandas import to_pandas
 
-folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-diagnostics = os.path.join(folder, "diagnostics")
+diagnostics = os.path.expanduser("~/massive-test/diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {
     "streams": m.streams(),

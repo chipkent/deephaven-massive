@@ -2,8 +2,7 @@ import os
 
 from deephaven.pandas import to_pandas
 
-folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-diagnostics = os.path.join(folder, "diagnostics")
+diagnostics = os.path.expanduser("~/massive-test/diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {
     "streams": m.streams(),

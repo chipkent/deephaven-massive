@@ -155,7 +155,6 @@ def test_examples_runs_the_folder_and_reports_the_failures(tmp_path: Path) -> No
     )
     assert status == 1
     assert started == [True]
-    assert environ[cli.FOLDER_VARIABLE] == str(folder.resolve())
     assert lines[-2:] == [f"saved to {folder.resolve() / 'examples-output'}", "failed: 02_b.py"]
     assert (folder / "examples-output" / "01_a.txt").read_text() == "ok\n"
 

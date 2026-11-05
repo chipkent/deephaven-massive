@@ -227,7 +227,6 @@ def test_every_example_runs_against_the_fake_market(
     monkeypatch: pytest.MonkeyPatch,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
-    monkeypatch.setenv("MASSIVE_TEST_FOLDER", str(tmp_path))
     # The free plan's snapshot is refused, so the live minute bars open on the real-time host
     # and Massive's live connection refuses their topic.
     _clients_reach(fake_ws_server, monkeypatch)
@@ -235,10 +234,14 @@ def test_every_example_runs_against_the_fake_market(
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
-        files, tmp_path / "out", secrets=SecretFilter((KEY,)), echo=lines.append
+        files, tmp_path / "out", tmp_path, secrets=SecretFilter((KEY,)), echo=lines.append
     )
-    failures = [examples.summary_line(o) for o in outcomes if o.status != examples.PASSED]
-    assert failures == []
+    # Example 10's live minute bars return before Massive refuses them, and the run reads the
+    # refusal from their stream.
+    verdicts = {o.name: o.status for o in outcomes if o.status != examples.PASSED}
+    assert verdicts == {"10_plan_refusals.py": examples.REFUSED}
+    refusal = next(o for o in outcomes if o.status == examples.REFUSED)
+    assert "AM.AAPL" in refusal.error
     assert [o.name for o in outcomes] == [p.name for p in files]
     out = tmp_path / "out"
     printed = {p.stem: (out / f"{p.stem}.txt").read_text() for p in files}
@@ -424,17 +427,39 @@ def test_settings_text_fits_the_keys_plans() -> None:
     assert examples.settings_text({}) == "delayed_subscriptions: []\n"
 
 
-def test_fitted_runs_a_copy_only_when_the_example_reads_the_settings_file(tmp_path: Path) -> None:
+def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:
     free = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
     reads = f'm = dm.MassiveSession(dm.MassiveConfig.from_file("{examples.SETTINGS_PATH}"))\n'
     paid = _write(tmp_path, "02_b.py", f"# paid\n{reads}")
-    settings = tmp_path / "settings.yaml"
-    assert examples.fitted(free, settings, tmp_path / "fitted") == free
-    copy = examples.fitted(paid, settings, tmp_path / "fitted")
-    assert copy == tmp_path / "fitted" / "02_b.py"
+    logs = _write(tmp_path, "03_c.py", f'log = "{examples.TEST_FOLDER}/massive-debug.log"\n')
+    settings, folder, copies = tmp_path / "settings.yaml", tmp_path / "t", tmp_path / "fitted"
+    assert examples.fitted(free, settings=settings, test_folder=folder, folder=copies) == free
+    copy = examples.fitted(paid, settings=settings, test_folder=folder, folder=copies)
+    assert copy == copies / "02_b.py"
     assert copy.read_text(encoding="utf-8") == (
         f'# paid\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
     )
+    copy = examples.fitted(logs, settings=settings, test_folder=folder, folder=copies)
+    assert copy.read_text(encoding="utf-8") == f'log = "{folder}/massive-debug.log"\n'
+
+
+def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() -> None:
+    passed = examples.Outcome("17_a.py", examples.PASSED, 1.0, "")
+    refusal = f"the WebSocket server x {examples.STREAM_REFUSAL} to AM.AAPL; Massive said: no"
+    assert examples.stream_verdict(passed, []) is passed
+    refused = examples.stream_verdict(passed, [refusal])
+    assert (refused.status, refused.error) == (examples.REFUSED, f"a stream failed: {refusal}")
+    failed = examples.stream_verdict(passed, [refusal, "the connection closed"])
+    assert failed.status == examples.FAILED
+    already = examples.Outcome("10_b.py", examples.FAILED, 1.0, "RuntimeError: x")
+    assert examples.stream_verdict(already, [refusal]) is already
+
+
+def test_failed_streams_lists_none_once_the_session_is_closed(market: MarketServer) -> None:
+    session = dm.MassiveSession()
+    assert examples.failed_streams(session) == []
+    session.close()
+    assert examples.failed_streams(session) == []
 
 
 def _write(folder: Path, name: str, code: str) -> Path:
@@ -506,6 +531,7 @@ def test_run_examples_writes_errors_tables_and_a_summary_without_the_secret(
     outcomes = examples.run_examples(
         examples.example_files(folder),
         tmp_path / "out",
+        tmp_path,
         secrets=SecretFilter(("K-1",)),
         echo=lines.append,
         wait=lambda _namespace: False,
@@ -536,7 +562,13 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
     _write(folder, "02_b.py", "pass\n")
     files = examples.example_files(folder)
     examples.run_examples(
-        files, tmp_path / "out", secrets=SecretFilter(()), echo=print, wait=remember
+        files,
+        tmp_path / "out",
+        tmp_path,
+        secrets=SecretFilter(()),
+        echo=print,
+        wait=remember,
+        settle=lambda: None,
     )
     assert len(seen) == 1  # seen before the second example, after the first made it
     core = seen[0]()
@@ -636,6 +668,7 @@ def test_run_examples_names_a_table_it_could_not_save(
     examples.run_examples(
         examples.example_files(folder),
         tmp_path / "out",
+        tmp_path,
         secrets=SecretFilter(()),
         echo=lines.append,
         wait=lambda _namespace: True,

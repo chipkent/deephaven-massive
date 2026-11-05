@@ -10,10 +10,10 @@
   or the Docker image `NAME`. Exit 0 when no item failed, else 1.
 - `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
   `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
-  `DIR/examples-output/`. The examples write their debug log and files to `DIR` too, through
-  the `MASSIVE_TEST_FOLDER` variable this command sets. It first asks Massive which plan the
-  key holds per subscription, and writes the settings file the paid examples read for those
-  plans. Exit 0 when no example failed (a refusal by the key's plan is not a failure), else 1.
+  `DIR/examples-output/`. The examples write their debug log and diagnostics to `DIR` too. It
+  first asks Massive which plan the key holds per subscription, and writes the settings file
+  the paid examples read for those plans. Exit 0 when no example failed (a refusal by the
+  key's plan is not a failure), else 1.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -48,9 +48,6 @@ if TYPE_CHECKING:
 
 REFUSED: Final = 2
 """The exit status when the API key is not set."""
-
-FOLDER_VARIABLE: Final = "MASSIVE_TEST_FOLDER"
-"""The variable that tells the examples where the tester's folder is."""
 
 EXAMPLES_FOLDER: Final = Path("docs") / "tester-examples"
 """The examples, relative to the repository root."""
@@ -161,7 +158,7 @@ def main(
         argv: The arguments, without the program's name.
         root: The repository root.
         start_server: Starts an embedded Deephaven server; only `examples` calls it.
-        environ: The environment; `examples` sets `MASSIVE_TEST_FOLDER` in it.
+        environ: The environment.
         stdout: Where the command prints.
         check: Checks both setups and the key (`check_both`).
         describe: Describes the machine for a bug report (`describe_machine`).
@@ -200,7 +197,6 @@ def main(
         (folder / CHECK_OUTPUT).write_text(text, encoding="utf-8")
         return 0 if ready(items) else 1
     if arguments.command == "examples":
-        environ[FOLDER_VARIABLE] = str(folder)
         start_server()
         examples = importlib.import_module("tests._live.tester.examples")
         tiers = plans(environ)
@@ -211,6 +207,7 @@ def main(
         outcomes = examples.run_examples(
             examples.example_files(root / EXAMPLES_FOLDER),
             folder / "examples-output",
+            folder,
             secrets=secrets,
             echo=echo,
             tiers=tiers,

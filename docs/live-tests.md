@@ -14,7 +14,7 @@ checkout's root. Each pytest marker selects one set of tests:
 
 | Marker | What it runs |
 |---|---|
-| `integration` | The evidence tests, most of which answer an open question |
+| `integration` | The question tests: each records or checks Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items.md)) |
 | `integration_smoke` | Every dataset and method once, checked automatically |
 | `integration_rate_limits` | The three rate-limit tests, which go over Basic's 5 requests a minute on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |
@@ -41,13 +41,14 @@ optional:
 The connection-limit tests run last and alone, because they disturb the key's connections:
 
 1. Stop every other program that uses the key.
-2. Run the evidence, smoke, and rate-limit tests. A weekday run in market hours covers more,
-   because a stream test checks rows only while its market is open. The rate-limit tests run
-   only while one asset class is still on Basic:
+2. Run the question, smoke, and rate-limit tests:
 
    ```bash
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
+
+   A weekday run in market hours covers more, because a stream test checks rows only while its
+   market is open. The rate-limit tests run only while one asset class is still on Basic.
 
 3. Run the connection-limit tests, one command after the other:
 
@@ -75,13 +76,14 @@ hour. To probe again at once, after an upgrade, delete the file.
 
 Declare your plans in `MASSIVE_LIVE_PLANS` when the probe can't tell them:
 
-| Case | What you declare |
+| Case | Declare it as |
 |---|---|
-| The run stops and asks you to | Every paid plan you hold. Between 03:30 and 04:30 New York time, you can wait until 04:30 instead. |
-| Stocks or Options Business with the trades and quotes expansion | Every paid plan you hold, with `business_expansion` for that asset class |
-| Indices Business | Every paid plan you hold, with `indices=business` |
-| Futures Business | Every paid plan you hold, with `futures=business` |
+| The run stops and asks you to | Your plans. Between 03:30 and 04:30 New York time, you can wait until 04:30 instead. |
+| Stocks or Options Business + Expansion | `business_expansion` for that asset class |
+| Indices Business | `indices=business` |
+| Futures Business | `futures=business` |
 
+A declaration lists every paid plan you hold, not only the one the probe misses.
 List each paid asset class as `<class>=<plan>`, separated by commas, and add `s3` when both S3
 keys reach the flat files. An asset class you leave out is on Basic. The plan names are:
 
@@ -92,9 +94,9 @@ keys reach the flat files. An asset class you leave out is on Basic. The plan na
 | `indices` | `starter`, `advanced`, `business` |
 | `currencies` | `starter`, `business` |
 
-Add the line to your shell's startup file, beside your keys, and open a new terminal. Remove it
-when your plans change, because it replaces the probe. This one
-declares Starter on Stocks, Options, and Currencies, and flat files:
+This line declares Starter on Stocks, Options, and Currencies, and flat files. Add yours to your
+shell's startup file, beside your keys, and open a new terminal. Remove it when your plans
+change, because it replaces the probe:
 
 ```bash
 export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
@@ -124,10 +126,10 @@ A skip prints its reason, and needs nothing from you. A test skips when:
 - the day it asks for is older than your plan keeps
 - the market isn't open, or the test can't tell its answer from a network drop
 
-A pass of a `settles` test still leaves evidence to read. The summary lists each question whose
-tests all passed, and none of which asserts its answer, under `ran, evidence to read`. A `verifies` test asserts its answer instead, so it fails the day
-Massive changes it. Both name the
-[open questions](dev/verification-items.md) they answer by number.
+A pass can still leave evidence to read. A `settles` test records Massive's answer and passes
+whatever it is, and the summary lists its question under `ran, evidence to read` once the
+question's tests all pass. A `verifies` test asserts the answer the library assumes. Both name
+their questions by number.
 
 <a id="read-the-end-of-a-run"></a>
 
@@ -174,7 +176,7 @@ one, the same section says where. Don't share that log, and open an issue that n
 ## Read five checks by hand
 
 Read each one's evidence. Only the index minute-file check fails on a wrong answer, when a file
-row falls outside its New York day; the others pass whatever Massive answers:
+row falls outside its New York day. The others pass whatever Massive answers:
 
 | Check | Plans | What to read | Open an issue when |
 |---|---|---|---|
@@ -217,6 +219,7 @@ contradicts:
 | [README 10, change since close](../README.md#change-since-close) | Stocks Starter or higher | Whether each row shows `PrevClose` before the stock's first minute bar, then `Close` and `ChangePct` with each bar |
 | [README 12, backfill](../README.md#backfill-then-live) | Stocks Starter or higher | Whether `spy` has one row per traded minute of the day so far, with no gap or repeat where history meets the stream |
 | [README 4 and 13, charts](../README.md#chart-closes) | The plan each names | Whether Example 4's chart draws Nvidia's closes for the year, and the dashboard opens with both panels and its chart grows each minute |
+| [Tester example 10](tester-guide.md#run-by-hand), the live minute bars | Stocks Basic | Whether the `stocks.bars` row of `streams` reads `FAILED` with Massive's refusal of `AM.AAPL`, as the tester guide expects, or the connection reconnects instead |
 | [`GreeksGamma`](datasets/options.snapshots.md) of `m.options.snapshots` | Options Starter or higher, with `delayed_subscriptions` listing options on Starter or Developer | For one contract, enter the underlying's price, the strike, the days to expiration, and `ImpliedVolatility` into a standard Black-Scholes calculator, which gives gamma per $1 move of the underlying. Record whether `GreeksGamma` matches that, or a hundredth of it, per $0.01 move as Massive's description says. |
 
 <a id="live-run-program"></a>
@@ -227,11 +230,13 @@ contradicts:
 
 Testers run the live tests through `scripts/live_run.py`, as the
 [tester guide](tester-guide.md#live-run) shows, and send its `live-results-<date>.zip` on their
-results issue. A comment on that issue can ask them to pack the results again, to rerun a group
+results issue. Open the zip's `REPORT.md` first. It gives the tester's environment, the plans
+probed over time, a table of each group's checks, and the open questions still unverified.
+`checks.csv` has one line per check. A comment on that issue can ask them to pack the results again, to rerun a group
 as [Reruns](#live-run-reruns) shows, or to run the [upgrade check](tester-guide.md#upgrade-check).
 
-The program runs the tests in groups, and the zip holds a folder for each attempt of a group,
-`<group>/<date>-<n>/`, with its debug log:
+Each attempt of a group has a folder in the zip, `<group>/<date>-<n>/`, with its debug log. The
+groups run these tests:
 
 | Group | What it runs |
 |---|---|

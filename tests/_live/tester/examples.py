@@ -23,9 +23,12 @@ For each example it writes, under the output folder:
 Every text it writes passes through the secret filter (`SecretFilter.clean`). An example
 ends `passed`; `refused by your plan` when it raised `EntitlementError`, a refusal by
 Massive because of the key's plans, which is expected on a free key; or `failed` with any
-other error, which is a finding to report. Every table the examples make belongs to one
-liveness scope; at the end the runner closes every session the examples left open, forgets
-their variables, and releases that scope, so nothing they started outlives the run.
+other error, which is a finding to report. A stream that Massive refuses fails after its
+example returns, so after the last example the run waits `REFUSAL_WAIT` seconds and gives a
+passed example the verdict of its sessions' failed streams (`stream_verdict`). Every table the
+examples make belongs to one liveness scope; at the end the runner closes every session the
+examples opened, forgets their variables, and releases that scope, so nothing they started
+outlives the run.
 
 Most examples open their session with `dm.MassiveSession()`, as the README's do. The paid
 Stocks examples load the settings file the README's settings example saves, `SETTINGS_PATH`;
@@ -86,8 +89,19 @@ minutes of rate-limit pauses, and some time to read."""
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""
 
+REFUSAL_WAIT: Final = 15.0
+"""Seconds the run waits after the last example for Massive's answers to the examples'
+streams: a refused subscription fails its stream seconds after the example returned."""
+
+STREAM_REFUSAL: Final = "refused the subscription"
+"""The words of a stream's `Error` when Massive's WebSocket server refused its subscription,
+a refusal by the key's plans; the connection writes them (`ws_connection`, `_refused`)."""
+
 SETTINGS_PATH: Final = "~/massive/settings.yaml"
 """The settings file the paid examples read, where the README's settings example saves it."""
+
+TEST_FOLDER: Final = "~/massive-test"
+"""The tester's folder, where the examples write their debug log and the diagnostics."""
 
 DELAYED_TIERS: Final = ("starter", "developer")
 """The plans that stream delayed data, except for currencies, which are real-time on every
@@ -113,24 +127,26 @@ def settings_text(tiers: Mapping[str, str]) -> str:
     return f"delayed_subscriptions: [{', '.join(delayed)}]\n"
 
 
-def fitted(path: Path, settings: Path, folder: Path) -> Path:
-    """Return the example to run: the file itself, or a copy that reads the run's settings.
+def fitted(path: Path, *, settings: Path, test_folder: Path, folder: Path) -> Path:
+    """Return the example to run: the file itself, or a copy that uses the run's own paths.
 
     Args:
         path: The example's file.
         settings: The settings file the run wrote (`settings_text`).
+        test_folder: The tester's folder of this run, which may not be `TEST_FOLDER`.
         folder: Where a changed copy goes, created if missing.
 
     Returns:
-        `path` when it doesn't read `SETTINGS_PATH`; otherwise a copy in `folder` that reads
-        `settings` instead.
+        `path` when it names neither `SETTINGS_PATH` nor `TEST_FOLDER`; otherwise a copy in
+        `folder` that names `settings` and `test_folder` instead.
     """
     code = path.read_text(encoding="utf-8")
-    if SETTINGS_PATH not in code:
+    if SETTINGS_PATH not in code and TEST_FOLDER not in code:
         return path
     folder.mkdir(parents=True, exist_ok=True)
     copy = folder / path.name
-    copy.write_text(code.replace(SETTINGS_PATH, str(settings)), encoding="utf-8")
+    code = code.replace(SETTINGS_PATH, str(settings)).replace(TEST_FOLDER, str(test_folder))
+    copy.write_text(code, encoding="utf-8")
     return copy
 
 
@@ -241,6 +257,41 @@ def loading(session: dm.MassiveSession) -> int:
     except dm.MassiveError:  # a closed session has no downloads left
         return 0
     return int((frame["State"] == "LOADING").sum())
+
+
+def failed_streams(session: dm.MassiveSession) -> list[str]:
+    """Return the `Error` of each of a session's streams that failed.
+
+    Args:
+        session: The session.
+
+    Returns:
+        The `Error` of each row of `streams()` whose `State` is `FAILED`; none for a closed
+        session, whose streams were stopped, not failed.
+    """
+    try:
+        frame = to_pandas(session.streams().snapshot())
+    except dm.MassiveError:  # a closed session's streams can no longer be read
+        return []
+    return [str(error) for error in frame.loc[frame["State"] == "FAILED", "Error"]]
+
+
+def stream_verdict(outcome: Outcome, errors: list[str]) -> Outcome:
+    """Give a passed example the verdict of the streams its sessions failed after it returned.
+
+    Args:
+        outcome: The example's outcome when it returned.
+        errors: The `Error` of each failed stream of the sessions it opened (`failed_streams`).
+
+    Returns:
+        The outcome as it was when it isn't `PASSED` or no stream failed; `REFUSED` when Massive
+        refused every failed stream's subscription (`STREAM_REFUSAL`); otherwise `FAILED`. The
+        new outcome's error names the first failed stream's `Error`.
+    """
+    if outcome.status != PASSED or not errors:
+        return outcome
+    status = REFUSED if all(STREAM_REFUSAL in error for error in errors) else FAILED
+    return Outcome(outcome.name, status, outcome.seconds, f"a stream failed: {errors[0]}")
 
 
 def wait_for_downloads(
@@ -372,18 +423,22 @@ def console_scope(namespace: dict[str, Any]) -> Iterator[None]:
 def run_examples(
     files: list[Path],
     out: Path,
+    test_folder: Path,
     *,
     secrets: SecretFilter,
     echo: Callable[[str], None],
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
     tiers: Mapping[str, str] = MappingProxyType({}),
+    settle: Callable[[], None] = lambda: time.sleep(REFUSAL_WAIT),
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
 
     Args:
         files: The example files, in order (`example_files`).
         out: The output folder, created if missing.
+        test_folder: The tester's folder, where the examples write their debug log and the
+            diagnostics in place of `TEST_FOLDER` (`fitted`).
         secrets: The secrets to keep out of every file written and line echoed.
         echo: Prints one line of progress.
         lock: Makes the lock every console command holds.
@@ -391,26 +446,32 @@ def run_examples(
             gave up.
         tiers: Each subscription's plan, for the settings file `out/settings.yaml`
             (`settings_text`); empty, the default, writes the free plan's file. An example
-            that reads `SETTINGS_PATH` runs from a copy under `out/fitted/` that reads it
+            that names `SETTINGS_PATH` or `TEST_FOLDER` runs from a copy under `out/fitted/`
             (`fitted`).
+        settle: Waits, after the last example, for Massive's answers to the streams; called
+            only when an example opened a session.
 
     Returns:
-        Each example's outcome.
+        Each example's outcome, with the verdict of the streams its sessions failed
+        (`stream_verdict`).
     """
     out.mkdir(parents=True, exist_ok=True)
     settings = out / "settings.yaml"
     settings.write_text(settings_text(tiers), encoding="utf-8")
     namespace: dict[str, Any] = {}
     outcomes: list[Outcome] = []
+    opened: dict[int, tuple[dm.MassiveSession, str]] = {}
     with console_scope(namespace):
         for path in files:
             if not wait(namespace):
                 echo("a background download is still running; going on without it")
             before = dict(tables_of(namespace))
             echo(f"{path.name}: running")
-            runs = fitted(path, settings, out / "fitted")
+            runs = fitted(path, settings=settings, test_folder=test_folder, folder=out / "fitted")
             outcome, printed = run_example(runs, namespace, lock=lock)
             outcomes.append(outcome)
+            for session in sessions(namespace):
+                opened.setdefault(id(session), (session, path.name))
             made = {n: t for n, t in tables_of(namespace).items() if before.get(n) is not t}
             unsaved = save_tables(made, out / "tables" / path.stem, secrets)
             text = printed + (f"\n{outcome.error}" if outcome.error else "")
@@ -419,6 +480,21 @@ def run_examples(
             echo(secrets.clean(summary_line(outcome)))
             for line in unsaved:
                 echo(secrets.clean(f"  table not saved: {line}"))
+        if opened:
+            settle()
+        errors: dict[str, list[str]] = {}
+        for session, name in opened.values():
+            errors.setdefault(name, []).extend(failed_streams(session))
+        for index, outcome in enumerate(outcomes):
+            verdict = stream_verdict(outcome, errors.get(outcome.name, []))
+            if verdict is not outcome:
+                outcomes[index] = verdict
+                echo(secrets.clean(summary_line(verdict)))
+                stem = verdict.name.removesuffix(".py")
+                with (out / f"{stem}.txt").open("a", encoding="utf-8") as file:
+                    file.write(secrets.clean(f"\n{verdict.error}"))
+        # Every session an example opened is closed on the way out, the replaced ones too.
+        namespace.update({f"_opened_{i}": s for i, (s, _) in enumerate(opened.values())})
     lines = [summary_line(o) for o in outcomes]
     (out / "summary.txt").write_text(secrets.clean("\n".join(lines)) + "\n", encoding="utf-8")
     return outcomes
