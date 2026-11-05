@@ -39,9 +39,11 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- A live table works as a watchlist. Symbols you add are read, and symbols you "
             "delete stop being read.\n"
             "- A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.\n"
-            "- In text or a list, a misspelled ticker such as `aapl` raises `ValueError`. In a "
-            "table, its row is skipped and logged. `dm.canonical_symbol` converts other "
-            "spellings, such as Yahoo's, to Massive's."
+            "- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, "
+            "unless the dataset's page says it takes another source's tickers. In a table, that "
+            "row is skipped and logged.\n"
+            "- To convert another source's tickers, such as Yahoo's `BRK-B`, use "
+            "`dm.canonical_symbol`."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
@@ -57,14 +59,13 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "dates only."
         ),
         "end": (
-            "The last day of the range, which is included, or the instant it stops, which is "
-            "excluded. Give it in the same form as `start`. Leave it out for no end. Rows dated "
+            "The last day of the range, included, or the instant the range stops, excluded. Give "
+            "it in the same form as `start`. Leave it out for no end. Rows dated "
             "in the future, such as upcoming dividends, then come back too."
         ),
         "date": "One calendar day, in the same forms as a `start` date.",
         "as_of": (
-            "The day to read the data as it stood on, as a date. Leave it out for Massive's "
-            "latest data."
+            "Read the data as it stood on this date. Leave it out for Massive's latest data."
         ),
         "sort": (
             "The field to order the rows by, as Massive names it, such as "
@@ -90,9 +91,9 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "timespan": (
             "The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or "
-            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. One-second and "
-            "one-minute bars with `multiplier=1` also stream. Bars of other lengths are history "
-            "only."
+            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, "
+            "one-second and one-minute bars with `multiplier=1` also stream. Bars of other "
+            "lengths are history only."
         ),
         "multiplier": (
             "How many `timespan` units each bar spans, 1 by default. "

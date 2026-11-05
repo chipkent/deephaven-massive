@@ -106,10 +106,10 @@ _NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
-    "This index lists every dataset by asset class, with the query methods, shared arguments, "
-    "and column types. Each dataset links its own page, with its call, arguments, plans, "
-    "and columns. In the Deephaven IDE, column descriptions show as tooltips. `dm.datasets()` "
-    "lists every dataset as a table."
+    "This index lists every dataset by asset class or subject, with the query methods, shared "
+    "arguments, and column types. Each dataset links its own page, with its call, arguments, "
+    "plans, and columns. In the Deephaven IDE, column descriptions show as tooltips. "
+    "`dm.datasets()` lists every dataset as a table."
 )
 """The paragraph under the index's title."""
 
