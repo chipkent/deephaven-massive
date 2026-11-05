@@ -372,8 +372,8 @@ class _Stocks(Namespace):
 
     Its methods cover trades, quotes, bars, limit up-limit down bands, imbalances, fair market
     value, snapshots, movers, dividends, splits, IPOs, short interest, short volume, and free float.
-    `m.stocks.financials` holds the financial statements. `m.stocks.filings` holds the SEC filings.
-    Each method only builds a query, so it never blocks. You can call it from any thread.
+    `m.stocks.financials` holds the financial statements, and `m.stocks.filings` the SEC filings.
+    Each method only builds a query, so it never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -560,11 +560,14 @@ class _Stocks(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
-        Each row is one bar of `multiplier` times `timespan`. History is split-adjusted unless you
-        pass `adjusted=False`. Streams and flat files serve bars as traded. For `dm.ALL`,
-        `history()` reads only one-day bars, and one-minute bars from flat files with
-        `adjusted=False`. Any other bar of `dm.ALL` raises. The columns page says how each bar's
-        window and `Date` are set. For only the previous day's bar, use `previous_day_bar()`.
+        Each row is one bar of `multiplier` times `timespan`. The dataset's page, linked below, says
+        how each bar's window and `Date` are set.
+
+        - History is split-adjusted unless you pass `adjusted=False`. Streams and flat files serve
+          bars as traded.
+        - With `dm.ALL`, `history()` reads one-day bars. It also reads one-minute bars from flat
+          files when `adjusted=False`. Any other bar of `dm.ALL` raises.
+        - For only the previous day's bar, use `previous_day_bar()`.
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
@@ -573,9 +576,9 @@ class _Stocks(Namespace):
             adjusted: Adjusts volume as well as prices.
 
         Returns:
-            A query: a `StreamHistoryQuery`, which also streams, for one-second and one-minute bars
-            with `multiplier=1`; otherwise a `HistoryQuery`, for history only. Its columns, plans,
-            and methods:
+            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
+            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
+            history only. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md.
 
         Raises:
@@ -850,7 +853,7 @@ class _Stocks(Namespace):
             symbols: Stock tickers; leave it out for every ticker.
             start: The first ex-dividend date.
             end: The last ex-dividend date.
-            sort: Any field of the rows, such as `"pay_date"`.
+            sort: Any of Massive's field names, such as `"pay_date"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.

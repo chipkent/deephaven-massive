@@ -208,8 +208,10 @@ class MassiveSession:
     `MASSIVE_API_KEY`.
 
     No public attribute or `repr` of the session shows your key, so the key stays out of the
-    console's variables. You can use a session from several threads at once. Messages name it by its
-    label, such as `MassiveSession #1`.
+    console's variables.
+
+    You can use a session from several threads at once. Messages name it by its label, such as
+    `MassiveSession #1`.
 
     Each dataset is a method of a namespace, such as `m.stocks.bars`, and returns a query. A method
     of the query, such as `history()` or `last_by()`, returns a table. A live table updates while
@@ -218,8 +220,10 @@ class MassiveSession:
     https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
     Massive allows one streaming connection per asset class by default. Sessions in one server that
-    use the same key and the same connection settings share their connections. When two sessions'
-    settings differ, they compete for that one connection, and a WARNING says so.
+    use the same key and the same streaming settings share their connections. The streaming settings
+    include `websocket_hosts`, `max_outage`, and the reconnect timings. When two sessions' settings
+    differ, they compete for that one connection. A WARNING says so, and `m.connections()` shows the
+    waiting connection as `WAITING_SLOT`.
 
     Example:
         ::
@@ -628,7 +632,8 @@ class MassiveSession:
         `close()` returns at once. The tables show their final state when the command ends.
 
         Connections that no other session uses are closed. Afterward, the query methods and the
-        diagnostics methods raise `MassiveError`. Building queries and `release()` still work. See
+        diagnostics methods, such as `m.streams()`, raise `MassiveError`. Building queries and
+        `release()` still work. See
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Raises:
