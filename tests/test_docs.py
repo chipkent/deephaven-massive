@@ -6,10 +6,14 @@ namespace of its own, as a reader would paste it into a fresh Deephaven console,
 fake REST and WebSocket servers, so nothing reaches Massive. Every block therefore carries its
 own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
 the fake REST server and whose streams connect to the fake WebSocket server.
-A block fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may
-be. Four README sections also run alone against scripted replies, and the tests check that
-their tables hold what the README says they hold: the whole-market day, the live board against
-yesterday's close, the backfill of today's minutes, and the split adjustment.
+A block fenced as `python continues` is the second step of an example, which the reader runs
+in the same console after the block before it, so it runs in that block's namespace. A block
+fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may be. The
+README's settings file is written by running its shell commands, with `HOME` in a temporary
+folder. Five README sections also run alone against scripted replies, and the tests check that
+their tables hold what the README says they hold: the whole-market day, the watchlist that
+adds and removes stocks, the settings file, the change since yesterday's close, and the
+backfill of today's minutes.
 
 The docstrings link instead of repeating. A docstring cites a page, or a section of a user page,
 by its full GitHub URL, `DOCS_URL` followed by the page's path from the repository root and,
@@ -21,14 +25,17 @@ of the tester guide) resolves.
 """
 
 import json
+import os
 import re
 import runpy
+import shutil
+import subprocess
 import threading
 import types
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import deephaven
 import pytest
@@ -61,6 +68,7 @@ own Deephaven server, or one that reads flat files, which needs S3 keys the fake
 """
 
 _FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
+_BASH = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
 """The prefix of every section citation in a docstring: the user pages on GitHub's main branch."""
@@ -78,30 +86,60 @@ def _name(page: Path) -> str:
     return page.relative_to(ROOT).as_posix()
 
 
+class Block(NamedTuple):
+    """One Python block of a user page that runs."""
+
+    code: str
+    """The block's code."""
+    continues: bool
+    """Whether it runs in the namespace of the block before it (a `python continues` fence)."""
+
+
 def _fences(text: str) -> list[tuple[str, str]]:
     """Return the info string after `python` and the code of each Python block, in order."""
     return [(info.strip(), code) for info, code in _FENCE.findall(text)]
 
 
-def _blocks(text: str) -> list[str]:
-    """Return the code of each Python block of a Markdown text that runs, in order."""
-    return [code for info, code in _fences(text) if info != "skip-test"]
+def _blocks(text: str) -> list[Block]:
+    """Return each Python block of a Markdown text that runs, in order."""
+    return [Block(code, info == "continues") for info, code in _fences(text) if info != "skip-test"]
 
 
-def _section_blocks(page: Path, anchor: str) -> list[str]:
-    """Return the Python blocks of one section of a page, from its anchor to the next anchor.
+def _section(page: Path, anchor: str) -> str:
+    """Return the text of one section of a page, from its anchor to the next anchor.
 
     Args:
         page: The user page.
-        anchor: The section's `<a id>`, such as `"split-adjustment"`.
+        anchor: The section's `<a id>`, such as `"whole-market-day"`.
 
     Returns:
-        The code of each block, in order.
+        The section's Markdown.
     """
     text = page.read_text(encoding="utf-8")
     start = text.index(f'<a id="{anchor}"></a>')
     end = text.find("<a id=", start + 1)
-    return _blocks(text[start : end if end >= 0 else len(text)])
+    return text[start : end if end >= 0 else len(text)]
+
+
+def _section_blocks(page: Path, anchor: str) -> list[Block]:
+    """Return the Python blocks of one section of a page, in order (see `_section`)."""
+    return _blocks(_section(page, anchor))
+
+
+def _write_settings_file(home: Path) -> None:
+    """Run the README's commands that write the settings file, with `HOME` set to `home`.
+
+    Args:
+        home: The folder that stands in for the reader's home folder.
+    """
+    [commands] = _BASH.findall(_section(README, "what-your-plan-allows"))
+    bash = shutil.which("bash")
+    assert bash is not None, "the README's shell commands need bash"
+    subprocess.run(  # noqa: S603 - bash running the README's own commands, no shell string
+        [bash, "-c", commands],
+        check=True,
+        env={**os.environ, "HOME": str(home)},
+    )
 
 
 def _ms(text: str) -> int:
@@ -214,36 +252,40 @@ def readme_server(
 
 
 def _run_blocks(
-    blocks: Sequence[str],
+    blocks: Sequence[Block],
     tmp_path: Path,
     name: str,
     *,
     console_command: Callable[[Callable[[], None]], None],
 ) -> list[dict[str, Any]]:
-    """Run code blocks as scripts, in order, each on its own, as a fresh console runs it.
+    """Run code blocks as scripts, in order, as a reader pastes them into the console.
 
-    Each block runs as one console command (the `console_command` fixture): under the update
-    graph's exclusive lock, as a reader pasting it into the Deephaven console runs it. A block
-    that creates an input table and adds a row at once, as the watchlist examples do, is then
-    never interrupted by an update cycle; without the lock, a cycle running while the table is
-    created can refresh it in the step it was stamped with, and Deephaven exits the process.
+    A block runs on its own, as in a fresh console, unless it continues the block before it:
+    then it starts from that block's names, as in the same console. Each block runs as one
+    console command (the `console_command` fixture): under the update graph's exclusive lock,
+    as a reader pasting it into the Deephaven console runs it. A block that creates an input
+    table and adds a row at once, as the watchlist examples do, is then never interrupted by an
+    update cycle; without the lock, a cycle running while the table is created can refresh it
+    in the step it was stamped with, and Deephaven exits the process.
 
     Args:
-        blocks: The code of each block.
+        blocks: The blocks, in order.
         tmp_path: Where to write the scripts.
         name: The scripts' file name prefix.
         console_command: Runs one block the way the console runs a command.
 
     Returns:
-        The names each block defined, one namespace per block, in order.
+        The names each block defined, one namespace per block, in order; a continuing block's
+        namespace holds the names it started from too.
     """
     namespaces: list[dict[str, Any]] = []
     for number, block in enumerate(blocks):
         script = tmp_path / f"{name}_{number}.py"
-        script.write_text(block, encoding="utf-8")
+        script.write_text(block.code, encoding="utf-8")
+        start = namespaces[-1] if block.continues else None
 
-        def run(script: Path = script) -> None:
-            namespaces.append(runpy.run_path(str(script)))
+        def run(script: Path = script, start: dict[str, Any] | None = start) -> None:
+            namespaces.append(runpy.run_path(str(script), init_globals=start))
 
         console_command(run)
     return namespaces
@@ -286,14 +328,17 @@ def _forget(namespaces: Sequence[dict[str, Any]]) -> None:
 #: Tables each page's examples promise, by page.
 _PROMISED: dict[str, tuple[str, ...]] = {
     "README.md": (
-        "week",
+        "day",
+        "apple",
         "busiest",
+        "returns",
+        "headlines",
+        "kept",
+        "closes",
+        "snapshot",
+        "changes",
         "since_start",
-        "board",
         "spy",
-        "near_quotes",
-        "mine",
-        "by_hand",
     ),
     "docs/troubleshooting.md": ("kept", "streams"),
 }
@@ -324,6 +369,9 @@ def test_every_user_page_example_runs_alone(
         return real_input_table(col_defs, init_table, key_cols)
 
     monkeypatch.setattr(deephaven, "input_table", recording)
+    # The README's settings file, written by its own commands in a stand-in home folder.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_settings_file(tmp_path)
     # Every path the examples read answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
     blocks = _blocks(page.read_text(encoding="utf-8"))
@@ -331,7 +379,7 @@ def test_every_user_page_example_runs_alone(
     names = _merged(namespaces)
     for name in _PROMISED.get(_name(page), ()):
         assert isinstance(names[name], Table), name
-    if any("input_table(" in block for block in blocks):
+    if any("input_table(" in block.code for block in blocks):
         assert locked  # the watchlist examples made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
     names.clear()
@@ -347,7 +395,7 @@ def test_only_allowed_blocks_skip_the_test() -> None:
     skipped = set()
     for page in USER_PAGES:
         for info, code in _fences(page.read_text(encoding="utf-8")):
-            assert info in {"", "skip-test"}, f"{_name(page)}: python {info}"
+            assert info in {"", "continues", "skip-test"}, f"{_name(page)}: python {info}"
             if info == "skip-test":
                 skipped.add((_name(page), code.split("\n", 1)[0]))
     assert skipped <= SKIPPED_BLOCKS
@@ -449,10 +497,61 @@ def test_every_relative_link_resolves(page: Path) -> None:
     assert broken == []
 
 
-# --- Four sections, against scripted data ------------------------------------------------------
+# --- Five sections, against scripted data ------------------------------------------------------
+
+
+def _wait_for_rows(
+    table: Table,
+    done: Callable[[list[dict[str, Any]]], bool],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Return a live table's rows once `done` accepts them, or its last rows after ten seconds.
+
+    Args:
+        table: The live table.
+        done: Whether the rows are the ones the test waits for.
+        dh_to_pylist: The fixture that reads a table's rows.
+
+    Returns:
+        The rows `done` accepted, or the last rows read; the caller's assertion then fails.
+    """
+    pace = threading.Event()  # never set; only paces the loop
+    rows = dh_to_pylist(table)
+    for _ in range(500):
+        if done(rows):
+            break
+        pace.wait(0.02)
+        rows = dh_to_pylist(table)
+    return rows
+
+
+def _wait_for_subscription(fake_ws_server: FakeMassiveServer, topic: str) -> None:
+    """Wait until a session subscribes to a topic on the fake WebSocket server, such as `AM.SPY`."""
+    fake_ws_server.wait_for(
+        lambda server: any(
+            topic in json.loads(frame).get("params", "")
+            for connection in server.connections
+            for frame in connection.frames
+        )
+    )
+
+
+@pytest.fixture
+def settings_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Write the README's settings file into a stand-in home folder, and point `HOME` at it.
+
+    Returns:
+        The stand-in home folder.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _write_settings_file(home)
+    return home
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+@pytest.mark.usefixtures("settings_home")
 def test_the_backfill_example_merges_history_with_live_bars(
     *,
     readme_server: FakeRestServer,
@@ -477,24 +576,11 @@ def test_the_backfill_example_merges_history_with_live_bars(
     readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="SPY")))
     [block] = _section_blocks(README, "backfill-then-live")
     [names] = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
-    fake_ws_server.wait_for(
-        lambda server: any(
-            "AM.SPY" in json.loads(frame).get("params", "")
-            for connection in server.connections
-            for frame in connection.frames
-        )
-    )
+    _wait_for_subscription(fake_ws_server, "AM.SPY")
     live = {"ev": "AM", "sym": "SPY", "v": 5, "o": 542.0, "c": 542.0, "h": 542.0, "l": 542.0}
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
-    # Bounded wait for the flush thread and an update-graph cycle to append the live bar.
-    pace = threading.Event()  # never set; only paces the loop
-    rows = dh_to_pylist(names["spy"])
-    for _ in range(500):
-        if len(rows) == 2:
-            break
-        pace.wait(0.02)
-        rows = dh_to_pylist(names["spy"])
+    rows = _wait_for_rows(names["spy"], lambda rows: len(rows) == 2, dh_to_pylist)
     # Today's minute from history, then the live minute after it, oldest first.
     assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
@@ -512,8 +598,7 @@ def test_the_whole_market_example_ranks_the_day(
     tmp_path: Path,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
-    # One grouped day of three stocks: BIG trades the most dollars but under a million shares,
-    # so it leads `busiest` and is left out of `risers`.
+    # One grouped day of three stocks: BIG trades the most dollars, on the fewest shares.
     day = [
         _bar("2026-10-30", 11.0, 2_000_000) | {"T": "UP", "o": 10.0, "vw": 10.0},
         _bar("2026-10-30", 150.0, 500_000) | {"T": "BIG", "o": 100.0, "vw": 100.0},
@@ -526,18 +611,75 @@ def test_the_whole_market_example_ranks_the_day(
     [block] = _section_blocks(README, "whole-market-day")
     [names] = _run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
+    # One row per stock, ranked by dollars traded, largest first.
     assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
     busiest = dh_to_pylist(names["busiest"])
     assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
-    assert busiest[0]["DollarVolume"] == pytest.approx(50_000_000)
-    risers = dh_to_pylist(names["risers"])
-    assert [r["Symbol"] for r in risers] == ["UP", "FLAT"]
-    assert [r["ChangePct"] for r in risers] == pytest.approx([10.0, 5.0])
+    assert [r["DollarVolume"] for r in busiest] == pytest.approx(
+        [50_000_000, 20_000_000, 15_000_000]
+    )
     names.clear()
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_live_board_example_compares_each_minute_with_yesterday(
+def test_the_watchlist_example_adds_and_removes_stocks(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "MSFT", "AMZN", "GOOGL", "NVDA")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    first, edit = _section_blocks(README, "drive-with-a-watchlist")
+    assert edit.continues
+    # The README polls once a minute; a one-second poll shows the same edit within seconds.
+    assert "poll(60)" in first.code
+    fast = first._replace(code=first.code.replace("poll(60)", "poll(1)"))
+    [names] = _run_blocks([fast], tmp_path, "watchlist", console_command=console_command)
+
+    def symbols(rows: list[dict[str, Any]]) -> set[str]:
+        return {r["Symbol"] for r in rows}
+
+    rows = _wait_for_rows(names["closes"], lambda rows: len(symbols(rows)) == 4, dh_to_pylist)
+    assert symbols(rows) == {"AAPL", "MSFT", "AMZN", "GOOGL"}
+    # The second block, in the same console: Nvidia's row arrives and Microsoft's leaves.
+    script = tmp_path / "watchlist_edit.py"
+    script.write_text(edit.code, encoding="utf-8")
+    edited: dict[str, Any] = {}
+    console_command(lambda: edited.update(runpy.run_path(str(script), init_globals=names)))
+    after = {"AAPL", "NVDA", "AMZN", "GOOGL"}
+    rows = _wait_for_rows(names["closes"], lambda rows: symbols(rows) == after, dh_to_pylist)
+    assert symbols(rows) == after
+    assert {r["Symbol"]: r["Close"] for r in rows}["NVDA"] == 104.0
+    edited.clear()
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_settings_example_reads_the_file_its_commands_write(
+    *,
+    readme_server: FakeRestServer,
+    settings_home: Path,
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    assert (settings_home / "massive" / "settings.yaml").is_file()
+    readme_server.reply_default(Reply(envelope([])))
+    [block] = _section_blocks(README, "what-your-plan-allows")
+    [names] = _run_blocks([block], tmp_path, "settings", console_command=console_command)
+    # The file accepts the delayed Stocks feed, the setting Starter and Developer need.
+    assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
+    assert isinstance(names["snapshot"], Table)
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+@pytest.mark.usefixtures("settings_home")
+def test_the_change_example_compares_each_minute_with_yesterday(
     *,
     readme_server: FakeRestServer,
     fake_ws_server: FakeMassiveServer,
@@ -550,93 +692,34 @@ def test_the_live_board_example_compares_each_minute_with_yesterday(
         readme_server.reply(
             f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
         )
-    # The board's other stocks had no bar yesterday.
+    # The watchlist's other stock had no bar yesterday.
     readme_server.reply_default(Reply(envelope([])))
-    [block] = _section_blocks(README, "live-board")
-    [names] = _run_blocks([block], tmp_path, "live_board", console_command=console_command)
-    # Each stock with a bar yesterday has its row before its first minute bar, with no close.
-    before = {r["Symbol"]: r for r in dh_to_pylist(names["board"])}
-    assert {s: (r["Close"], r["PrevClose"]) for s, r in before.items()} == {
+    [block] = _section_blocks(README, "change-since-close")
+    [names] = _run_blocks([block], tmp_path, "change", console_command=console_command)
+    # Each stock with a previous close has its row before its first minute bar, with no close.
+    rows = _wait_for_rows(names["changes"], lambda rows: len(rows) == 2, dh_to_pylist)
+    assert {r["Symbol"]: (r["Close"], r["PrevClose"]) for r in rows} == {
         "AAPL": (None, 200.0),
         "MSFT": (None, 400.0),
     }
-    fake_ws_server.wait_for(
-        lambda server: any(
-            "AM.AAPL" in json.loads(frame).get("params", "")
-            for connection in server.connections
-            for frame in connection.frames
-        )
-    )
+    _wait_for_subscription(fake_ws_server, "AM.AAPL")
     minute = {"s": _ms("2026-10-30T19:00:00"), "e": _ms("2026-10-30T19:01:00"), "v": 100}
     bars = [
         {"ev": "AM", "sym": symbol, "o": price, "h": price, "l": price, "c": price} | minute
         for symbol, price in (("AAPL", 205.0), ("MSFT", 380.0), ("AAPL", 210.0))
     ]
     fake_ws_server.send(json.dumps(bars))
-    # Bounded wait for the flush thread and an update-graph cycle to publish the bars.
-    pace = threading.Event()  # never set; only paces the loop
-    board: dict[str, dict[str, Any]] = {}
-    for _ in range(500):
-        board = {r["Symbol"]: r for r in dh_to_pylist(names["board"])}
-        if board.keys() == {"AAPL", "MSFT"} and board["AAPL"]["Close"] == 210.0:
-            break
-        pace.wait(0.02)
+    rows = _wait_for_rows(
+        names["changes"],
+        lambda rows: {r["Symbol"]: r["Close"] for r in rows} == {"AAPL": 210.0, "MSFT": 380.0},
+        dh_to_pylist,
+    )
     # Each stock's newest minute, against yesterday's close.
-    assert {s: (r["Close"], r["PrevClose"]) for s, r in board.items()} == {
+    changes = {r["Symbol"]: r for r in rows}
+    assert {s: (r["Close"], r["PrevClose"]) for s, r in changes.items()} == {
         "AAPL": (210.0, 200.0),
         "MSFT": (380.0, 400.0),
     }
-    assert board["AAPL"]["ChangePct"] == pytest.approx(5.0)
-    assert board["MSFT"]["ChangePct"] == pytest.approx(-5.0)
-    names.clear()
-
-
-@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_split_recipe_adjusts_as_traded_bars_like_massive(
-    *,
-    readme_server: FakeRestServer,
-    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    tmp_path: Path,
-    console_command: Callable[[Callable[[], None]], None],
-) -> None:
-    # ORLY's last day before its 15-for-1 split, and its first day after; both reads ask for
-    # the same path, adjusted first, as the recipe reads them.
-    path = (
-        f"/v2/aggs/ticker/ORLY/range/1/day/{_ms('2025-06-03T04:00:00')}/"
-        f"{_ms('2025-06-14T04:00:00') - 1}"
-    )
-    adjusted = [_bar("2025-06-09", 1350.0 / 15, 15_000), _bar("2025-06-10", 91.0, 30_000)]
-    traded = [_bar("2025-06-09", 1350.0, 1_000), _bar("2025-06-10", 91.0, 30_000)]
-    readme_server.reply(
-        path,
-        Reply(envelope(adjusted, adjusted=True, ticker="ORLY")),
-        Reply(envelope(traded, adjusted=False, ticker="ORLY")),
-    )
-    split = {
-        "adjustment_type": "forward_split",
-        "execution_date": "2025-06-10",
-        "historical_adjustment_factor": 1 / 15,
-        "id": "orly-2025",
-        "split_from": 1,
-        "split_to": 15,
-        "ticker": "ORLY",
-    }
-    readme_server.reply("/stocks/v1/splits", Reply(envelope([split])))
-    [block] = _section_blocks(README, "split-adjustment")
-    [names] = _run_blocks([block], tmp_path, "split", console_command=console_command)
-
-    traded_closes = [(r["Date"], r["Close"]) for r in dh_to_pylist(names["traded"])]
-    assert traded_closes == [("2025-06-09", 1350.0), ("2025-06-10", 91.0)]
-    massive = dh_to_pylist(names["adjusted"])
-    by_hand = dh_to_pylist(names["by_hand"])
-    assert [r["Date"] for r in by_hand] == [r["Date"] for r in massive]
-    # The bar before the split takes its factor; the bar on the execution date keeps 1.
-    assert [r["Factor"] for r in by_hand] == pytest.approx([1 / 15, 1.0])
-    assert [r["AdjustedClose"] for r in by_hand] == pytest.approx([r["Close"] for r in massive])
-    assert [r["AdjustedVolume"] for r in by_hand] == pytest.approx([15_000, 30_000])
-    # The first read asks Massive for adjusted bars, and the second for bars as traded.
-    assert [r.target.partition("?")[2] for r in readme_server.requests][:2] == [
-        "adjusted=true&limit=50000&sort=asc",
-        "adjusted=false&limit=50000&sort=asc",
-    ]
+    assert changes["AAPL"]["ChangePct"] == pytest.approx(5.0)
+    assert changes["MSFT"]["ChangePct"] == pytest.approx(-5.0)
     names.clear()

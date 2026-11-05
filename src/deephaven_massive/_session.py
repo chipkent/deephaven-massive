@@ -210,10 +210,10 @@ class MassiveSession:
 
     Dataset methods hang off the namespaces (`m.stocks.trades(...)`) and return queries; verbs on a
     query return Deephaven tables
-    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#how-it-works). A live table
-    keeps running, and keeps its session running, while it or a table derived from it is in use;
-    release it with `m.release(table)`, and `m.close()` stops everything and fails every live table
-    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news). As a
+    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#read-daily-bars). A live
+    table keeps running, and keeps its session running, while it or a table derived from it is in
+    use; release it with `m.release(table)`, and `m.close()` stops everything and fails every live
+    table (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables). As a
     context manager the session closes on exit.
 
     Massive allows one WebSocket connection for each group of streams, such as stocks or
@@ -583,7 +583,7 @@ class MassiveSession:
         panel open in the Deephaven IDE. Once nothing does, its stream unsubscribes, its poller
         stops, or its background read stops. Releasing twice does nothing, and `release()` keeps
         working after `close()`. Static results are not tracked. See
-        https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
+        https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Args:
             table: A live table returned by a verb of this session.
@@ -616,7 +616,7 @@ class MassiveSession:
         final state once the command ends. Connections no other session of the key uses are closed.
         After `close()`, verbs and the diagnostics methods raise `MassiveError("MassiveSession #1 is
         closed")`; building queries and `release()` keep working. See
-        https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news.
+        https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Raises:
             ValueError: On a Deephaven update-graph thread, for example inside a table

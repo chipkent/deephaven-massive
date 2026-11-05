@@ -1243,7 +1243,7 @@ class Query(QueryBase):
         `unavailable_symbols` to `RAISE`. A feed, a dataset whose default mode is `APPEND` such as
         news and filings, needs a `start` or a `limit`. The table polls for as long as it, or any
         table made from it, is in use
-        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#follow-the-news).
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables).
 
         A failed cycle shows in the `Error` column of `m.streams()`, logs a WARNING, and the next
         cycle runs. A few failures fail the table and stop polling: authentication, entitlement,
@@ -1765,7 +1765,7 @@ class HistoryQuery(QueryBase):
         (https://github.com/chipkent/deephaven-massive/blob/main/README.md#configuration).
 
         A static symbol table is read once, when you call. A live one, a watchlist, is followed
-        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#history-of-a-watchlist).
+        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#drive-with-a-watchlist).
         The result holds each listed symbol's complete rows over the range, which is fixed when you
         call, so `end=None` means through that moment. A symbol you add arrives with all its rows
         in one update, and one you delete leaves in one update. `AUTO` reads a watchlist from REST

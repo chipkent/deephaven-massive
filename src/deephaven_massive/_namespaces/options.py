@@ -651,7 +651,7 @@ class _Options(Namespace):
         `Symbol` and keep `SharesPerContract == 100` with a null or `[]` `AdditionalUnderlyings`.
         `snapshots(dm.ALL)` lists every contract of every underlying. A table of underlyings reads
         each one's chain; a live one is followed by `fetch()` and re-read by each `poll()`
-        cycle (https://github.com/chipkent/deephaven-massive/blob/main/README.md#option-chain).
+        cycle (https://github.com/chipkent/deephaven-massive/blob/main/README.md#drive-with-a-watchlist).
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or
@@ -797,7 +797,7 @@ class _Options(Namespace):
                 the rows' `Underlying` is the same canonical ticker. Or a table of them in a
                 `Symbol` column, each listed as if passed alone; a live one is followed
                 by `fetch()` and re-read by each `poll()` cycle. See
-                https://github.com/chipkent/deephaven-massive/blob/main/README.md#option-chain.
+                https://github.com/chipkent/deephaven-massive/blob/main/README.md#drive-with-a-watchlist.
             contract_type: `dm.ContractType.CALL` or `PUT`; None for both.
             as_of: The day whose contracts to list; None for today.
             expired: True lists expired contracts only; False, the default, those still trading.

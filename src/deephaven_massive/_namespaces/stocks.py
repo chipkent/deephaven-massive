@@ -907,9 +907,10 @@ class _Stocks(Namespace):
 
         Each row is one split: its `ExecutionDate`, the ratio (`SplitFrom` to `SplitTo`), the
         adjustment type, and `HistoricalAdjustmentFactor`, the cumulative factor that adjusts
-        earlier prices. `poll()` replaces the table each cycle, keyed by `Id`. Use it to adjust
-        as-traded bars yourself, as
-        https://github.com/chipkent/deephaven-massive/blob/main/README.md#split-adjustment shows.
+        earlier prices: to adjust a price from day D, multiply it by the factor of the first
+        split executed after D. `poll()` replaces the table each cycle, keyed by `Id`. Bars'
+        `history()` already returns split-adjusted prices unless you pass `adjusted=False`
+        (https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md).
 
         Args:
             symbols: Stock tickers; None, the default, for every ticker.

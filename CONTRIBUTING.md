@@ -35,8 +35,8 @@ A release is one manual run of the Release workflow on `main`;
 
 User documentation has three parts:
 
-- [`README.md`](README.md): the complete landing page, which takes a new user from "what is
-  this?" through install to everyday use and the main recipes.
+- [`README.md`](README.md): the landing page, which takes a new user from "what is this?"
+  through install and configuration to a tutorial of thirteen examples.
 - [`docs/troubleshooting.md`](docs/troubleshooting.md): every error message and symptom with
   its fix, the diagnostics tables, the debug log, and how to report a bug.
 - [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference, one page per

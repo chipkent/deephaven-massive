@@ -128,8 +128,15 @@ Each of these has a source. Check it again before you write:
 
   ```bash
   TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-  pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
+    "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
   ```
+
+- `deephaven-plugin-ui` (imported as `from deephaven import ui`) and
+  `deephaven-plugin-plotly-express` (imported as `import deephaven.plot.express as dx`) are
+  separate packages from `deephaven-server` (deephaven.io's
+  [deephaven.ui install](https://deephaven.io/core/ui/docs/installation/) and
+  [Deephaven Express](https://deephaven.io/core/plotly/docs/) pages).
 
 - `deephaven` is a command inside the environment, so the step that starts the server runs it
   from the activated environment.
@@ -148,21 +155,40 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Proposed on 2026-11-04 and awaiting the owner's outline review. Each example adds one idea, in
-dependency order: the call pattern, then static tables, then polling, then streaming.
+Approved by the owner on 2026-11-04. Each example adds one idea, in dependency order: the call
+pattern, static tables, charts, polling, stopping, watchlists, settings, then streaming. Each
+title names the idea, then what the example does. Examples 1 to 7 run on Stocks Basic, the free
+plan, and 8 to 13 on Stocks Starter or higher.
 
-| # | Title | The one new idea | Plan |
+| # | Title | Builds on | Plan |
 |---|---|---|---|
-| 1 | Get a week of Apple's daily prices | Session, query, method, table | Stocks Basic |
-| 2 | Rank the whole market on one day | Symbols: one, a list, or `dm.ALL`; tables take Deephaven operations | Stocks Basic |
-| 3 | Score three stocks over a year | Dates are `yyyy-MM-dd` text, inclusive, New York trading days | Stocks Basic |
-| 4 | Fit the session to your plan | `MassiveConfig` and `dm.EntitlementError` | Stocks Basic |
-| 5 | Follow the news as it breaks | `poll()`: a table that keeps changing | Stocks Basic |
-| 6 | Stop a live table when you're done | `m.release()`, `m.close()`, `snapshot()` | Stocks Basic |
-| 7 | Let a watchlist choose the symbols | A table as `symbols` | Stocks Basic |
-| 8 | Watch your watchlist's minute bars live | Streaming with `last_by()`; `delayed_subscriptions` | Stocks Starter |
-| 9 | Choose which trades a live table keeps | `last_by`, `ring`, `append_only`, `blink` | Currencies Starter |
-| 10 | Backfill a live table with history | `history()` merged with a stream | Stocks Starter |
+| 1 | Queries: read a week of Apple's daily bars | | Stocks Basic |
+| 2 | Symbol lists: rank every US stock by one day's dollar volume | 1 | Stocks Basic |
+| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
+| 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
+| 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
+| 6 | Stopping live tables: stop the news feed and keep a snapshot | 5 | Stocks Basic |
+| 7 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5, 6 | Stocks Basic |
+| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
+| 9 | Streaming: stream minute bars for the stocks on your list | 7, 8 | Stocks Starter or higher |
+| 10 | Live calculations: track each stock's change since the previous close | 7, 9 | Stocks Starter or higher |
+| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 | Stocks Starter or higher |
+| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 | Stocks Starter or higher |
+| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 | Stocks Starter or higher |
+
+The owner's decisions behind it:
+
+- Example 7's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
+  types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
+- Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
+  reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
+  no path; never imply that a session reads it.
+- Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
+  `deephaven-server` doesn't include, so the install command adds them.
+- Stock streams carry data only while stocks trade, so the streaming examples say so and
+  offer crypto, which trades around the clock. Free-plan examples stay under five requests a
+  minute where they poll.
+- Install ends by starting the server and hands off to Example 1, without repeating its code.
 
 <a id="accuracy"></a>
 
