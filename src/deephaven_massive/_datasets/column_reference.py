@@ -182,7 +182,8 @@ _TYPE_NAMES: Final[Mapping[ColumnType, str]] = {
     ColumnType.LONG_ARRAY: "An array of `long`",
     ColumnType.STRING_ARRAY: "An array of `String`",
 }
-"""What each Deephaven type a page names holds, as the index's table of types says it."""
+"""What each Deephaven type a column can have holds; the index's table of types lists the ones
+its datasets' columns use."""
 
 _INDEX_LINK: Final = f"[Dataset index]({INDEX})"
 """The link from every dataset page back to the index."""
@@ -195,7 +196,8 @@ _WIRE_ANCHOR: Final = "massive-fields"
 
 _WIRE_GUIDE: Final = (
     "The Massive field behind each column, by source. `request` marks a value the library fills "
-    "from the request, and an empty cell a column the library computes."
+    "from the request. An empty cell means the source doesn't carry the column, or the library "
+    "computes it."
 )
 """The paragraph inside the folded wire-field table."""
 
@@ -338,7 +340,8 @@ def render(
     linking every class's page, one table per namespace listing each dataset's page, summary,
     and query methods, in declaration order, the rule of every shared argument
     (`ARGUMENT_RULES`) under its name and anchor, the recipe that merges tables of different
-    classes with the shared columns whose type differs, and a table of the column types.
+    classes with the shared columns whose type differs, and a table of the column types the
+    datasets use.
 
     A dataset's page has its call path as heading (`call_path`), its `DatasetSpec.summary`, its
     call (`DatasetCall.signature`) in a code block, and a list of facts: its query methods, the
@@ -409,7 +412,7 @@ def _index(
     Under the title and its guide come the datasets several asset classes have, every dataset
     by namespace, the shared arguments' rules, how to merge tables of one kind from two classes
     with the columns whose type differs between classes (`_type_differences`), and what each
-    column type holds.
+    column type the datasets use holds.
 
     Args:
         specs: Every dataset, in catalog order.
@@ -482,7 +485,8 @@ def _index(
     lines.extend(("", f"## {_TYPES_HEADING}", "", _TYPES_GUIDE, ""))
     lines.append(_row(["Type", "Holds"]))
     lines.append(_row(["---"] * 2))
-    lines.extend(_row([f"`{t.value}`", meaning]) for t, meaning in _TYPE_NAMES.items())
+    used = {column.type for spec in specs for column in catalog.dataset_schema(spec).columns}
+    lines.extend(_row([f"`{t.value}`", meaning]) for t, meaning in _TYPE_NAMES.items() if t in used)
     lines.extend(("", *footer))
     return "\n".join(lines) + "\n"
 
@@ -771,7 +775,11 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
         lines.append("")
         lines.extend(
             f"- {_label(url, provenance)}: "
-            + " ".join(text for text in (page.access, page.recency, page.history) if text)
+            + "".join(
+                f"{text.removesuffix('.')}. "
+                for text in (page.access, page.recency, page.history)
+                if text
+            ).rstrip()
             for url, page in unlisted
         )
     return lines

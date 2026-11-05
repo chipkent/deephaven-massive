@@ -32,7 +32,7 @@ A linked argument follows the [shared rules](README.md#shared-arguments) on the 
 
 How recent the data is on each of Massive's plans, and how far back its history goes, as Massive's pages state them.
 
-- ETF Analytics (REST): Available to existing subscribers only Updated daily
+- ETF Analytics (REST): Available to existing subscribers only. Updated daily.
 
 ## Columns
 
@@ -79,7 +79,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request, and an empty cell a column the library computes.
+The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |

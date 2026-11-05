@@ -48,11 +48,12 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "also drop a deleted symbol's rows.\n"
             "- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no "
             "filter by symbol. Each dataset's page says which of the two it takes.\n"
-            "- A misspelled symbol in text or a list raises `ValueError` at the call. A "
-            "misspelled row of a table is skipped and logged by default, and the table keeps "
-            "running.\n"
-            "- `dm.canonical_symbol` converts other spellings, such as Yahoo's `BRK-B`, to "
-            "Massive's.\n"
+            "- A symbol in text or a list that isn't spelled as Massive spells it, such as "
+            "`aapl`, raises `ValueError` at the call. Such a row of a table is skipped and "
+            "logged by default, and the table keeps running. A table whose every row is "
+            "misspelled is refused at the call.\n"
+            "- `dm.canonical_symbol` converts other spellings to Massive's. Yahoo's `BRK-B`, "
+            "for example, converts with `convention=dm.SymbolConvention.YAHOO`.\n"
             "- A record that lists several symbols, such as a news article, appears once for "
             "each symbol you named that it lists."
         ),
@@ -61,10 +62,10 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "instants.\n"
             "\n"
             f"- A date is {_DATE_FORMS}. It means {_MARKET_DAY}.\n"
-            "- An instant is a Python `datetime` with a time zone, a `pandas.Timestamp`, a "
-            "`numpy.datetime64`, a Deephaven `Instant` or `ZonedDateTime`, or Deephaven time "
-            'text such as `"2025-06-02T09:30 ET"`. A `datetime` without a time zone raises '
-            "`ValueError`.\n"
+            "- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a "
+            "`numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or "
+            'Deephaven time text such as `"2025-06-02T09:30 ET"`. A `datetime` or '
+            "`pandas.Timestamp` without a time zone raises `ValueError`.\n"
             "- A dataset whose range is a calendar date, such as an ex-dividend date, takes "
             "dates only."
         ),
@@ -73,12 +74,12 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
             "of June 2. An instant is excluded.\n"
-            "- Leave it out to read through now. Massive is then sent no end, so it also "
-            "returns records still to come, such as dividends announced but not yet paid."
+            "- Leave it out to send Massive no end. The rows then include records still to "
+            "come, such as dividends announced but not yet paid."
         ),
         "date": (
             f"One calendar day, as {_DATE_FORMS}. It means {_MARKET_DAY}. A `datetime` or an "
-            "instant is refused at the call."
+            "instant raises `ValueError` at the call."
         ),
         "as_of": (
             f"The day to read the data as it stood on, as {_DATE_FORMS}. Leave it out for "
@@ -90,31 +91,38 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "Massive allows, name several, separated by commas, each with an optional `.asc` "
             'or `.desc`: `"ticker,ex_dividend_date.desc"`.'
         ),
-        "order": "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`.",
+        "order": (
+            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Where Massive's "
+            "endpoint has no `order` parameter of its own, `order` without `sort` raises "
+            "`ValueError`."
+        ),
         "limit": (
             "The most rows Massive returns for the whole request, across every symbol you "
             "name, in Massive's order.\n"
             "\n"
-            "- Ask for newest first, `order=dm.Order.DESC`, to keep the latest rows.\n"
+            "- To keep the latest rows, sort newest first, such as "
+            '`sort="ex_dividend_date", order=dm.Order.DESC`.\n'
             "- A symbol that comes first can use up the whole limit, so leave `limit` out when "
             "you need every row of each symbol.\n"
-            "- A `fetch()` that follows a table of symbols applies the limit to each symbol's "
-            "request. A dataset's page notes any other case where it applies to each symbol."
+            "- A `fetch()` that follows a table of symbols applies the limit to each request: "
+            "one per symbol, or for a snapshot dataset one per group of up to 250 symbols. A "
+            "dataset's page notes any other case where it applies to each symbol."
         ),
         "filters": (
             "Any other parameter Massive documents for the dataset, as a `dict` from the "
             "parameter's name to its value. Write each dot in a name as `_`: Massive's "
             "`strike_price.gte` is `strike_price_gte`.\n"
             "\n"
-            "- Each dataset's page lists the keys it takes. Any other key, or a key with an "
-            "argument of its own, such as `start`, raises `ValueError` naming the keys the "
-            "dataset takes.\n"
-            "- A date or time value is ISO 8601 text, or any value `start` takes."
+            "- Each dataset's page lists the keys it takes. Any other key raises `ValueError` "
+            "listing them. A key that an argument sets, such as `ex_dividend_date_gte` for "
+            "`start`, raises `ValueError` naming that argument.\n"
+            "- A date or time value is ISO 8601 text, with an offset for a time, or a date or "
+            "time object that `start` takes. Deephaven time text isn't read here."
         ),
         "adjusted": (
-            "`True`, the default, gives split-adjusted prices, restated in terms of every later "
-            "stock split. `False` gives prices as traded. Only REST adjusts, so bars from flat "
-            "files and live bars are always as traded."
+            "`True`, the default, adjusts prices and volumes for splits: a value from before a "
+            "split is restated in the split's terms. `False` gives values as traded. Only REST "
+            "adjusts, so bars from flat files and live bars are always as traded."
         ),
         "timespan": (
             "The unit of each bar, a `dm.Timespan` member: `SECOND`, `MINUTE`, `HOUR`, `DAY`, "

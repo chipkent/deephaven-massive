@@ -742,7 +742,8 @@ Massive's pages state them.
 <details><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. `request` marks a value the library fills \
-from the request, and an empty cell a column the library computes.
+from the request. An empty cell means the source doesn't carry the column, or the library \
+computes it.
 
 | Column | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- |
@@ -1048,11 +1049,18 @@ def test_the_real_index_lists_each_shared_column_whose_type_differs() -> None:
     assert "Cast one table's column" not in _rendered()[INDEX]
 
 
-def test_the_index_says_what_every_type_holds() -> None:
-    index = _rendered()[INDEX]
+def test_the_index_says_what_every_type_in_use_holds() -> None:
+    index = rendered()[INDEX]
+    used = {
+        column.type
+        for spec in CATALOG.by_name.values()
+        for column in CATALOG.dataset_schema(spec).columns
+    }
     for column_type in ColumnType:
-        assert f"\n| `{column_type.value}` | " in index
+        assert (f"\n| `{column_type.value}` | " in index) == (column_type in used)
     assert "| `long[]` | An array of `long` |" in index
+    # No dataset has a 32-bit integer column, so the table leaves the type out.
+    assert ColumnType.INT not in used
 
 
 def test_each_vendor_link_is_labeled_and_opens_the_web_page() -> None:

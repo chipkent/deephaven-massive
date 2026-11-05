@@ -213,8 +213,8 @@ Massive's ticker for each symbol, spelled exactly as Massive spells it:
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
 - A live table of symbols is followed. Each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and most polls also drop a deleted symbol's rows.
 - `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no filter by symbol. Each dataset's page says which of the two it takes.
-- A misspelled symbol in text or a list raises `ValueError` at the call. A misspelled row of a table is skipped and logged by default, and the table keeps running.
-- `dm.canonical_symbol` converts other spellings, such as Yahoo's `BRK-B`, to Massive's.
+- A symbol in text or a list that isn't spelled as Massive spells it, such as `aapl`, raises `ValueError` at the call. Such a row of a table is skipped and logged by default, and the table keeps running. A table whose every row is misspelled is refused at the call.
+- `dm.canonical_symbol` converts other spellings to Massive's. Yahoo's `BRK-B`, for example, converts with `convention=dm.SymbolConvention.YAHOO`.
 - A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists.
 
 <a id="start"></a>
@@ -224,7 +224,7 @@ Massive's ticker for each symbol, spelled exactly as Massive spells it:
 The first day or moment of the range. Give `start` and `end` as two dates or two instants.
 
 - A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day.
-- An instant is a Python `datetime` with a time zone, a `pandas.Timestamp`, a `numpy.datetime64`, a Deephaven `Instant` or `ZonedDateTime`, or Deephaven time text such as `"2025-06-02T09:30 ET"`. A `datetime` without a time zone raises `ValueError`.
+- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a `numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or Deephaven time text such as `"2025-06-02T09:30 ET"`. A `datetime` or `pandas.Timestamp` without a time zone raises `ValueError`.
 - A dataset whose range is a calendar date, such as an ex-dividend date, takes dates only.
 
 <a id="end"></a>
@@ -234,13 +234,13 @@ The first day or moment of the range. Give `start` and `end` as two dates or two
 The last day, or the moment the range stops, in the same form as `start`.
 
 - A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all of June 2. An instant is excluded.
-- Leave it out to read through now. Massive is then sent no end, so it also returns records still to come, such as dividends announced but not yet paid.
+- Leave it out to send Massive no end. The rows then include records still to come, such as dividends announced but not yet paid.
 
 <a id="date"></a>
 
 ### date
 
-One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant is refused at the call.
+One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant raises `ValueError` at the call.
 
 <a id="as_of"></a>
 
@@ -258,7 +258,7 @@ The field to order the rows by, as Massive names it, such as `"ex_dividend_date"
 
 ### order
 
-The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`.
+The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Where Massive's endpoint has no `order` parameter of its own, `order` without `sort` raises `ValueError`.
 
 <a id="limit"></a>
 
@@ -266,9 +266,9 @@ The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`.
 
 The most rows Massive returns for the whole request, across every symbol you name, in Massive's order.
 
-- Ask for newest first, `order=dm.Order.DESC`, to keep the latest rows.
+- To keep the latest rows, sort newest first, such as `sort="ex_dividend_date", order=dm.Order.DESC`.
 - A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol.
-- A `fetch()` that follows a table of symbols applies the limit to each symbol's request. A dataset's page notes any other case where it applies to each symbol.
+- A `fetch()` that follows a table of symbols applies the limit to each request: one per symbol, or for a snapshot dataset one per group of up to 250 symbols. A dataset's page notes any other case where it applies to each symbol.
 
 <a id="filters"></a>
 
@@ -276,14 +276,14 @@ The most rows Massive returns for the whole request, across every symbol you nam
 
 Any other parameter Massive documents for the dataset, as a `dict` from the parameter's name to its value. Write each dot in a name as `_`: Massive's `strike_price.gte` is `strike_price_gte`.
 
-- Each dataset's page lists the keys it takes. Any other key, or a key with an argument of its own, such as `start`, raises `ValueError` naming the keys the dataset takes.
-- A date or time value is ISO 8601 text, or any value `start` takes.
+- Each dataset's page lists the keys it takes. Any other key raises `ValueError` listing them. A key that an argument sets, such as `ex_dividend_date_gte` for `start`, raises `ValueError` naming that argument.
+- A date or time value is ISO 8601 text, with an offset for a time, or a date or time object that `start` takes. Deephaven time text isn't read here.
 
 <a id="adjusted"></a>
 
 ### adjusted
 
-`True`, the default, gives split-adjusted prices, restated in terms of every later stock split. `False` gives prices as traded. Only REST adjusts, so bars from flat files and live bars are always as traded.
+`True`, the default, adjusts prices and volumes for splits: a value from before a split is restated in the split's terms. `False` gives values as traded. Only REST adjusts, so bars from flat files and live bars are always as traded.
 
 <a id="timespan"></a>
 
@@ -338,7 +338,6 @@ Each column has one of these Deephaven types:
 | --- | --- |
 | `double` | A 64-bit floating-point number, Python's `float` |
 | `long` | A 64-bit integer |
-| `int` | A 32-bit integer |
 | `boolean` | True or false |
 | `String` | Text |
 | `Instant` | An exact moment in time |
