@@ -23,7 +23,13 @@ import pytest
 
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._massive.net.redaction import REDACTED, Redactor, redact, without_userinfo
+from deephaven_massive._massive.net.redaction import (
+    REDACTED,
+    Redactor,
+    redact,
+    without_userinfo,
+    without_userinfo_or_query,
+)
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import Patience, RequestGovernor
@@ -513,3 +519,23 @@ def test_the_redactor_passes_on_a_body_whose_escapes_spell_no_whole_secret() -> 
 )
 def test_without_userinfo_hides_the_user_and_password_of_a_url(url: str, shown: str) -> None:
     assert without_userinfo(url) == shown
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://api.massive.com?apiKey=hunter2", "https://api.massive.com?***"),
+        ("https://api.massive.com#hunter2", "https://api.massive.com#***"),
+        ("https://h.example/x#a?hunter2", "https://h.example/x#***"),
+        ("https://u:pw@h.example/x?y=hunter2", "https://***@h.example/x?***"),
+        ("https://h.example?apiKey=hunter2@x", "https://***"),
+        ("https://u:p?hunter2@h.example", "https://***"),
+        ("h.example?k=hunter2@x", "***"),
+        ("https://h.example?", "https://h.example?***"),
+        ("https://files.massive.com", "https://files.massive.com"),
+    ],
+)
+def test_without_userinfo_or_query_hides_everything_that_can_hold_a_secret(
+    url: str, shown: str
+) -> None:
+    assert without_userinfo_or_query(url) == shown

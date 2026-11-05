@@ -349,12 +349,13 @@ class MassiveConfig:
                 interval, or count is not positive, only one of the two S3 credentials is set,
                 `api_key` or an S3 credential has leading or trailing whitespace (or an S3
                 credential is blank), `rest_base_url` or `s3_endpoint_url` is not an `http` or
-                `https` URL with a host, `rest_base_url` names more than a scheme, host, and
-                port (a user and password, a path, or a query) or is `http` to a host other
-                than this machine, `s3_bucket` is blank, a `websocket_hosts` value is not a
-                bare lower-case hostname, an environment variable read for a default has leading or
-                trailing whitespace, `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or
-                a `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
+                `https` URL with a host, `rest_base_url` names port 0 or more than a scheme,
+                host, and port (a user and password, a path, or a query), or is `http` to a
+                host other than this machine, `s3_bucket` is blank, a `websocket_hosts` value is
+                not a bare lower-case hostname, an environment variable read for a default has
+                leading or trailing whitespace, `delayed_subscriptions` holds
+                `dm.Subscription.CURRENCIES`, or a `websocket_hosts` pin of a delayed host does not
+                match `delayed_subscriptions`.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")

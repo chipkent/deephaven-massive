@@ -522,6 +522,7 @@ def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> No
         ("http://api.massive.com", "would send the API key in clear text; use https"),
         ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
         ("https://api.massive.com:99999", "is not an absolute http or https URL"),
+        ("https://api.massive.com:0", "is not an absolute http or https URL"),
     ],
 )
 def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
@@ -1122,3 +1123,10 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
     assert not getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
+def test_a_refused_rest_base_url_never_shows_its_query() -> None:
+    with pytest.raises(ValueError, match="must name only") as info:
+        MassiveConfig(api_key="k", rest_base_url="https://api.massive.com?apiKey=hunter2")
+    assert "'https://api.massive.com?***'" in str(info.value)
+    assert "hunter2" not in str(info.value)
