@@ -132,8 +132,10 @@ class SessionClients:
         Returns:
             The transport.
 
-        An API key or `rest_base_url` the REST client cannot use raises its `ValueError` (see
-        `RestClient`), and a garbage-collected core the `MassiveError` of `_live_core`.
+        An API key the REST client cannot use raises its `ValueError` (see `RestClient`), and a
+        garbage-collected core the `MassiveError` of `_live_core`. A `rest_base_url` the client
+        cannot use never reaches it: `MassiveConfig` applies the client's rule
+        (`_massive.check_rest_base_url`) and refuses the URL when the config is built.
         """
         core = self._live_core()
         with core.registry_lock:

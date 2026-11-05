@@ -460,12 +460,10 @@ def test_equal_backoffs_are_accepted() -> None:
 def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
     config = dm.MassiveConfig(
         api_key="k",
-        rest_base_url="https://u:hunter2@api.massive.com",
         s3_endpoint_url="https://reader:hunter2@files.massive.com",
     )
     shown = repr(config)
     assert "hunter2" not in shown
-    assert "rest_base_url='https://***@api.massive.com'" in shown
     assert "s3_endpoint_url='https://***@files.massive.com'" in shown
     assert shown.startswith("MassiveConfig(s3_access_key_id=")
     assert "api_key" not in shown
@@ -494,11 +492,44 @@ def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> N
 
 
 @pytest.mark.parametrize(
-    "url", ["http://127.0.0.1:8080", "https://api.massive.com/v1?x=1", "http://[::1]:9000"]
+    "url",
+    ["http://127.0.0.1:8080", "http://localhost", "https://api.massive.com/", "http://[::1]:9000"],
 )
 def test_an_http_url_with_a_host_is_accepted(url: str) -> None:
     config = MassiveConfig(api_key="k", rest_base_url=url, s3_endpoint_url=url)
     assert (config.rest_base_url, config.s3_endpoint_url) == (url, url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.massive.com/v1?x=1",
+        "https://reader:pw@files.massive.com",
+        "http://minio:9000",
+    ],
+)
+def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> None:
+    assert MassiveConfig(api_key="k", s3_endpoint_url=url).s3_endpoint_url == url
+
+
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [
+        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
+        ("https://api.massive.com?apiKey=1", "must name only a scheme, host, and port"),
+        ("https://api.massive.com#top", "must name only a scheme, host, and port"),
+        ("https://u:hunter2@api.massive.com", "must name only a scheme, host, and port"),
+        ("http://api.massive.com", "would send the API key in clear text; use https"),
+        ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
+        ("https://api.massive.com:99999", "is not an absolute http or https URL"),
+    ],
+)
+def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
+    url: str, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=f"^rest_base_url '.*' {reason}") as info:
+        MassiveConfig(api_key="k", rest_base_url=url)
+    assert "hunter2" not in str(info.value)
 
 
 def test_a_refused_url_never_shows_a_password() -> None:
@@ -1035,6 +1066,10 @@ def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path
     )
     message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
     assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
+    message = _refused(tmp_path, "max_outage: 600\nrest_base_url: https://api.massive.com/v3\n")
+    assert message.startswith(
+        ", line 2, column 1: rest_base_url 'https://api.massive.com/v3' must name only a scheme"
+    )
     message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")
     assert message.startswith(", line 2, column 1: s3_endpoint_url must be an http or https URL")
     message = _refused(tmp_path, "reconnect_backoff: 200\n")

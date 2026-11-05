@@ -47,6 +47,9 @@ Interface:
       recording Massive's real replies. Off by default.
     - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
       governor the library shares. It is part of `net` and loads no client.
+    - `check_rest_base_url`: the rule of a REST base URL (an origin alone, and `https` unless
+      the host is loopback), which the REST client and `MassiveConfig.rest_base_url` both
+      apply. It is part of `net` and loads no client.
     - `without_userinfo`: a URL with its user and password replaced by `***`, the one rule
       every message and log line that shows a configured URL uses. It is part of `net` and
       loads no client.
@@ -109,6 +112,7 @@ __all__ = [
     "WireUnit",
     "WsClient",
     "WsState",
+    "check_rest_base_url",
     "encode_value",
     "object_key",
     "origin_of",
@@ -158,6 +162,7 @@ _EXPORTS: dict[str, str] = {
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.object_keys",
+    "check_rest_base_url": "deephaven_massive._massive.net.base_urls",
     "origin_of": "deephaven_massive._massive.net.origins",
     "without_userinfo": "deephaven_massive._massive.net.redaction",
     "to_batch": "deephaven_massive._massive.rest.batch",
@@ -170,6 +175,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.client import FlatFileClient
     from deephaven_massive._massive.flatfiles.object_keys import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
+    from deephaven_massive._massive.net.base_urls import check_rest_base_url
     from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.capture import CapturedReply, set_reply_capture
     from deephaven_massive._massive.net.errors import (
