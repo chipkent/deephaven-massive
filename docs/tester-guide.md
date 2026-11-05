@@ -634,7 +634,8 @@ print(text.count(os.environ["MASSIVE_API_KEY"]), "copies of the key")
 ```
 
 You should see `0 copies of the key`. Any other count is a serious problem. Report it, and
-don't send the log. You should also see warnings from example 11, and on Basic from example 7.
+don't send the log. The warnings count is above 0, because example 11 logs a warning for the
+value it couldn't convert.
 
 #### 13. Chart a moving average
 
@@ -1029,7 +1030,8 @@ Massive's answers for the maintainer. You start it once and leave it running for
 trading days. It checks your plans when it starts and each trading morning, so you can change
 plans during the test.
 
-Two kinds of check keep your key busy for many hours. Each needs the key to itself:
+Keep your key free of other programs while the run goes: a live check can't stream while another
+program holds the key's connection. Two kinds of check keep the key busy for many hours:
 
 | Check | When, in New York time | Which plans |
 |---|---|---|
@@ -1040,9 +1042,8 @@ Two kinds of check keep your key busy for many hours. Each needs the key to itse
 
 ### Check the computer
 
-Stop every other use of your key first, the Deephaven server included. A live check can't
-stream while another program holds the key's connection. Then, in a terminal, run the program's
-check, which writes nothing:
+Stop every other use of your key first, the Deephaven server included. Then, in a terminal, run
+the program's check, which writes nothing:
 
 ```bash
 cd ~/massive-test/deephaven-massive
@@ -1230,8 +1231,8 @@ A report is an issue with a zip of your logs, your keys removed:
    uv run python scripts/tester.py bug-report
    ```
 
-   You should see `wrote` and the zip's path, `~/massive-test/bug-report-<time>.zip`. If the
-   zip shows each of your keys as `***`. If a key still shows up in a file, the command writes
+   You should see `wrote` and the zip's path, `~/massive-test/bug-report-<time>.zip`. The zip
+   shows each of your keys as `***`. If a key still shows up in a file, the command writes
    nothing and names the files. Put that list of names, without the files, on the issue.
 4. Open an [issue](https://github.com/chipkent/deephaven-massive/issues/new), paste your report,
    and attach the zip and the screenshots.

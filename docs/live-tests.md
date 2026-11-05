@@ -2,7 +2,8 @@
 
 The live tests call Massive's real servers with your keys, and record what Massive sends. This
 is the owner's runbook for running them with pytest and reading what they record. Testers run
-the same tests through the live-run program, and send its results zip on an issue.
+them, and further checks, through the live-run program, `scripts/live_run.py`, and send its
+results zip on an issue.
 
 <a id="run-the-tests"></a>
 
@@ -112,13 +113,13 @@ A test fails when:
 - a stream delivers no row while rows are due
 - Massive refuses a request although your plans, probed or declared, include the plan the test
   needs
-- a `verifies` test gets an answer other than the one the library assumes
+- a test that asserts the answer the library assumes gets another answer
 
 A refusal of data your plans include means your plans don't match what Massive serves. Check
 `MASSIVE_LIVE_PLANS` first, then open an issue with the refusal. For any other failure, open an
 issue with `live-checks.log`.
 
-A skip prints its reason, and needs nothing from you. A test skips when:
+A skip prints its reason. A test skips when:
 
 - your key lacks a plan it needs, and the skip names the plan with its price, such as
   "needs Currencies Starter ($49/month)"
@@ -126,10 +127,9 @@ A skip prints its reason, and needs nothing from you. A test skips when:
 - the day it asks for is older than your plan keeps
 - the market isn't open, or the test can't tell its answer from a network drop
 
-A pass can still leave evidence to read. A `settles` test records Massive's answer and passes
-whatever it is. The summary lists a question under `ran, evidence to read` once its tests all
-pass and none of them asserts its answer. A `verifies` test asserts the answer the library assumes. Both name
-their questions by number.
+A pass can still leave evidence to read. A `settles` test records Massive's answer for you to
+read, and a `verifies` test asserts the answer the library assumes. The summary lists a question under `ran, evidence to read` once its tests all
+pass and none of them asserts its answer. Both kinds name their questions by number.
 
 <a id="read-the-end-of-a-run"></a>
 
@@ -175,8 +175,8 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read five checks by hand
 
-Read each one's evidence. Only the index minute-file check fails on a wrong answer, when a file
-row falls outside its New York day. The others pass whatever Massive answers:
+Read each one's evidence. The index minute-file check fails when its file disagrees with the New
+York day or with REST, and the others pass whatever Massive answers:
 
 | Check | Plans | What to read | Open an issue when |
 |---|---|---|---|
