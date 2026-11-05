@@ -203,7 +203,7 @@ cd ~/massive-test/deephaven-massive
 uv run python scripts/tester.py examples
 ```
 
-The runner fits each example's session to your plans. It prints a line per example as it runs,
+The runner writes a settings file for your plans, which examples 17, 18, and 22 read. It prints a line per example as it runs,
 then `no example failed`, or `failed:` and the examples' names. Each example's output is in
 `~/massive-test/examples-output/`, and `summary.txt` there gives each one's verdict:
 
@@ -588,7 +588,8 @@ On the free plan, you should see three lines:
 | Bars from 2015 | `EntitlementError`: your plan's history doesn't reach 2015 |
 
 A line says `no error` on a paid plan that includes that data. An `EntitlementError` that names
-`delayed_subscriptions` means your plan is delayed, and example 17 shows the setting.
+`delayed_subscriptions` means your plan is delayed, and the README's settings example shows the
+setting.
 
 For each message, including the `Error` in `streams`, note whether it told you what went wrong
 and what to do. Note any that blamed your key when the cause was your plan. Also note which of
@@ -651,7 +652,7 @@ print(text.count(os.environ["MASSIVE_API_KEY"]), "copies of the key")
 ```
 
 You should see `0 copies of the key`. Any other count is a serious problem. Report it, and
-don't send the log. You should also see warnings from examples 7 and 11.
+don't send the log. You should also see warnings from example 11, and on Basic from example 7.
 
 #### 13. Chart a moving average
 
@@ -863,7 +864,7 @@ m = dm.MassiveSession()
 reads = m.symbol_reads()
 streams = m.streams()
 
-# Three Stocks requests a minute, within Basic's five.
+# One Stocks request per stock for the dividends, then one per stock a minute for the bars.
 stocks = new_table({"Symbol": ["JPM", "XOM", "TSLA"]})
 stock_watchlist = input_table(init_table=stocks, key_cols="Symbol")
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
@@ -1073,8 +1074,8 @@ Two kinds of check keep your key busy for many hours. Each needs the key to itse
 
 ### Check the computer
 
-Stop every other use of your key first, the Deephaven server included. A live check waits for
-the key's connection, or disconnects the other program. Then, in a terminal, run the program's
+Stop every other use of your key first, the Deephaven server included. A live check can't
+stream while another program holds the key's connection. Then, in a terminal, run the program's
 check, which writes nothing:
 
 ```bash
@@ -1112,17 +1113,20 @@ running.
 ### Stop and resume the run
 
 The run must survive a stop, and this step checks that it does. After the first groups have
-started, press Control-C once. You should see `interrupted; to resume, run:` and the command,
-which is the `run` command without `--any-time`.
+started, press Control-C once. You should see `interrupted; to resume, run:` and the resume
+command, which restarts the run after any stop. Run it now, from the same folder:
 
-That resume command restarts the run after any stop. Run it now. You should see `resuming`, and
-every check that passed stays passed.
+```bash
+uv run python scripts/live_run.py run --out ~/massive-live
+```
+
+You should see `resuming`, and every check that passed stays passed.
 
 | What happened | What you do |
 |---|---|
 | Control-C, a closed terminal, a crash, or a restart of the computer | In a new terminal, go to `~/massive-test/deephaven-massive` and run the resume command. |
 | You changed your plan | Nothing. The next morning's plan check sees it. To make the run see it at once, stop and resume it. |
-| You got S3 keys for the first time | Add them to your startup file as the README's [Set your API keys](../README.md#set-your-api-keys) shows, and resume the run in a new terminal. |
+| You got S3 keys for the first time | Add them to your startup file as the README's [Set your API keys](../README.md#set-your-api-keys) shows, and resume the run from `~/massive-test/deephaven-massive` in a new terminal. |
 | A new release comes out | Nothing. Keep testing the release you installed, unless a comment on your issue asks you to switch. |
 
 <a id="look-in-once-a-day"></a>
@@ -1190,7 +1194,7 @@ a minute once you upgrade it. Run it only when a comment on your issue asks:
 
 | You see | What you do |
 |---|---|
-| `the API key was rejected` | Copy the key from Massive's dashboard into your startup file again, and resume the run in a new terminal. |
+| `the API key was rejected` | Copy the key from Massive's dashboard into your startup file again, and resume the run from `~/massive-test/deephaven-massive` in a new terminal. |
 | `a run or an upgrade check is using ...` | Another `run` is already going. Use it, or stop it first. |
 | The plan check shows a lower plan than you bought | Stop and resume the run, which checks again. If the plan is still lower, say so on your issue. |
 | A gap in a stream day or night, in the zip's `REPORT.md` | Keep the computer awake with the lid open. When a stream day's or night's gaps add up to more than 30 minutes, it fails, and the program plans one more. |

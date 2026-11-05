@@ -7,7 +7,7 @@ m = dm.MassiveSession()
 reads = m.symbol_reads()
 streams = m.streams()
 
-# Three Stocks requests a minute, within Basic's five.
+# One Stocks request per stock for the dividends, then one per stock a minute for the bars.
 stocks = new_table({"Symbol": ["JPM", "XOM", "TSLA"]})
 stock_watchlist = input_table(init_table=stocks, key_cols="Symbol")
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)

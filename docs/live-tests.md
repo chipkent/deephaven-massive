@@ -1,8 +1,8 @@
 # Live integration tests
 
 The live tests call Massive's real servers with your keys, and record what Massive sends. The
-owner runs them with pytest, before a release and whenever a live check fails, as
-[Run the tests](#run-the-tests) shows. A tester runs the same tests unattended for days through the live-run program, as the
+owner runs them with pytest, as [Run the tests](#run-the-tests) shows. A tester runs the same
+tests unattended for days through the live-run program, as the
 [tester guide](tester-guide.md#live-run) shows.
 
 <a id="run-the-tests"></a>
@@ -93,7 +93,8 @@ keys reach the flat files. An asset class you leave out is on Basic. The plan na
 | `indices` | `starter`, `advanced`, `business` |
 | `currencies` | `starter`, `business` |
 
-Add the line to your shell's startup file, beside your keys, and open a new terminal. This one
+Add the line to your shell's startup file, beside your keys, and open a new terminal. Remove it
+when your plans change, because it replaces the probe. This one
 declares Starter on Stocks, Options, and Currencies, and flat files:
 
 ```bash
@@ -124,9 +125,9 @@ A skip prints its reason, and needs nothing from you. A test skips when:
 - the day it asks for is older than your plan keeps
 - the market isn't open, or the test can't tell its answer from a network drop
 
-A pass of a `settles` test still leaves evidence to read, as
-[Read five checks by hand](#checks-to-read-by-hand) shows. A `verifies` test asserts its
-answer instead, so it fails the day Massive changes it. Both name the
+A pass of a `settles` test still leaves evidence to read, which the summary lists under
+`ran, evidence to read`. A `verifies` test asserts its answer instead, so it fails the day
+Massive changes it. Both name the
 [open questions](dev/verification-items.md) they answer by number.
 
 <a id="read-the-end-of-a-run"></a>
@@ -155,7 +156,7 @@ plans keep:
 |---|---|---|
 | The option split check | NVDA's split of 2024-06-10 | It skips, naming Options Developer |
 | The deliverable check's adjusted option roots | `AAPL7` (2014-06-10), `DELL1` (2021-11-15), `FF1` (2024-04-15) | It records each root it can't read as outside the plan's history |
-| `tests/tables/test_followed_read_integration.py` | The week of 2025-06-02 | It fails on Stocks Basic from June 2027, because its read never finishes |
+| `tests/tables/test_followed_read_integration.py` | The week of 2025-06-02 | It fails on Stocks Basic from June 2027, because its read fails |
 | The `responses` group of the [live-run program](#live-run-program) | NVDA's daily bars from 2024-06-03 to 2024-06-14 | It skips the example, naming the Stocks plan it needs |
 
 <a id="debug-log"></a>
@@ -181,7 +182,7 @@ the owner, and attach the evidence file and the `stream-day` group's debug log t
 |---|---|---|---|---|
 | `test_the_options_cap_counts_contracts_or_topics` | The first [connection-limit command](#run-order) | Options Advanced | Whether Massive acknowledges all 2,000 topics of 1,000 contracts, or refuses those past 1,000 or closes the socket | The cap counts topics |
 | `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | The file's rows outside the New York day, and the minutes REST has that the file lacks | The file holds its own New York day. This check fails otherwise. |
-| `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | None. Index day bars end at 01:00 New York time until this is read. |
+| `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | Index day bars end at 01:00 New York time until this check is read |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | The evidence tests | Futures Starter | Its `VERDICT` lines | Each bar of a session or longer holds the whole sessions that open in its UTC days |
 | A quiet connection | The `stream-day` group of the [live-run program](#live-run-groups) | Any plan that streams stocks | The stocks connection's `status` lines from 03:45 to 04:00 New York time, and the longest gap between them; every `no frame for ... during ... trading hours` WARNING of the day, with its time | None. The check records it. |
 
@@ -267,5 +268,8 @@ The program reruns a check by itself:
 | Skipped for a missing subscription, or refused | When the subscriptions change |
 | Skipped for the moment, such as a closed market | Up to three attempts in all |
 
-To run every check of a group again, failed ones included, pass the group to `run --redo`, such
-as `--redo luld,smoke`.
+To run every check of a group again, failed ones included, name the group in `--redo`:
+
+```bash
+uv run python scripts/live_run.py run --out ~/massive-live --redo luld,smoke
+```
