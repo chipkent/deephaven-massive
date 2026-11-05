@@ -124,8 +124,8 @@ A skip prints its reason, and needs nothing from you. A test skips when:
 - the day it asks for is older than your plan keeps
 - the market isn't open, or the test can't tell its answer from a network drop
 
-A pass of a `settles` test still leaves evidence to read, which the summary lists under
-`ran, evidence to read`. A `verifies` test asserts its answer instead, so it fails the day
+A pass of a `settles` test still leaves evidence to read. The summary lists each question whose
+tests all passed, and none of which asserts its answer, under `ran, evidence to read`. A `verifies` test asserts its answer instead, so it fails the day
 Massive changes it. Both name the
 [open questions](dev/verification-items.md) they answer by number.
 
@@ -265,5 +265,6 @@ To have every check of a group run again, failed ones included, ask the tester t
 and resume it with `--redo` and the group:
 
 ```bash
+cd ~/massive-test/deephaven-massive
 uv run python scripts/live_run.py run --out ~/massive-live --redo luld,smoke
 ```
