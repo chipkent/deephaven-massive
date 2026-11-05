@@ -60,19 +60,18 @@ _E = TypeVar("_E", bound=StrEnum)
 
 
 class AssetClass(StrEnum):
-    """An asset class, named by its WebSocket cluster path.
+    """An asset class, such as stocks or crypto.
 
-    Used to pin a WebSocket host (`MassiveConfig.websocket_hosts`), in the diagnostics tables, and
-    by the reference endpoints that filter by asset class (`m.reference.ticker_types`,
-    `m.reference.exchanges`, `m.reference.conditions`). The values are the cluster paths
-    (`wss://<host>/stocks`, ...). On the REST reference endpoints `FOREX` is sent as `fx`.
+    Pin a streaming host with it in `MassiveConfig.websocket_hosts`, and filter the reference
+    datasets `m.reference.ticker_types`, `m.reference.exchanges`, and `m.reference.conditions` by
+    it. The diagnostics tables show it too.
 
     Example:
         ::
 
             import deephaven_massive as dm
 
-            cfg = dm.MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
+            config = dm.MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"})
     """
 
     STOCKS = "stocks"
@@ -100,11 +99,10 @@ class ClassFromPrefix(Enum):
 class Timespan(StrEnum):
     """The unit of a bar or an indicator window.
 
-    For `bars()` the timespan also decides whether the bars can stream: `SECOND` and `MINUTE`
-    (with `multiplier=1`) stream over WebSocket, and every other combination is history only. The
-    previous session's 1-day bar is not a `bars()` call: each namespace that has one serves it
-    as `previous_day_bar()`. `SESSION` exists only for futures, whose aggregates endpoint has a
-    trading-session unit and no `DAY`.
+    For `bars()`, the timespan also decides whether the bars stream: one-second and one-minute bars
+    (`SECOND` and `MINUTE` with `multiplier=1`) stream, and every other bar is history only.
+    `SESSION` is for futures alone, whose bars have a trading-session unit and no `DAY`. The
+    previous day's bar is a dataset of its own, `previous_day_bar()`.
 
     Example:
         ::
@@ -141,22 +139,17 @@ class NotBars(Enum):
 
 
 class PollMode(StrEnum):
-    """How a `poll()` table combines successive request cycles.
+    """How a `poll()` table combines one poll's rows with the last.
 
-    - `AUTO`, the default of `poll()`: the dataset's own mode, one of the three below, which
-      its page in `docs/datasets` names: `APPEND` for the news and filing feeds, `UPSERT` for
-      IPOs, and `REPLACE` for the rest.
-    - `REPLACE`: a keyed table that holds exactly the latest cycle; keys absent from it are
-      deleted, including when the cycle returns no rows.
-    - `UPSERT`: a keyed table that adds and updates rows but never deletes. On a dataset
-      keyed on every column (`reference.related_companies`), it holds each distinct row once.
-    - `APPEND`: an append-only table that adds only rows it has not seen before. A row is
-      identified by the dataset's poll keys (such as a news article's id), followed on a
-      current-state dataset by its update time (a snapshot's `Updated`), so an explicit
-      `APPEND` on a snapshot records each new state of a symbol. A row whose identity the
-      table already holds is skipped for as long as the table lives, also after any absence;
-      so a later revision of an appended row that changes none of those columns is not
-      appended (`UPSERT` follows revisions).
+    - `AUTO`, the default of `poll()`: the mode the dataset's page names. It's `APPEND` for the news
+      and filings feeds, `UPSERT` for IPOs, and `REPLACE` for the rest.
+    - `REPLACE`: a keyed table that holds exactly the latest poll's rows. A key the poll doesn't
+      return is deleted, even when the poll returns no rows.
+    - `UPSERT`: a keyed table that adds and updates rows but never deletes them.
+    - `APPEND`: an append-only table that adds only rows it hasn't seen. The dataset's keys identify
+      a row, such as a news article's id. A snapshot's update time is part of its key, so `APPEND`
+      on a snapshot records each new state of a symbol. A later revision that changes none of the
+      key columns isn't added. `UPSERT` follows revisions.
 
     Example:
         ::
@@ -175,11 +168,11 @@ class PollMode(StrEnum):
 class HistorySource(StrEnum):
     """Where `history()` reads from.
 
-    - `AUTO`: the library picks flat files or REST from the S3 credentials, the dataset, the bar
-      shape and `adjusted`, and the number of symbols (`flat_file_symbol_threshold`). A day whose
-      file is missing, or files the plan lacks, are read from REST when REST can serve them.
-    - `REST`: Massive's REST API, every page of it.
-    - `FLAT_FILES`: the gzip CSV files on S3 (`files.massive.com`); needs S3 credentials.
+    - `AUTO`: the library picks flat files or REST. The choice depends on whether you set S3 keys,
+      the dataset, the bars and `adjusted`, and how many symbols you ask for. When REST can serve
+      them, it reads from REST any day whose file is missing or isn't in your plan.
+    - `REST`: Massive's REST API.
+    - `FLAT_FILES`: Massive's flat files, the daily CSV files it publishes on S3. They need S3 keys.
 
     Example:
         ::
@@ -195,22 +188,19 @@ class HistorySource(StrEnum):
 
 
 class Reread(StrEnum):
-    """Whether `history()` of a live symbol table downloads a symbol again when it returns.
+    """Whether `history()` of a watchlist downloads a symbol again when you add it back.
 
-    A `history()` whose `symbols` is a live table, a watchlist, follows it: each symbol added later
-    is downloaded over the call's range, and a removed symbol's rows leave the result. This setting
-    decides what happens when a removed symbol comes back. No date or time rule can tell that
-    Massive's past data is final (late cancellations, rewritten flat files, backfills, splits
-    applied overnight), so there is no automatic member. It has no effect when `symbols` is not a
-    live table.
+    A `history()` of a watchlist reads each symbol you add over the call's range. It drops each
+    symbol you delete. This setting decides what happens when a deleted symbol comes back. It has no
+    effect when `symbols` isn't a live table.
 
-    - `ALWAYS` (the default): the returning symbol is downloaded again and shows Massive's
-      current answer. It has no rows until the new download lands.
-    - `NEVER`: the returning symbol gets its earlier download back at once, with no request.
-      The result keeps every download it has made for as long as it lives, in memory, and a
-      returning symbol's rows are as old as that download (`ReadAt` in `m.symbol_reads()`).
+    - `ALWAYS`, the default: the symbol is downloaded again and shows Massive's current data. It has
+      no rows until the download lands.
+    - `NEVER`: the symbol gets its earlier rows back at once, with no request. The result keeps
+      every download in memory for as long as it lives, and `ReadAt` in `m.symbol_reads()` says when
+      each was made.
 
-    A symbol whose download failed is downloaded again on every return, under both members.
+    A symbol whose download failed is downloaded again when it comes back, under either member.
 
     Example:
         ::
@@ -225,11 +215,10 @@ class Reread(StrEnum):
 
 
 class FuturesVenue(StrEnum):
-    """A futures exchange, used only to pick the futures flat-file prefix.
+    """A futures exchange, which picks the flat files a futures `history()` reads.
 
-    Futures streams always use the `/futures` cluster path whatever the venue, so the venue is
-    not part of a stream's identity. A futures dataset's `venues`, a set of members, picks the
-    prefixes read; every venue by default.
+    A futures dataset's `venues` argument takes a set of members and reads every exchange by
+    default. It applies only to flat files: streams cover every exchange.
 
     Example:
         ::
@@ -301,9 +290,9 @@ class SeriesType(StrEnum):
 class Timeframe(StrEnum):
     """The reporting period of the `m.stocks.financials` statements.
 
-    `ANNUAL` is a fiscal year and `QUARTERLY` a fiscal quarter. `TRAILING_TWELVE_MONTHS` sums
-    the four most recent quarters; the income and cash flow statements offer it, while a
-    balance sheet, a snapshot at the period's end, has no trailing form.
+    `ANNUAL` is a fiscal year and `QUARTERLY` a fiscal quarter. `TRAILING_TWELVE_MONTHS` sums the
+    four most recent quarters. The income and cash flow statements offer it, and a balance sheet,
+    which is a snapshot at the period's end, doesn't.
 
     Example:
         ::
@@ -483,14 +472,14 @@ class OnError(StrEnum):
 
     One enum for every symbol problem, used in five places:
 
-    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The
-      default there is `RAISE`.
-    - `MassiveConfig.noncanonical_symbols`, for a row of a symbol table passed as `symbols`
-      that is not Massive's exact ticker. A `str` or a list passed in code always raises,
-      whatever the setting. The default is `LOG`.
-    - `MassiveConfig.unlisted_symbols`, for a crypto pair of a symbol table that Massive's
-      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default
-      is `LOG`.
+    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The default
+      there is `RAISE`.
+    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols` that
+      is not Massive's exact ticker. A `str` or a list you pass always raises, whatever the setting.
+      The default is `LOG`.
+    - `MassiveConfig.unlisted_symbols`, for a crypto pair of a table of symbols that Massive's
+      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default is
+      `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
     - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
@@ -498,14 +487,13 @@ class OnError(StrEnum):
 
     The members:
 
-    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`),
-      and a live table fails when the bad value arrives.
-    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at
-      WARNING for a value the user supplied, and at ERROR, as a library defect to report, for
-      a spelling from Massive the library cannot read. `canonicalize_symbols` writes a null
-      symbol for the row; a symbol table's bad row is skipped and listed in its result's
-      `m.streams()` row; an unreadable spelling keeps its row with a null `Symbol` and the text
-      in the `RawSymbol` column.
+    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`), and a
+      live table fails when the bad value arrives.
+    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at WARNING for
+      a value the user supplied, and at ERROR, as a library defect to report, for a spelling from
+      Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
+      bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
+      unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Example:
@@ -523,18 +511,18 @@ class OnError(StrEnum):
 
 
 class Subscription(StrEnum):
-    """One of Massive's five subscriptions, each bought, and rate-limited, on its own.
+    """One of Massive's five subscriptions, each with its own plan and REST request limit.
 
-    Massive sells market data as five subscriptions, one per asset class, with no bundle and
-    no account-wide plan; forex and crypto share one, `CURRENCIES`. Each has a plan of its
-    own, such as Stocks Basic or Options Starter, and the plan sets its REST request limit: a
-    free Basic plan allows 5 requests per minute, and every paid plan has no request limit. All the
-    API keys of an account share the limits. Declare the subscriptions on Basic in
-    `MassiveConfig.rest_basic_subscriptions` so their requests are paced from the first one;
-    otherwise the library learns the limit from Massive's first refusal. `m.rate_limits()` shows
-    each one's state. Reference data and the other datasets Massive assigns to no subscription
-    (economy, partner data, the unified snapshot) are counted in a bucket of their own, `other`,
-    which no setting declares but which the library paces once Massive's refusal shows its limit.
+    Massive sells its data as five subscriptions, one per asset class, with forex and crypto sharing
+    `CURRENCIES`. Each has its own plan, such as Stocks Basic or Options Starter, and the plan sets
+    its REST request limit: five a minute on a free Basic plan, and no limit on a paid one. All the
+    API keys of your account share the limits.
+
+    List your Basic subscriptions in `MassiveConfig.rest_basic_subscriptions`, so their requests
+    keep to the limit from the first one; otherwise the library slows down after Massive's first
+    refusal. `m.rate_limits()` shows each subscription's state. Datasets Massive assigns to no
+    subscription, such as reference, economy, and partner data, share a limit of their own, `other`,
+    which the library learns from Massive's refusals.
 
     Example:
         ::
@@ -542,7 +530,7 @@ class Subscription(StrEnum):
             import deephaven_massive as dm
 
             # Paid stocks; free options and currencies (forex and crypto).
-            cfg = dm.MassiveConfig(
+            config = dm.MassiveConfig(
                 rest_basic_subscriptions={dm.Subscription.OPTIONS, dm.Subscription.CURRENCIES}
             )
     """

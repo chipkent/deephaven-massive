@@ -356,3 +356,7 @@ hand; the diagnostics tables are blink tables with `last_by`.
 
 **94. `poll()` refuses an interval shorter than 1 second** (2026-11-03). A shorter interval is
 almost always a typo that would send requests back to back; a stream serves anything faster.
+
+**95. `dm.datasets()` names its query-method column `Methods`** (2026-11-05). The docstrings call
+`fetch()`, `history()`, and the stream methods "methods", Python's word, so the column and the
+dataset pages' row say `Methods` too.

@@ -12,7 +12,7 @@ m.options.chain(underlying, *, contract_type=None, sort=None, order=None, limit=
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `LastQuoteLastUpdated` and `LastTradeSipTimestamp` |
 | `sort` | `ticker`, `expiration_date`, `strike_price` |
@@ -24,12 +24,12 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`; case is kept and nothing is converted. Or a table of them in a `Symbol` column, each read as if passed alone. |  |
-| `contract_type` | `dm.ContractType.CALL` or `PUT`; None, the default, for both. |  |
+| `underlying` | The underlying's exact Massive ticker, a stock or an index, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused; use `snapshots(dm.ALL)` for every contract. |  |
+| `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |  |
 | `sort` | `"ticker"`, `"expiration_date"`, or `"strike_price"`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
 | `order` | The direction of `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
-| `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
-| `filters` | `strike_price`, `expiration_date`, and their range forms. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
+| `limit` | The most rows to return, in total. A table of underlyings caps every underlying's requests instead. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
+| `filters` | Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |
 
 ## Plan access
 

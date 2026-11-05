@@ -45,8 +45,8 @@ DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Dataset": "The dataset's name: its namespace and method, such as stocks.trades.",
         "Call": "How a session m reaches the dataset, such as m.stocks.trades.",
         "Summary": "What the dataset holds, in one sentence.",
-        "Verbs": (
-            "The verbs its queries have, such as fetch and poll. Bars stream only at some "
+        "Methods": (
+            "The methods its queries have, such as fetch and poll. Bars stream only at some "
             "timespans, as their docstring says."
         ),
         "Transports": "Where its rows come from: REST, flat files, WebSocket.",
@@ -67,8 +67,8 @@ def datasets() -> Table:
     Returns:
         A static table, in the order the namespaces declare their datasets, with the columns
         `Dataset` (String, such as `stocks.trades`), `Call` (String, how a session `m` reaches
-        it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Verbs` (String[],
-        the verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
+        it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Methods` (String[],
+        the methods its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
         `ring`, `last_by`, `history`), `Transports` (String[], where the library reads it from,
         spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
@@ -80,7 +80,7 @@ def datasets() -> Table:
             import deephaven_massive as dm
 
             catalog = dm.datasets()
-            streams = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
+            streams = catalog.where("Arrays.asList(Methods).contains(`blink`)")
             news = catalog.where("Summary.toLowerCase().contains(`news`)")
     """
     specs = tuple(CATALOG.by_name.values())
@@ -89,7 +89,7 @@ def datasets() -> Table:
             string_col("Dataset", [spec.name for spec in specs]),
             string_col("Call", [call_path(spec) for spec in specs]),
             string_col("Summary", [spec.summary for spec in specs]),
-            _string_arrays("Verbs", [verbs(spec) for spec in specs]),
+            _string_arrays("Methods", [verbs(spec) for spec in specs]),
             _string_arrays(
                 "Transports",
                 [

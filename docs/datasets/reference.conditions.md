@@ -12,7 +12,7 @@ m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, s
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `SipMappingFinraTdds`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume` |
 | `sort` | `asset_class`, `id`, `type`, `name`, `data_types`, `legacy` |
@@ -24,11 +24,11 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `asset_class` | The class whose conditions to list (forex is sent as `fx`); None for every class. The endpoint has no futures or indices conditions. |  |
-| `data_type` | The kind of data the conditions apply to; None for every kind. |  |
-| `condition_id` | One condition's id, sent as Massive's parameter `id`; None for every condition. |  |
-| `sip` | The SIP whose condition mapping to list; None for every SIP. |  |
-| `sort` | The field to sort by. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
+| `asset_class` | The asset class whose conditions to list. Leave it out for every class. Massive lists no futures or index conditions. |  |
+| `data_type` | The kind of data the conditions apply to. Leave it out for every kind. |  |
+| `condition_id` | One condition's id. Leave it out for every condition. |  |
+| `sip` | The SIP whose condition codes to list. Leave it out for every SIP. |  |
+| `sort` | Any of Massive's field names, such as `"name"`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
 | `order` | The direction of `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
 | `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |
 | `filters` | Further endpoint parameters. | Any other parameter Massive documents for this dataset, as a mapping from the parameter's name to its value, with each dot in the name written as `_`: Massive's `strike_price.gte` is `strike_price_gte`. This page lists the keys the dataset takes. A key it doesn't take, or one that has its own argument, such as `start`, raises `ValueError` naming the keys it does take. A date or time value takes ISO 8601 text, or any value `start` takes. |

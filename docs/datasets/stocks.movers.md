@@ -12,7 +12,7 @@ m.stocks.movers(direction, *, include_otc=False)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`; `mode=dm.PollMode.APPEND` also keys by `Updated` |
 
@@ -23,7 +23,7 @@ What each argument does for this dataset, and the rule it follows for every data
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
 | `direction` | `dm.Direction.GAINERS` or `dm.Direction.LOSERS`. |  |
-| `include_otc` | True to include OTC securities; False, the default, leaves them out. |  |
+| `include_otc` | True to include OTC securities. |  |
 
 ## Plan access
 

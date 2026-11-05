@@ -117,7 +117,7 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     assert "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)\n" in page
     # `m.snapshots` is a method of the session, so the index lists it under no namespace.
     index = rendered()[INDEX]
-    assert "\n## Session methods\n\n| Dataset | Summary | Verbs |\n" in index
+    assert "\n## Session methods\n\n| Dataset | Summary | Methods |\n" in index
     assert "[`m.snapshots`](snapshots.md)" in index.partition("## Session methods")[2]
     assert "## `m.snapshots`" not in index
 
@@ -619,7 +619,7 @@ def test_the_rendered_index() -> None:
     assert f"\n{classes}\n| --- | --- | --- | --- | --- | --- | --- |\n{grid}\n\nTables of" in index
     assert "`financials.ratios` |" not in index
     stocks = (
-        "## `m.stocks`\n\n| Dataset | Summary | Verbs |\n| --- | --- | --- |\n"
+        "## `m.stocks`\n\n| Dataset | Summary | Methods |\n| --- | --- | --- |\n"
         "| [`m.stocks.trades`](stocks.trades.md) | Trades of stocks, tick by tick. "
         "| blink, history |\n"
         "| [`m.stocks.financials.ratios`](stocks.financials.ratios.md) | Financial ratios. | "
@@ -662,7 +662,7 @@ m.stocks.trades(symbols)
 
 |  |  |
 | --- | --- |
-| Verbs | `blink()`, `history()` |
+| Methods | `blink()`, `history()` |
 | Served by | REST, flat files, WebSocket |
 
 ## Arguments
@@ -728,7 +728,7 @@ Massive's documentation of this dataset:
 def test_the_rendered_ratios_page() -> None:
     page = _rendered()["stocks.financials.ratios.md"]
     facts = (
-        "| Verbs | `fetch()`, `poll()` |\n"
+        "| Methods | `fetch()`, `poll()` |\n"
         "| Served by | REST |\n"
         "| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by "
         "`Symbol` |\n"

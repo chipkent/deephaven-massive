@@ -105,9 +105,9 @@ _NOT_INCLUDED: Final = "Not included"
 
 _INDEX_GUIDE: Final = (
     "Every dataset the library serves, one page each. A page shows how to call the dataset, "
-    "its verbs, the `sort` values and `filters` keys it accepts, each argument and its rules, "
-    "which of Massive's plans include it, and every column of its tables, in the order every "
-    "verb returns them. The "
+    "its query methods, the `sort` values and `filters` keys it accepts, each argument and its "
+    "rules, which of Massive's plans include it, and every column of its tables, in the order "
+    "every method returns them. The "
     "same column descriptions appear in the Deephaven IDE's column tooltips and in a query's "
     "`columns()`, and `dm.datasets()` lists these datasets as a table."
 )
@@ -413,7 +413,7 @@ def _index(
         by_heading.setdefault(heading, []).append(spec)
     for heading, members in by_heading.items():
         lines.extend(("", f"## {heading}", ""))
-        lines.append(_row(["Dataset", "Summary", "Verbs"]))
+        lines.append(_row(["Dataset", "Summary", "Methods"]))
         lines.append(_row(["---"] * 3))
         lines.extend(
             _row(
@@ -526,7 +526,7 @@ def _facts(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[list[
     """
     used = {transport for transport, _ in spec.sources}
     facts = [
-        ["Verbs", ", ".join(f"`{verb}()`" for verb in call.verbs)],
+        ["Methods", ", ".join(f"`{verb}()`" for verb in call.verbs)],
         ["Served by", ", ".join(TRANSPORT_LABELS[t] for t in TRANSPORT_ORDER if t in used)],
     ]
     if spec.time_axis is not None:

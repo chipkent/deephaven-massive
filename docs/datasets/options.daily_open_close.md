@@ -12,7 +12,7 @@ m.options.daily_open_close(symbols, date, *, adjusted=True)
 
 |  |  |
 | --- | --- |
-| Verbs | `fetch()`, `poll()` |
+| Methods | `fetch()`, `poll()` |
 | Served by | REST |
 | `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol` |
 
@@ -22,9 +22,9 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `symbols` | Contracts as Massive's tickers (`O:` and the OCC symbol). | Massive's ticker for each symbol, spelled exactly as Massive spells it: `AAPL` or `BRK.B` for a stock, `O:SPY271217C00700000` (the OCC code) for an option, `I:SPX` for an index, `C:EURUSD` for a forex pair, `X:BTCUSD` for a crypto pair, and `ESZ6` for a future. Pass one symbol as text, several as a list, or a table with a `Symbol` column. A live table is followed: each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and most polls also drop a deleted symbol's rows. `dm.ALL` reads every symbol, and leaving the argument out reads every record with no filter by symbol, where this dataset takes them. A misspelled symbol in text or a list raises `ValueError` at the call; by default, a misspelled row of a table is skipped and logged, and the table keeps running. `dm.canonical_symbol` converts other spellings to Massive's. A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. |
-| `date` | The trading day, a calendar date (a `datetime` raises). | One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant is refused at the call. |
-| `adjusted` | Adjust for splits of the underlying. | `True`, the default, gives split-adjusted prices, restated in terms of every later stock split; `False` gives prices as traded. Only REST adjusts: flat files and live bars are always as traded. |
+| `symbols` | Option contracts. `dm.ALL` is refused; for every contract's bar of one day, use `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the flat files. | Massive's ticker for each symbol, spelled exactly as Massive spells it: `AAPL` or `BRK.B` for a stock, `O:SPY271217C00700000` (the OCC code) for an option, `I:SPX` for an index, `C:EURUSD` for a forex pair, `X:BTCUSD` for a crypto pair, and `ESZ6` for a future. Pass one symbol as text, several as a list, or a table with a `Symbol` column. A live table is followed: each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and most polls also drop a deleted symbol's rows. `dm.ALL` reads every symbol, and leaving the argument out reads every record with no filter by symbol, where this dataset takes them. A misspelled symbol in text or a list raises `ValueError` at the call; by default, a misspelled row of a table is skipped and logged, and the table keeps running. `dm.canonical_symbol` converts other spellings to Massive's. A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists. |
+| `date` | The trading day, as a date; a `datetime` raises. | One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant is refused at the call. |
+| `adjusted` | Adjusts for splits of the underlying. | `True`, the default, gives split-adjusted prices, restated in terms of every later stock split; `False` gives prices as traded. Only REST adjusts: flat files and live bars are always as traded. |
 
 ## Plan access
 
