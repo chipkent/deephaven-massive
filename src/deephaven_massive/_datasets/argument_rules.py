@@ -19,24 +19,15 @@ from typing import Final
 
 __all__ = ["ARGUMENT_RULES"]
 
-_DATE_FORMS: Final = 'text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`'
-"""The values a calendar-date argument takes, as a rule says them."""
-
-_MARKET_DAY: Final = (
-    "the day in the market's time zone: New York for stocks, options, and indices; UTC for "
-    "forex and crypto; for futures, the trading session that ends that day"
-)
-"""Which day a date names, by asset class, as a rule says it."""
-
 ARGUMENT_RULES: Final = MappingProxyType(
     {
         "symbols": (
-            "Massive's ticker for each symbol, spelled exactly as Massive spells it:\n"
+            "Each symbol is Massive's ticker, spelled exactly:\n"
             "\n"
             "| Asset class | Ticker |\n"
             "| --- | --- |\n"
             "| Stocks | `AAPL`, `BRK.B` |\n"
-            "| Options | `O:SPY271217C00700000`: `O:` and the OCC code |\n"
+            "| Options | `O:SPY271217C00700000`: `O:` and the OCC option symbol |\n"
             "| Indices | `I:SPX` |\n"
             "| Forex | `C:EURUSD` |\n"
             "| Crypto | `X:BTCUSD` |\n"
@@ -44,16 +35,18 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             "- Pass one symbol as text, several as a list, or a table with a `Symbol` column.\n"
             "- A live table of symbols is followed. Each symbol you add is read, and each one "
-            "you delete stops being read. `last_by()`, `fetch()`, `history()`, and most polls "
-            "also drop a deleted symbol's rows.\n"
+            "you delete stops being read. `last_by()`, `fetch()`, `history()`, and a `poll()` in "
+            "`dm.PollMode.REPLACE` mode also drop a deleted symbol's rows. `APPEND` and `UPSERT` "
+            "polls keep them.\n"
             "- `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no "
             "filter by symbol. Each dataset's page says which of the two it takes.\n"
-            "- A symbol in text or a list that isn't spelled as Massive spells it, such as "
-            "`aapl`, raises `ValueError` at the call. Such a row of a table is skipped and "
-            "logged by default, and the table keeps running. A table whose every row is "
-            "misspelled is refused at the call.\n"
-            "- `dm.canonical_symbol` converts other spellings to Massive's. Yahoo's `BRK-B`, "
-            "for example, converts with `convention=dm.SymbolConvention.YAHOO`.\n"
+            "- Text or a list with a misspelled symbol, such as `aapl`, raises `ValueError` at "
+            "the call. A misspelled row of a table is skipped and logged by default, and the "
+            "table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table "
+            "whose every row is misspelled is refused at the call.\n"
+            "- `dm.canonical_symbol` converts other spellings to Massive's: "
+            '`dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, '
+            'convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.\n'
             "- A record that lists several symbols, such as a news article, appears once for "
             "each symbol you named that it lists."
         ),
@@ -61,10 +54,13 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
             "instants.\n"
             "\n"
-            f"- A date is {_DATE_FORMS}. It means {_MARKET_DAY}.\n"
+            '- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven '
+            "`LocalDate`. It means the day in the market's time zone: New York for stocks, "
+            "options, and indices; UTC for forex and crypto; for futures, the trading session "
+            "that ends that day.\n"
             "- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a "
             "`numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or "
-            'Deephaven time text such as `"2025-06-02T09:30 ET"`. A `datetime` or '
+            'a Deephaven time string such as `"2025-06-02T09:30 ET"`. A `datetime` or '
             "`pandas.Timestamp` without a time zone raises `ValueError`.\n"
             "- A dataset whose range is a calendar date, such as an ex-dividend date, takes "
             "dates only."
@@ -73,17 +69,18 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "The last day, or the moment the range stops, in the same form as `start`.\n"
             "\n"
             '- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all '
-            "of June 2. An instant is excluded.\n"
+            "of June 2. An instant `end` is excluded from the range.\n"
             "- Leave it out to send Massive no end. The rows then include records still to "
-            "come, such as dividends announced but not yet paid."
+            "come, such as dividends announced but not yet paid. A query's `history()` without "
+            "`end` reads through now."
         ),
         "date": (
-            f"One calendar day, as {_DATE_FORMS}. It means {_MARKET_DAY}. A `datetime` or an "
-            "instant raises `ValueError` at the call."
+            "One calendar day, in the same forms as a `start` date, and meaning the same day. A "
+            "`datetime` or an instant raises `ValueError` at the call."
         ),
         "as_of": (
-            f"The day to read the data as it stood on, as {_DATE_FORMS}. Leave it out for "
-            "today's data. The dataset's plan table says how far back each plan goes."
+            "The day to read the data as it stood on, in the same forms as a `start` date. Leave "
+            "it out for today's data. The dataset's plan table says how far back each plan goes."
         ),
         "sort": (
             "The field to order the rows by, as Massive names it, such as "
@@ -92,8 +89,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             'or `.desc`: `"ticker,ex_dividend_date.desc"`.'
         ),
         "order": (
-            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Where Massive's "
-            "endpoint has no `order` parameter of its own, `order` without `sort` raises "
+            "The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. "
+            "Where Massive's endpoint has no `order` parameter of its own, `order` alone raises "
             "`ValueError`."
         ),
         "limit": (
@@ -117,7 +114,7 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "listing them. A key that an argument sets, such as `ex_dividend_date_gte` for "
             "`start`, raises `ValueError` naming that argument.\n"
             "- A date or time value is ISO 8601 text, with an offset for a time, or a date or "
-            "time object that `start` takes. Deephaven time text isn't read here."
+            "time object that `start` takes. A Deephaven time string isn't read here."
         ),
         "adjusted": (
             "`True`, the default, adjusts prices and volumes for splits: a value from before a "

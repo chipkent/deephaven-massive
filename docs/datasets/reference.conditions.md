@@ -4,13 +4,13 @@
 
 The trade and quote condition codes, with what each means and how it updates bars.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, sip=None, sort=None, order=None, limit=None, filters=None)
 ```
 
-- Query methods: `fetch()`, `poll()`
+- [Query methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `AssetClass`, `Type`, `Id`, `Name`, `DataTypes`, `Abbreviation`, `Description`, `Exchange`, `Legacy`, `SipMappingCta`, `SipMappingOpra`, `SipMappingUtp`, `SipMappingFinraTdds`, `UpdateRulesConsolidatedUpdatesHighLow`, `UpdateRulesConsolidatedUpdatesOpenClose`, `UpdateRulesConsolidatedUpdatesVolume`, `UpdateRulesMarketCenterUpdatesHighLow`, `UpdateRulesMarketCenterUpdatesOpenClose` and `UpdateRulesMarketCenterUpdatesVolume`
 
@@ -80,7 +80,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |

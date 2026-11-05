@@ -4,7 +4,23 @@
 
 Each dataset has a page with how to call it, its arguments, the plans that include it, and its columns. In the Deephaven IDE, the same column descriptions show as column tooltips, and `dm.datasets()` lists every dataset as a table.
 
-## Datasets by asset class
+<a id="query-methods"></a>
+
+## Query methods
+
+A dataset method, such as `m.stocks.dividends()`, returns a query. A query names the data and reads nothing, and its methods read the data and return a Deephaven table.
+
+| Method | Returns |
+| --- | --- |
+| `blink()` | The stream as a blink table: each update cycle holds only that cycle's rows. |
+| `append_only()` | Every row received since the call, in arrival order. |
+| `ring(capacity)` | The most recent `capacity` rows received. |
+| `last_by(by='Symbol')` | The latest row per key, by default one row per `Symbol`. |
+| `history(start, end=None)` | The dataset's rows over a range of days or of exact instants. |
+| `fetch()` | Every row the dataset's endpoint returns, all pages of it. |
+| `poll(interval)` | A live table that re-runs `fetch()` every `interval`. |
+
+## Datasets in several asset classes
 
 The datasets that several asset classes have, linked to each class's page.
 
@@ -183,7 +199,7 @@ The datasets that several asset classes have, linked to each class's page.
 | [`m.partners.fable.merchant_aggregates`](partners.fable.merchant_aggregates.md) | Daily European consumer spending per merchant, from Fable Data's transaction panel. | `fetch()`, `poll()` |
 | [`m.partners.fable.merchant_hierarchy`](partners.fable.merchant_hierarchy.md) | Fable Data's map from merchants to parent companies, tickers, and industries. | `fetch()`, `poll()` |
 
-## Session methods
+## Across asset classes
 
 | Dataset | Summary | Query methods |
 | --- | --- | --- |
@@ -199,22 +215,22 @@ These arguments follow the same rules on every dataset that takes them. A datase
 
 ### symbols
 
-Massive's ticker for each symbol, spelled exactly as Massive spells it:
+Each symbol is Massive's ticker, spelled exactly:
 
 | Asset class | Ticker |
 | --- | --- |
 | Stocks | `AAPL`, `BRK.B` |
-| Options | `O:SPY271217C00700000`: `O:` and the OCC code |
+| Options | `O:SPY271217C00700000`: `O:` and the OCC option symbol |
 | Indices | `I:SPX` |
 | Forex | `C:EURUSD` |
 | Crypto | `X:BTCUSD` |
 | Futures | `ESZ6` |
 
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
-- A live table of symbols is followed. Each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and most polls also drop a deleted symbol's rows.
+- A live table of symbols is followed. Each symbol you add is read, and each one you delete stops being read. `last_by()`, `fetch()`, `history()`, and a `poll()` in `dm.PollMode.REPLACE` mode also drop a deleted symbol's rows. `APPEND` and `UPSERT` polls keep them.
 - `dm.ALL` reads every symbol. Leaving `symbols` out reads every record with no filter by symbol. Each dataset's page says which of the two it takes.
-- A symbol in text or a list that isn't spelled as Massive spells it, such as `aapl`, raises `ValueError` at the call. Such a row of a table is skipped and logged by default, and the table keeps running. A table whose every row is misspelled is refused at the call.
-- `dm.canonical_symbol` converts other spellings to Massive's. Yahoo's `BRK-B`, for example, converts with `convention=dm.SymbolConvention.YAHOO`.
+- Text or a list with a misspelled symbol, such as `aapl`, raises `ValueError` at the call. A misspelled row of a table is skipped and logged by default, and the table keeps running. `MassiveConfig.noncanonical_symbols` changes that. A table whose every row is misspelled is refused at the call.
+- `dm.canonical_symbol` converts other spellings to Massive's: `dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)` returns `"BRK.B"`.
 - A record that lists several symbols, such as a news article, appears once for each symbol you named that it lists.
 
 <a id="start"></a>
@@ -224,7 +240,7 @@ Massive's ticker for each symbol, spelled exactly as Massive spells it:
 The first day or moment of the range. Give `start` and `end` as two dates or two instants.
 
 - A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day.
-- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a `numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or Deephaven time text such as `"2025-06-02T09:30 ET"`. A `datetime` or `pandas.Timestamp` without a time zone raises `ValueError`.
+- An instant is a Python `datetime` or `pandas.Timestamp` with a time zone, a `numpy.datetime64` finer than a day, a Deephaven `Instant` or `ZonedDateTime`, or a Deephaven time string such as `"2025-06-02T09:30 ET"`. A `datetime` or `pandas.Timestamp` without a time zone raises `ValueError`.
 - A dataset whose range is a calendar date, such as an ex-dividend date, takes dates only.
 
 <a id="end"></a>
@@ -233,20 +249,20 @@ The first day or moment of the range. Give `start` and `end` as two dates or two
 
 The last day, or the moment the range stops, in the same form as `start`.
 
-- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all of June 2. An instant is excluded.
-- Leave it out to send Massive no end. The rows then include records still to come, such as dividends announced but not yet paid.
+- A date includes its whole day: `start="2025-06-02", end="2025-06-02"` reads all of June 2. An instant `end` is excluded from the range.
+- Leave it out to send Massive no end. The rows then include records still to come, such as dividends announced but not yet paid. A query's `history()` without `end` reads through now.
 
 <a id="date"></a>
 
 ### date
 
-One calendar day, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It means the day in the market's time zone: New York for stocks, options, and indices; UTC for forex and crypto; for futures, the trading session that ends that day. A `datetime` or an instant raises `ValueError` at the call.
+One calendar day, in the same forms as a `start` date, and meaning the same day. A `datetime` or an instant raises `ValueError` at the call.
 
 <a id="as_of"></a>
 
 ### as_of
 
-The day to read the data as it stood on, as text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. Leave it out for today's data. The dataset's plan table says how far back each plan goes.
+The day to read the data as it stood on, in the same forms as a `start` date. Leave it out for today's data. The dataset's plan table says how far back each plan goes.
 
 <a id="sort"></a>
 
@@ -258,7 +274,7 @@ The field to order the rows by, as Massive names it, such as `"ex_dividend_date"
 
 ### order
 
-The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Where Massive's endpoint has no `order` parameter of its own, `order` without `sort` raises `ValueError`.
+The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. Give it with `sort`. Where Massive's endpoint has no `order` parameter of its own, `order` alone raises `ValueError`.
 
 <a id="limit"></a>
 
@@ -277,7 +293,7 @@ The most rows Massive returns for the whole request, across every symbol you nam
 Any other parameter Massive documents for the dataset, as a `dict` from the parameter's name to its value. Write each dot in a name as `_`: Massive's `strike_price.gte` is `strike_price_gte`.
 
 - Each dataset's page lists the keys it takes. Any other key raises `ValueError` listing them. A key that an argument sets, such as `ex_dividend_date_gte` for `start`, raises `ValueError` naming that argument.
-- A date or time value is ISO 8601 text, with an offset for a time, or a date or time object that `start` takes. Deephaven time text isn't read here.
+- A date or time value is ISO 8601 text, with an offset for a time, or a date or time object that `start` takes. A Deephaven time string isn't read here.
 
 <a id="adjusted"></a>
 
@@ -306,30 +322,6 @@ How many `timespan` units each bar spans, 1 by default. `timespan=dm.Timespan.MI
 
 The exchanges whose futures flat files `history()` reads, as a set of `dm.FuturesVenue` members: `CME`, `CBOT`, `NYMEX`, and `COMEX`. The default is all four. Massive sells futures flat files by exchange, so pass the ones your plan includes. Streams and REST reads ignore it.
 
-## Merge tables from two asset classes
-
-Tables of one kind from two asset classes, such as stock and forex quotes, can have different columns. To merge two such tables, `a` and `b`, keep the columns they share:
-
-```python
-from deephaven import merge
-
-common = [c for c in a.column_names if c in b.column_names]
-merged = merge([t.view(common) for t in (a, b)])
-```
-
-To keep every column instead, first add each missing column to the other table as a typed null, such as `b.update("Tape = NULL_LONG")`.
-
-A few shared columns have a different type in some asset classes, because Massive declares them that way. Cast one table's column to the other's type before the merge, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
-
-| Dataset | Column | Types |
-| --- | --- | --- |
-| `snapshots` | `LastQuoteBidSize` | long for stocks and futures, double for options |
-| `snapshots` | `LastQuoteAskSize` | long for stocks and futures, double for options |
-| `snapshots` | `LastTradeSize` | long for stocks, options and futures, double for crypto |
-| `snapshots` | `LastMinuteVolume` | double for stocks, options, forex and crypto, long for futures |
-| `snapshots` | `SessionVolume` | double for options, long for futures |
-| `movers` | `LastTradeSize` | long for stocks, double for crypto |
-
 ## Column types
 
 Each column has one of these Deephaven types:
@@ -343,6 +335,19 @@ Each column has one of these Deephaven types:
 | `Instant` | An exact moment in time |
 | `long[]` | An array of `long` |
 | `String[]` | An array of `String` |
+
+## Columns whose type differs by asset class
+
+Tables of one kind from two asset classes share these columns with different types. To merge two such tables, cast one table's column to the other's type first, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
+
+| Dataset | Column | Types |
+| --- | --- | --- |
+| `snapshots` | `LastQuoteBidSize` | long for stocks and futures, double for options |
+| `snapshots` | `LastQuoteAskSize` | long for stocks and futures, double for options |
+| `snapshots` | `LastTradeSize` | long for stocks, options and futures, double for crypto |
+| `snapshots` | `LastMinuteVolume` | double for stocks, options, forex and crypto, long for futures |
+| `snapshots` | `SessionVolume` | double for options, long for futures |
+| `movers` | `LastTradeSize` | long for stocks, double for crypto |
 
 ---
 

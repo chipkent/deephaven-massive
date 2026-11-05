@@ -4,13 +4,13 @@
 
 The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.stocks.filings.index(symbols=None, *, form_type=None, start=None, end=None, sort=None, order=None, limit=None, filters=None)
 ```
 
-- Query methods: `fetch()`, `poll()`
+- [Query methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.APPEND`, which appends each row it hasn't seen, identified by `Cik` and `AccessionNumber`
 
@@ -61,7 +61,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |

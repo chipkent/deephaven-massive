@@ -4,13 +4,13 @@
 
 Massive's fair market value estimate of US-listed stocks, as it updates.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.stocks.fmv(symbols)
 ```
 
-- Query methods: `blink()`, `append_only()`, `ring()`, `last_by()`
+- [Query methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
 - Read from: WebSocket
 
 [Dataset index](README.md)
@@ -50,7 +50,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | WebSocket field |
 | --- | --- |

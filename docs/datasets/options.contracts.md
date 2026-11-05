@@ -4,13 +4,13 @@
 
 Reference data on options contracts: type, exercise style, expiration, and strike.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.options.contracts(symbols=None, *, underlying=None, contract_type=None, as_of=None, expired=False, sort=None, order=None, limit=None, filters=None)
 ```
 
-- Query methods: `fetch()`, `poll()`
+- [Query methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `Symbol`
 
@@ -67,7 +67,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |

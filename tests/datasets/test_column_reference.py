@@ -31,6 +31,7 @@ from deephaven_massive._datasets.column_reference import (
     INDEX,
     PAGES_URL,
     DatasetCall,
+    QueryMethod,
     SyncResult,
     call_path,
     column_changes,
@@ -118,10 +119,10 @@ def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     # `m.snapshots` is a method of the session, so the index lists it under no namespace, after
     # every namespace.
     index = rendered()[INDEX]
-    assert "\n## Session methods\n\n| Dataset | Summary | Query methods |\n" in index
-    assert "[`m.snapshots`](snapshots.md)" in index.partition("## Session methods")[2]
+    assert "\n## Across asset classes\n\n| Dataset | Summary | Query methods |\n" in index
+    assert "[`m.snapshots`](snapshots.md)" in index.partition("## Across asset classes")[2]
     assert "## Snapshots" not in index
-    assert index.index("## Partner data") < index.index("## Session methods")
+    assert index.index("## Partner data") < index.index("## Across asset classes")
 
 
 def test_the_real_pages_state_each_poll_mode() -> None:
@@ -139,7 +140,8 @@ def test_the_real_pages_state_each_poll_mode() -> None:
     )
     # The latest market status has no key, so a poll holds one row; an APPEND poll keys by time.
     assert (
-        f"{default}{replace}\n- `poll(mode=dm.PollMode.APPEND)`: appends each new state of a "
+        f"{default}{replace}\n- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new "
+        "state of a "
         "row, identified by" in pages["reference.market_status.md"]
     )
     # A dataset without fetch() has no poll() fact, and one without sort or filters none of
@@ -599,12 +601,18 @@ _CALLS = {
         verbs=("blink", "history"),
         arguments=("symbols",),
         descriptions=("Stock tickers | or `dm.ALL`.",),
+        methods=(
+            QueryMethod("blink", "blink()", "The stream."),
+            QueryMethod("history", "history(start, end=None)", "A range | of rows."),
+        ),
     ),
+    # Only `poll` has a method, so `fetch` shows as its name alone.
     "stocks.financials.ratios": DatasetCall(
         signature="m.stocks.financials.ratios(*, sort=None, filters=None)",
         verbs=("fetch", "poll"),
         arguments=("sort", "filters"),
         typed=("sort", "filters"),
+        methods=(QueryMethod("poll", "poll(interval)", "A live table."),),
     ),
     "crypto.trades": DatasetCall(
         signature="m.crypto.trades(symbols)", verbs=("blink",), arguments=("symbols",)
@@ -653,6 +661,18 @@ def test_the_rendered_index() -> None:
     # `trades` is shared by two classes, so it has a row; the ratios are listed only.
     grid = "| `trades` | [Stocks](stocks.trades.md), [Crypto](crypto.trades.md) |"
     assert f"\n| Dataset | Asset classes |\n| --- | --- |\n{grid}\n\n## Stocks\n" in index
+    # Every dataset's query methods, once each, in the order they first appear.
+    methods = (
+        '<a id="query-methods"></a>\n\n## Query methods\n\n'
+        "A dataset method, such as `m.stocks.dividends()`, returns a query."
+    )
+    assert methods in index
+    table = (
+        "| Method | Returns |\n| --- | --- |\n| `blink()` | The stream. |\n"
+        "| `history(start, end=None)` | A range \\| of rows. |\n"
+        "| `poll(interval)` | A live table. |\n\n## Datasets in several asset classes\n"
+    )
+    assert table in index
     assert "`financials.ratios` |" not in index
     stocks = (
         "## Stocks\n\n| Dataset | Summary | Query methods |\n| --- | --- | --- |\n"
@@ -663,7 +683,6 @@ def test_the_rendered_index() -> None:
     )
     assert stocks in index
     assert "\n## Shared arguments\n" in index
-    assert "\n## Merge tables from two asset classes\n" in index
     assert index.endswith(f"\n---\n\n{_FOOTER}\n")
     # A catalog in which no two classes share a dataset has neither the table of shared
     # datasets nor the merge recipe.
@@ -672,9 +691,10 @@ def test_the_rendered_index() -> None:
         source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
     )
     lone = render(alone, _PROVENANCE, _CALLS)[INDEX]
-    assert "Datasets by asset class" not in lone
-    assert "Merge tables" not in lone
+    assert "Datasets in several asset classes" not in lone
     assert "## Shared arguments" in lone
+    # An index of datasets without query methods has no table of them.
+    assert "## Query methods" not in render(Catalog(()), _PROVENANCE, {})[INDEX]
 
 
 def test_the_rendered_stocks_trades_page() -> None:
@@ -695,13 +715,13 @@ def test_the_rendered_stocks_trades_page() -> None:
 
 Trades of stocks, tick by tick.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.stocks.trades(symbols)
 ```
 
-- Query methods: `blink()`, `history()`
+- [Query methods](README.md#query-methods): `blink()`, `history(start, end=None)`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
@@ -741,9 +761,9 @@ Massive's pages state them.
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills \
-from the request. An empty cell means the source doesn't carry the column, or the library \
-computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't \
+carry the column, or the library computes it. `request` marks a value the library fills from \
+the request.
 
 | Column | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- |
@@ -771,7 +791,7 @@ computes it.
 def test_the_rendered_ratios_page() -> None:
     page = _rendered()["stocks.financials.ratios.md"]
     facts = (
-        "- Query methods: `fetch()`, `poll()`\n"
+        "- [Query methods](README.md#query-methods): `fetch()`, `poll(interval)`\n"
         "- Read from: REST\n"
         "- `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, "
         "one row per `Symbol`\n"
@@ -790,6 +810,8 @@ def test_the_rendered_ratios_page() -> None:
     assert "RawSymbol" not in page
     assert "| Column | Type | Description |\n" in page
     assert "| `PriceEarnings` | double | Price \\| earnings. |\n" in page
+    # No column is filled from the request, so the wire-field guide does not explain `request`.
+    assert "`request` marks" not in page
 
 
 def test_sort_and_filters_of_a_path_that_takes_neither() -> None:
@@ -1028,11 +1050,11 @@ def test_a_table_row_before_a_page_s_first_heading_belongs_to_no_dataset() -> No
     assert report == ["m.b.y: dataset removed"]  # m.a.x did not gain Stray
 
 
-def test_the_merge_recipe_and_the_grid_are_on_the_index() -> None:
+def test_the_shared_datasets_and_their_type_differences_are_on_the_index() -> None:
     pages = rendered()
-    assert "## Merge tables from two asset classes" in pages[INDEX]
+    assert "## Columns whose type differs by asset class" in pages[INDEX]
     assert "| `bars` | [Stocks](stocks.bars.md), [Options](options.bars.md)," in pages[INDEX]
-    assert "Merge tables" not in pages["stocks.trades.md"]
+    assert "## Columns whose type differs" not in pages["stocks.trades.md"]
 
 
 def test_the_real_index_lists_each_shared_column_whose_type_differs() -> None:

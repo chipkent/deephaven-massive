@@ -4,13 +4,13 @@
 
 Open, high, low, close, and volume bars of futures contracts.
 
-Call it from a session `m`:
+Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
 m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVenue))
 ```
 
-- Query methods: `blink()`, `append_only()`, `ring()`, `last_by()`, `history()`
+- [Query methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
@@ -65,7 +65,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, by source. `request` marks a value the library fills from the request. An empty cell means the source doesn't carry the column, or the library computes it.
+The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- |
