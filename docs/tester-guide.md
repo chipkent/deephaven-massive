@@ -181,9 +181,9 @@ Each test example tries one part of the library. Most run on Basic, Massive's fr
 | 17 | Stream live minute bars | Stocks Starter or higher |
 | 18 | Backfill today's minute bars | Stocks Starter or higher |
 | 19 | Stream crypto trades | Currencies Starter or higher |
-| 20 | Edit watchlists that tables follow | Any plan |
+| 20 | Edit watchlists that tables follow | Stocks Basic and Futures Basic |
 | 21 | Stream a crypto watchlist | Currencies Starter or higher |
-| 22 | Stream the trades of the top gainers | Stocks Developer, Advanced, or Business with the expansion |
+| 22 | Stream the trades of the top gainers | Stocks Developer, Advanced, or Business + Expansion |
 | 23 | Read history that follows a watchlist | Any plan |
 | 24 | Save the diagnostics tables | Any plan |
 | 25 | Close a session | Any plan |
@@ -209,7 +209,7 @@ then `no example failed`, or `failed:` and the examples' names. Each example's o
 
 | Verdict | What you do |
 |---|---|
-| `passed` | Nothing |
+| `passed` | Nothing. On the free plan, a stream example also passes when Massive refuses it after the example returns; its row in `streams` shows the refusal. |
 | `refused by your plan` | Nothing, unless your plan includes that example's data |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
@@ -405,10 +405,10 @@ You should see these panels:
 
 | Panel | What it holds |
 |---|---|
-| `companies` | A row per company: its name, its exchange (`XNAS` is Nasdaq), its listing date, and its market value in dollars |
+| `companies` | A row per company: its name, its exchange, its listing date, and its market value in dollars |
 | `market_now` | One row, whose `Market` reads `open`, `closed`, or `extended-hours` |
 | `holidays` | The coming market holidays |
-| `yields` | US Treasury yields in percent, a row per day |
+| `yields` | US Treasury yields, a row per day |
 
 #### 6. Poll the market's status
 
@@ -433,7 +433,7 @@ diagnostics tables:
 |---|---|
 | `rate_limits` | A row per subscription, plus `other` |
 | `streams` | A row for `live_status`, with `State` `RUNNING` |
-| `connections` | No rows: a poll needs no streaming connection |
+| `connections` | No streaming connection: a poll doesn't stream |
 
 #### 7. Exceed Basic's request limit
 
@@ -898,8 +898,8 @@ of `streams`:
 1. Add `X:SOLUSD`. An `X:SOLUSD` row joins `latest_trades` with its first trade, and the
    stream's `Symbols` lists it.
 2. Delete `X:SOLUSD`. Its row leaves `latest_trades` at once, and `Symbols` drops it.
-3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` as a
-   spelling Massive doesn't use. The other pairs keep streaming.
+3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` among the
+   values it skips. The other pairs keep streaming.
 4. Delete `btcusd` and add `X:BTCUSD`. The `Error` clears, and an `X:BTCUSD` row arrives with
    its first trade.
 5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and the `Error` names it. Delete
@@ -908,8 +908,8 @@ of `streams`:
 #### 22. Stream the trades of the top gainers
 
 Poll the day's top gainers every minute, and stream the trades of whichever stocks are on that
-list. You need a Stocks plan that streams trades: Developer, Advanced, or Business with the
-trades and quotes expansion:
+list. You need a Stocks plan that streams trades: Developer, Advanced, or Business +
+Expansion:
 
 ```python
 import deephaven_massive as dm
@@ -1098,7 +1098,7 @@ You should see `resuming`, and every check that passed stays passed.
 |---|---|
 | Control-C, a closed terminal, a crash, or a restart of the computer | In a new terminal, go to `~/massive-test/deephaven-massive` and run the resume command. |
 | You changed your plan | Nothing. The next morning's plan check sees it. To make the run see it at once, stop and resume it. |
-| You got S3 keys for the first time | Add them to your startup file as the README's [Set your API keys](../README.md#set-your-api-keys) shows, and resume the run from `~/massive-test/deephaven-massive` in a new terminal. |
+| You got S3 keys for the first time | Add them to your startup file as the README's [Set your API keys](../README.md#set-your-api-keys) shows, then stop the run with Control-C and resume it from `~/massive-test/deephaven-massive` in a new terminal. |
 | A new release comes out | Nothing. Keep testing the release you installed, unless a comment on your issue asks you to switch. |
 
 <a id="look-in-once-a-day"></a>
@@ -1120,7 +1120,7 @@ its status, and a table of counts per group. Most statuses need nothing from you
 | `passed` or `not run` | Nothing |
 | `skipped:` and a reason, or `not started (optional)` | Nothing. Your plan lacks that check, or its market is closed, and a check skipped for the moment runs again. |
 | `refused` | Nothing. Massive refused data its documentation says your plan includes, and the maintainer reads it in the results. |
-| `failed` or `error` | Nothing the first time, because a failed check runs once more. If it fails twice, [pack the results](#pack-the-results) and send them on your issue. |
+| `failed` or `error` | Nothing. A failed check runs once more by itself, and the maintainer reads both attempts in the results. |
 
 Note each date you checked, and the date of the stream day, in your checklist.
 
@@ -1166,7 +1166,7 @@ a minute once you upgrade it. Run it only when a comment on your issue asks:
 
 | You see | What you do |
 |---|---|
-| `the API key was rejected` | Copy the key from Massive's dashboard into your startup file again, and resume the run from `~/massive-test/deephaven-massive` in a new terminal. |
+| `the API key was rejected` | Copy the key from Massive's dashboard into your startup file again, then stop the run with Control-C and resume it from `~/massive-test/deephaven-massive` in a new terminal. |
 | `a run or an upgrade check is using ...` | Another `run` is already going. Use it, or stop it first. |
 | The plan check shows a lower plan than you bought | Stop and resume the run, which checks again. If the plan is still lower, say so on your issue. |
 | A gap in a stream day or night, in the zip's `REPORT.md` | Keep the computer awake with the lid open. When a stream day's or night's gaps add up to more than 30 minutes, it fails, and the program plans one more. |
@@ -1181,7 +1181,7 @@ Report each problem when it happens:
 - a step that fails, hangs, or shows something other than the step says
 - an error message you can't understand or act on
 - an instruction that was unclear
-- a console command that hasn't returned after 5 minutes
+- a console command that seems to hang
 - a `WARNING` in the debug log about a bar stamped at an unexpected time
 
 <a id="which-errors"></a>
@@ -1237,7 +1237,8 @@ A report is an issue with a zip of your logs, your keys removed:
    ```
 
    You should see `wrote` and the zip's path, `~/massive-test/bug-report-<time>.zip`. If the
-   command finds a key in a file, it writes nothing and names the files, as `pack` does.
+   zip shows each of your keys as `***`. If a key still shows up in a file, the command writes
+   nothing and names the files. Put that list of names, without the files, on the issue.
 4. Open an [issue](https://github.com/chipkent/deephaven-massive/issues/new), paste your report,
    and attach the zip and the screenshots.
 

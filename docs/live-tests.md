@@ -8,9 +8,9 @@ the same tests through the live-run program, and send its results zip on an issu
 
 ## Run the tests
 
-Run the live tests, the files `tests/**/test_*_integration.py`, in a clone set up as the tester
-guide's [Set up the test](tester-guide.md#set-up) leaves it. Run each command in a terminal at
-the clone's root. Each pytest marker selects one set of tests:
+Run the live tests, the files `tests/**/test_*_integration.py`, in a checkout set up as
+[CONTRIBUTING.md](../CONTRIBUTING.md#set-up) says. Run each command in a terminal at the
+checkout's root. Each pytest marker selects one set of tests:
 
 | Marker | What it runs |
 |---|---|
@@ -148,8 +148,8 @@ prints up to four sections:
 
 ### Tests that need older history
 
-Four tests read fixed dates. Every other test reads recent days, within the two years the free
-plans keep:
+Three tests, and the live-run program's `responses` group, read fixed dates. Every other test
+reads recent days, within the two years the free plans keep:
 
 | Test | Fixed date | Without a plan that keeps it |
 |---|---|---|
@@ -173,7 +173,8 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read five checks by hand
 
-Four of these checks pass whatever Massive answers, so read each one's evidence:
+Read each one's evidence. Only the index minute-file check fails on a wrong answer, when a file
+row falls outside its New York day; the others pass whatever Massive answers:
 
 | Check | Plans | What to read | Open an issue when |
 |---|---|---|---|
@@ -184,8 +185,8 @@ Four of these checks pass whatever Massive answers, so read each one's evidence:
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Any plan that streams stocks | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics for want of a plan. It also skips as
-inconclusive when the socket reconnects without saying why. Then run the first connection-limit
-command again.
+inconclusive when the socket reconnects without saying why, and then needs the first
+connection-limit command run again.
 
 To run one of the other checks alone, use `-k` with a word of its name:
 
