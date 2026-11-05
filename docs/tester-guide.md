@@ -62,8 +62,8 @@ you finish it, and next to each item, note anything that failed, surprised you, 
 ## Set up the test
 
 You run the Deephaven server from a Python environment, as the README installs it, or in Docker.
-Two steps, Check the setup and Start the server, have
-[Docker versions](#docker).
+These steps follow the Python environment, and [Run the server in Docker](#docker) replaces
+two of them.
 
 <a id="check-what-you-need"></a>
 
@@ -171,7 +171,7 @@ Each test example tries one part of the library. Most run on Basic, Massive's fr
 | 19 | Stream crypto trades | Currencies Starter or higher |
 | 20 | Edit watchlists that tables follow | Any plan |
 | 21 | Stream a crypto watchlist | Currencies Starter or higher |
-| 22 | Stream the trades of the top gainers | Stocks Developer or Advanced |
+| 22 | Stream the trades of the top gainers | Stocks Developer, Advanced, or Business with the expansion |
 | 23 | Read history that follows a watchlist | Any plan |
 | 24 | Save the diagnostics tables | Any plan |
 | 25 | Close a session | Any plan |
@@ -241,12 +241,7 @@ that fails or shows something other than its text says. Examples 13 to 16 are sh
 the kind you'd write yourself, so try them with your own symbols and dates too.
 
 Examples 20, 21, and 23 make a watchlist that you edit by hand in its panel, or in code, as the
-README's [watchlist example](../README.md#drive-with-a-watchlist) shows. In code, this line
-deletes TSLA from example 20's watchlist:
-
-```python
-stock_watchlist.delete(new_table({"Symbol": ["TSLA"]}))
-```
+README's [watchlist example](../README.md#drive-with-a-watchlist) shows.
 
 #### 1. Open a session with a debug log
 
@@ -846,7 +841,13 @@ watched_contracts = m.futures.contracts(product_code=product_watchlist, limit=10
 
 You should see `stock_watchlist` with three stocks, `watched_bars` with a row per stock, and
 `watched_dividends` with each stock's dividends. `product_watchlist` has one row, and
-`watched_contracts` has up to 10 ES contracts. Then edit the watchlists:
+`watched_contracts` has up to 10 ES contracts. Then edit the watchlists, in their panels or in
+code. These lines, run in the same console, make the first and fourth edits:
+
+```python
+stock_watchlist.add(new_table({"Symbol": ["AAPL"]}))
+product_watchlist.add(new_table({"ProductCode": ["NQ"]}))
+```
 
 1. In `stock_watchlist`, add `AAPL`. AAPL's dividends join `watched_dividends`, and an `AAPL`
    row joins `watched_bars` at the next poll.
@@ -893,14 +894,15 @@ of `streams`:
 #### 22. Stream the trades of the top gainers
 
 Poll the day's top gainers every minute, and stream the trades of whichever stocks are on that
-list. You need Stocks Developer or Advanced, the plans that stream trades:
+list. You need a Stocks plan that streams trades: Developer, Advanced, or Business with the
+trades and quotes expansion:
 
 ```python
-# Stream the trades of the day's top gainers. Needs Stocks Developer or Advanced.
+# Stream the trades of the day's top gainers. Needs a Stocks plan that streams trades.
 import deephaven_massive as dm
 
-# Stocks Developer streams 15 minutes late, so this session accepts delayed data. On
-# Stocks Advanced, which streams in real time, delete that setting.
+# Stocks Developer streams 15 minutes late, so this session accepts delayed data. On a
+# real-time plan, delete that setting.
 m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
 streams = m.streams()
 
@@ -1030,7 +1032,7 @@ Two kinds of check keep your key busy for many hours. Each needs the key to itse
 
 | Check | When, in New York time | Which plans |
 |---|---|---|
-| A stream day: a trading day of live data | 03:15 to 20:30, on a day the program picks | Any paid plan |
+| A stream day: a trading day of live data | A plan check at 03:15, then streams from 03:45 to 20:30, on a day the program picks | Any paid plan |
 | A stream night: Bitcoin, Ether, and the ES and NQ futures overnight | 16:30 to 09:30 the next morning, on an evening before a full trading day | A paid Currencies or Futures plan |
 
 <a id="check-the-computer"></a>
@@ -1100,8 +1102,8 @@ cd ~/massive-test/deephaven-massive
 uv run python scripts/live_run.py status --out ~/massive-live
 ```
 
-You should see the latest plan check, the next stream day and night, every check with its
-status, and a table of counts per group. Most statuses need nothing from you:
+You should see `latest probe:` with your plans, the next stream day and night, every check with
+its status, and a table of counts per group. Most statuses need nothing from you:
 
 | Status | What you do |
 |---|---|
@@ -1225,8 +1227,7 @@ A report is an issue with a zip of your logs, your keys removed:
    ```
 
    You should see `wrote` and the zip's path, `~/massive-test/bug-report-<time>.zip`. If the
-   command finds a key in a file, it writes nothing and names the files. Put that list of names,
-   without the files, on the issue.
+   command finds a key in a file, it writes nothing and names the files, as `pack` does.
 4. Open an [issue](https://github.com/chipkent/deephaven-massive/issues/new), paste your report,
    and attach the zip and the screenshots.
 
@@ -1275,6 +1276,7 @@ uv run python scripts/tester.py check --docker-image deephaven-massive-test
 At [Start the server](#start-the-server), start the container in a new terminal:
 
 ```bash
+mkdir -p ~/massive
 docker run --rm --name massive-test -p 10000:10000 \
   -e MASSIVE_API_KEY -e MASSIVE_S3_ACCESS_KEY_ID -e MASSIVE_S3_SECRET_ACCESS_KEY \
   -e MASSIVE_TEST_FOLDER=/massive-test -v "$HOME/massive-test:/massive-test" \

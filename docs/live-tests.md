@@ -19,7 +19,7 @@ root. They carry these pytest markers:
 
 | Marker | What it runs |
 |---|---|
-| `integration` | The evidence tests, each answering one open question |
+| `integration` | The evidence tests, most of which answer an open question |
 | `integration_smoke` | Every dataset and method once, checked automatically |
 | `integration_rate_limits` | The three rate-limit tests, which go over Basic's 5 requests a minute on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |
@@ -37,7 +37,7 @@ as Massive's [pricing](https://massive.com/pricing) shows. Two more variables ar
 
 | Variable | What you get | Without it |
 |---|---|---|
-| `MASSIVE_DELAYED_API_KEY` | Two checks of a delayed Stocks key. Set it to a key on Stocks Starter or Developer when your main key's Stocks plan is neither; otherwise the main key serves. | Those checks skip |
+| `MASSIVE_DELAYED_API_KEY` | Two checks of a delayed Stocks key, which a second key on Stocks Starter serves. Your main key serves the stream check on Stocks Starter or Developer, and the past-data check on Stocks Basic or Starter. | The checks it can't serve skip |
 | `MASSIVE_LIVE_PLANS` | Your plans, declared instead of asked of Massive ([Declare plans the probe can't see](#declare-the-plans)) | The run asks Massive |
 
 <a id="run-order"></a>
@@ -49,8 +49,9 @@ The connection-limit tests disturb the key's connections, so they run last and a
 1. Stop every other program that uses the key. A stream test on a connection another program
    uses either waits for a slot or disconnects that program.
 2. Run the evidence, smoke, and rate-limit tests. A stream test checks rows only while its
-   market is open, so a weekday run in market hours covers more. The rate-limit tests need no
-   open market, so run them in the same command, or, during market hours, at another time.
+   market is open, so a weekday run in market hours covers more. The rate-limit tests need at
+   least one asset class still on Basic, and no open market, so run them in the same command,
+   or, during market hours, at another time.
 
    In one command:
 
@@ -58,8 +59,7 @@ The connection-limit tests disturb the key's connections, so they run last and a
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
 
-   Or the rate-limit tests apart, the second command later. They need at least one asset class
-   still on Basic:
+   Or the rate-limit tests apart, the second command later:
 
    ```bash
    uv run pytest -m "integration or integration_smoke" 2>&1 | tee -a live-checks.log
@@ -122,8 +122,8 @@ has its own plan names:
 | `indices` | `starter`, `advanced`, `business` |
 | `currencies` | `starter`, `business` |
 
-Run this line before the tests to declare Starter on Stocks, Options, and Currencies, and flat
-files:
+Add a line like this one to your shell's startup file, beside your keys, and open a new
+terminal. It declares Starter on Stocks, Options, and Currencies, and flat files:
 
 ```bash
 export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
@@ -133,7 +133,7 @@ export MASSIVE_LIVE_PLANS="currencies=starter,options=starter,stocks=starter,s3"
 
 ## Read the results
 
-A failure is a fault in Massive or the library. A test fails when:
+Most failures are a fault in Massive or the library. A test fails when:
 
 - a request it needs fails or returns nothing
 - a stream delivers no row while rows are due
@@ -184,9 +184,6 @@ a reason such as "not exercised: market closed (acknowledged)".
 
 The LULD check runs only in the regular session, when the bands change.
 
-The `/prev` check shows a short day's stamp only on the trading day after a half day, and its
-evidence marks that day `half day: yes`.
-
 <a id="read-the-end-of-a-run"></a>
 
 ### Read the end of a run
@@ -236,7 +233,9 @@ is a library bug to fix before the next run.
 
 Five checks record an answer the library's design depends on, and four of them pass whatever
 Massive answers, so a pass says only that they ran. Read each one's evidence, compare it with
-the answer the library assumes, and open an issue when they differ:
+the answer the library assumes, and open an issue when they differ. A tester can leave the
+reading to the owner, and attach the evidence file and the stream day's debug log to their
+issue:
 
 | Check | Run | Plans | The question | The answer the library assumes |
 |---|---|---|---|---|
@@ -244,7 +243,7 @@ the answer the library assumes, and open an issue when they differ:
 | `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | Does each index minute file hold only its own New York day? | Yes. This check asserts it, and fails otherwise. |
 | `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Which day, New York or Chicago, do the index day bars from REST and the daily files cover, and do the files match REST? | The Chicago day: an index day bar ends at 01:00 New York time |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | The evidence tests | Futures Starter | Does each futures bar of a session or longer hold the whole sessions that start in its UTC days? | Yes |
-| A quiet connection | The stream day of the [live-run program](#live-run-program) | Any plan that streams stocks | What does Massive send on a connection that has no data? | None. The check records it. |
+| A quiet connection | The [stream day](#live-run-program) of the live-run program | Any plan that streams stocks | What does Massive send on a connection that has no data? | None. The check records it. |
 
 <a id="read-the-options-cap"></a>
 
@@ -254,8 +253,8 @@ The options check subscribes 1,000 far-dated SPY contracts on two channels, 2,00
 Massive acknowledges all 2,000, the cap counts contracts. If Massive refuses the topics past
 1,000, or closes the socket after a status that says why, the cap counts topics. The check skips
 as inconclusive when Massive refuses topics for want of a plan. It also skips when the socket
-reconnects without saying why, which a network drop also does, so run the first
-connection-limit command again.
+reconnects without saying why, as after a network drop. Then run the first connection-limit
+command again.
 
 <a id="read-the-index-checks"></a>
 
@@ -334,7 +333,7 @@ section starts it, and open an issue for each claim the run contradicts:
 | README example | Plan | What to record |
 |---|---|---|
 | Every example | The plan it names | Whether the tables, charts, and panels match the text after the example |
-| [1 to 7](../README.md#read-daily-bars), one after another | Stocks Basic | Whether every table fills when an example sends more than five requests in a minute |
+| [1 to 7](../README.md#read-daily-bars), one after another | Stocks Basic | Whether every table fills when the examples, run back to back, send more than five requests in a minute |
 | [5, news](../README.md#follow-the-news) | Stocks Basic | Whether `latest` starts with up to ten articles per stock, newest first |
 | [6, stopping](../README.md#stop-live-tables) | Stocks Basic | Whether `headlines` and `latest` show the closed-session error and keep their rows, and `kept` holds the same rows |
 | [7, watchlist](../README.md#drive-with-a-watchlist) | Stocks Basic | Whether Nvidia's row arrives and Microsoft's leaves at the next poll, with no other change |
@@ -349,10 +348,10 @@ section starts it, and open an issue for each claim the run contradicts:
 ## Run the live-run program
 
 `scripts/live_run.py` records every live check a key allows, unattended, on a fixed New York
-timetable. A full pass takes at least three trading days. The first is a stream day, a whole
-trading day of live streams from 03:45 to 20:30, then the day after it, and then an ordinary
-day. A key that streams
-crypto or futures also needs a stream night, of those streams from 16:30 to 09:30. The program
+timetable. A full pass takes at least three trading days: an ordinary day, a stream day, and the
+day after it. A stream day is a whole trading day of live streams, from 03:45 to 20:30. A key
+that streams crypto or futures also needs a stream night of those streams, from 16:30 to
+09:30. The program
 asks Massive for your plans when it starts and each trading morning, and reruns the checks a new
 or raised plan allows.
 
@@ -372,7 +371,7 @@ uv run python scripts/live_run.py pack --out ~/massive-live   # after Control-C;
   give it for a results folder.
 - `status` prints the latest plan check, each check's status and reason, and a count per group.
 - `pack` refuses unless your terminal holds the same keys the run used, and refuses to zip a
-  folder that holds a key.
+  folder that holds a key. `run` also packs a zip by itself whenever a group finishes.
 
 Run `upgrade-check` only when the owner asks. It asks you to upgrade a plan while it runs, and
 records whether the library stops pacing that subscription. The
@@ -390,7 +389,7 @@ The program runs its checks in groups, each at a set New York time:
 | `evidence` | `-m integration -k "not luld"` | From 11:30, after the previous day's flat files |
 | `luld` | `-m integration -k luld` | 09:28, for the opening bands, except on a stream day and the day after |
 | `smoke` | `-m integration_smoke` | From 11:30 |
-| `responses` | The documentation's examples, each in its own session, with every raw reply recorded | From 11:30 |
+| `responses` | A fixed set of library calls, each in its own session, with every raw reply recorded | From 11:30 |
 | `limits-ws` | The WebSocket connection-limit tests | From 16:15 |
 | `limits-second-connection` | The second-connection test, which runs last with nothing else open | From 11:30, after the groups before it |
 | `stream-day` | A full trading day of streams for every asset class the key can stream | 03:45 to 20:30 on a planned day |
@@ -400,10 +399,8 @@ The program runs its checks in groups, each at a set New York time:
 | `stream-night-reconcile` | The night's minute bars against REST history | From 11:30 the morning after |
 | `half-day` | The bar-stamp tests | On the trading day after a half day |
 
-Each start of a group is one attempt, with its own folder, `<group>/<date>-<n>/`, in the results
-folder, holding the attempt's debug log. A stream day or night keeps one folder for all its
-starts. While it waits for the next group, `run` packs a fresh zip whenever a group has finished
-since the last one.
+Each attempt of a group gets a folder in the results folder, `<group>/<date>-<n>/`, that holds
+its debug log. A stream day or night keeps one folder for all its starts.
 
 <a id="live-run-reruns"></a>
 
@@ -433,7 +430,8 @@ commit, so pulling `main` between starts blocks the resume.
 
 ### Stream nights
 
-A stream night covers the hours only 24-hour markets trade, after a stream day ends at 20:30.
+A stream night covers the hours only 24-hour markets trade, from 16:30 New York time to 09:30
+the next morning.
 When the key streams crypto or futures, the program plans one on the first suitable evening
 before a full trading day. It streams the trades, quotes, and minute bars of `X:BTCUSD` and
 `X:ETHUSD`, and the minute bars of the front ES and NQ contracts. From Futures Developer up, it
@@ -459,7 +457,5 @@ a section per night.
 ### Secrets in the results
 
 The program reads the keys only from the environment, and never writes them. Its output and the
-text files it writes pass through a filter that replaces each secret with `***`. Before it zips
-anything, `pack` scans every file of the results folder for each secret, plain, URL-encoded,
-and base64, and refuses if it finds one. It also checks your keys against the salted
-fingerprints `run` stored.
+files it writes show each key as `***`, and `pack` refuses to zip a folder in which it finds a
+key.
