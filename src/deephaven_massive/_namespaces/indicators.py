@@ -177,9 +177,9 @@ class _Indicators(Namespace):
     """The technical indicator datasets, reached as `m.indicators`.
 
     Its methods cover the simple and exponential moving averages, the relative strength index, and
-    the moving average convergence/divergence, which Massive computes from its bars for tickers of
-    any asset class. Each method only builds a query, so it never blocks, and you can call it from
-    any thread.
+    the moving average convergence/divergence. Massive computes them from its bars, for tickers of
+    any asset class. Each method only builds a query, so it never blocks. You can call it from any
+    thread.
 
     Example:
         ::
@@ -284,14 +284,14 @@ class _Indicators(Namespace):
         """The simple moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
-        day: in UTC for crypto and forex, and in New York time otherwise. Without `start`, the call
-        reads the whole series, so pass `start`, or a `limit` with the default newest-first order.
+        day, in UTC for crypto and forex and in New York time for the rest. Without `start`, the
+        call reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value, which
-        changes until the bar ends; `t.where("TimestampEnd <= TimestampInsert")` keeps finished
-        values. An `APPEND` poll keeps the first, unfinished value of each bar and never the
-        finished one. Reading through today on a delayed plan raises `dm.EntitlementError` unless
-        the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
+        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
+        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
+        never the finished one. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class.
@@ -302,7 +302,7 @@ class _Indicators(Namespace):
                 a crypto symbol.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
-            order: The direction of the bars' times; the endpoints have no `sort`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
 
@@ -312,9 +312,10 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`; the timespan is `SECOND` or `SESSION`; a
-                window isn't positive; a bound is a time without a time zone; the range ends before
-                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
+                It's also raised when a window isn't positive, a bound is a time without a time
+                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
+                value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -354,14 +355,14 @@ class _Indicators(Namespace):
         """The exponential moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
-        day: in UTC for crypto and forex, and in New York time otherwise. Without `start`, the call
-        reads the whole series, so pass `start`, or a `limit` with the default newest-first order.
+        day, in UTC for crypto and forex and in New York time for the rest. Without `start`, the
+        call reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value, which
-        changes until the bar ends; `t.where("TimestampEnd <= TimestampInsert")` keeps finished
-        values. An `APPEND` poll keeps the first, unfinished value of each bar and never the
-        finished one. Reading through today on a delayed plan raises `dm.EntitlementError` unless
-        the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
+        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
+        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
+        never the finished one. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class.
@@ -372,7 +373,7 @@ class _Indicators(Namespace):
                 a crypto symbol.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
-            order: The direction of the bars' times; the endpoints have no `sort`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
 
@@ -382,9 +383,10 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`; the timespan is `SECOND` or `SESSION`; a
-                window isn't positive; a bound is a time without a time zone; the range ends before
-                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
+                It's also raised when a window isn't positive, a bound is a time without a time
+                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
+                value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -422,15 +424,15 @@ class _Indicators(Namespace):
     ) -> Query:
         """The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 
-        Each row holds the index for one bar, with the bar's start and end. `Date` is the bar's day:
-        in UTC for crypto and forex, and in New York time otherwise. Without `start`, the call reads
-        the whole series, so pass `start`, or a `limit` with the default newest-first order.
+        Each row holds the index for one bar, with the bar's start and end. `Date` is the bar's day,
+        in UTC for crypto and forex and in New York time for the rest. Without `start`, the call
+        reads the whole series. Pass `start`, or a `limit` with the default newest-first order.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value, which
-        changes until the bar ends; `t.where("TimestampEnd <= TimestampInsert")` keeps finished
-        values. An `APPEND` poll keeps the first, unfinished value of each bar and never the
-        finished one. Reading through today on a delayed plan raises `dm.EntitlementError` unless
-        the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
+        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
+        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
+        never the finished one. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class.
@@ -441,7 +443,7 @@ class _Indicators(Namespace):
                 a crypto symbol.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
-            order: The direction of the bars' times; the endpoints have no `sort`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
 
@@ -451,9 +453,10 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`; the timespan is `SECOND` or `SESSION`; a
-                window isn't positive; a bound is a time without a time zone; the range ends before
-                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
+                It's also raised when a window isn't positive, a bound is a time without a time
+                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
+                value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -494,15 +497,15 @@ class _Indicators(Namespace):
         """The moving average convergence/divergence of a ticker's bars, one row per bar.
 
         Each row holds one bar's MACD line in `Value`, its signal line in `Signal`, and their
-        difference in `Histogram`, with the bar's start and end. `Date` is the bar's day: in UTC for
-        crypto and forex, and in New York time otherwise. Without `start`, the call reads the whole
-        series, so pass `start`, or a `limit` with the default newest-first order.
+        difference in `Histogram`, with the bar's start and end. `Date` is the bar's day, in UTC for
+        crypto and forex and in New York time for the rest. Without `start`, the call reads the
+        whole series. Pass `start`, or a `limit` with the default newest-first order.
 
-        A `fetch()` or `poll()` that reads through today includes the current bar's value, which
-        changes until the bar ends; `t.where("TimestampEnd <= TimestampInsert")` keeps finished
-        values. An `APPEND` poll keeps the first, unfinished value of each bar and never the
-        finished one. Reading through today on a delayed plan raises `dm.EntitlementError` unless
-        the subscription is in `MassiveConfig.delayed_subscriptions`.
+        A `fetch()` or `poll()` that reads through today includes the current bar's value. That
+        value changes until the bar ends, and `t.where("TimestampEnd <= TimestampInsert")` keeps
+        only finished values. An `APPEND` poll keeps the first, unfinished value of each bar and
+        never the finished one. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
             symbols: Tickers of any asset class.
@@ -515,7 +518,7 @@ class _Indicators(Namespace):
                 a crypto symbol.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
-            order: The direction of the bars' times; the endpoints have no `sort`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
 
@@ -525,9 +528,10 @@ class _Indicators(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is None or `dm.ALL`; the timespan is `SECOND` or `SESSION`; a
-                window isn't positive; a bound is a time without a time zone; the range ends before
-                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is None or `dm.ALL`, or the timespan is `SECOND` or `SESSION`.
+                It's also raised when a window isn't positive, a bound is a time without a time
+                zone, or the range ends before it starts. A filter the dataset doesn't take, or a
+                value that doesn't fit it, raises it too.
 
         Example:
             ::

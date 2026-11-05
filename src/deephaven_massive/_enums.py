@@ -141,15 +141,15 @@ class NotBars(Enum):
 class PollMode(StrEnum):
     """How a `poll()` table combines one cycle's rows with the last.
 
-    - `AUTO`, the default of `poll()`: the dataset's own mode, which its page names. That's `APPEND`
-      for the news and filings feeds, `UPSERT` for IPOs, and `REPLACE` for the rest.
+    - `AUTO`, the default of `poll()`: the mode the dataset's page names. It's `APPEND` for the news
+      and filings feeds, `UPSERT` for IPOs, and `REPLACE` for the rest.
     - `REPLACE`: a keyed table that holds exactly the latest cycle's rows. A key the cycle doesn't
       return is deleted, even when the cycle returns no rows.
     - `UPSERT`: a keyed table that adds and updates rows but never deletes them.
-    - `APPEND`: an append-only table that adds only rows it hasn't seen. A row is known by the
-      dataset's keys, such as a news article's id, and on a snapshot also by its update time, so
-      `APPEND` on a snapshot records each new state of a symbol. A later revision that changes none
-      of those columns isn't added; `UPSERT` follows revisions.
+    - `APPEND`: an append-only table that adds only rows it hasn't seen. The dataset's keys identify
+      a row, such as a news article's id. A snapshot's update time is part of its key, so `APPEND`
+      on a snapshot records each new state of a symbol. A later revision that changes none of the
+      key columns isn't added. `UPSERT` follows revisions.
 
     Example:
         ::
@@ -168,9 +168,9 @@ class PollMode(StrEnum):
 class HistorySource(StrEnum):
     """Where `history()` reads from.
 
-    - `AUTO`: the library picks flat files or REST, by whether you set S3 keys, the dataset, the
-      bars and `adjusted`, and how many symbols you ask for. It reads from REST any day whose file
-      is missing and any files your plan lacks, when REST can serve them.
+    - `AUTO`: the library picks flat files or REST. The choice depends on whether you set S3 keys,
+      the dataset, the bars and `adjusted`, and how many symbols you ask for. When REST can serve
+      them, it reads from REST any day whose file is missing or isn't in your plan.
     - `REST`: Massive's REST API.
     - `FLAT_FILES`: Massive's flat files, the daily CSV files it publishes on S3. They need S3 keys.
 
@@ -190,9 +190,9 @@ class HistorySource(StrEnum):
 class Reread(StrEnum):
     """Whether `history()` of a watchlist downloads a symbol again when you add it back.
 
-    A `history()` whose `symbols` is a live table follows it: it reads each symbol you add over the
-    call's range, and drops each one you delete. This setting decides what happens when a deleted
-    symbol comes back. It has no effect when `symbols` isn't a live table.
+    A `history()` of a watchlist reads each symbol you add over the call's range. It drops each
+    symbol you delete. This setting decides what happens when a deleted symbol comes back. It has no
+    effect when `symbols` isn't a live table.
 
     - `ALWAYS`, the default: the symbol is downloaded again and shows Massive's current data. It has
       no rows until the download lands.

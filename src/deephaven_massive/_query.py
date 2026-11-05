@@ -627,9 +627,9 @@ class QueryBase:
     def columns(self) -> Table:
         """List the dataset's columns, their types, and what each one means.
 
-        Every method of the query returns these columns in this order, whichever source serves it,
-        and a column that source doesn't fill is null. The call reads nothing from Massive, and it
-        works on a closed session.
+        Every method of the query returns these columns, in this order. A column that the serving
+        source doesn't fill is null. The call reads nothing from Massive and works on a closed
+        session.
 
         Returns:
             A static table with one row per column, and these columns:
@@ -944,9 +944,8 @@ def _symbols_per_read(spec: DatasetSpec) -> int:
 class Query(QueryBase):
     """A query with `fetch()` for a static table and `poll()` for a live one.
 
-    A dataset method, such as `m.stocks.dividends(...)` or `m.stocks.snapshots(...)`, builds the
-    query. It reads nothing until you call one of its methods, and you can call them as often as you
-    like.
+    You get the query from a dataset method, such as `m.stocks.dividends(...)`. It reads nothing
+    until you call one of its methods. You can call them as often as you like.
 
     Example:
         ::
@@ -978,7 +977,7 @@ class Query(QueryBase):
         leaves. One symbol's failure leaves the watchlist's other symbols in place, and
         `m.symbol_reads()` shows each symbol's read.
 
-        A symbol Massive has no data for gets no rows and logs a WARNING. Under
+        A symbol Massive has no data for gets no rows, and the library logs a WARNING. Under
         `MassiveConfig.unavailable_symbols=dm.OnError.RAISE`, it raises instead.
 
         Args:
@@ -991,24 +990,23 @@ class Query(QueryBase):
 
         Raises:
             TypeError: If `wait` isn't a `bool`.
-            ValueError: Before any request: if called on a Deephaven update-graph thread; if the
-                endpoint doesn't take a parameter or filter the query sets; if a static table of
-                symbols, or a static `underlying=` or `product_code=` table, is empty; if a table
-                holds only rows the dataset doesn't take; if it holds any such row under
-                `noncanonical_symbols=dm.OnError.RAISE`; or if both `symbols` and an `underlying=`
-                or `product_code=` table are live.
+            ValueError: Before any request, on a Deephaven update-graph thread, or when the endpoint
+                doesn't take a parameter or filter the query sets. It's also raised when a static
+                table of symbols, or of `underlying=` or `product_code=` values, is empty. A table
+                that holds only rows the dataset doesn't take raises it. So does any such row under
+                `noncanonical_symbols=dm.OnError.RAISE`. Passing a live table as both `symbols` and
+                `underlying=` or `product_code=` raises it too.
             AuthenticationError: If Massive rejects your API key.
-            EntitlementError: If your plan doesn't include the data, or Massive delays current data,
-                such as a snapshot, whose subscription isn't in
-                `MassiveConfig.delayed_subscriptions`
-                (https://github.com/chipkent/deephaven-massive/blob/main/README.md#massive-config).
-                The message names the line to add.
-            MassiveError: If the session is closed, a rate limit outlasts the retries, a page holds
-                no row the library can read, a symbol's data stops partway, or a request fails in
-                any other way. A crypto pair that Massive doesn't list raises when you pass it in
-                code. In a table of symbols, it raises only under
-                `unlisted_symbols=dm.OnError.RAISE` or when no pair in the table is listed. For a
-                watchlist, the call raises only when every symbol failed, with the first one's
+            EntitlementError: If your plan doesn't include the data. It's also raised when Massive
+                delays current data, such as a snapshot, whose subscription isn't in
+                `MassiveConfig.delayed_subscriptions`. The message names the line to add:
+                https://github.com/chipkent/deephaven-massive/blob/main/README.md#massive-config.
+            MassiveError: If the session is closed, a rate limit outlasts the retries, a response
+                holds no row the library can read, a symbol's data stops partway, or a request fails
+                in any other way. A crypto pair that Massive doesn't list raises it when you pass
+                the pair in code. In a table of symbols, an unlisted pair raises it only when no
+                pair in the table is listed, or under `unlisted_symbols=dm.OnError.RAISE`. With a
+                watchlist, the call raises it only when every symbol failed, with the first one's
                 error.
 
         Example:
@@ -1225,25 +1223,24 @@ class Query(QueryBase):
         cycles combine. The table polls while anything uses it
         (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables).
 
-        A news or filings feed needs a `start` or a `limit`, or each cycle would read Massive's
-        whole archive.
+        A news or filings feed needs a `start` or a `limit`. Without either, each cycle would read
+        Massive's whole archive.
 
-        A failed cycle logs a WARNING and shows in `Error` of `m.streams()`, and the next cycle
-        runs.
-        The table stops polling and fails in two cases:
+        A failed cycle logs a WARNING and shows in `Error` of `m.streams()`. The next cycle runs as
+        usual. The table stops polling and fails in two cases:
 
         - its cycles keep failing for `MassiveConfig.max_outage`, 300 seconds by default;
         - a cycle meets a problem no later cycle can fix: a rejected key, a plan that lacks the
           data, rows that break the dataset's columns or have a null key, or delayed data whose
           subscription isn't in `MassiveConfig.delayed_subscriptions`.
 
-        Once the table is running, a cycle skips each symbol it can't read, and `m.streams()` lists
-        it:
+        Once the table is running, a cycle skips each symbol it can't read and lists it in
+        `m.streams()`:
 
         - a row that isn't Massive's exact ticker;
         - a crypto pair Massive doesn't list;
         - a symbol Massive has no data for;
-        - a symbol whose endpoint doesn't take a parameter the query sets.
+        - a symbol added later whose endpoint doesn't take a parameter the query sets.
 
         To fail the table instead, set `noncanonical_symbols`, `unlisted_symbols`, or
         `unavailable_symbols` in `MassiveConfig` to `dm.OnError.RAISE`.
@@ -1251,9 +1248,9 @@ class Query(QueryBase):
         Args:
             interval: The time between cycles, in seconds or as a `timedelta`, at least 1 second.
                 For anything faster, use a stream.
-            mode: How cycles combine. `dm.PollMode.AUTO`, the default, is the dataset's own mode,
-                which its page names. `REPLACE` keeps only the latest cycle's rows, `UPSERT` keeps
-                every key ever seen at its latest row, and `APPEND` adds only rows it hasn't seen.
+            mode: How cycles combine. `dm.PollMode.AUTO`, the default, uses the mode the dataset's
+                page names. `REPLACE` keeps only the latest cycle's rows. `UPSERT` keeps every key
+                ever seen, at its latest row. `APPEND` adds only rows it hasn't seen.
 
         Returns:
             A live table with the dataset's columns: keyed for `REPLACE` and `UPSERT`, append-only
@@ -1263,14 +1260,14 @@ class Query(QueryBase):
         Raises:
             TypeError: If `interval` isn't a number or a `timedelta`, or `mode` isn't a
                 `dm.PollMode`.
-            ValueError: Before the table exists: if called on a Deephaven update-graph thread; if
-                `interval` is shorter than 1 second or isn't finite; if a news or filings feed has
-                neither `start` nor `limit`; if a table of symbols holds no row that is Massive's
-                exact ticker; if it holds any such row under
-                `noncanonical_symbols=dm.OnError.RAISE`; or if an endpoint doesn't take a parameter
-                or filter the query sets.
+            ValueError: Before the table exists, on a Deephaven update-graph thread, or when
+                `interval` is shorter than 1 second or isn't finite. A news or filings feed with
+                neither `start` nor `limit` raises it. So does a table of symbols with no row that
+                is Massive's exact ticker, or with any such row under
+                `noncanonical_symbols=dm.OnError.RAISE`. It's also raised when a symbol's endpoint
+                at the call doesn't take a parameter or filter the query sets.
             AuthenticationError: If Massive rejects your API key while the call reads Massive's list
-                of crypto tickers, which it needs to split a pair into its currencies.
+                of crypto tickers.
             EntitlementError: If your plan doesn't include that list.
             MassiveError: If the session is closed, or a crypto ticker passed in code can't be split
                 into its currencies.
@@ -1312,10 +1309,10 @@ class Query(QueryBase):
 class StreamQuery(QueryBase):
     """A streaming query: `blink()`, `append_only()`, `ring()`, and `last_by()`.
 
-    A dataset method, such as `m.stocks.luld(...)`, builds the query, and you can reuse it. Its four
-    methods return the same stream as four Deephaven table types. Identical queries share one
-    stream, and each call returns its own table. The stream stays subscribed until no table of it,
-    or table made from one, is left.
+    You get the query from a dataset method, such as `m.stocks.luld(...)`, and you can reuse it. Its
+    four methods return the same stream as four Deephaven table types. Identical queries share one
+    stream, and each call returns its own table. The stream stays subscribed while any of its
+    tables, or a table made from one, is in use.
 
     A method returns once its table exists, without waiting for Massive to confirm the subscription.
     A failure Massive reports later, such as a refused subscription or a rejected key, fails the
@@ -1438,11 +1435,11 @@ class StreamQuery(QueryBase):
             A live blink table with the dataset's columns.
 
         Raises:
-            ValueError: Before the table exists: if called on a Deephaven update-graph thread; if a
-                static table of symbols is empty; if a table of symbols holds only rows that aren't
-                Massive's exact tickers; if it holds any such row under
-                `noncanonical_symbols=dm.OnError.RAISE`; if option contracts listed in code pass the
-                connection's limit; or for a fair market value stream of a subscription in
+            ValueError: Before the table exists, on a Deephaven update-graph thread, or when a
+                static table of symbols is empty. A table of symbols that holds only rows that
+                aren't Massive's exact tickers raises it. So does any such row under
+                `noncanonical_symbols=dm.OnError.RAISE`. Option contracts listed in code beyond the
+                connection's limit raise it. So does a fair market value stream of a subscription in
                 `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. When the streaming server rejects it, the table fails later
@@ -1476,11 +1473,11 @@ class StreamQuery(QueryBase):
             A live append-only table with the dataset's columns.
 
         Raises:
-            ValueError: Before the table exists: if called on a Deephaven update-graph thread; if a
-                static table of symbols is empty; if a table of symbols holds only rows that aren't
-                Massive's exact tickers; if it holds any such row under
-                `noncanonical_symbols=dm.OnError.RAISE`; if option contracts listed in code pass the
-                connection's limit; or for a fair market value stream of a subscription in
+            ValueError: Before the table exists, on a Deephaven update-graph thread, or when a
+                static table of symbols is empty. A table of symbols that holds only rows that
+                aren't Massive's exact tickers raises it. So does any such row under
+                `noncanonical_symbols=dm.OnError.RAISE`. Option contracts listed in code beyond the
+                connection's limit raise it. So does a fair market value stream of a subscription in
                 `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. When the streaming server rejects it, the table fails later
@@ -1517,13 +1514,13 @@ class StreamQuery(QueryBase):
 
         Raises:
             TypeError: If `capacity` isn't an `int`.
-            ValueError: Before the table exists: if `capacity` is out of range; if called on a
-                Deephaven update-graph thread; if a static table of symbols is empty; if a table of
-                symbols holds only rows that aren't Massive's exact tickers; if it holds any such
-                row under `noncanonical_symbols=dm.OnError.RAISE`; if option contracts listed in
-                code pass the connection's limit; or for a fair market value stream of a
-                subscription in `MassiveConfig.delayed_subscriptions`, since fair market value is
-                real-time only.
+            ValueError: Before the table exists, on a Deephaven update-graph thread, or when a
+                static table of symbols is empty. A `capacity` out of range raises it. A table of
+                symbols that holds only rows that aren't Massive's exact tickers raises it. So does
+                any such row under `noncanonical_symbols=dm.OnError.RAISE`. Option contracts listed
+                in code beyond the connection's limit raise it. So does a fair market value stream
+                of a subscription in `MassiveConfig.delayed_subscriptions`, since fair market value
+                is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. When the streaming server rejects it, the table fails later
                 instead.
@@ -1590,8 +1587,8 @@ class StreamQuery(QueryBase):
         """Return the latest row of each key, by default one row per symbol.
 
         The table starts empty and gains each key's row when its first update arrives. For each
-        symbol's current state at once, poll a snapshot instead, as in
-        `m.stocks.snapshots(symbols).poll(5)`, on a plan that includes snapshots.
+        symbol's current state at once, poll a snapshot instead, such as
+        `m.stocks.snapshots(["AAPL", "MSFT"]).poll(5)`. Snapshots need a plan that includes them.
 
         With a watchlist, each symbol's row shows only while the symbol is on it. A symbol you
         delete and add back shows no row until its next update.
@@ -1608,12 +1605,12 @@ class StreamQuery(QueryBase):
 
         Raises:
             TypeError: If `by` isn't a `str` or a sequence of `str`.
-            ValueError: Before the table exists: if `by` is empty, repeats a column, or names a
-                column the dataset doesn't have; if called on a Deephaven update-graph thread; if a
-                static table of symbols is empty; if a table of symbols holds only rows that aren't
-                Massive's exact tickers; if it holds any such row under
-                `noncanonical_symbols=dm.OnError.RAISE`; if option contracts listed in code pass the
-                connection's limit; or for a fair market value stream of a subscription in
+            ValueError: Before the table exists, on a Deephaven update-graph thread, or when a
+                static table of symbols is empty. A `by` that is empty, repeats a column, or names a
+                column the dataset doesn't have raises it. A table of symbols that holds only rows
+                that aren't Massive's exact tickers raises it. So does any such row under
+                `noncanonical_symbols=dm.OnError.RAISE`. Option contracts listed in code beyond the
+                connection's limit raise it. So does a fair market value stream of a subscription in
                 `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. When the streaming server rejects it, the table fails later
@@ -1720,7 +1717,7 @@ class HistoryQuery(QueryBase):
         is excluded. A bar is included only when its whole window is in the range and has ended.
 
         Rows come from REST or from Massive's flat files. `dm.HistorySource.AUTO` picks the source.
-        It reads from REST each day whose file is missing or isn't in your plan, so the call fails
+        It reads from REST each day whose file is missing or isn't in your plan. So the call fails
         only when neither source can serve it. The table's description says which source it read and
         why.
 
@@ -1742,7 +1739,7 @@ class HistoryQuery(QueryBase):
                 forces one.
             reread: For a watchlist, whether a symbol you delete and add back is downloaded again
                 (`dm.Reread.ALWAYS`, the default) or gets its earlier rows back without a request
-                (`dm.Reread.NEVER`). It has no effect on other symbols.
+                (`dm.Reread.NEVER`). It doesn't affect a static table of symbols.
             wait: True, the default, waits for the rows, or for a watchlist until each symbol has
                 been read once. False returns a live table at once and fills it in the background; a
                 failed request then fails the table instead of raising.
@@ -1754,19 +1751,20 @@ class HistoryQuery(QueryBase):
         Raises:
             TypeError: If `source` isn't a `dm.HistorySource`, `reread` isn't a `dm.Reread`, `wait`
                 isn't a `bool`, or a bound isn't a date or a time.
-            ValueError: Before any request: for a `datetime` without a time zone, unreadable text,
-                or `NaT`; a date mixed with a time; `start` after `end`, or in the future when `end`
-                is left out; an empty static table of symbols, or one with no readable row; futures
-                session dates with a `session_end_date` filter; a source that can't serve the
-                request, with each reason; or a call on a Deephaven update-graph thread.
+            ValueError: Before any request, on a Deephaven update-graph thread. A bound that is a
+                `datetime` without a time zone, unreadable text, or `NaT` raises it. So do a date
+                mixed with a time, and a `start` after `end`, or in the future when `end` is left
+                out. An empty static table of symbols, or one with no readable row, raises it. So do
+                futures session dates with a `session_end_date` filter. A source that can't serve
+                the request raises it too, and the message gives each reason.
             AuthenticationError: If Massive or its flat-file server rejects your keys.
             EntitlementError: If your plan doesn't include the data from any source the call can
                 use.
-            MassiveError: If the session is closed or a request fails; if adjusted bars come back
-                unadjusted, or the reverse; if a symbol's data stops partway; or, when only flat
-                files can serve the read, if a trading day's file is missing and no later file shows
-                that the day was a holiday. For a watchlist, the call raises only when every symbol
-                failed, with the first one's error.
+            MassiveError: If the session is closed or a request fails. It's also raised when
+                adjusted bars come back unadjusted, or the reverse, or when a symbol's data stops
+                partway. When only flat files can serve the read, a missing trading day's file
+                raises it, unless a later file shows the day was a holiday. With a watchlist, the
+                call raises it only when every symbol failed, with the first one's error.
 
         Example:
             ::

@@ -259,7 +259,7 @@ class _Reference(Namespace):
 
     Its methods cover tickers and their details, types, events, and related companies, news, the
     exchanges, the trade and quote condition codes, the market status, and the market holidays. Each
-    method only builds a query, so it never blocks, and you can call it from any thread.
+    method only builds a query, so it never blocks. You can call it from any thread.
 
     Example:
         ::
@@ -298,15 +298,16 @@ class _Reference(Namespace):
         `symbols` left out, the call lists every ticker that matches the other arguments.
 
         Args:
-            symbols: Tickers of any asset class; leave it out for every ticker.
-            market: The market to list, such as `dm.Market.STOCKS`; leave it out for every market.
-            ticker_type: The type, such as `dm.TickerType.ETF`; `ticker_types()` lists them. Leave
-                it out for every type.
-            exchange: The primary exchange's MIC, such as `"XNAS"`; leave it out for every exchange.
+            symbols: Tickers of any asset class. Leave it out for every ticker.
+            market: The market to list, a `dm.Market` member such as `dm.Market.STOCKS`. Leave it
+                out for every market.
+            ticker_type: The type, a `dm.TickerType` member such as `dm.TickerType.ETF`.
+                `ticker_types()` lists them. Leave it out for every type.
+            exchange: The primary exchange's MIC, such as `"XNAS"`. Leave it out for every exchange.
             cusip: The CUSIP to look up.
             cik: The SEC Central Index Key to look up.
-            as_of: The day the listing is as of; leave it out for today.
-            active: True, the default, lists tickers traded on `as_of`; False lists delisted ones.
+            as_of: The day the listing is as of. Leave it out for today.
+            active: True, the default, lists tickers traded on `as_of`. False lists delisted ones.
             search: Text to match against the ticker and the company name.
             sort: Any field of the rows, such as `"name"`.
             order: The direction of `sort`.
@@ -320,8 +321,8 @@ class _Reference(Namespace):
         Raises:
             TypeError: If `active` isn't a `bool`, or another argument has the wrong type.
             ValueError: If `symbols` is `dm.ALL` or holds a ticker that isn't Massive's exact
-                ticker; `as_of` is a time instead of a date; or a filter isn't one the dataset
-                takes, or its value doesn't fit.
+                ticker. It's also raised when `as_of` is a time instead of a date. A filter the
+                dataset doesn't take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -364,8 +365,8 @@ class _Reference(Namespace):
         logs a WARNING.
 
         Args:
-            symbols: Tickers of any asset class; `tickers()` lists every ticker.
-            as_of: The day the details are as of; leave it out for the latest.
+            symbols: Tickers of any asset class. `tickers()` lists every ticker.
+            as_of: The day the details are as of. Leave it out for the latest.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -374,7 +375,7 @@ class _Reference(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is None or `dm.ALL`, or holds a ticker that isn't Massive's
-                exact ticker; or `as_of` is a time instead of a date.
+                exact ticker. It's also raised when `as_of` is a time instead of a date.
 
         Example:
             ::
@@ -403,9 +404,9 @@ class _Reference(Namespace):
         are the values of `dm.TickerType`, which `tickers()` filters by.
 
         Args:
-            asset_class: The asset class whose types to list; leave it out for every class. Massive
+            asset_class: The asset class whose types to list. Leave it out for every class. Massive
                 lists no futures types.
-            locale: The locale whose types to list; leave it out for both.
+            locale: The locale whose types to list. Leave it out for both.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -436,7 +437,7 @@ class _Reference(Namespace):
 
         Args:
             symbols: Tickers of any asset class, CUSIPs, or Composite FIGIs.
-            types: The event types to include, such as `["ticker_change"]`; one `str` is one type.
+            types: The event types to include, such as `["ticker_change"]`. One `str` is one type.
                 Leave it out for every type.
 
         Returns:
@@ -446,7 +447,7 @@ class _Reference(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If `symbols` is None or `dm.ALL`, or holds a ticker that isn't Massive's
-                exact ticker; or `types` is empty.
+                exact ticker. It's also raised when `types` is empty.
 
         Example:
             ::
@@ -505,15 +506,15 @@ class _Reference(Namespace):
         """News articles about tickers, with their publishers and sentiment insights.
 
         Each row holds one article's headline, publisher, publication time, and Massive's sentiment
-        insights. An article lists every ticker it names in `Tickers`, and appears once under each
-        of your tickers it names, in `Symbol`. With tickers named, `sort`, `order`, and `limit`
-        apply to each ticker's articles, newest first by default.
+        insights. An article lists every ticker it names in `Tickers`. It appears once under each of
+        your tickers it names, in `Symbol`. When you name tickers, `sort`, `order`, and `limit`
+        apply to each ticker's articles. The default order is newest first.
 
         Args:
-            symbols: The tickers whose articles to read; leave it out for every article.
+            symbols: The tickers whose articles to read. Leave it out for every article.
             start: The earliest publication time.
             end: The latest publication time.
-            sort: Each ticker's sort field; `"published_utc"`, the default, is the only one.
+            sort: Each ticker's sort field. `"published_utc"`, the default, is the only one.
             order: Each ticker's direction of `sort`, newest first by default.
             limit: Articles per ticker, or in total without `symbols`.
             filters: Further endpoint parameters.
@@ -524,9 +525,10 @@ class _Reference(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds a ticker that isn't Massive's
-                exact ticker; a bound isn't a date or a time with a time zone; the range ends before
-                it starts; or a filter isn't one the dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's
+                exact ticker. It's also raised when a bound isn't a date or a time with a time zone,
+                or the range ends before it starts. A filter the dataset doesn't take, or a value
+                that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -556,9 +558,9 @@ class _Reference(Namespace):
         codes that trades and quotes carry.
 
         Args:
-            asset_class: The asset class whose exchanges to list; leave it out for every class.
+            asset_class: The asset class whose exchanges to list. Leave it out for every class.
                 Massive lists no index exchanges.
-            locale: The locale whose exchanges to list; leave it out for both.
+            locale: The locale whose exchanges to list. Leave it out for both.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -597,15 +599,15 @@ class _Reference(Namespace):
 
         Each row holds one condition's id, name, and the SIP codes it maps to, and whether a trade
         with it updates a bar's high and low, open and close, and volume. Massive lists two
-        different conditions under one stocks quote id, so a `poll()` table keeps every distinct
+        different conditions under one stocks quote id. So a `poll()` table keeps every distinct
         row.
 
         Args:
-            asset_class: The asset class whose conditions to list; leave it out for every class.
+            asset_class: The asset class whose conditions to list. Leave it out for every class.
                 Massive lists no futures or index conditions.
-            data_type: The kind of data the conditions apply to; leave it out for every kind.
-            condition_id: One condition's id; leave it out for every condition.
-            sip: The SIP whose condition codes to list; leave it out for every SIP.
+            data_type: The kind of data the conditions apply to. Leave it out for every kind.
+            condition_id: One condition's id. Leave it out for every condition.
+            sip: The SIP whose condition codes to list. Leave it out for every SIP.
             sort: Any field of the rows, such as `"name"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total.
@@ -617,8 +619,8 @@ class _Reference(Namespace):
 
         Raises:
             TypeError: If `condition_id` isn't an `int`, or another argument has the wrong type.
-            ValueError: If `asset_class` is one the endpoint doesn't take; or a filter isn't one the
-                dataset takes, or its value doesn't fit.
+            ValueError: If `asset_class` is one the endpoint doesn't take. A filter the dataset
+                doesn't take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::

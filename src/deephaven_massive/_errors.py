@@ -137,11 +137,10 @@ class ErrorCause(StrEnum):
 class MassiveError(Exception):
     """The base class of every error Massive or the library reports.
 
-    One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for a
-    failure that is neither an `AuthenticationError` nor an `EntitlementError`: a network error, an
-    HTTP error other than 401 or 403, a rate limit that outlasted the retries, or a closed session.
-    The message names the host, the dataset, and Massive's own text. To branch on the failure, read
-    `status`, such as 404 or 429, instead of the message.
+    One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for any
+    other failure: a network error, an HTTP error other than 401 or 403, a rate limit that outlasted
+    the retries, or a closed session. The message names the host, the dataset, and Massive's own
+    text. To branch on the failure, read `status`, such as 404 or 429, instead of the message.
 
     A static verb raises the error. A live table, or a static verb called with `wait=False`, fails
     with it instead: the table shows the error, the log records it, and `m.streams()` lists it.
@@ -206,11 +205,10 @@ class AuthenticationError(MassiveError):
     """Massive refused your keys: the API key is missing or rejected, or the S3 keys are.
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
-    live table fails with it when Massive's streaming server rejects the key, and so does every
-    other stream on that connection. Massive gives the streaming server's answer for a plan with no
-    streams of the asset class too, and the message says so. `history()` raises it when Massive's
-    flat-file server rejects the S3 keys, and the message names `s3_access_key_id` and
-    `s3_secret_access_key`.
+    live table fails with it when Massive's streaming server rejects the key. Every other stream on
+    that connection fails too. Massive gives the same answer to a plan with no streams of the asset
+    class, and the message says so. `history()` raises it when Massive's flat-file server rejects
+    the S3 keys. The message then names `s3_access_key_id` and `s3_secret_access_key`.
 
     Example:
         ::
@@ -229,15 +227,15 @@ class EntitlementError(MassiveError):
 
     Massive refused the request: a REST request with HTTP 403, a stream subscription, or a flat
     file. The library raises it too when Massive marks current data as delayed and its subscription
-    isn't in `MassiveConfig.delayed_subscriptions`, and the message names the line to add. Only the
-    table that asked fails, and other tables on the same connection keep running.
+    isn't in `MassiveConfig.delayed_subscriptions`. The message then names the line to add. Only the
+    table that asked fails. Other tables on the same connection keep running.
 
-    The message says what Massive refused, without guessing at your plan, and quotes Massive's own
-    text. A REST refusal names the subscription and the request, a stream refusal the host and the
-    subscribed topics, and a flat-file refusal the file. A refused request that the library made for
-    you, such as reading Massive's list of crypto tickers, is named as such. Where another source
-    can serve the same data, the message names it, such as `source=dm.HistorySource.REST` for a
-    refused flat-file `history()`.
+    The message says what Massive refused, without guessing at your plan. It quotes Massive's own
+    text. A REST refusal names the subscription and the request. A stream refusal names the host and
+    the subscribed topics, and a flat-file refusal names the file. When the library made the refused
+    request for you, the message says so, as for its read of Massive's list of crypto tickers. Where
+    another source can serve the same data, the message names it, such as
+    `source=dm.HistorySource.REST` for a refused flat-file `history()`.
 
     Example:
         Read a day of trades, and report it when your plan lacks them::

@@ -242,7 +242,7 @@ class _Crypto(Namespace):
 
     Its methods cover trades, quotes, bars, each pair's last trade and previous day's bar, fair
     market value, snapshots, movers, and each pair's daily open and close. Each method only builds a
-    query, so it never blocks, and you can call it from any thread.
+    query, so it never blocks. You can call it from any thread.
 
     Example:
         ::
@@ -264,12 +264,11 @@ class _Crypto(Namespace):
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
         Each row holds one trade on one exchange. `Timestamp` is the exchange's own time, and `Date`
-        is its UTC date. A pair missing from Massive's crypto ticker list, which includes delisted
-        pairs, is refused when you call a method. For each pair's latest trade alone, use
-        `last_trade()`.
+        is its UTC date. The call refuses a pair missing from Massive's crypto ticker list. That
+        list includes delisted pairs. For each pair's latest trade alone, use `last_trade()`.
 
         Args:
-            symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`, which `history()` reads only
+            symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`. `history()` reads `dm.ALL` only
                 from the flat files.
 
         Returns:
@@ -278,8 +277,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a symbol isn't an `X:` crypto ticker; the sequence is empty; a table has
-                no `Symbol` column; or `symbols` is None.
+            ValueError: If a symbol isn't an `X:` crypto ticker, or `symbols` is None. It's also
+                raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -294,14 +293,13 @@ class _Crypto(Namespace):
 
         Each row holds one pair's latest trade, without a trade ID or a received time. A pair with
         no trade is left out, with a WARNING. A `poll()` sees only the trade that is latest at each
-        cycle, so `trades()` is the way to see every trade. Currencies Basic doesn't include this
-        dataset, and `snapshots()` also carries each pair's last trade. A pair missing from
-        Massive's crypto ticker list, which includes delisted pairs, is refused when you call a
-        method.
+        cycle. To see every trade, use `trades()`. Currencies Basic doesn't include this dataset.
+        `snapshots()` also carries each pair's last trade. The call refuses a pair missing from
+        Massive's crypto ticker list, which includes delisted pairs.
 
         Args:
-            symbols: Crypto pairs, such as `X:BTCUSD`; `dm.ALL` is refused, so use
-                `m.crypto.snapshots(dm.ALL)`.
+            symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; use
+                `m.crypto.snapshots(dm.ALL)` instead.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -309,8 +307,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL` or None; a symbol isn't an `X:` crypto ticker; the
-                sequence is empty; or a table has no `Symbol` column.
+            ValueError: If `symbols` is `dm.ALL` or None, or a symbol isn't an `X:` crypto ticker.
+                It's also raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -330,9 +328,8 @@ class _Crypto(Namespace):
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row holds one exchange's best bid and ask for one pair. Massive serves no crypto quote
-        history and no last quote, so for each pair's current state, poll `snapshots()`. A pair
-        missing from Massive's crypto ticker list, which includes delisted pairs, is refused when
-        you call a method.
+        history and no last quote. For each pair's current state, poll `snapshots()`. The call
+        refuses a pair missing from Massive's crypto ticker list, which includes delisted pairs.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`.
@@ -343,8 +340,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a symbol isn't an `X:` crypto ticker; the sequence is empty; a table has
-                no `Symbol` column; or `symbols` is None.
+            ValueError: If a symbol isn't an `X:` crypto ticker, or `symbols` is None. It's also
+                raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -380,27 +377,27 @@ class _Crypto(Namespace):
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, and weeks run
-        Sunday to Saturday. A daily bar that Massive stamps at another time than the start or end of
-        its UTC day keeps its stamp, ends a day later, and has no `Date`, with a WARNING. Crypto has
-        no splits, so there's no `adjusted`. A pair missing from Massive's crypto ticker list, which
-        includes delisted pairs, is refused when you call a method.
+        Sunday to Saturday. Massive sometimes stamps a daily bar at a time other than the start or
+        end of its UTC day. Such a bar keeps its stamp, ends a day later, and has no `Date`, and the
+        library logs a WARNING. Crypto has no splits, so there's no `adjusted`. The call refuses a
+        pair missing from Massive's crypto ticker list, which includes delisted pairs.
 
         Args:
-            symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`, which `history()` takes for
+            symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`. `history()` takes `dm.ALL` for
                 one-minute and one-day bars.
             timespan: The bar's unit, any but `dm.Timespan.SESSION`.
             multiplier: Units per bar.
 
         Returns:
             A query: a `StreamHistoryQuery`, which also streams, for one-second and one-minute bars
-            with `multiplier=1`; otherwise a `HistoryQuery`, for history only. Its columns, plans,
-            and methods:
+            with `multiplier=1`. Otherwise it's a `HistoryQuery`, for history only. Its columns,
+            plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION`; `multiplier` is below 1; or `symbols` is empty,
-                None, or holds a symbol that isn't an `X:` crypto ticker.
+            ValueError: If `timespan` is `SESSION` or `multiplier` is below 1. It's also raised when
+                `symbols` is empty or None, or holds a symbol that isn't an `X:` crypto ticker.
 
         Example:
             ::
@@ -424,13 +421,14 @@ class _Crypto(Namespace):
     def previous_day_bar(self, symbols: Symbols) -> Query:
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
-        Each row holds one pair's bar of the previous complete UTC day. A bar that Massive stamps at
-        another time than the start or end of its UTC day keeps its stamp, ends a day later, and has
-        no `Date`, with a WARNING. A pair with no bar is left out, with a WARNING.
+        Each row holds one pair's bar of the previous complete UTC day. Massive sometimes stamps the
+        bar at a time other than the start or end of its UTC day. Such a bar keeps its stamp, ends a
+        day later, and has no `Date`, and the library logs a WARNING. A pair with no bar is left
+        out, with a WARNING.
 
         Args:
-            symbols: Crypto pairs, such as `X:BTCUSD`; `dm.ALL` is refused, so use
-                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; use
+                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` instead.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -438,8 +436,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
-            ValueError: If `symbols` is `dm.ALL` or None; a symbol isn't an `X:` crypto ticker; the
-                sequence is empty; or a table has no `Symbol` column.
+            ValueError: If `symbols` is `dm.ALL` or None, or a symbol isn't an `X:` crypto ticker.
+                It's also raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -463,9 +461,9 @@ class _Crypto(Namespace):
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
         Each row holds one update of Massive's own price estimate. Only Currencies Business includes
-        it; on another plan, the table fails with `EntitlementError`. It streams only, with no
-        history. A pair missing from Massive's crypto ticker list, which includes delisted pairs, is
-        refused when you call a method.
+        it. On another plan, the table fails with `EntitlementError`. It streams only, with no
+        history. The call refuses a pair missing from Massive's crypto ticker list, which includes
+        delisted pairs.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL`.
@@ -476,8 +474,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a symbol isn't an `X:` crypto ticker; the sequence is empty; a table has
-                no `Symbol` column; or `symbols` is None.
+            ValueError: If a symbol isn't an `X:` crypto ticker, or `symbols` is None. It's also
+                raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -490,10 +488,10 @@ class _Crypto(Namespace):
     def snapshots(self, symbols: Symbols) -> Query:
         """The current state of crypto pairs: today's, the last minute's, and yesterday's bars.
 
-        Each row holds one pair's bar for today, its latest minute bar, its previous day's bar, its
-        last trade, and today's change. Massive clears the snapshots daily at midnight Eastern time
-        and refills them as trades arrive. A stream's `last_by()` starts empty, so poll this dataset
-        for each pair's state at once.
+        Each row holds one pair's bar for today, its latest minute bar, and its previous day's bar.
+        It also holds the pair's last trade and today's change. Massive clears the snapshots daily
+        at midnight Eastern time and refills them as trades arrive. A stream's `last_by()` starts
+        empty, so poll this dataset for each pair's state at once.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every traded pair.
@@ -504,8 +502,8 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
-            ValueError: If a symbol isn't an `X:` crypto ticker; the sequence is empty; a table has
-                no `Symbol` column; or `symbols` is None.
+            ValueError: If a symbol isn't an `X:` crypto ticker, or `symbols` is None. It's also
+                raised when the sequence is empty or a table has no `Symbol` column.
 
         Example:
             ::
@@ -520,8 +518,8 @@ class _Crypto(Namespace):
 
         Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
         change. Massive clears the list daily at midnight Eastern time. A `poll()` table keeps one
-        row per pair, so pairs leave as the ranking changes, and it can be the `symbols` of another
-        dataset, which then follows the list.
+        row per pair, so pairs leave as the ranking changes. The table can be the `symbols` of
+        another dataset, which then follows the list.
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
@@ -531,7 +529,7 @@ class _Crypto(Namespace):
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.movers.md.
 
         Raises:
-            TypeError: If `direction` isn't a `dm.Direction`; a plain string such as `"gainers"`
+            TypeError: If `direction` isn't a `dm.Direction`. A plain string such as `"gainers"`
                 isn't one.
 
         Example:
@@ -547,16 +545,16 @@ class _Crypto(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
-        Each row holds one pair's open and close for the UTC day, and its first and last trades as
-        JSON text in `OpenTrades` and `ClosingTrades`. Massive doesn't say which time zone's day a
-        row marked `IsUtc` false covers, so its window is the widest that date has in any zone, with
-        one WARNING per session. A pair missing from Massive's crypto ticker list is refused when
-        you call a method; delisted pairs are on the list, so past dates work for them.
+        Each row holds one pair's open and close for the UTC day. `OpenTrades` and `ClosingTrades`
+        hold its first and last trades as JSON text. Massive doesn't say which time zone's day a row
+        marked `IsUtc` false covers. Such a row gets the widest window its date has in any zone, and
+        the library logs one WARNING per session. The call refuses a pair missing from Massive's
+        crypto ticker list. Delisted pairs are on the list, so past dates work for them.
 
         Args:
-            symbols: Crypto pairs, such as `X:BTCUSD`; `dm.ALL` is refused, so use
-                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-            date: The UTC day, as a date such as `"2026-01-02"`; a `datetime` or an instant is
+            symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; use
+                `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)` instead.
+            date: The UTC day, as a date such as `"2026-01-02"`. A `datetime` or an instant is
                 refused.
 
         Returns:
@@ -565,9 +563,9 @@ class _Crypto(Namespace):
 
         Raises:
             TypeError: If `date` isn't a date or a time, or `symbols` has another type.
-            ValueError: If `symbols` is `dm.ALL` or None; `date` is a time, or text that isn't a
-                date; a symbol isn't an `X:` crypto ticker; the sequence is empty; or a table has no
-                `Symbol` column.
+            ValueError: If `symbols` is `dm.ALL` or None, or a symbol isn't an `X:` crypto ticker.
+                It's also raised when `date` is a time or text that isn't a date. An empty sequence,
+                or a table with no `Symbol` column, raises it too.
 
         Example:
             ::

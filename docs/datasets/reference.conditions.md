@@ -24,10 +24,10 @@ What each argument does for this dataset, and the rule it follows for every data
 
 | Argument | For this dataset | For every dataset |
 | --- | --- | --- |
-| `asset_class` | The asset class whose conditions to list; leave it out for every class. Massive lists no futures or index conditions. |  |
-| `data_type` | The kind of data the conditions apply to; leave it out for every kind. |  |
-| `condition_id` | One condition's id; leave it out for every condition. |  |
-| `sip` | The SIP whose condition codes to list; leave it out for every SIP. |  |
+| `asset_class` | The asset class whose conditions to list. Leave it out for every class. Massive lists no futures or index conditions. |  |
+| `data_type` | The kind of data the conditions apply to. Leave it out for every kind. |  |
+| `condition_id` | One condition's id. Leave it out for every condition. |  |
+| `sip` | The SIP whose condition codes to list. Leave it out for every SIP. |  |
 | `sort` | Any field of the rows, such as `"name"`. | The field to order the rows by, named as Massive names it, such as `"ex_dividend_date"`. Where the endpoint allows, name several, separated by commas, each with an optional `.asc` or `.desc`: `"ticker,ex_dividend_date.desc"`. This page lists the values the dataset takes. |
 | `order` | The direction of `sort`. | The direction of `sort`: `dm.Order.ASC` or `dm.Order.DESC`. |
 | `limit` | The most rows to return, in total. | The most rows Massive returns for the whole request, across every symbol you name, kept in Massive's order: ask for newest first (`order=dm.Order.DESC`) to keep the latest. A symbol that comes first can use up the whole limit, so leave `limit` out when you need every row of each symbol. A `fetch()` that follows a table of symbols applies it to each symbol's request, and this dataset's own line says where else it applies to each symbol. |

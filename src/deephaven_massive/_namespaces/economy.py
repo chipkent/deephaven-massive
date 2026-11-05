@@ -91,8 +91,8 @@ class _Economy(Namespace):
     """The US economic datasets, reached as `m.economy`.
 
     Its methods cover Treasury yields, inflation, inflation expectations, the labor market, and
-    short-term funding conditions. They take no symbols: each row is one date of the series. Each
-    method only builds a query, so it never blocks, and you can call it from any thread.
+    short-term funding conditions. They take no symbols, and each row is one date of the series.
+    Each method only builds a query, so it never blocks. You can call it from any thread.
 
     Example:
         ::
@@ -171,9 +171,9 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date; the range ends before it starts;
-                `order` is given without `sort`; or a filter isn't one the dataset takes, or its
-                value doesn't fit.
+            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
+                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
+                take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -220,9 +220,9 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date; the range ends before it starts;
-                `order` is given without `sort`; or a filter isn't one the dataset takes, or its
-                value doesn't fit.
+            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
+                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
+                take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -252,8 +252,8 @@ class _Economy(Namespace):
     ) -> Query:
         """US inflation expectations from market prices and models, one row per day.
 
-        Each row holds one day's expected inflation over several horizons, from market prices, such
-        as `Market10Year`, and from models, such as `Model10Year`.
+        Each row holds one day's expected inflation over several horizons. Market-price columns,
+        such as `Market10Year`, sit beside model columns, such as `Model10Year`.
 
         Args:
             start: The first date.
@@ -269,9 +269,9 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date; the range ends before it starts;
-                `order` is given without `sort`; or a filter isn't one the dataset takes, or its
-                value doesn't fit.
+            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
+                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
+                take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -318,9 +318,9 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date; the range ends before it starts;
-                `order` is given without `sort`; or a filter isn't one the dataset takes, or its
-                value doesn't fit.
+            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
+                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
+                take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::
@@ -368,9 +368,9 @@ class _Economy(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a time instead of a date; the range ends before it starts;
-                `order` is given without `sort`; or a filter isn't one the dataset takes, or its
-                value doesn't fit.
+            ValueError: If a bound is a time instead of a date, or the range ends before it starts.
+                It's also raised when `order` is given without `sort`. A filter the dataset doesn't
+                take, or a value that doesn't fit it, raises it too.
 
         Example:
             ::

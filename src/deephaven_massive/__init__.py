@@ -1,9 +1,10 @@
 """Market data from Massive as live and historical Deephaven tables, for traders and quants.
 
-Testing a trading idea usually means one program for history and another for the live feed.
-Here, one query of a streaming dataset gives both, with the same columns, so the same Deephaven
-code runs on each. Every dataset works the same way: create a session, call a dataset method to
-get a query, and call one of the query's methods to get a Deephaven table.
+Testing a trading idea usually takes one program for history and another for the live feed.
+Here, one query of a streaming dataset gives both, with the same columns.
+
+Every dataset works the same way. Create a session, call a dataset method to get a query, and
+call one of the query's methods to get a Deephaven table.
 
 Example:
     In the Deephaven console, with your API key in `MASSIVE_API_KEY`::
@@ -15,45 +16,51 @@ Example:
         # Apple's daily bars for one week, on any Stocks plan.
         apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 
-        # Each stock's latest minute bar, live, on Stocks Advanced; see Settings for Starter.
+        # Each stock's latest minute bar, live and real-time on Stocks Advanced.
         latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 Datasets:
     Each dataset is a method of a namespace on the session. The namespaces by asset class are
-    `m.stocks`, `m.options`, `m.futures`, `m.indices`, `m.forex`, and `m.crypto`, and the ones
-    by topic are `m.reference`, `m.indicators`, `m.economy`, and `m.partners`.
-    `m.snapshots()` reads symbols of several asset classes at once. `dm.datasets()` lists every
-    dataset in a table, and `columns()` on any query lists its columns and what each one means.
+    `m.stocks`, `m.options`, `m.futures`, `m.indices`, `m.forex`, and `m.crypto`. The ones by
+    topic are `m.reference`, `m.indicators`, `m.economy`, and `m.partners`. `m.snapshots()`
+    reads symbols of several asset classes at once. `dm.datasets()` lists every dataset in a
+    table, with each one's query methods in its `Verbs` column.
 
 Query methods:
-    A query reads nothing until you call one of these methods, and it has only the ones its
+    A query reads nothing until you call one of its methods. It has only the methods its
     dataset supports:
 
-    - `history(start, end)`: a static table of a past range.
-    - `fetch()`: a static table of what Massive has now.
+    - `history(start, end)`: a table of a past range.
+    - `fetch()`: a table of what Massive has now.
     - `poll(interval)`: a live table that fetches again every `interval` seconds.
     - `blink()`: a live table of a stream's rows from the latest update cycle.
     - `append_only()`: a live table of every row a stream sends after the call.
     - `ring(capacity)`: a live table of a stream's latest `capacity` rows.
     - `last_by()`: a live table of each symbol's latest row from a stream.
 
+    `columns()` on any query lists its columns and what each one means.
+
     A live table updates while anything uses it: a variable, a panel, or a table made from it.
-    `m.release(table)` drops your variable's hold at once, so the table stops when no panel or
-    table made from it is left. `m.close()` stops every live table of the session.
+    `m.release(table)` drops your variable's hold at once. The table then stops when no panel
+    or table made from it is left. `m.close()` stops every live table of the session.
 
 Settings:
-    `dm.MassiveConfig` holds a session's settings; pass it as `dm.MassiveSession(config)`. Two
-    settings match a session to your plans. `delayed_subscriptions` lets live tables and
-    snapshots read a plan's delayed data, as on Stocks Starter. `rest_basic_subscriptions` keeps
-    a free Basic plan's requests within its limit from the first one. `help(dm.MassiveConfig)`
-    lists every setting.
+    `dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`. Two
+    settings match a session to your plans:
+
+    - `delayed_subscriptions` lets live tables and snapshots read a plan's delayed data, as on
+      Stocks Starter.
+    - `rest_basic_subscriptions` keeps a free Basic plan's requests within its limit from the
+      first request.
+
+    `help(dm.MassiveConfig)` lists every setting.
 
 Symbols:
-    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY251219C00600000`,
-    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. Where a dataset takes it, `dm.ALL` means every
-    symbol. A table with a `Symbol` column works too. A live one is a watchlist: the library
-    follows it as you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols`
-    convert other spellings, such as Yahoo's `BRK-B`.
+    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
+    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. `dm.ALL` means every symbol, in the datasets
+    that take it. A table with a `Symbol` column works too. A live one is a watchlist, which
+    the library follows as you add and delete rows. `dm.canonical_symbol` and
+    `dm.canonicalize_symbols` convert other spellings, such as Yahoo's `BRK-B`.
 
 Enums:
     An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.
@@ -61,11 +68,11 @@ Enums:
 
 Errors:
     Errors from Massive, failed reads, and failed live tables are all `dm.MassiveError`s.
-    `dm.AuthenticationError` means Massive refused your keys, and `dm.EntitlementError` means
-    your plan doesn't include the data. Each error's `cause`, a `dm.ErrorCause`, says whether
-    it's expected, a mistake in your code, or a bug in the library to report. A wrong argument
-    raises `TypeError` or `ValueError` at the call instead. `dm.enable_debug_logging()` records
-    what the library does, for a bug report.
+    `dm.AuthenticationError` means Massive refused your keys. `dm.EntitlementError` means your
+    plan doesn't include the data. Each error's `cause` is a `dm.ErrorCause`, which says
+    whether the error is expected, a mistake in your code, or a bug in the library to report.
+    A wrong argument raises `TypeError` or `ValueError` at the call instead.
+    `dm.enable_debug_logging()` records what the library does, for a bug report.
 
 Server:
     Sessions run inside a Deephaven server: in its console, in an application script, or in

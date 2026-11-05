@@ -380,7 +380,7 @@ class _Options(Namespace):
 
     Its methods cover trades, quotes, bars, each contract's last trade and previous day's bar, fair
     market value, option chains, snapshots, contract reference data, and each contract's daily open
-    and close. A contract is Massive's ticker, `O:` and the OCC symbol, such as
+    and close. A contract's ticker is `O:` followed by its OCC symbol, such as
     `O:AAPL250117C00150000`. Each method only builds a query, so it never blocks, and you can call
     it from any thread.
 
@@ -414,8 +414,8 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type.
-            ValueError: If a symbol isn't an OCC option symbol, `symbols` is None or empty, or a
-                table has no `Symbol` column.
+            ValueError: If a symbol isn't an OCC option symbol, or `symbols` is None or empty. A
+                table with no `Symbol` column raises it too.
 
         Example:
             ::
@@ -431,13 +431,13 @@ class _Options(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed options contract.
 
-        Each row holds one contract's most recent trade. A contract with no trade is left out, with
-        a WARNING. `snapshots()` also gives each contract's last trade, on more plans than this
-        dataset. `poll(mode=dm.PollMode.APPEND)` adds each new last trade, but misses a trade
-        between two cycles; `trades()` streams every one.
+        Each row holds one contract's most recent trade. A contract with no trade is left out, and
+        the library logs a WARNING. `snapshots()` also gives each contract's last trade, on more
+        plans than this dataset. `poll(mode=dm.PollMode.APPEND)` adds each new last trade, but it
+        misses a trade between two cycles. `trades()` streams every one.
 
         Args:
-            symbols: Option contracts; `dm.ALL` is refused, so use `chain()` for a whole underlying.
+            symbols: Option contracts. `dm.ALL` is refused; use `chain()` for a whole underlying.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -445,8 +445,8 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty; a symbol isn't an OCC option
-                symbol; or a table has no `Symbol` column.
+            ValueError: If `symbols` is `dm.ALL`, None, or empty, or a symbol isn't an OCC option
+                symbol. A table with no `Symbol` column raises it too.
 
         Example:
             ::
@@ -467,9 +467,9 @@ class _Options(Namespace):
         """Quotes of US-listed options contracts (OPRA), tick by tick.
 
         Each row holds a quote's bid and ask prices, sizes, and exchanges, with its SIP timestamp.
-        Massive has no last-quote dataset for options; `snapshots()` gives each contract's latest
-        quote. `history()` of `dm.ALL` reads a day's flat file. One connection carries at most 1,000
-        contracts, as `StreamQuery` describes.
+        Massive has no last-quote dataset for options. `snapshots()` gives each contract's latest
+        quote instead. `history()` of `dm.ALL` reads a day's flat file. One connection carries at
+        most 1,000 contracts, as `StreamQuery` describes.
 
         Args:
             symbols: Option contracts, or `dm.ALL`.
@@ -480,8 +480,8 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type.
-            ValueError: If a symbol isn't an OCC option symbol, `symbols` is None or empty, or a
-                table has no `Symbol` column.
+            ValueError: If a symbol isn't an OCC option symbol, or `symbols` is None or empty. A
+                table with no `Symbol` column raises it too.
 
         Example:
             ::
@@ -521,9 +521,9 @@ class _Options(Namespace):
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
         Each row is one contract's bar of `multiplier` times `timespan`. History is adjusted for
-        splits of the underlying unless you pass `adjusted=False`, while streams and flat files
-        serve bars as traded. `history()` of `dm.ALL` reads a day's flat file. The columns page says
-        how each bar's window and `Date` are set.
+        splits of the underlying unless you pass `adjusted=False`. Streams and flat files serve bars
+        as traded. `history()` of `dm.ALL` reads a day's flat file. The columns page says how each
+        bar's window and `Date` are set.
 
         Args:
             symbols: Option contracts, or `dm.ALL`.
@@ -539,8 +539,9 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION`; `multiplier` is below 1; a symbol isn't an OCC
-                option symbol; `symbols` is None or empty; or a table has no `Symbol` column.
+            ValueError: If `timespan` is `SESSION` or `multiplier` is below 1. It's also raised when
+                a symbol isn't an OCC option symbol, `symbols` is None or empty, or a table has no
+                `Symbol` column.
 
         Example:
             ::
@@ -565,8 +566,8 @@ class _Options(Namespace):
         """The previous trading day's open, high, low, close, and volume of options contracts.
 
         Each row holds one contract's bar of the previous completed session. A contract with no bar
-        is left out, with a WARNING. For every contract's bar of a day, use `bars(dm.ALL,
-        dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the flat files.
+        is left out, and the library logs a WARNING. For every contract's bar of a day, use
+        `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`. It reads the flat files.
 
         Args:
             symbols: Option contracts; `dm.ALL` is refused.
@@ -578,8 +579,8 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty; a symbol isn't an OCC option
-                symbol; or a table has no `Symbol` column.
+            ValueError: If `symbols` is `dm.ALL`, None, or empty, or a symbol isn't an OCC option
+                symbol. A table with no `Symbol` column raises it too.
 
         Example:
             ::
@@ -605,7 +606,7 @@ class _Options(Namespace):
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
         Each row holds a contract's fair market value and when Massive computed it. It streams only
-        on Options Business, and has no history. One connection carries at most 1,000 contracts, as
+        on Options Business. It has no history. One connection carries at most 1,000 contracts, as
         `StreamQuery` describes.
 
         Args:
@@ -617,8 +618,8 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type.
-            ValueError: If a symbol isn't an OCC option symbol, `symbols` is None or empty, or a
-                table has no `Symbol` column.
+            ValueError: If a symbol isn't an OCC option symbol, or `symbols` is None or empty. A
+                table with no `Symbol` column raises it too.
 
         Example:
             ::
@@ -641,23 +642,25 @@ class _Options(Namespace):
     ) -> Query:
         """The snapshot of every contract in one underlying's option chain.
 
-        Each row holds one contract's details, the session's prices, its last quote and trade, its
-        greeks, implied volatility, and open interest. `Underlying` is the instrument Massive links
-        the contract to, so an adjusted contract, such as root `AAPL1`, is listed beside the
-        standard ones. To keep only standard contracts, join `contracts()` on `Symbol` and keep rows
-        with `SharesPerContract == 100` and a null or `[]` `AdditionalUnderlyings`.
+        Each row holds one contract's details and the session's prices. It also holds the contract's
+        last quote and trade, its greeks, implied volatility, and open interest. `Underlying` is the
+        instrument Massive links the contract to. So an adjusted contract with root `AAPL1` is
+        listed beside the standard ones. To keep only standard contracts, join `contracts()` on
+        `Symbol`. Then keep the rows with `SharesPerContract == 100` and a null or `[]`
+        `AdditionalUnderlyings`.
 
-        A table of underlyings is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed underlying fails the call.
+        A table of underlyings is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed underlying fails the call.
 
         Args:
-            underlying: The underlying's exact Massive ticker, such as `"AAPL"`, `"BRK.B"`, or
-                `"I:SPX"`, or a table of them in a `Symbol` column. `dm.ALL` is refused; use
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
+                table of them in a `Symbol` column works too. `dm.ALL` is refused; use
                 `snapshots(dm.ALL)` for every contract.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
+            limit: The most rows to return, in total. A table of underlyings caps every underlying's
+                requests instead.
             filters: `strike_price`, `expiration_date`, and their range forms.
 
         Returns:
@@ -668,9 +671,10 @@ class _Options(Namespace):
             TypeError: If `underlying` isn't a `str` or a table, `sort` isn't a `str`,
                 `contract_type` isn't a `dm.ContractType`, `order` isn't a `dm.Order`, `limit` isn't
                 an `int`, or `filters` isn't a mapping.
-            ValueError: If `underlying` is `dm.ALL`, isn't Massive's exact stock or index ticker, or
-                is a table without a `Symbol` column; `limit` isn't positive; or a filter isn't one
-                the dataset takes, or its value doesn't fit.
+            ValueError: If `underlying` is `dm.ALL` or isn't Massive's exact stock or index ticker.
+                It's also raised for a table without a `Symbol` column, or a `limit` that isn't
+                positive. A filter the dataset doesn't take, or a value that doesn't fit it, raises
+                it too.
 
         Example:
             ::
@@ -713,19 +717,19 @@ class _Options(Namespace):
     ) -> Query:
         """The current snapshot of each requested options contract, with its greeks.
 
-        Each row holds one contract's details, the session's prices, its last quote, trade, and
-        minute bar, its greeks, implied volatility, open interest, and fair market value. It needs
-        Options Starter or higher, while `last_trade()` needs Options Developer or Advanced, so
-        polling snapshots follows a contract on more plans. `dm.ALL` lists every contract Massive
-        has: millions of rows and many requests.
+        Each row holds one contract's details and the session's prices. It also holds the contract's
+        last quote, trade, and minute bar, its greeks, implied volatility, open interest, and fair
+        market value. Snapshots need Options Starter or higher. `last_trade()` needs Options
+        Developer or Advanced, so polling snapshots follows a contract on more plans. `dm.ALL` lists
+        every contract Massive has, which means millions of rows and many requests.
 
         Args:
             symbols: Option contracts, or `dm.ALL`.
             sort: `"ticker"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
-            filters: The ticker range forms `ticker_gt`, `ticker_gte`, `ticker_lt`, and
-                `ticker_lte`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"ticker_gte": "O:AAPL"}`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -734,10 +738,10 @@ class _Options(Namespace):
         Raises:
             TypeError: If `symbols` is of another type, `sort` isn't a `str`, `order` isn't a
                 `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping.
-            ValueError: If a symbol isn't an OCC option symbol; `symbols` is None or empty; a table
-                has no `Symbol` column; `limit` isn't positive; or a filter isn't one the dataset
-                takes, or its value doesn't fit. `type` is refused, since the library sends it for
-                `dm.ALL`.
+            ValueError: If a symbol isn't an OCC option symbol, or `symbols` is None or empty. It's
+                also raised for a table with no `Symbol` column, or a `limit` that isn't positive. A
+                filter the dataset doesn't take, or a value that doesn't fit it, raises it too. The
+                `type` filter is refused, since the library sends it for `dm.ALL`.
 
         Example:
             ::
@@ -782,26 +786,27 @@ class _Options(Namespace):
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
         Each row holds one contract's underlying, shares per contract, primary exchange, and CFI
-        code. Without `symbols` it lists contracts, narrowed by the other arguments. With `symbols`
-        it reads each named contract and takes only `as_of`: any other argument raises `ValueError`
-        when a method reads the query. `SharesPerContract` is 100 for a standard contract, and
-        `AdditionalUnderlyings` is JSON text of any further deliverables, null or `[]` when there
-        are none. An adjusted contract keeps its own root, such as `AAPL1`.
+        code. Without `symbols`, it lists contracts, narrowed by the other arguments. With
+        `symbols`, it reads each named contract and takes only `as_of`. Any other argument then
+        raises `ValueError` when a method reads the query.
+
+        `SharesPerContract` is 100 for a standard contract. `AdditionalUnderlyings` is JSON text of
+        any further deliverables, and it's null or `[]` when there are none. An adjusted contract
+        keeps its own root, such as `AAPL1`.
 
         Args:
             symbols: Option contracts to describe; leave it out to list contracts. `dm.ALL` is
                 refused.
-            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`,
-                or a table of them in a `Symbol` column. A table is read value by value, each as if
-                passed alone; a live one is followed, and for a static one, one failed value fails
-                the call.
+            underlying: Only contracts of this exact Massive ticker, such as `"AAPL"` or `"I:SPX"`.
+                A table of them in a `Symbol` column is read value by value, each as if passed
+                alone. A live table is followed. In a static table, one failed value fails the call.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True lists only expired contracts; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows in total without `symbols`; per contract with them, so no effect
-                there.
+            limit: The most rows in total without `symbols`. With them, it counts per contract, so
+                it has no effect.
             filters: `strike_price`, `expiration_date`, and their range forms.
 
         Returns:
@@ -812,11 +817,12 @@ class _Options(Namespace):
             TypeError: If `underlying` isn't a `str` or a table, `sort` isn't a `str`,
                 `contract_type` isn't a `dm.ContractType`, `expired` isn't a `bool`, `order` isn't a
                 `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping.
-            ValueError: If `symbols` is `dm.ALL`, empty, or a stock or index ticker, which the
-                message says to pass as `underlying=`; a symbol isn't an OCC option symbol; a table
-                has no `Symbol` column; `underlying` isn't Massive's exact ticker; `as_of` is a
-                `datetime` or isn't a date; `limit` isn't positive; or a filter isn't one the
-                dataset takes, or its value doesn't fit.
+            ValueError: If `symbols` is `dm.ALL` or empty, or a symbol isn't an OCC option symbol. A
+                stock or index ticker in `symbols` raises it, and the message says to pass it as
+                `underlying=`. It's also raised for a table with no `Symbol` column, an `underlying`
+                that isn't Massive's exact ticker, or an `as_of` that is a `datetime` or isn't a
+                date. A `limit` that isn't positive raises it, and so does a filter the dataset
+                doesn't take or a value that doesn't fit it.
 
         Example:
             ::
@@ -870,9 +876,10 @@ class _Options(Namespace):
         """The open, high, low, close, and volume of each options contract on one day.
 
         Each row holds one contract's day, with its pre-market and after-hours prices. For every
-        contract's bar of a day, use `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day,
-        day)`, which reads the flat files. Massive doesn't say here whether the prices are adjusted,
-        so the library can't check `adjusted`.
+        contract's bar of a day, use
+        `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`. It reads the flat files.
+        Massive doesn't say here whether the prices are adjusted, so the library can't check
+        `adjusted`.
 
         Args:
             symbols: Option contracts; `dm.ALL` is refused.
@@ -885,8 +892,9 @@ class _Options(Namespace):
 
         Raises:
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
-            ValueError: If `symbols` is `dm.ALL`, None, or empty; a symbol isn't an OCC option
-                symbol; a table has no `Symbol` column; or `date` is a `datetime` or isn't a date.
+            ValueError: If `symbols` is `dm.ALL`, None, or empty, or a symbol isn't an OCC option
+                symbol. It's also raised for a table with no `Symbol` column, or a `date` that is a
+                `datetime` or isn't a date.
 
         Example:
             ::

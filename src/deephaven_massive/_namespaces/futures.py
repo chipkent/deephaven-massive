@@ -290,11 +290,12 @@ class _Futures(Namespace):
     it never blocks, and you can call it from any thread.
 
     A symbol is a contract ticker, such as `"ESZ5"` for the December 2025 E-mini S&P 500. A futures
-    trading day is a session that ends at 17:00 Chicago time, and `Date` is that session. A contract
-    trades only until its last trade date, so a live table needs a current contract: `contracts()`
-    lists them. The tickers in this namespace's examples have expired, so their live calls need a
-    current contract in their place, while their `history()` calls read past dates and work as
-    written.
+    trading day is a session that ends at 17:00 Chicago time, and `Date` is that session.
+
+    A contract trades only until its last trade date, so a live table needs a current contract.
+    `contracts()` lists them. The tickers in this namespace's examples have expired. Their live
+    calls need a current contract in their place. Their `history()` calls read past dates and work
+    as written.
 
     Example:
         ::
@@ -318,8 +319,9 @@ class _Futures(Namespace):
 
         Each row holds a trade's price, size, and the exchange's sequence numbers. `Date` is the
         trading session, and a date bound of `history()` is a whole session. A streamed row whose
-        session the library can't place has a null `Date`, with a WARNING. `snapshots()` gives each
-        contract's latest trade. `history()` of `dm.ALL` reads the flat files.
+        session the library can't place has a null `Date`, and the library logs a WARNING.
+        `snapshots()` gives each contract's latest trade. `history()` of `dm.ALL` reads the flat
+        files.
 
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL`.
@@ -332,8 +334,8 @@ class _Futures(Namespace):
         Raises:
             TypeError: If `symbols` is of another type, or `venues` isn't a set of
                 `dm.FuturesVenue`.
-            ValueError: If `venues` is empty; `symbols` is None or empty; a ticker isn't Massive's
-                exact ticker; or a table has no `Symbol` column.
+            ValueError: If `venues` is empty, or `symbols` is None or empty. It's also raised when a
+                ticker isn't Massive's exact ticker, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -366,8 +368,8 @@ class _Futures(Namespace):
         Raises:
             TypeError: If `symbols` is of another type, or `venues` isn't a set of
                 `dm.FuturesVenue`.
-            ValueError: If `venues` is empty; `symbols` is None or empty; a ticker isn't Massive's
-                exact ticker; or a table has no `Symbol` column.
+            ValueError: If `venues` is empty, or `symbols` is None or empty. It's also raised when a
+                ticker isn't Massive's exact ticker, or a table has no `Symbol` column.
 
         Example:
             ::
@@ -408,12 +410,14 @@ class _Futures(Namespace):
     ) -> HistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
-        Each row is one bar of `multiplier` times `timespan`. Daily bars are `dm.Timespan.SESSION`,
-        since a futures day is a session: there is no `DAY` and no `previous_day_bar()`. A bar of a
-        session or longer ends at 17:00 Chicago time on its last session, and `history()` with dates
+        Each row is one bar of `multiplier` times `timespan`. A futures day is a session, so daily
+        bars are `dm.Timespan.SESSION`. There is no `DAY` and no `previous_day_bar()`. A bar of a
+        session or longer ends at 17:00 Chicago time on its last session. `history()` with dates
         keeps it only when all its sessions are in the range. The columns page says how each bar's
-        window and `Date` are set. Massive refuses a multiplier above its unit's maximum, such as 60
-        minutes, with `MassiveError`; use the next unit instead.
+        window and `Date` are set.
+
+        Massive refuses a multiplier above its unit's maximum, such as 60 minutes, and the call
+        raises `MassiveError`. Use the next unit instead.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL`.
@@ -429,9 +433,10 @@ class _Futures(Namespace):
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `DAY`, and the message names `SESSION`; `venues` is empty;
-                `multiplier` is below 1; `symbols` is None or empty; a ticker isn't Massive's exact
-                ticker; or a table has no `Symbol` column.
+            ValueError: If `timespan` is `DAY`, and the message names `SESSION`. It's also raised
+                when `venues` is empty, `multiplier` is below 1, or `symbols` is None or empty. A
+                ticker that isn't Massive's exact ticker, or a table with no `Symbol` column, raises
+                it too.
 
         Example:
             ::
@@ -463,22 +468,23 @@ class _Futures(Namespace):
     ) -> Query:
         """Snapshots of futures contracts: the latest trade, quote, minute bar, and session.
 
-        Each row holds one contract's last trade, quote, and minute bar, and the open, high, low,
-        close, volume, and settlement of its current session. `dm.ALL` with `product_code` reads
-        every contract of those products.
+        Each row holds one contract's last trade, quote, and minute bar. It also holds the open,
+        high, low, close, volume, and settlement of the contract's current session. `dm.ALL` with
+        `product_code` reads every contract of those products.
 
-        A table of product codes is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed code fails the call.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL`.
-            product_code: Only contracts of this product, such as `"ES"`, or these, such as `["ES",
-                "NQ"]`, or a table of them in a `ProductCode` column; leave it out for every
-                product.
+            product_code: Only contracts of this product, such as `"ES"`, or of these, such as
+                `["ES", "NQ"]`. A table of them in a `ProductCode` column works too. Leave it out
+                for every product.
             sort: A field of the rows, such as `"ticker"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
-            filters: Such as `{"ticker_gte": "ES"}`.
+            limit: The most rows to return, in total. A watchlist's `fetch()`, or a table of product
+                codes, caps every request instead.
+            filters: Further endpoint parameters, such as `{"ticker_gte": "ES"}`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -487,9 +493,10 @@ class _Futures(Namespace):
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
                 a `str`, a sequence of `str`, or a table.
-            ValueError: If a symbol isn't Massive's exact ticker, or `symbols` holds None; a filter
-                isn't one the dataset takes, or its value doesn't fit; `order` is given without
-                `sort`; or `product_code` is empty, or a table without a `ProductCode` column.
+            ValueError: If a symbol isn't Massive's exact ticker, or `symbols` holds None. It's also
+                raised when `order` is given without `sort`, or `product_code` is empty or a table
+                without a `ProductCode` column. A filter the dataset doesn't take, or a value that
+                doesn't fit it, raises it too.
 
         Example:
             ::
@@ -525,37 +532,38 @@ class _Futures(Namespace):
 
         Each row holds one contract as of a date: its product, trading venue, first and last trade
         dates, settlement date, tick sizes, and order-size limits. Its `Symbol` is the contract's
-        ticker, either a single contract or a combo, such as a spread, whose `Type` is `combo`. The
-        table, or part of it, works as `symbols` for `trades()`, `quotes()`, `bars()`, or
-        `snapshots()`.
+        ticker. A combo, such as a spread, has the `Type` `combo`. The table, or part of it, works
+        as `symbols` for `trades()`, `quotes()`, `bars()`, or `snapshots()`.
 
-        A table of product codes is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed code fails the call.
 
         Args:
             symbols: Only these contracts; leave it out to list every contract. `dm.ALL` is refused.
-            product_code: Only contracts of this product, such as `"ES"`, or these, such as `["ES",
-                "NQ"]`, or a table of them in a `ProductCode` column; leave it out for every
-                product.
+            product_code: Only contracts of this product, such as `"ES"`, or of these, such as
+                `["ES", "NQ"]`. A table of them in a `ProductCode` column works too. Leave it out
+                for every product.
             as_of: The day whose specifications to list; leave it out for today.
-            sort: A field of the rows, such as `"ticker"`; Massive sorts by `product_code`
-                otherwise.
+            sort: A field of the rows, such as `"ticker"`. Without it, Massive sorts by
+                `product_code`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
-            filters: Such as `{"active": True}` or `{"last_trade_date_gte": "2026-01-01"}`.
+            limit: The most rows to return, in total. A watchlist's `fetch()`, or a table of product
+                codes, caps every request instead.
+            filters: Further endpoint parameters, such as `{"active": True}`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.contracts.md.
 
         Raises:
-            TypeError: If `sort` isn't a `str`; `order` isn't a `dm.Order`; `product_code` isn't a
-                `str`, a sequence of `str`, or a table; or `symbols` or `as_of` is of another type.
-            ValueError: If `symbols` is `dm.ALL` or holds a ticker that isn't Massive's exact
-                ticker; `as_of` is a `datetime` or isn't a date; a filter isn't one the dataset
-                takes, or its value doesn't fit, and `ticker_any_of` is set through `symbols`;
-                `order` is given without `sort`; or `product_code` is empty, or a table without a
-                `ProductCode` column.
+            TypeError: If `sort` isn't a `str`, or `order` isn't a `dm.Order`. It's also raised when
+                `product_code` isn't a `str`, a sequence of `str`, or a table, or when `symbols` or
+                `as_of` is of another type.
+            ValueError: If `symbols` is `dm.ALL`, or holds a ticker that isn't Massive's exact
+                ticker. It's also raised when `as_of` is a `datetime` or isn't a date, or `order` is
+                given without `sort`. An empty `product_code`, or a table without a `ProductCode`
+                column, raises it. So does a filter the dataset doesn't take, a value that doesn't
+                fit it, or a `ticker_any_of` filter, which `symbols` sets.
 
         Example:
             ::
@@ -596,32 +604,35 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures products: the specification of every product, the family of its contracts.
 
-        Each row holds one product as of a date, such as `ES` (E-mini S&P 500): its name, trading
-        and clearing venues, sector and asset class, settlement method and currency, price
-        quotation, and unit of measure. It takes no symbols and has no `Symbol` column.
+        Each row holds one product as of a date, such as `ES`, the E-mini S&P 500. A row gives the
+        product's name, trading and clearing venues, sector and asset class, settlement method and
+        currency, price quotation, and unit of measure. The dataset takes no symbols and has no
+        `Symbol` column.
 
-        A table of product codes is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed code fails the call.
 
         Args:
-            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`, or a
-                table of them in a `ProductCode` column; leave it out for every product.
+            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
+                table of them in a `ProductCode` column works too. Leave it out for every product.
             as_of: The day whose specifications to list; leave it out for today.
-            sort: A field of the rows, such as `"name"`; Massive sorts by `date` otherwise.
+            sort: A field of the rows, such as `"name"`. Without it, Massive sorts by `date`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
-            filters: Such as `{"sector": "precious"}` or `{"trading_venue": "XCME"}`.
+            limit: The most rows to return, in total. A table of product codes caps every code's
+                requests instead.
+            filters: Further endpoint parameters, such as `{"sector": "precious"}`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.products.md.
 
         Raises:
-            TypeError: If `sort` isn't a `str`; `order` isn't a `dm.Order`; `product_code` isn't a
-                `str`, a sequence of `str`, or a table; or `as_of` is of another type.
-            ValueError: If `as_of` is a `datetime` or isn't a date; a filter isn't one the dataset
-                takes, or its value doesn't fit; `order` is given without `sort`; or `product_code`
-                is empty, or a table without a `ProductCode` column.
+            TypeError: If `sort` isn't a `str`, or `order` isn't a `dm.Order`. It's also raised when
+                `product_code` isn't a `str`, a sequence of `str`, or a table, or when `as_of` is of
+                another type.
+            ValueError: If `as_of` is a `datetime` or isn't a date, or `order` is given without
+                `sort`. An empty `product_code`, or a table without a `ProductCode` column, raises
+                it. So does a filter the dataset doesn't take, or a value that doesn't fit it.
 
         Example:
             ::
@@ -649,9 +660,10 @@ class _Futures(Namespace):
     def exchanges(self, *, limit: int | None = None) -> Query:
         """Futures exchanges: the exchanges and trading venues of US futures.
 
-        Each row holds one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
-        market identifier codes, type, locale, and web site. Massive offers no filter or sort here,
-        so the method takes none. It takes no symbols and has no `Symbol` column.
+        Each row holds one venue, such as the Chicago Mercantile Exchange. A row gives the venue's
+        id, name, acronym, market identifier codes, type, locale, and web site. Massive offers no
+        filter or sort here, so the method takes none. The dataset takes no symbols and has no
+        `Symbol` column.
 
         Args:
             limit: The most rows to return, in total.
@@ -680,18 +692,20 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures market status: whether each futures product is trading right now.
 
-        Each row holds one product's current market event, `MarketEvent`, such as `open`, `pause`,
-        or `close`, with its trading venue, its session, and when Massive evaluated it. `poll()`
-        keeps it current. Massive's only filter here is the product code, so the method takes no
-        `filters`, `sort`, or `order`. It takes no symbols and has no `Symbol` column.
+        Each row holds one product's current market event, such as `open`, `pause`, or `close`, in
+        `MarketEvent`. It also gives the trading venue, the session, and when Massive evaluated it.
+        `poll()` keeps it current. Massive's only filter here is the product code, so the method
+        takes no `filters`, `sort`, or `order`. The dataset takes no symbols and has no `Symbol`
+        column.
 
-        A table of product codes is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed code fails the call.
 
         Args:
-            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`, or a
-                table of them in a `ProductCode` column; leave it out for every product.
-            limit: The most rows to return, in total.
+            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
+                table of them in a `ProductCode` column works too. Leave it out for every product.
+            limit: The most rows to return, in total. A table of product codes caps every code's
+                requests instead.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -726,24 +740,25 @@ class _Futures(Namespace):
     ) -> Query:
         """Futures schedules: the timed events of each product's trading sessions.
 
-        Each row holds one scheduled event of a product's session, `Event`, such as `pre_open`,
-        `open`, or `close`, at its time, with its session, `SessionEndDate`, and its trading venue.
-        The events cover session hours, intraday breaks, and holiday changes. It takes no symbols
-        and has no `Symbol` column.
+        Each row holds one scheduled event of a product's session, such as `pre_open`, `open`, or
+        `close`, in `Event`. It also gives the event's time, its session's `SessionEndDate`, and the
+        trading venue. The events cover session hours, intraday breaks, and holiday changes. The
+        dataset takes no symbols and has no `Symbol` column.
 
-        A table of product codes is read value by value, each as if passed alone. A live one is
-        followed, and for a static one, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A live table is
+        followed. In a static table, one failed code fails the call.
 
         Args:
-            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`, or a
-                table of them in a `ProductCode` column; leave it out for every product.
+            product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
+                table of them in a `ProductCode` column works too. Leave it out for every product.
             start: The first session, by `SessionEndDate`, as a date.
             end: The last session, as a date. Leave it out to include sessions still to come.
-            sort: A field of the rows; Massive sorts by `product_code` otherwise.
+            sort: A field of the rows. Without it, Massive sorts by `product_code`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total.
-            filters: Such as `{"trading_venue": "XCME"}`; never `session_end_date`, which `start`
-                and `end` set.
+            limit: The most rows to return, in total. A table of product codes caps every code's
+                requests instead.
+            filters: Further endpoint parameters, such as `{"trading_venue": "XCME"}`. Don't pass
+                `session_end_date`, which `start` and `end` set.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -752,10 +767,10 @@ class _Futures(Namespace):
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
                 a `str`, a sequence of `str`, or a table.
-            ValueError: If `end` is before `start`; a bound is a `datetime` or can't be read; a
-                filter isn't one the dataset takes, or its value doesn't fit; `order` is given
-                without `sort`; or `product_code` is empty, or a table without a `ProductCode`
-                column.
+            ValueError: If `end` is before `start`, or a bound is a `datetime` or can't be read.
+                It's also raised when `order` is given without `sort`. An empty `product_code`, or a
+                table without a `ProductCode` column, raises it. So does a filter the dataset
+                doesn't take, or a value that doesn't fit it.
 
         Example:
             ::
