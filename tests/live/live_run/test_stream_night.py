@@ -380,7 +380,9 @@ def test_a_night_records_its_rows_and_judges_its_units(
     stream = Stream("crypto-minute-bars", "crypto real-time", bars)
     monkeypatch.setattr(stream_night, "night_streams", lambda *_a, **_k: [stream])
     harness = make_ws_session()
-    now_ms = int(time.time() * 1000)
+    # The bar ends at the night's start, on the fake clock, so its date never depends on when the
+    # test runs.
+    end_ms = int(START.timestamp() * 1000)
 
     def publish() -> None:
         harness.subscribed("AM.AAPL")
@@ -398,8 +400,8 @@ def test_a_night_records_its_rows_and_judges_its_units(
                 "l": 0.5,
                 "a": 1.0,
                 "z": 10,
-                "s": now_ms - 60_000,
-                "e": now_ms,
+                "s": end_ms - 60_000,
+                "e": end_ms,
             }
         )
         _wait_for(
