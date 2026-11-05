@@ -53,7 +53,7 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | `over capacity: <n>/1000; <k> deferred` in `Error` | Massive allows 1,000 option contracts on one connection, and the library counts a contract's trades and its quotes as two. | Watch fewer contracts. The waiting ones subscribe as others leave. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
-| A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels. Next time, stop a table with `m.release(table)` instead of deleting its variable, as [Stopping live tables](../README.md#stop-live-tables) shows. |
+| A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
 
 <a id="diagnostics"></a>
 
@@ -69,8 +69,8 @@ checking:
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
 | `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |
 
-Start with `m.streams()`. This example, on any Stocks plan, makes a new session, `demo`, so it
-leaves your `m` alone. It polls Apple's news, then shows the poll's row:
+Start with `m.streams()`. On any Stocks plan, this example polls Apple's news in a new session,
+`demo`, and shows the poll's row:
 
 ```python
 import deephaven_massive as dm
