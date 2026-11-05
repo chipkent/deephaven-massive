@@ -1,8 +1,8 @@
 # Live integration tests
 
-The live tests call Massive's real servers with your keys, and record what Massive sends. Run
-them before a release, and whenever a check of the live-run program fails. Testers run the same
-checks through the [live-run program](#live-run-program), as the
+The live tests call Massive's real servers with your keys, and record what Massive sends. The
+owner runs them with pytest, before a release and whenever a live check fails, as
+[Run the tests](#run-the-tests) shows. A tester runs the same tests unattended for days through the live-run program, as the
 [tester guide](tester-guide.md#live-run) shows.
 
 <a id="run-the-tests"></a>
@@ -175,7 +175,7 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 Four of these checks pass whatever Massive answers, so read each one's evidence, and open an
 issue when it differs from the answer the library assumes. A tester can leave the reading to
-the owner, and attach the evidence file and the stream day's debug log to their issue instead.
+the owner, and attach the evidence file and the `stream-day` group's debug log to their issue instead.
 
 | Check | Run | Plans | What to read | The answer the library assumes |
 |---|---|---|---|---|
@@ -183,11 +183,11 @@ the owner, and attach the evidence file and the stream day's debug log to their 
 | `test_an_index_minute_file_holds_its_own_new_york_day` | The [evidence tests](#run-order) | Indices Starter and `s3` | The file's rows outside the New York day, and the minutes REST has that the file lacks | The file holds its own New York day. This check fails otherwise. |
 | `test_index_day_windows_and_files_across_many_indices` | The evidence tests | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | None. Index day bars end at 01:00 New York time until this is read. |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | The evidence tests | Futures Starter | Its `VERDICT` lines | Each bar of a session or longer holds the whole sessions that open in its UTC days |
-| A quiet connection | The [stream day](#live-run-program) of the live-run program | Any plan that streams stocks | The stocks connection's `status` lines from 03:45 to 04:00 New York time, and the longest gap between them; every `no frame for ... during ... trading hours` WARNING of the day, with its time | None. The check records it. |
+| A quiet connection | The `stream-day` group of the [live-run program](#live-run-groups) | Any plan that streams stocks | The stocks connection's `status` lines from 03:45 to 04:00 New York time, and the longest gap between them; every `no frame for ... during ... trading hours` WARNING of the day, with its time | None. The check records it. |
 
 The options check skips when Massive refuses the topics for want of a plan. It also skips as
-inconclusive when the socket reconnects without saying why: run the first connection-limit
-command again then.
+inconclusive when the socket reconnects without saying why. Then run the first connection-limit
+command again.
 
 To run one of the other checks alone, use `-k` with a word of its name:
 
@@ -224,31 +224,10 @@ contradicts:
 
 ## Run the live-run program
 
-`scripts/live_run.py` runs every live check a key allows, unattended, on a fixed New York
-timetable. A full pass takes at least three trading days: an ordinary day, a stream day, and the
-day after it. A stream day is a whole trading day of live streams, from 03:45 to 20:30. A key
-that streams crypto or futures also needs a stream night of those streams, from 16:30 to 09:30.
-
-In a terminal at the clone's root, with your keys set:
-
-```bash
-uv run python scripts/live_run.py check                       # the computer and the key; writes nothing
-uv run python scripts/live_run.py run --out ~/massive-live    # runs until Control-C; add --any-time on a first run
-uv run python scripts/live_run.py status --out ~/massive-live # from a second terminal
-uv run python scripts/live_run.py pack --out ~/massive-live   # after Control-C; writes live-results-<date>.zip
-```
-
-- `check` prints an `OK`, `WARN`, or `FAIL` line for each part of the computer, then each
-  subscription's plan, then `ready: yes` or `ready: no`.
-- `run --any-time` starts the checks that need no market hours at once. The option counts only
-  the first time you give it for a results folder. `run` resumes after any stop, with every
-  result kept, unless the clone has moved to another commit.
-- `status` prints the latest probe, each check's status and reason, and a count per group.
-- `pack` refuses unless your terminal holds the keys the run used, and refuses to zip a folder in
-  which it finds a key. While nothing is due, `run` also packs a zip by itself.
-
-Run `upgrade-check` only when the owner asks. It asks you to upgrade a plan while it runs. The
-[tester guide](tester-guide.md#live-run) walks through a run step by step.
+`scripts/live_run.py` runs every live test a key allows, on a fixed New York timetable, and
+packs the results into a zip. Its commands are in the tester guide's
+[Run the live checks](tester-guide.md#live-run). Run `upgrade-check` only when the owner asks.
+It asks you to upgrade a plan while it runs.
 
 <a id="live-run-groups"></a>
 
@@ -290,24 +269,3 @@ The program reruns a check by itself:
 
 To run every check of a group again, failed ones included, pass the group to `run --redo`, such
 as `--redo luld,smoke`.
-
-<a id="stream-night"></a>
-
-### Stream nights
-
-A stream night streams `X:BTCUSD` and `X:ETHUSD` trades, quotes, and minute bars, and the front
-ES and NQ contracts' minute bars, plus their trades and quotes from Futures Developer up. It runs
-on the first suitable evening before a full trading day. It checks the two date boundaries in
-those hours. Crypto's `Date` changes at 00:00 UTC, and a futures row's at the 16:00 Chicago
-close.
-
-Crypto and futures each fail when:
-
-- a stream failed
-- gaps passed 30 minutes in all
-- a batch of rows couldn't be written
-- an hour the market was open brought no row
-- a row near a boundary carries the wrong `Date`
-
-The next day, `stream-night-reconcile` compares the night's minute bars with REST history, and
-records a failure for a bar whose `Date` is wrong. `REPORT.md` in each zip has a section per night.
