@@ -205,17 +205,17 @@ class MassiveSession:
 
     Create a session inside a Deephaven server, in its console or an application script. Its
     settings come from `dm.MassiveConfig`, and without one it reads your API key from
-    `MASSIVE_API_KEY`. No public attribute or `repr` of the session shows your key, so the key stays
-    out of the console's variables. You can use a session from several threads at once. Messages
-    name it by its label, such as `MassiveSession #1`.
+    `MASSIVE_API_KEY`.
+
+    No public attribute or `repr` of the session shows your key, so the key stays out of the
+    console's variables. You can use a session from several threads at once. Messages name it by its
+    label, such as `MassiveSession #1`.
 
     Each dataset is a method of a namespace, such as `m.stocks.bars`, and returns a query. A method
-    of the query, such as `history()` or `last_by()`, returns a table
-    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#read-daily-bars). A live
-    table updates until you release it with `m.release(table)` or nothing refers to it, and
-    `m.close()` stops them all
-    (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables). In a
-    `with` block, the session closes when the block ends.
+    of the query, such as `history()` or `last_by()`, returns a table. A live table updates while
+    anything uses it. `m.release(table)` drops your variable's hold on one, and `m.close()` stops
+    them all (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables).
+    In a `with` block, the session closes when the block ends.
 
     Massive allows one streaming connection per asset class by default. Sessions in one server that
     use the same key and the same connection settings share their connections. When two sessions'
@@ -442,7 +442,7 @@ class MassiveSession:
         data is real-time or delayed, and its last error. A connection that another session with the
         same key shares shows in both sessions' tables. The table also has a `REST` row for each
         asset class and kind of data whose feed, real-time or delayed, the session has found. Each
-        call returns a new view, which keeps its final rows after `close()`. How to read it:
+        call returns a new table, which keeps its final rows after `close()`. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#connections-table.
 
         Returns:
@@ -473,7 +473,7 @@ class MassiveSession:
 
         Start here when a live table looks wrong. Each row is one stream, `poll()` table, or
         background read, and the tables of identical queries share one stream and one row. Each call
-        returns a new view, which keeps its final rows after `close()`. How to read it:
+        returns a new table, which keeps its final rows after `close()`. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#streams-columns.
 
         Returns:
@@ -490,8 +490,9 @@ class MassiveSession:
             - `Deferred`: how many option contracts wait for room on the options connection.
             - `Transport`: `WebSocket`, `REST`, `flat files`, or `flat files and REST`.
             - `Host` and `Path`: where a stream connects.
-            - `Recency`: `REALTIME`, `DELAYED`, or `UNKNOWN`, which never counts as real-time. Null
-              for a background read and for reference, economy, and partner data.
+            - `Recency`: `REALTIME`, `DELAYED`, or `UNKNOWN` when the library can't tell, which it
+              never treats as real-time. Null for a background read and for reference, economy, and
+              partner data.
             - `RowsPublished`: how many rows it has delivered.
             - `Loading`: how many symbols a watchlist's read has yet to read.
             - `RequestsPerCycle`: the REST requests of a poll's latest cycle.
@@ -499,7 +500,7 @@ class MassiveSession:
             - `Error`: why it failed, or the warnings that leave it running, such as a connection
               that is down or symbols a cycle skipped.
             - `Gaps`: the latest five spans in which rows may be missing, such as a recovered
-              outage, as `<start> to <end>` in UTC. They stay after the warning clears.
+              outage, as `<start> to <end>` in UTC. They stay after the `Error` note clears.
             - `CreatedAt`: when it started.
             - `SchemaDrift`: entries as `connections()` describes them, named by transport instead
               of channel.
@@ -517,7 +518,7 @@ class MassiveSession:
         limit on a paid one. The limit counts every request your account makes, from every key and
         session. Each row is one subscription, or `other` for the datasets Massive assigns to none.
         Sessions in this server that use the same key share these rows. Each call returns a new
-        view, which keeps its final rows after `close()`. How to read it:
+        table, which keeps its final rows after `close()`. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#connections-table.
 
         Returns:
@@ -547,7 +548,7 @@ class MassiveSession:
         limit or a network error, is `RETRYING`, tried again 1, 5, and 15 minutes later, then
         `FAILED`. Any other failure is `FAILED` at once. To read a failed symbol again, delete its
         row from the watchlist and add it back. The rows stay for the session's life. Each call
-        returns a new view, which keeps its final rows after `close()`. How to read it:
+        returns a new table, which keeps its final rows after `close()`. How to read it:
         https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#symbol-reads.
 
         Returns:
@@ -586,8 +587,8 @@ class MassiveSession:
         https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Args:
-            table: A live table that a verb of this session returned. For a table made from one,
-                release the table it came from.
+            table: A live table that a query method of this session returned. For a table made from
+                one, release the table it came from.
 
         Raises:
             TypeError: If `table` isn't a Deephaven `Table`.
@@ -609,13 +610,13 @@ class MassiveSession:
     def close(self) -> None:
         """Stop every live table of the session. Calling it again does nothing.
 
-        Each live table, and each table made from one, fails with `MassiveError("MassiveSession #1
-        was closed; this table no longer updates")` and keeps its rows; `t.snapshot()` gives a
-        static copy to keep working with. In a console command, `close()` returns at once, and the
-        tables show their final state when the command ends. Connections no other session uses are
-        closed. Afterward, the verbs and the diagnostics methods raise `MassiveError`, while
-        building queries and `release()` still work. See
-        https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
+        Each live table, and each table made from one, fails with
+        `MassiveError("MassiveSession #1 was closed; this table no longer updates")` and keeps its
+        rows; `t.snapshot()` gives a static copy to keep working with. In a console command,
+        `close()` returns at once, and the tables show their final state when the command ends.
+        Connections no other session uses are closed. Afterward, the query methods and the
+        diagnostics methods raise `MassiveError`, while building queries and `release()` still work.
+        See https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
         Raises:
             ValueError: If called on a Deephaven update-graph thread, such as inside a table

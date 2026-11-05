@@ -1,10 +1,9 @@
 """Market data from Massive as live and historical Deephaven tables, for traders and quants.
 
-Where a dataset both streams and keeps history, one query gives both the history and the live
-table, with the same columns, so the same Deephaven code runs on each. Every dataset works the
-same way: create
-a session, call a dataset method to get a query, and call one of the query's methods to get
-a Deephaven table. A query names the data and reads nothing.
+Testing a trading idea usually means one program for history and another for the live feed.
+Here, one query of a streaming dataset gives both, with the same columns, so the same Deephaven
+code runs on each. Every dataset works the same way: create a session, call a dataset method to
+get a query, and call one of the query's methods to get a Deephaven table.
 
 Example:
     In the Deephaven console, with your API key in `MASSIVE_API_KEY`::
@@ -27,7 +26,8 @@ Datasets:
     dataset in a table, and `columns()` on any query lists its columns and what each one means.
 
 Query methods:
-    A query has only the methods its dataset supports:
+    A query reads nothing until you call one of these methods, and it has only the ones its
+    dataset supports:
 
     - `history(start, end)`: a static table of a past range.
     - `fetch()`: a static table of what Massive has now.
@@ -37,41 +37,42 @@ Query methods:
     - `ring(capacity)`: a live table of a stream's latest `capacity` rows.
     - `last_by()`: a live table of each symbol's latest row from a stream.
 
-    A live table updates until you release it with `m.release(table)` or nothing refers to it
-    any more. A panel or a table made from it keeps it updating either way. `m.close()` stops
-    every live table of the session.
+    A live table updates while anything uses it: a variable, a panel, or a table made from it.
+    `m.release(table)` drops your variable's hold at once, so the table stops when no panel or
+    table made from it is left. `m.close()` stops every live table of the session.
 
 Settings:
     `dm.MassiveConfig` holds a session's settings; pass it as `dm.MassiveSession(config)`. Two
-    settings match a session to your plans: `delayed_subscriptions` for plans that stream
-    delayed data, such as Stocks Starter, and `rest_basic_subscriptions` for the free Basic
-    plans. `help(dm.MassiveConfig)` lists every setting.
+    settings match a session to your plans. `delayed_subscriptions` lets live tables and
+    snapshots read a plan's delayed data, as on Stocks Starter. `rest_basic_subscriptions` keeps
+    a free Basic plan's requests within its limit from the first one. `help(dm.MassiveConfig)`
+    lists every setting.
 
 Symbols:
     Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY251219C00600000`,
     `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. Where a dataset takes it, `dm.ALL` means every
-    symbol. A table with a `Symbol` column works too, and a live one, a watchlist, is followed as
-    you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols` convert other
-    spellings, such as Yahoo's `BRK-B`.
+    symbol. A table with a `Symbol` column works too. A live one is a watchlist: the library
+    follows it as you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols`
+    convert other spellings, such as Yahoo's `BRK-B`.
 
 Enums:
     An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Every error from Massive, and every failed read or live table, is a `dm.MassiveError`.
+    Errors from Massive, failed reads, and failed live tables are all `dm.MassiveError`s.
     `dm.AuthenticationError` means Massive refused your keys, and `dm.EntitlementError` means
     your plan doesn't include the data. Each error's `cause`, a `dm.ErrorCause`, says whether
     it's expected, a mistake in your code, or a bug in the library to report. A wrong argument
     raises `TypeError` or `ValueError` at the call instead. `dm.enable_debug_logging()` records
     what the library does, for a bug report.
 
-Where it runs:
+Server:
     Sessions run inside a Deephaven server: in its console, in an application script, or in
     Python after starting `deephaven_server.Server`. Without a server, you can import the
     package and use its errors, enums, and logging functions.
 
-Read next:
+Next steps:
     - The README and its tutorial: https://github.com/chipkent/deephaven-massive
     - Every dataset's arguments, plans, and columns:
       https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md

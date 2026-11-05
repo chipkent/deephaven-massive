@@ -562,9 +562,9 @@ class _Stocks(Namespace):
 
         Each row is one bar of `multiplier` times `timespan`. History is split-adjusted unless you
         pass `adjusted=False`, while streams and flat files serve bars as traded. For `dm.ALL`,
-        `history()` reads daily bars, and one-minute bars from flat files with `adjusted=False`;
-        other intraday bars of `dm.ALL` raise. The columns page says how each bar's window and
-        `Date` are set. For only the previous day's bar, use `previous_day_bar()`.
+        `history()` reads only one-day bars, and one-minute bars from flat files with
+        `adjusted=False`; any other bar of `dm.ALL` raises. The columns page says how each bar's
+        window and `Date` are set. For only the previous day's bar, use `previous_day_bar()`.
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.

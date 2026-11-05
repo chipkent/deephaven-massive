@@ -973,17 +973,13 @@ class Query(QueryBase):
     def fetch(self, *, wait: bool = True) -> Table:
         """Return a table of every row Massive has now, up to the query's `limit`.
 
-        A symbol Massive has no data for gets no rows and logs a WARNING, or raises under
-        `MassiveConfig.unavailable_symbols=dm.OnError.RAISE`.
-
-        Current data, such as a snapshot, raises `EntitlementError` when Massive delays it, unless
-        its subscription is in `MassiveConfig.delayed_subscriptions`
-        (https://github.com/chipkent/deephaven-massive/blob/main/README.md#massive-config).
-
         A static table of symbols is read once, when you call. A watchlist is followed: the result
-        holds each symbol's rows from its latest read, a symbol you add is read, and one you delete
-        leaves. For a watchlist, one symbol's failure leaves the others in place, and
+        holds each symbol's rows from its latest read. A symbol you add is read, and one you delete
+        leaves. One symbol's failure leaves the watchlist's other symbols in place, and
         `m.symbol_reads()` shows each symbol's read.
+
+        A symbol Massive has no data for gets no rows and logs a WARNING. Under
+        `MassiveConfig.unavailable_symbols=dm.OnError.RAISE`, it raises instead.
 
         Args:
             wait: True, the default, waits for the rows, or for a watchlist until each symbol has
@@ -1002,9 +998,11 @@ class Query(QueryBase):
                 `noncanonical_symbols=dm.OnError.RAISE`; or if both `symbols` and an `underlying=`
                 or `product_code=` table are live.
             AuthenticationError: If Massive rejects your API key.
-            EntitlementError: If your plan doesn't include the data, or Massive delays data whose
-                subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names the
-                line to add.
+            EntitlementError: If your plan doesn't include the data, or Massive delays current data,
+                such as a snapshot, whose subscription isn't in
+                `MassiveConfig.delayed_subscriptions`
+                (https://github.com/chipkent/deephaven-massive/blob/main/README.md#massive-config).
+                The message names the line to add.
             MassiveError: If the session is closed, a rate limit outlasts the retries, a page holds
                 no row the library can read, a symbol's data stops partway, or a request fails in
                 any other way. A crypto pair that Massive doesn't list raises when you pass it in
@@ -1223,21 +1221,24 @@ class Query(QueryBase):
     def poll(self, interval: float | timedelta, *, mode: PollMode = PollMode.AUTO) -> Table:
         """Return a live table that fetches the query again every `interval`.
 
-        Each cycle reads the whole query again, so the table follows a watchlist, and `mode` sets
-        how cycles combine. The table polls until you release it or nothing refers to it
+        Each cycle reads the whole query again, so the table follows a watchlist. `mode` sets how
+        cycles combine. The table polls while anything uses it
         (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables).
 
         A news or filings feed needs a `start` or a `limit`, or each cycle would read Massive's
         whole archive.
 
         A failed cycle logs a WARNING and shows in `Error` of `m.streams()`, and the next cycle
-        runs. The table fails and stops polling when its cycles keep failing for
-        `MassiveConfig.max_outage`, 300 seconds by default. It also fails on a failure no later
-        cycle can fix: a rejected key, a plan that lacks the data, rows that break the dataset's
-        columns or have a null key, or delayed data whose subscription isn't in
-        `MassiveConfig.delayed_subscriptions`.
+        runs.
+        The table stops polling and fails in two cases:
 
-        A cycle skips each symbol it can't read, and `m.streams()` lists it:
+        - its cycles keep failing for `MassiveConfig.max_outage`, 300 seconds by default;
+        - a cycle meets a problem no later cycle can fix: a rejected key, a plan that lacks the
+          data, rows that break the dataset's columns or have a null key, or delayed data whose
+          subscription isn't in `MassiveConfig.delayed_subscriptions`.
+
+        Once the table is running, a cycle skips each symbol it can't read, and `m.streams()` lists
+        it:
 
         - a row that isn't Massive's exact ticker;
         - a crypto pair Massive doesn't list;
@@ -1264,8 +1265,8 @@ class Query(QueryBase):
                 `dm.PollMode`.
             ValueError: Before the table exists: if called on a Deephaven update-graph thread; if
                 `interval` is shorter than 1 second or isn't finite; if a news or filings feed has
-                neither `start` nor `limit`; if a table of symbols holds only rows that aren't
-                Massive's exact tickers; if it holds any such row under
+                neither `start` nor `limit`; if a table of symbols holds no row that is Massive's
+                exact ticker; if it holds any such row under
                 `noncanonical_symbols=dm.OnError.RAISE`; or if an endpoint doesn't take a parameter
                 or filter the query sets.
             AuthenticationError: If Massive rejects your API key while the call reads Massive's list
@@ -1433,9 +1434,6 @@ class StreamQuery(QueryBase):
         A blink table keeps no history, so it suits a Deephaven aggregation that should count every
         row without storing them.
 
-        `help(StreamQuery)`, after `from deephaven_massive.queries import StreamQuery`, describes
-        what every stream method has in common: shared streams, watchlists, and later failures.
-
         Returns:
             A live blink table with the dataset's columns.
 
@@ -1454,7 +1452,8 @@ class StreamQuery(QueryBase):
             MassiveError: If the session is closed, or the stream fails while it opens. For crypto,
                 also if Massive's list of crypto tickers can't be read, or lacks a pair you listed
                 in code. For a table of crypto pairs, it raises when the list lacks every pair in
-                the table, or, under `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                the table. Under `unlisted_symbols=dm.OnError.RAISE`, it raises when the list lacks
+                any one.
         """
         return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
@@ -1472,9 +1471,6 @@ class StreamQuery(QueryBase):
         """Return every row the stream sends after the call, oldest first.
 
         The table grows for as long as the stream runs; `ring()` keeps only the latest rows.
-
-        `help(StreamQuery)`, after `from deephaven_massive.queries import StreamQuery`, describes
-        what every stream method has in common: shared streams, watchlists, and later failures.
 
         Returns:
             A live append-only table with the dataset's columns.
@@ -1494,7 +1490,8 @@ class StreamQuery(QueryBase):
             MassiveError: If the session is closed, or the stream fails while it opens. For crypto,
                 also if Massive's list of crypto tickers can't be read, or lacks a pair you listed
                 in code. For a table of crypto pairs, it raises when the list lacks every pair in
-                the table, or, under `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                the table. Under `unlisted_symbols=dm.OnError.RAISE`, it raises when the list lacks
+                any one.
         """
         return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
@@ -1511,9 +1508,6 @@ class StreamQuery(QueryBase):
     )
     def ring(self, capacity: int) -> Table:
         """Return the latest `capacity` rows the stream sends.
-
-        `help(StreamQuery)`, after `from deephaven_massive.queries import StreamQuery`, describes
-        what every stream method has in common: shared streams, watchlists, and later failures.
 
         Args:
             capacity: How many rows to keep, from 1 to 2**31 - 1.
@@ -1538,7 +1532,8 @@ class StreamQuery(QueryBase):
             MassiveError: If the session is closed, or the stream fails while it opens. For crypto,
                 also if Massive's list of crypto tickers can't be read, or lacks a pair you listed
                 in code. For a table of crypto pairs, it raises when the list lacks every pair in
-                the table, or, under `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                the table. Under `unlisted_symbols=dm.OnError.RAISE`, it raises when the list lacks
+                any one.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -1598,13 +1593,11 @@ class StreamQuery(QueryBase):
         symbol's current state at once, poll a snapshot instead, as in
         `m.stocks.snapshots(symbols).poll(5)`, on a plan that includes snapshots.
 
-        With a watchlist, each symbol's row shows only while the symbol is on it, and a symbol you
-        delete and add back shows no row until its next update. With keys that span symbols, such as
-        `by="Exchange"`, each group's row is the latest from a symbol on the watchlist when the row
-        arrived, and deleting that symbol keeps the row.
+        With a watchlist, each symbol's row shows only while the symbol is on it. A symbol you
+        delete and add back shows no row until its next update.
 
-        `help(StreamQuery)`, after `from deephaven_massive.queries import StreamQuery`, describes
-        what every stream method has in common: shared streams, watchlists, and later failures.
+        With keys that span symbols, such as `by="Exchange"`, each group shows its latest row from a
+        symbol that was on the watchlist when the row arrived. Deleting that symbol keeps the row.
 
         Args:
             by: The key column or columns, as in Deephaven's `Table.last_by`; `"Symbol"` by default.
@@ -1630,7 +1623,8 @@ class StreamQuery(QueryBase):
             MassiveError: If the session is closed, or the stream fails while it opens. For crypto,
                 also if Massive's list of crypto tickers can't be read, or lacks a pair you listed
                 in code. For a table of crypto pairs, it raises when the list lacks every pair in
-                the table, or, under `unlisted_symbols=dm.OnError.RAISE`, any one of them.
+                the table. Under `unlisted_symbols=dm.OnError.RAISE`, it raises when the list lacks
+                any one.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()
@@ -1728,7 +1722,7 @@ class HistoryQuery(QueryBase):
         Rows come from REST or from Massive's flat files. `dm.HistorySource.AUTO` picks the source.
         It reads from REST each day whose file is missing or isn't in your plan, so the call fails
         only when neither source can serve it. The table's description says which source it read and
-        why. `MassiveConfig.delayed_subscriptions` doesn't apply to history.
+        why.
 
         A static table of symbols is read once, when you call. A watchlist is followed over the
         range fixed at the call: a symbol you add arrives with all its rows in one update, and one
@@ -2089,9 +2083,10 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """A streaming query that also has history: the four stream methods and `history()`.
 
     You get the query from a dataset method, such as `m.stocks.bars(...)` with a one-second or
-    one-minute timespan, and you can reuse it. `help(StreamQuery)`, after `from
-    deephaven_massive.queries import StreamQuery`, describes what every stream method has in common:
-    shared streams, watchlists, and later failures.
+    one-minute timespan, and you can reuse it.
+
+    What every stream method has in common, such as shared streams, watchlists, and later failures,
+    is in `help(StreamQuery)`. Import it with `from deephaven_massive.queries import StreamQuery`.
 
     Example:
         ::
