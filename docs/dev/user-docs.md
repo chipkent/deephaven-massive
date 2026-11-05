@@ -1,7 +1,8 @@
 # Writing user documentation
 
-This is the standard for every page a user reads: `README.md`, `docs/troubleshooting.md`, the
-tester guide, and the hand-written text of the generated dataset reference. The
+This is the standard for every page a user reads: `README.md`, `docs/troubleshooting.md`,
+`docs/configuration.md`, the tester guide, and the hand-written text of the generated dataset
+reference. The
 `writing-user-docs` skill is the workflow, and its grader,
 [`agents/editor.md`](../../.claude/skills/writing-user-docs/agents/editor.md), scores a page
 against this standard. Docstrings follow the `writing-docstrings` skill, and PR descriptions
@@ -83,16 +84,18 @@ later date refines an earlier one:
 | Simplicity | Every reader finishes a page believing the product is simple and easy to use. A passage that makes it seem hard (a needless step, reference detail in a tutorial, a stack of caveats, jargon, length) is a fault of the page. | 11-04 |
 | Accuracy | Every factual claim has a source in the code, Massive's vendored docs, or Deephaven's docs, or it's cut. Nothing invented: no estimated durations or sizes. | 11-03, 11-04 |
 | Outcomes | Users want to know how to use the library, not how it works. | 11-04 |
-| Hook | The README sells the library in 20 seconds of reading, through the reader's job-level pains. | 11-04 |
-| Only requested sections | The README holds the hook, Install, Configuration, the examples, next steps, and contributing. No recipes, no common-errors section, no status section, no "Terms", "How it works", or "How do I" sections. | 11-04 |
+| Hook | The README sells the library in 20 seconds of reading, through the reader's job-level pains: short bullets, each led by a bold outcome. A code sample stays only if it shows a visible result, such as a chart. | 11-04, 11-05 |
+| Approved text | Owner-approved intent and content bind every revision and every grader. Wording may improve, but a revision never dilutes an approved message's clarity or directness. | 11-05 |
+| Only requested sections | The README holds the hook, Install, the examples, Configuration, next steps, and contributing, in that order. No recipes, no common-errors section, no status section, no "Terms", "How it works", or "How do I" sections. | 11-04, 11-05 |
+| Order | Don't bury the lead: the hook, then Install, then the tutorial. Install reaches the first result by the shortest path and sets every key in one step. Reference (environment variables, settings, configuration tables) comes after the tutorial. | 11-05 |
 | Install | Best practice: in order, scannable, every command working as written. Until the PyPI release, install from git at the newest release tag, looked up in the same step, never hard-coded. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
-| Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. | 11-04 |
+| Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. Every configuration concept a page mentions links to its reference page, generated from the code: `docs/configuration.md` for `MassiveConfig` and the settings file. | 11-04, 11-05 |
 | Examples | Each is complete and runs as pasted, with its imports and session. Each says the plan it needs, any setting, and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
 | Terms | Industry-standard words: Massive's for its data, Deephaven's for its operations, practitioners' for market concepts, Python's for Python. | 11-04 |
 | Deephaven and Massive | Describe Deephaven in its own terms, from deephaven.io. Keep Massive's names for its products, datasets, and columns. Dates in examples are ISO strings. | 10-27, 10-28, 11-03 |
 | Coverage | Live tables driven by a watchlist; which plans include each dataset, generated so it follows Massive's changes; split adjustment, documented with the `adjusted` argument; how to filter out a known problem in Massive's data; column meanings on the generated dataset pages. | 10-27, 10-28, 10-30, 11-02 |
 | Tester guide | Every step, its commands, example code, and what to put in a report, automated as far as possible. | 10-30 |
-| Hero image and badges | A slot for the owner's hero image after the title; a few static badges. | 11-03 |
+| Hero image and badges | A slot for the owner's hero image after the title. Only badges that render for the page's viewers and can't go stale; the CI badge renders on github.com for people with access to the private repository. At the public launch and the PyPI release, add the badges that become possible then, such as a PyPI version badge. | 11-03, 11-05 |
 | Repository | Never describe the repository as private. No legal, licensing, data-sharing, access, or contact instructions. Testers report on a GitHub issue. | 11-04 |
 | Process | A code change that alters documented behavior updates the user docs in the same PR. Moved text is rewritten to this standard. Docs are graded before they go out. | 10-31, 11-03, 11-04 |
 
@@ -104,7 +107,8 @@ Each fact has one home, and other pages link to it:
 
 | Page | Owns |
 |---|---|
-| `README.md` | The hook, Install, Configuration (environment variables and `MassiveConfig`), the teaching examples, next steps, contributing |
+| `README.md` | The hook, Install, the teaching examples, Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
+| `docs/configuration.md` | Every `MassiveConfig` setting, its settings-file key, values, and default, and how to write and load a settings file; the settings are generated from the code |
 | `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
 | `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
 | Docstrings, read with `help()` | The fine detail of every method, setting, enum, and exception |
@@ -250,6 +254,9 @@ reading, about 80 to 90 words of prose:
    plan caveats before it.
 4. **One specific call to action**: "Install it with one `pip` command", not "Get started".
 
+A sample earns its place only by showing a visible result, such as a chart, in a few lines,
+followed by one or two plain sentences on how little it took. Code that shows no result goes.
+
 Everything else moves down the page: plan details, dataset counts, prerequisites, and
 definitions. The hook has no asides, no history ("formerly ..."), and no caveats. Link
 "Massive" and "Deephaven" instead of explaining them. The hero image goes after the title,
@@ -371,8 +378,10 @@ time: elegant variation reads as AI.
 
 ## Section models
 
-The README runs broad to specific: the title and hero image, a few badges, the hook, Install,
-Configuration, the examples, next steps, contributing.
+The README runs broad to specific, and never buries the lead: the title and hero image, the
+badges, the hook, Install, the examples, then reference (Configuration), next steps,
+contributing. Install reaches the first result by the shortest path and sets every key in one
+step, and no reference stands between it and the first example.
 
 <a id="model-install"></a>
 
@@ -433,6 +442,15 @@ A page passes only when all of these hold:
 2. No claim is unsourced or false, and every command works as written.
 3. No criterion scores below 2.
 4. The holistic score is 9 or more.
+
+Each round has a separate fact check, by a subagent that traces every claim, command, and
+column name in the changed lines and any new page to its source, and one pair of independent
+graders scoped to the changed sections. Apply only the fixes both graders agree on, plus every
+false claim either finds, and fix wording nits directly. A second pair grades only when the
+first finds a false or unsourced claim or the page misses the bar. A grader may flag owner-approved text but never
+rewrites its intent or content, and it judges a revised hook against the approved version for
+clarity and directness. A page passes when both graders pass it with a mean holistic score of 9
+or more.
 
 A page still short of the bar after two revision rounds goes to the owner with the last score
 sheet. Nobody loops on it further.
