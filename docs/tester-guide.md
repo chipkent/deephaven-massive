@@ -575,7 +575,7 @@ On the free plan, you should see three lines:
 | Line | What it says |
 |---|---|
 | The latest trade | `EntitlementError`, quoting Massive's refusal |
-| Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` reads `FAILED`, with an `Error` that quotes Massive's refusal of `AM.AAPL`. |
+| Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` reads `FAILED`. |
 | Bars from 2015 | `EntitlementError`: your plan's history doesn't reach 2015 |
 
 A line says `no error` on a paid plan that includes that data. An `EntitlementError` that names
@@ -583,8 +583,9 @@ A line says `no error` on a paid plan that includes that data. An `EntitlementEr
 setting.
 
 For each message, including the `Error` in `streams`, note whether it told you what went wrong
-and what to do. Note any that blamed your key when the cause was your plan. If the live minute
-bars show anything else, such as `connections` reconnecting again and again, report it.
+and what to do. Note any that blamed your key when the cause was your plan. For the live minute
+bars, note whether their `Error` quotes Massive's refusal of `AM.AAPL` or says Massive rejected
+the key, or whether `connections` reconnects again and again instead.
 
 #### 11. Convert symbols from other sources
 

@@ -14,7 +14,7 @@ checkout's root. Each pytest marker selects one set of tests:
 
 | Marker | What it runs |
 |---|---|
-| `integration` | The question tests: each records or checks Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items.md)) |
+| `integration` | The question tests, most of which record or check Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items.md)) |
 | `integration_smoke` | Every dataset and method once, checked automatically |
 | `integration_rate_limits` | The three rate-limit tests, which go over Basic's 5 requests a minute on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |
@@ -127,8 +127,8 @@ A skip prints its reason, and needs nothing from you. A test skips when:
 - the market isn't open, or the test can't tell its answer from a network drop
 
 A pass can still leave evidence to read. A `settles` test records Massive's answer and passes
-whatever it is, and the summary lists its question under `ran, evidence to read` once the
-question's tests all pass. A `verifies` test asserts the answer the library assumes. Both name
+whatever it is. The summary lists a question under `ran, evidence to read` once its tests all
+pass and none of them asserts its answer. A `verifies` test asserts the answer the library assumes. Both name
 their questions by number.
 
 <a id="read-the-end-of-a-run"></a>
@@ -203,7 +203,7 @@ uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar
 ## Check the user docs by hand
 
 These claims in the user docs need a run with a key, and no live test asserts them. Run each
-README example as pasted, in the console of a server started as the README's
+README or tester example as pasted, in the console of a server started as the README's
 [Install](../README.md#install) section starts it. Open an issue for each claim the run
 contradicts:
 
@@ -219,7 +219,7 @@ contradicts:
 | [README 10, change since close](../README.md#change-since-close) | Stocks Starter or higher | Whether each row shows `PrevClose` before the stock's first minute bar, then `Close` and `ChangePct` with each bar |
 | [README 12, backfill](../README.md#backfill-then-live) | Stocks Starter or higher | Whether `spy` has one row per traded minute of the day so far, with no gap or repeat where history meets the stream |
 | [README 4 and 13, charts](../README.md#chart-closes) | The plan each names | Whether Example 4's chart draws Nvidia's closes for the year, and the dashboard opens with both panels and its chart grows each minute |
-| [Tester example 10](tester-guide.md#run-by-hand), the live minute bars | Stocks Basic | Whether the `stocks.bars` row of `streams` reads `FAILED` with Massive's refusal of `AM.AAPL`, as the tester guide expects, or the connection reconnects instead |
+| [Tester example 10](tester-guide.md#run-by-hand), the live minute bars, pasted into the console | Stocks Basic | Whether the `stocks.bars` row of `streams` reads `FAILED` with Massive's refusal of `AM.AAPL`, or with an `AuthenticationError` because Massive rejected the key, or the connection reconnects instead |
 | [`GreeksGamma`](datasets/options.snapshots.md) of `m.options.snapshots` | Options Starter or higher, with `delayed_subscriptions` listing options on Starter or Developer | For one contract, enter the underlying's price, the strike, the days to expiration, and `ImpliedVolatility` into a standard Black-Scholes calculator, which gives gamma per $1 move of the underlying. Record whether `GreeksGamma` matches that, or a hundredth of it, per $0.01 move as Massive's description says. |
 
 <a id="live-run-program"></a>
@@ -231,7 +231,8 @@ contradicts:
 Testers run the live tests through `scripts/live_run.py`, as the
 [tester guide](tester-guide.md#live-run) shows, and send its `live-results-<date>.zip` on their
 results issue. Open the zip's `REPORT.md` first. It gives the tester's environment, the plans
-probed over time, a table of each group's checks, and the open questions still unverified.
+probed over time, a table of each group's checks, each open question the checks answer with its
+status, and the checks still unverified.
 `checks.csv` has one line per check. A comment on that issue can ask them to pack the results again, to rerun a group
 as [Reruns](#live-run-reruns) shows, or to run the [upgrade check](tester-guide.md#upgrade-check).
 
