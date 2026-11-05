@@ -46,7 +46,7 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import AuthenticationError
-from deephaven_massive._massive import without_userinfo
+from deephaven_massive._massive import check_rest_base_url, without_userinfo
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -349,7 +349,9 @@ class MassiveConfig:
                 interval, or count is not positive, only one of the two S3 credentials is set,
                 `api_key` or an S3 credential has leading or trailing whitespace (or an S3
                 credential is blank), `rest_base_url` or `s3_endpoint_url` is not an `http` or
-                `https` URL with a host, `s3_bucket` is blank, a `websocket_hosts` value is not a
+                `https` URL with a host, `rest_base_url` names more than a scheme, host, and
+                port (a user and password, a path, or a query) or is `http` to a host other
+                than this machine, `s3_bucket` is blank, a `websocket_hosts` value is not a
                 bare lower-case hostname, an environment variable read for a default has leading or
                 trailing whitespace, `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or
                 a `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
@@ -402,6 +404,7 @@ class MassiveConfig:
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
         _check_url("rest_base_url", self.rest_base_url)
+        check_rest_base_url(self.rest_base_url, setting="rest_base_url")
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
         _check_bucket(self.s3_bucket)
         object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))

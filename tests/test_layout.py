@@ -1454,6 +1454,7 @@ _WIRE_VOCABULARY = frozenset(
         "WireUnit",
         "encode_value",
         "origin_of",
+        "check_rest_base_url",
         "without_userinfo",
         "provenance",
         "source",
