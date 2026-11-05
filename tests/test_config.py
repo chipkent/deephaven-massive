@@ -440,6 +440,13 @@ def test_api_key_must_be_a_string() -> None:
         MassiveConfig(api_key=cast("str", None))
 
 
+@pytest.mark.parametrize("api_key", ["s3c r3t", "s3c\tr3t", "s3cr3t\r\nX: y", "s3cr\u00e9t"])
+def test_an_api_key_no_header_can_carry_is_refused_at_the_config(api_key: str) -> None:
+    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as info:
+        MassiveConfig(api_key=api_key)
+    assert "s3c" not in str(info.value)
+
+
 def test_configs_are_hashable_and_compare_by_value() -> None:
     hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     a = MassiveConfig(api_key="k", websocket_hosts=hosts)

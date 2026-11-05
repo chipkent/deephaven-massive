@@ -12,6 +12,8 @@ WebSocket, and flat-file clients all build on it:
 - `net.cancel`: `Cancel`, the token that ends a request's waits, which follows other tokens.
 - `net.slots`: `ConnectionSlots`, the bound on a client's requests in flight: its pool's size.
 - `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.
+- `net.api_keys`: `check_api_key`, the rule of an API key the REST client can send in a
+  header.
 - `net.base_urls`: `check_rest_base_url`, the rule of a URL the REST client may send the API
   key to.
 - `net.redaction`: `Redactor` and `redact`, which replace a client's secrets with `***` in

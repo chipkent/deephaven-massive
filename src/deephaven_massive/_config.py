@@ -46,7 +46,7 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import AuthenticationError
-from deephaven_massive._massive import check_rest_base_url, without_userinfo
+from deephaven_massive._massive import check_api_key, check_rest_base_url, without_userinfo
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -348,14 +348,15 @@ class MassiveConfig:
                 `reconnect_backoff`, `max_outage` is negative or not finite, a timeout, backoff,
                 interval, or count is not positive, only one of the two S3 credentials is set,
                 `api_key` or an S3 credential has leading or trailing whitespace (or an S3
-                credential is blank), `rest_base_url` or `s3_endpoint_url` is not an `http` or
-                `https` URL with a host, `rest_base_url` names port 0 or more than a scheme,
-                host, and port (a user and password, a path, or a query), or is `http` to a
-                host other than this machine, `s3_bucket` is blank, a `websocket_hosts` value is
-                not a bare lower-case hostname, an environment variable read for a default has
-                leading or trailing whitespace, `delayed_subscriptions` holds
-                `dm.Subscription.CURRENCIES`, or a `websocket_hosts` pin of a delayed host does not
-                match `delayed_subscriptions`.
+                credential is blank), `api_key` holds whitespace or a character outside
+                visible ASCII, which no header can carry, `rest_base_url` or `s3_endpoint_url`
+                is not an `http` or `https` URL with a host, `rest_base_url` names port 0 or
+                more than a scheme, host, and port (a user and password, a path, or a query),
+                or is `http` to a host other than this machine, `s3_bucket` is blank, a
+                `websocket_hosts` value is not a bare lower-case hostname, an environment
+                variable read for a default has leading or trailing whitespace,
+                `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or a
+                `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
@@ -368,6 +369,7 @@ class MassiveConfig:
                 "api_key has leading or trailing whitespace; pass the key without any (the key "
                 "is not shown)"
             )
+        check_api_key(self.api_key, setting="api_key")
         _check_s3_credential("s3_access_key_id", self.s3_access_key_id)
         _check_s3_credential("s3_secret_access_key", self.s3_secret_access_key)
         if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):

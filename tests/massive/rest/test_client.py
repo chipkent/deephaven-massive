@@ -219,7 +219,7 @@ def test_plain_http_is_allowed_for_loopback() -> None:
 def test_an_api_key_that_cannot_be_a_header_is_refused_without_being_shown(
     api_key: str,
 ) -> None:
-    with pytest.raises(ValueError, match="api_key must be non-empty visible ASCII") as caught:
+    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as caught:
         RestClient(
             api_key, base_url="https://api.massive.com", max_concurrency=1, governor=_governor()
         )
