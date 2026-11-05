@@ -408,6 +408,15 @@ Reference, so it describes and doesn't narrate:
   new user needs (setting, set it when, what changes), one complete code block, and
   `help(dm.MassiveConfig)` for the rest.
 
+<a id="model-structure"></a>
+
+### File formats and data structures
+
+A page that documents a file format, a settings file, or a data structure shows its full shape:
+every level of nesting, which values are single words or numbers, lists, or mappings, and at
+least one example of each nested form in ordinary block syntax. Inline examples in table cells
+don't count: the reader must never infer the structure from them.
+
 <a id="model-teaching"></a>
 
 ### Examples

@@ -689,7 +689,7 @@ def test_the_settings_example_reads_the_file_its_commands_write(
 def test_the_settings_pages_example_file_loads_as_its_comments_say(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    [text] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
+    [text, _] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
     file = tmp_path / "settings.yaml"
     file.write_text(text, encoding="utf-8")
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
@@ -703,6 +703,17 @@ def test_the_settings_pages_example_file_loads_as_its_comments_say(
     }
     assert config.max_outage == 600
     assert config.noncanonical_symbols is dm.OnError.RAISE
+
+
+def test_the_settings_pages_nested_example_pins_one_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    [_, text] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
+    file = tmp_path / "settings.yaml"
+    file.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    config = dm.MassiveConfig.from_file(file)
+    assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM

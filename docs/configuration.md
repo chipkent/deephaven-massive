@@ -8,8 +8,10 @@ uses the same ones. It can't hold your API and S3 keys. Set them in the environm
 
 ## Write a settings file
 
-A settings file maps each setting's name to its value. Leave a setting out to keep its default.
-This file is for an account that has bought only Stocks Starter:
+A settings file maps each setting's name to its value, one name per line at the left margin.
+Leave a setting out to keep its default. Most values are a single word or number, such as `600`
+or `raise`, or a list in brackets, such as `[stocks]`. This file is for an account that has
+bought only Stocks Starter:
 
 ```yaml
 # Stocks Starter streams Massive's delayed feed, 15 minutes late.
@@ -22,7 +24,16 @@ max_outage: 600
 noncanonical_symbols: raise
 ```
 
-Save it anywhere, such as `~/massive/settings.yaml`.
+`websocket_hosts` is the one setting whose value is a mapping, so it nests one level: each asset
+class, indented under the setting, names its host. This entry streams index values from
+the host Massive documents for them:
+
+```yaml
+websocket_hosts:
+  indices: business.massive.com
+```
+
+Save the file anywhere, such as `~/massive/settings.yaml`.
 
 <a id="load-a-settings-file"></a>
 
