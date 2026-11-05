@@ -27,10 +27,10 @@ other error, which is a finding to report. Every table the examples make belongs
 liveness scope; at the end the runner closes every session the examples left open, forgets
 their variables, and releases that scope, so nothing they started outlives the run.
 
-Most examples open their session with the free plan's line, `FREE_PLAN_SESSION`, and the paid
-Stocks examples with a line that accepts delayed data. On a key with paid plans,
-`run_examples` runs a copy of each example whose session lines all fit the plans
-(`session_line`).
+Most examples open their session with `dm.MassiveSession()`, as the README's do. The paid
+Stocks examples load the settings file the README's settings example saves, `SETTINGS_PATH`;
+`run_examples` writes a settings file for the key's plans (`settings_text`) and runs a copy of
+each such example that reads it instead (`fitted`), so the run needs no file of the tester's.
 
 This module imports Deephaven, so it is imported only once a Deephaven server runs.
 """
@@ -44,6 +44,7 @@ import runpy
 import time
 import traceback
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
 from deephaven.execution_context import get_exec_ctx
@@ -85,68 +86,51 @@ minutes of rate-limit pauses, and some time to read."""
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""
 
-FREE_PLAN_SESSION: Final = (
-    "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))\n"
-)
-"""The session line of the first example, as the guide writes it for the free plan."""
+SETTINGS_PATH: Final = "~/massive/settings.yaml"
+"""The settings file the paid examples read, where the README's settings example saves it."""
 
 DELAYED_TIERS: Final = ("starter", "developer")
 """The plans that stream delayed data, except for currencies, which are real-time on every
 plan."""
 
 
-def session_line(tiers: Mapping[str, str]) -> str:
-    """Write the first example's session line for the key's plans.
+def settings_text(tiers: Mapping[str, str]) -> str:
+    """Write the settings file the paid examples read, for the key's plans.
 
-    A subscription on the free plan goes in `rest_basic_subscriptions`, so its requests are
-    paced from the start; a Starter or Developer subscription other than currencies goes in
+    A Starter or Developer subscription other than currencies goes in
     `delayed_subscriptions`, so its live examples read the delayed feed its plan streams.
 
     Args:
-        tiers: Each subscription's plan, as the probe names them (`"stocks": "basic"`).
+        tiers: Each subscription's plan, as the probe names them (`"stocks": "starter"`);
+            empty when the plans are unknown, which writes the free plan's file.
 
     Returns:
-        `FREE_PLAN_SESSION` when every subscription is on the free plan; otherwise the line
-        that fits the plans, such as
-        `m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions={...},
-        delayed_subscriptions={dm.Subscription.STOCKS}))`, ending with a newline.
+        The file's YAML, such as `delayed_subscriptions: [futures, stocks]` and a newline.
     """
-    if all(tier == "basic" for tier in tiers.values()):
-        return FREE_PLAN_SESSION
-    basic = sorted(name for name, tier in tiers.items() if tier == "basic")
     delayed = sorted(
         name for name, tier in tiers.items() if tier in DELAYED_TIERS and name != "currencies"
     )
-
-    def members(names: list[str]) -> str:
-        if not names:
-            return "set()"
-        return "{" + ", ".join(f"dm.Subscription.{name.upper()}" for name in names) + "}"
-
-    return (
-        f"m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions={members(basic)}, "
-        f"delayed_subscriptions={members(delayed)}))\n"
-    )
+    return f"delayed_subscriptions: [{', '.join(delayed)}]\n"
 
 
-def fitted(path: Path, session: str, folder: Path) -> Path:
-    """Return the example to run: the file itself, or a copy whose session lines fit the plans.
+def fitted(path: Path, settings: Path, folder: Path) -> Path:
+    """Return the example to run: the file itself, or a copy that reads the run's settings.
 
     Args:
         path: The example's file.
-        session: The session line to run (`session_line`).
+        settings: The settings file the run wrote (`settings_text`).
         folder: Where a changed copy goes, created if missing.
 
     Returns:
-        `path` when it opens no session or `session` is the free plan's line; otherwise a
-        copy in `folder` with every session line (`SESSION_LINE`) replaced by `session`.
+        `path` when it doesn't read `SETTINGS_PATH`; otherwise a copy in `folder` that reads
+        `settings` instead.
     """
     code = path.read_text(encoding="utf-8")
-    if session == FREE_PLAN_SESSION or not SESSION_LINE.search(code):
+    if SETTINGS_PATH not in code:
         return path
     folder.mkdir(parents=True, exist_ok=True)
     copy = folder / path.name
-    copy.write_text(SESSION_LINE.sub(lambda _: session, code), encoding="utf-8")
+    copy.write_text(code.replace(SETTINGS_PATH, str(settings)), encoding="utf-8")
     return copy
 
 
@@ -393,7 +377,7 @@ def run_examples(
     echo: Callable[[str], None],
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
-    session: str = FREE_PLAN_SESSION,
+    tiers: Mapping[str, str] = MappingProxyType({}),
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
 
@@ -405,14 +389,17 @@ def run_examples(
         lock: Makes the lock every console command holds.
         wait: Waits for the background downloads before each example; returns False when it
             gave up.
-        session: The session line the examples run (`session_line`); on a key with paid
-            plans, an example that opens a session runs from a copy under `out/fitted/` with
-            its session lines replaced (`fitted`).
+        tiers: Each subscription's plan, for the settings file `out/settings.yaml`
+            (`settings_text`); empty, the default, writes the free plan's file. An example
+            that reads `SETTINGS_PATH` runs from a copy under `out/fitted/` that reads it
+            (`fitted`).
 
     Returns:
         Each example's outcome.
     """
     out.mkdir(parents=True, exist_ok=True)
+    settings = out / "settings.yaml"
+    settings.write_text(settings_text(tiers), encoding="utf-8")
     namespace: dict[str, Any] = {}
     outcomes: list[Outcome] = []
     with console_scope(namespace):
@@ -421,7 +408,7 @@ def run_examples(
                 echo("a background download is still running; going on without it")
             before = dict(tables_of(namespace))
             echo(f"{path.name}: running")
-            runs = fitted(path, session, out / "fitted")
+            runs = fitted(path, settings, out / "fitted")
             outcome, printed = run_example(runs, namespace, lock=lock)
             outcomes.append(outcome)
             made = {n: t for n, t in tables_of(namespace).items() if before.get(n) is not t}

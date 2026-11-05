@@ -7,7 +7,7 @@ from deephaven.updateby import rolling_avg_tick
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 six_months_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=182)
 nvda_daily = (

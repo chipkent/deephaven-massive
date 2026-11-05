@@ -413,12 +413,10 @@ def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
     for path in examples.example_files(EXAMPLES):
         opens = examples.SESSION_LINE.search(path.read_text(encoding="utf-8")) is not None
         assert opens == (path.name not in without), path.name
-    assert examples.FREE_PLAN_SESSION in (EXAMPLES / "01_start_a_session.py").read_text()
+    assert "m = dm.MassiveSession()\n" in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
-def test_session_line_fits_the_keys_plans() -> None:
-    free = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
-    assert examples.session_line(free) == examples.FREE_PLAN_SESSION
+def test_settings_text_fits_the_keys_plans() -> None:
     # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
     paid = {
         "stocks": "developer",
@@ -427,32 +425,21 @@ def test_session_line_fits_the_keys_plans() -> None:
         "currencies": "starter",
         "futures": "starter",
     }
-    assert examples.session_line(paid) == (
-        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-        "{dm.Subscription.INDICES}, delayed_subscriptions={dm.Subscription.FUTURES, "
-        "dm.Subscription.STOCKS}))\n"
-    )
-    assert examples.session_line({"stocks": "advanced"}) == (
-        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(), "
-        "delayed_subscriptions=set()))\n"
-    )
+    assert examples.settings_text(paid) == "delayed_subscriptions: [futures, stocks]\n"
+    assert examples.settings_text({}) == "delayed_subscriptions: []\n"
 
 
-def test_fitted_runs_a_copy_only_when_the_session_line_changes(tmp_path: Path) -> None:
-    first = _write(tmp_path, "01_a.py", f"x = 1\n{examples.FREE_PLAN_SESSION}")
-    other = _write(tmp_path, "02_b.py", "y = 2\n")
-    delayed = "m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions=set()))\n"
-    third = _write(tmp_path, "03_c.py", f"# delayed\n{delayed}z = 3\n")
-    paid = "m = dm.MassiveSession()\n"
-    assert examples.fitted(first, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == first
-    assert examples.fitted(third, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == third
-    assert examples.fitted(other, paid, tmp_path / "fitted") == other
-    copy = examples.fitted(first, paid, tmp_path / "fitted")
-    assert copy == tmp_path / "fitted" / "01_a.py"
-    assert copy.read_text(encoding="utf-8") == f"x = 1\n{paid}"
-    # Every session line fits the plans, the paid examples' own lines included.
-    copy = examples.fitted(third, paid, tmp_path / "fitted")
-    assert copy.read_text(encoding="utf-8") == f"# delayed\n{paid}z = 3\n"
+def test_fitted_runs_a_copy_only_when_the_example_reads_the_settings_file(tmp_path: Path) -> None:
+    free = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
+    reads = f'm = dm.MassiveSession(dm.MassiveConfig.from_file("{examples.SETTINGS_PATH}"))\n'
+    paid = _write(tmp_path, "02_b.py", f"# paid\n{reads}")
+    settings = tmp_path / "settings.yaml"
+    assert examples.fitted(free, settings, tmp_path / "fitted") == free
+    copy = examples.fitted(paid, settings, tmp_path / "fitted")
+    assert copy == tmp_path / "fitted" / "02_b.py"
+    assert copy.read_text(encoding="utf-8") == (
+        f'# paid\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
+    )
 
 
 def _write(folder: Path, name: str, code: str) -> Path:

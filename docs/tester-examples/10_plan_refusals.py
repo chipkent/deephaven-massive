@@ -1,7 +1,7 @@
 # Ask for three things the free Basic plan doesn't include, and print how each was refused.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 streams = m.streams()
 connections = m.connections()
 

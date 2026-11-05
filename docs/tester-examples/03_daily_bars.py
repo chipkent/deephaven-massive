@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(

@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 details = m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch()
 companies = details.view(["Symbol", "Name", "PrimaryExchange", "ListDate", "MarketCap"])

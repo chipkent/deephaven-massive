@@ -8,7 +8,7 @@ from deephaven.updateby import delta
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
 pair = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago)

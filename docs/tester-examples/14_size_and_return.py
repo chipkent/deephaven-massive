@@ -6,7 +6,7 @@ from deephaven import agg
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 symbols = ["AAPL", "JPM", "XOM"]
 quarter_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=91)

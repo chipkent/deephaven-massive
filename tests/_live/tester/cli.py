@@ -12,8 +12,8 @@
   `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
   `DIR/examples-output/`. The examples write their debug log and files to `DIR` too, through
   the `MASSIVE_TEST_FOLDER` variable this command sets. It first asks Massive which plan the
-  key holds per subscription, so the first example opens the session those plans need. Exit 0
-  when no example failed (a refusal by the key's plan is not a failure), else 1.
+  key holds per subscription, and writes the settings file the paid examples read for those
+  plans. Exit 0 when no example failed (a refusal by the key's plan is not a failure), else 1.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -166,8 +166,8 @@ def main(
         check: Checks both setups and the key (`check_both`).
         describe: Describes the machine for a bug report (`describe_machine`).
         now: Reads the time, which names a bug report's zip.
-        plans: Asks Massive which plan the key holds per subscription, for the session line
-            of the first example; None when it cannot tell. Only `examples` calls it.
+        plans: Asks Massive which plan the key holds per subscription, for the settings file
+            the paid examples read; None when it cannot tell. Only `examples` calls it.
 
     Returns:
         The exit status: 0; 1 when an item of the check failed, an example failed, or a
@@ -205,17 +205,15 @@ def main(
         examples = importlib.import_module("tests._live.tester.examples")
         tiers = plans(environ)
         if tiers is None:
-            session = examples.FREE_PLAN_SESSION
+            tiers = {}
             echo("could not tell the key's plans; the examples run as on the free plan")
-        else:
-            session = examples.session_line(tiers)
-        echo(f"session: {session.strip()}")
+        echo(f"settings: {examples.settings_text(tiers).strip()}")
         outcomes = examples.run_examples(
             examples.example_files(root / EXAMPLES_FOLDER),
             folder / "examples-output",
             secrets=secrets,
             echo=echo,
-            session=session,
+            tiers=tiers,
         )
         failed = [o.name for o in outcomes if o.status == examples.FAILED]
         echo(f"saved to {folder / 'examples-output'}")

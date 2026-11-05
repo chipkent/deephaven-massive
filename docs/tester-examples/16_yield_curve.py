@@ -6,7 +6,7 @@ from deephaven.plot.figure import Figure
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 two_years_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=730)
 curve = (

@@ -6,7 +6,7 @@ from deephaven import input_table, new_table
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 reads = m.symbol_reads()
 
 stocks = new_table({"Symbol": ["AAPL", "MSFT"]})

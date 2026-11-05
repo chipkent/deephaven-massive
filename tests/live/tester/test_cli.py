@@ -210,7 +210,7 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
     }
 
 
-def test_examples_opens_the_session_the_keys_plans_need(tmp_path: Path) -> None:
+def test_examples_writes_the_settings_the_keys_plans_need(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
     (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
@@ -223,10 +223,9 @@ def test_examples_opens_the_session_the_keys_plans_need(tmp_path: Path) -> None:
         plans=lambda _environ: tiers,
     )
     assert status == 0
-    assert lines[0] == (
-        "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-        "{dm.Subscription.OPTIONS}, delayed_subscriptions={dm.Subscription.STOCKS}))"
-    )
+    assert lines[0] == "settings: delayed_subscriptions: [stocks]"
+    settings = tmp_path / "t" / "examples-output" / "settings.yaml"
+    assert settings.read_text(encoding="utf-8") == "delayed_subscriptions: [stocks]\n"
 
 
 def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: Path) -> None:
@@ -241,8 +240,5 @@ def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: 
     )
     assert lines[:2] == [
         "could not tell the key's plans; the examples run as on the free plan",
-        (
-            "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-            "set(dm.Subscription)))"
-        ),
+        "settings: delayed_subscriptions: []",
     ]

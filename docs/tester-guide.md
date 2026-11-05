@@ -61,9 +61,8 @@ you finish it, and next to each item, note anything that failed, surprised you, 
 
 ## Set up the test
 
-You run the Deephaven server from a Python environment, as the README installs it, or in Docker.
-These steps follow the Python environment, and [Run the server in Docker](#docker) replaces
-two of them.
+Run the Deephaven server from a Python environment, as the README installs it, or in Docker.
+Each step that differs shows both.
 
 <a id="check-what-you-need"></a>
 
@@ -74,6 +73,7 @@ You need the README's [prerequisites](../README.md#prerequisites), and uv to run
 | What | Check it with | Get it from |
 |---|---|---|
 | uv | `uv --version` | [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) |
+| Docker, only to run the server in Docker | `docker info` | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
 
 On Windows, run every command inside a WSL 2 terminal, and apply the WSL 2 clock fix that
 Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/)
@@ -85,9 +85,12 @@ gives.
 
 Follow the README's [Install](../README.md#install) section, from
 [Sign in to GitHub](../README.md#sign-in-to-github) through
-[Set your API keys](../README.md#set-your-api-keys). Keep the environment the README names,
-`~/dh-massive`, and stop before the README starts the server. With Docker, skip the README's
-[Install the library](../README.md#install-the-library) step.
+[Set your API keys](../README.md#set-your-api-keys), and stop before the README starts the
+server:
+
+- Python environment: do every step, and keep the environment the README names, `~/dh-massive`.
+- Docker: skip [Install the library](../README.md#install-the-library). The image you build in
+  [Check the setup](#check-the-setup) holds the library.
 
 Your keys are now in your shell's startup file, so every terminal you open has them.
 
@@ -126,12 +129,21 @@ commit.
 ### Check the setup
 
 The setup check confirms that the server's environment and the test tools hold the same
-release, and that Massive accepts your key. With Docker, run the check that
-[Run the server in Docker](#docker) gives instead. In a terminal, run the check:
+release, and that Massive accepts your key. In a terminal, run the check for your setup.
+
+Python environment:
 
 ```bash
 cd ~/massive-test/deephaven-massive
 uv run python scripts/tester.py check
+```
+
+Docker, which first builds the image from the clone:
+
+```bash
+cd ~/massive-test/deephaven-massive
+git archive HEAD | docker build -f docs/tester-docker/Dockerfile --build-arg TESTER_COMMIT=$(git rev-parse HEAD) -t deephaven-massive-test -
+uv run python scripts/tester.py check --docker-image deephaven-massive-test
 ```
 
 The check prints one line per item, each starting `OK`, `WARN`, or `FAIL`, and ends with
@@ -205,9 +217,11 @@ then `no example failed`, or `failed:` and the examples' names. Each example's o
 
 ### Start the server
 
-Start the server as the README's [Start the server](../README.md#start-the-server) step does,
-and also save its output for your bug reports. With Docker, start it as
-[Run the server in Docker](#docker) shows instead. In a new terminal, start the server:
+In a new terminal, start the server as the README's
+[Start the server](../README.md#start-the-server) step does, saving its output for your bug
+reports.
+
+Python environment:
 
 ```bash
 source ~/dh-massive/bin/activate
@@ -215,8 +229,26 @@ deephaven server --jvm-args "-Xmx4g" 2>&1 | tee ~/massive-test/server.log
 ```
 
 The server prints a line that starts `Deephaven is running at` and opens the Deephaven IDE in
-your browser. Keep this terminal open while you test, and press Control-C there to stop the
-server. If the server fails to start, find its message in
+your browser.
+
+Docker:
+
+```bash
+mkdir -p ~/massive
+docker run --rm --name massive-test -p 10000:10000 \
+  -e MASSIVE_API_KEY -e MASSIVE_S3_ACCESS_KEY_ID -e MASSIVE_S3_SECRET_ACCESS_KEY \
+  -e MASSIVE_TEST_FOLDER=/massive-test -v "$HOME/massive-test:/massive-test" \
+  -v "$HOME/massive:/root/massive" \
+  -e START_OPTS="-Xmx4g -Dauthentication.psk=massive-test" \
+  deephaven-massive-test 2>&1 | tee ~/massive-test/server.log
+```
+
+The server prints `Server started on port 10000`. Open
+<http://localhost:10000/?psk=massive-test> in your browser, which signs you in. The examples
+write their files to `~/massive-test`, and the README's settings file in `~/massive` reaches
+the server.
+
+Keep this terminal open while you test, and press Control-C there to stop the server. If the server fails to start, find its message in
 [Troubleshooting](troubleshooting.md#setup-messages).
 
 <a id="run-the-tutorial"></a>
@@ -226,6 +258,10 @@ server. If the server fails to start, find its message in
 Run each example of the README's [Tutorial](../README.md#tutorial) that your plan allows,
 pasted as it is into the console. The text after each example says what you should see. In your
 checklist, note each place where what you see differs from that text.
+
+Whatever your plan, save the settings file of the README's
+[settings example](../README.md#what-your-plan-allows), because test examples 17, 18, and 22
+read it. On the free plan, save the Starter or Developer file.
 
 <a id="run-by-hand"></a>
 
@@ -259,7 +295,7 @@ folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-tes
 os.makedirs(folder, exist_ok=True)
 dm.enable_debug_logging(os.path.join(folder, "massive-debug.log"))
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 print(dm.__version__)
 print(m)
 ```
@@ -267,9 +303,9 @@ print(m)
 You should see the library's version without its leading `v`, such as `0.1.0rc1`, then a line
 such as `<MassiveSession #12 open>`. The number counts the sessions this server has opened.
 
-`rest_basic_subscriptions` keeps every subscription to Basic's five requests a minute from the
-first request, as the README's [MassiveConfig](../README.md#massive-config) table says. The
-free-plan examples all open their session this way, and on a paid plan they run as written.
+The examples open their sessions as the README's do. On Basic, a session slows to five
+requests a minute after Massive's first rate-limit error, as the README's
+[MassiveConfig](../README.md#massive-config) table says, and example 7 checks it.
 
 #### 2. Find datasets and their columns
 
@@ -279,7 +315,7 @@ List every dataset, and the columns of a query, without a request to Massive:
 # List every dataset, and describe the columns of daily stock bars without a request.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 catalog = dm.datasets()
 bars = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY)
@@ -302,7 +338,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
@@ -329,7 +365,7 @@ from deephaven import agg
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
@@ -359,7 +395,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 details = m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch()
 companies = details.view(["Symbol", "Name", "PrimaryExchange", "ListDate", "MarketCap"])
@@ -387,7 +423,7 @@ Poll the market's status every 60 seconds, and open three of the session's diagn
 # Make a table that asks Massive again every minute, and open the diagnostics tables.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 live_status = m.reference.market_status().poll(60)
 
@@ -401,7 +437,7 @@ diagnostics tables:
 
 | Panel | What you should see |
 |---|---|
-| `rate_limits` | A row per subscription, plus `other`. The `stocks` row shows `RequestsPerMinute` 5. |
+| `rate_limits` | A row per subscription, plus `other` |
 | `streams` | A row for `live_status`, with `State` `RUNNING` |
 | `connections` | No rows: a poll needs no streaming connection |
 
@@ -413,7 +449,7 @@ Poll six stocks every 30 seconds, more than Basic allows, then release the table
 # Ask for more than Basic allows, then let the library stop the table.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 # 12 Stocks requests a minute: six stocks every 30 seconds, against a limit of 5.
 paced = m.stocks.previous_day_bar(["AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"]).poll(30)
@@ -424,9 +460,10 @@ streams = m.streams()
 m.release(paced)
 ```
 
-Watch `rate_limits` and `paced` for two minutes. The `stocks` row of `rate_limits` should read
-`PACED`, which means requests are waiting for a free slot. `paced` gets its six rows, and the
-debug log gets a `WARNING` that the table's requests are paced at 5 a minute.
+Watch `rate_limits` and `paced` for two minutes. On Basic, once Massive refuses a request, the
+`stocks` row of `rate_limits` shows `LimitSource` `LEARNED` and `RequestsPerMinute` 5, and reads
+`PACED` while requests wait for a free slot. `paced` gets its six rows either way. On a paid
+Stocks plan, nothing is refused.
 
 Then close the `paced` panel. The table stops, and the `stocks` row returns to `READY`.
 `m.release()` lets the library stop a table once no panel or other table uses it.
@@ -443,7 +480,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
 year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago, wait=False)
@@ -468,7 +505,7 @@ from deephaven.updateby import delta
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
 pair = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago)
@@ -519,7 +556,7 @@ them, and the code prints how Massive refuses each:
 # Ask for three things the free Basic plan doesn't include, and print how each was refused.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 streams = m.streams()
 connections = m.connections()
 
@@ -630,7 +667,7 @@ from deephaven.updateby import rolling_avg_tick
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 six_months_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=182)
 nvda_daily = (
@@ -662,7 +699,7 @@ from deephaven import agg
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 symbols = ["AAPL", "JPM", "XOM"]
 quarter_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=91)
@@ -693,7 +730,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 year_ago = yesterday - timedelta(days=364)
@@ -724,7 +761,7 @@ from deephaven.plot.figure import Figure
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 two_years_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=730)
 curve = (
@@ -740,16 +777,15 @@ wherever the curve was inverted.
 
 #### 17. Stream live minute bars
 
-Keep the latest minute bar of five stocks, with a paid Stocks plan. The code's comment says
-which setting to delete on a real-time plan:
+Keep the latest minute bar of five stocks, with a paid Stocks plan. The session loads the
+settings file you saved for the README tutorial:
 
 ```python
 # Keep the latest minute bar of five stocks, updated live. Needs a paid Stocks plan.
 import deephaven_massive as dm
 
-# Stocks Starter and Developer stream 15 minutes late, so this session accepts delayed
-# data. On Stocks Advanced or Business, which stream in real time, delete that setting.
-m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+# Load the settings file that the README's settings example saves for your plan.
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 
 latest_bars = m.stocks.bars(
     ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"], dm.Timespan.MINUTE
@@ -764,7 +800,7 @@ stays empty until the stocks trade.
 #### 18. Backfill today's minute bars
 
 Start with AAPL's minute bars from earlier today, and add each new minute as it ends, with the
-plan and setting of example 17:
+plan and settings file of example 17:
 
 ```python
 # Join today's minute bars from history with the live ones that follow. Needs a paid Stocks plan.
@@ -775,9 +811,8 @@ from deephaven import merge
 
 import deephaven_massive as dm
 
-# Stocks Starter and Developer stream 15 minutes late, so this session accepts delayed
-# data. On Stocks Advanced or Business, which stream in real time, delete that setting.
-m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+# Load the settings file that the README's settings example saves for your plan.
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 
 aapl_minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
 session_day = datetime.now(ZoneInfo("America/New_York")).date()
@@ -800,7 +835,7 @@ Crypto trades around the clock, so this example works at any hour:
 # Stream Bitcoin and Ether trades, and count them by the minute. Needs a paid Currencies plan.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 crypto_trades = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).append_only()
 crypto_latest = crypto_trades.last_by("Symbol")
@@ -824,7 +859,7 @@ from deephaven import input_table, new_table
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 reads = m.symbol_reads()
 streams = m.streams()
 
@@ -870,7 +905,7 @@ from deephaven import input_table, new_table
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 streams = m.streams()
 
 pairs = new_table({"Symbol": ["X:ETHUSD", "X:LINKUSD"]})
@@ -902,9 +937,8 @@ trades and quotes expansion:
 # Stream the trades of the day's top gainers. Needs a Stocks plan that streams trades.
 import deephaven_massive as dm
 
-# Stocks Developer streams 15 minutes late, so this session accepts delayed data. On a
-# real-time plan, delete that setting.
-m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+# Load the settings file that the README's settings example saves for your plan.
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 streams = m.streams()
 
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
@@ -929,7 +963,7 @@ from deephaven import input_table, new_table
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 reads = m.symbol_reads()
 
 stocks = new_table({"Symbol": ["AAPL", "MSFT"]})
@@ -988,7 +1022,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 closing_status = m.reference.market_status().poll(60)
 m.close()
 print(m)
@@ -1000,8 +1034,7 @@ except dm.MassiveError as error:
     print(f"MassiveError: {error}")
 
 # A with block closes its session when the block ends.
-config = dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription))
-with dm.MassiveSession(config) as m2:
+with dm.MassiveSession() as m2:
     last_week = m2.stocks.bars("NVDA", dm.Timespan.DAY).history(
         yesterday - timedelta(days=6), yesterday
     )
@@ -1255,38 +1288,3 @@ plan, one stream day run to its end at 20:30. Then send your results and clean u
 
    Run it again with `sudo` in front if `rm` reports a permission error. With Docker, also
    delete the image with `docker rmi deephaven-massive-test`.
-
-<a id="docker"></a>
-
-## Run the server in Docker
-
-Test the library in Docker if that's where you run Deephaven. Docker replaces two steps. The
-image holds the library, and the container runs the server. You still need the rest of
-[Set up the test](#set-up), and [Docker Desktop](https://www.docker.com/products/docker-desktop/)
-or Docker Engine, which `docker info` checks.
-
-At [Check the setup](#check-the-setup), build the image from the clone, then check it. In a
-terminal:
-
-```bash
-cd ~/massive-test/deephaven-massive
-git archive HEAD | docker build -f docs/tester-docker/Dockerfile --build-arg TESTER_COMMIT=$(git rev-parse HEAD) -t deephaven-massive-test -
-uv run python scripts/tester.py check --docker-image deephaven-massive-test
-```
-
-At [Start the server](#start-the-server), start the container in a new terminal:
-
-```bash
-mkdir -p ~/massive
-docker run --rm --name massive-test -p 10000:10000 \
-  -e MASSIVE_API_KEY -e MASSIVE_S3_ACCESS_KEY_ID -e MASSIVE_S3_SECRET_ACCESS_KEY \
-  -e MASSIVE_TEST_FOLDER=/massive-test -v "$HOME/massive-test:/massive-test" \
-  -v "$HOME/massive:/root/massive" \
-  -e START_OPTS="-Xmx4g -Dauthentication.psk=massive-test" \
-  deephaven-massive-test 2>&1 | tee ~/massive-test/server.log
-```
-
-The server prints `Server started on port 10000`. Open
-<http://localhost:10000/?psk=massive-test> in your browser, which signs you in. The examples
-write their files to `~/massive-test`, and the README tutorial's settings file in `~/massive`
-reaches the server too.

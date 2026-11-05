@@ -8,6 +8,6 @@ folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-tes
 os.makedirs(folder, exist_ok=True)
 dm.enable_debug_logging(os.path.join(folder, "massive-debug.log"))
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 print(dm.__version__)
 print(m)

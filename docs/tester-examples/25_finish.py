@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 closing_status = m.reference.market_status().poll(60)
 m.close()
 print(m)
@@ -16,8 +16,7 @@ except dm.MassiveError as error:
     print(f"MassiveError: {error}")
 
 # A with block closes its session when the block ends.
-config = dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription))
-with dm.MassiveSession(config) as m2:
+with dm.MassiveSession() as m2:
     last_week = m2.stocks.bars("NVDA", dm.Timespan.DAY).history(
         yesterday - timedelta(days=6), yesterday
     )
