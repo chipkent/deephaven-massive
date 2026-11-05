@@ -113,53 +113,88 @@ def test_every_dataset_has_a_page_after_the_index() -> None:
 
 def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     page = rendered()["snapshots.md"]
-    assert page.startswith("# `m.snapshots`\n")
+    assert page.startswith("# m.snapshots\n")
     assert "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)\n" in page
-    # `m.snapshots` is a method of the session, so the index lists it under no namespace.
+    # `m.snapshots` is a method of the session, so the index lists it under no namespace, after
+    # every namespace.
     index = rendered()[INDEX]
-    assert "\n## Session methods\n\n| Dataset | Summary | Verbs |\n" in index
+    assert "\n## Session methods\n\n| Dataset | Summary | Query methods |\n" in index
     assert "[`m.snapshots`](snapshots.md)" in index.partition("## Session methods")[2]
-    assert "## `m.snapshots`" not in index
+    assert "## Snapshots" not in index
+    assert index.index("## Partner data") < index.index("## Session methods")
 
 
 def test_the_real_pages_state_each_poll_mode() -> None:
     pages = rendered()
-    replace = "`dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by `Symbol`"
-    assert f"| `poll()` | {replace} |" in pages["options.contracts.md"]
+    default = "- `poll()` by default: "
+    replace = "`dm.PollMode.REPLACE`, which holds only the latest poll's rows"
+    assert f"{default}{replace}, one row per `Symbol`\n" in pages["options.contracts.md"]
     assert (
-        "| `poll()` | `dm.PollMode.APPEND`: appends only rows it has not seen, keyed by `Id` and "
-        "`Symbol` |" in pages["reference.news.md"]
+        f"{default}`dm.PollMode.APPEND`, which appends each row it hasn't seen, identified by "
+        "`Id` and `Symbol`\n" in pages["reference.news.md"]
     )
     assert (
-        "| `poll()` | `dm.PollMode.UPSERT`: adds and updates rows, never deletes, keyed by "
-        "`Symbol` and `IssuerName`" in pages["stocks.ipos.md"]
+        f"{default}`dm.PollMode.UPSERT`, which adds and updates rows and never deletes them, one "
+        "row per `Symbol` and `IssuerName`\n" in pages["stocks.ipos.md"]
     )
-    status = pages["reference.market_status.md"]
+    # The latest market status has no key, so a poll holds one row; an APPEND poll keys by time.
     assert (
-        "| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows; "
-        "`mode=dm.PollMode.APPEND` also keys by" in (status)
+        f"{default}{replace}\n- `poll(mode=dm.PollMode.APPEND)`: appends each new state of a "
+        "row, identified by" in pages["reference.market_status.md"]
     )
-    # A dataset without fetch() has no poll() row, and one without sort or filters none of theirs.
+    # A dataset without fetch() has no poll() fact, and one without sort or filters none of
+    # their rows.
     trades = pages["stocks.trades.md"]
-    assert "| `poll()` |" not in trades
-    assert "| `sort` |" not in trades
-    assert "| `filters` |" not in trades
+    assert "`poll()`" not in trades
+    assert "[`sort`]" not in trades
+    assert "[`filters`]" not in trades
 
 
-def test_the_real_pages_list_sort_values_and_filters() -> None:
+def test_the_real_pages_list_sort_fields_and_filter_keys() -> None:
     pages = rendered()
-    assert "| `sort` | `ticker`, `name`, `market`," in pages["reference.tickers.md"]
-    assert "| `sort` | any REST field of the rows" in pages["stocks.dividends.md"]
+    assert (
+        "| [`sort`](README.md#sort) | The field to sort by. Fields: `ticker`, `name`, `market`,"
+        in pages["reference.tickers.md"]
+    )
+    assert (
+        "Fields: any REST field under [Massive fields](#massive-fields)."
+        in pages["stocks.dividends.md"]
+    )
+    # The docstring's line already quotes every field, so the page does not list them again.
+    assert (
+        '| [`sort`](README.md#sort) | `"ticker"`, `"expiration_date"`, or `"strike_price"`. |\n'
+        in pages["options.chain.md"]
+    )
     # The method's own arguments set `type` and `date`, so neither is a filter.
     tickers = next(
-        line for line in pages["reference.tickers.md"].split("\n") if line.startswith("| `filters`")
+        line
+        for line in pages["reference.tickers.md"].split("\n")
+        if line.startswith("| [`filters`]")
     )
     assert "`type`" not in tickers
     assert "`date`" not in tickers
-    assert "`ticker_gte`" in tickers
+    assert "Keys: `ticker_gt`, `ticker_gte`," in tickers
+
+
+def test_every_link_on_a_real_page_has_its_anchor() -> None:
+    pages = rendered()
+    index = pages[INDEX]
+    for name, page in pages.items():
+        for anchor in re.findall(r"\]\(README\.md#([\w-]+)\)", page):
+            assert f'<a id="{anchor}"></a>' in index, (name, anchor)
+        for anchor in re.findall(r"\]\(#([\w-]+)\)", page):
+            assert f'<a id="{anchor}"></a>' in page, (name, anchor)
+
+
+def test_the_index_holds_every_shared_rule_and_the_pages_link_it() -> None:
+    pages = rendered()
+    for name, rule in ARGUMENT_RULES.items():
+        assert f'\n<a id="{name}"></a>\n\n### {name}\n\n{rule}\n' in pages[INDEX]
+    # No dataset page repeats a rule; each links it.
+    assert ARGUMENT_RULES["symbols"] not in pages["stocks.bars.md"]
     assert (
-        "| Time range | `start` and `end` are sent as `ex_dividend_date.gte` and"
-        in (pages["stocks.dividends.md"])
+        "| [`symbols`](README.md#symbols) | Stock tickers, or `dm.ALL`. |"
+        in pages["stocks.bars.md"]
     )
 
 
@@ -173,6 +208,11 @@ def test_the_real_pages_show_massives_plan_tables() -> None:
     snapshots = rendered()["snapshots.md"]
     assert "| Plan | Unified Snapshot (REST) |\n" in snapshots
     assert "| Stocks Starter | 15-minute delayed |\n" in snapshots
+    # Where such pages state different terms for one plan, each term names its page's class.
+    assert (
+        "| Currencies Basic | crypto: Updated as needed, 2 years; forex: Updated hourly, 2 years |"
+        in rendered()["reference.tickers.md"]
+    )
 
 
 def test_the_wire_columns_follow_the_order_of_every_supplied_by() -> None:
@@ -572,10 +612,10 @@ _CALLS = {
 }
 
 _FOOTER = (
-    "Generated by `uv run python scripts/render_reference.py` from Massive's documentation as "
-    "fetched on 2026-10-27. The descriptions and plan tables are Massive's, descriptions "
-    "corrected where they are clearly wrong; the library writes its own for the key columns "
-    "and the columns it computes."
+    "The plan tables and most column descriptions are Massive's, from its documentation as "
+    "fetched on 2026-10-27, with a few corrected where Massive's are wrong. The library writes "
+    "its own descriptions of the key columns and the columns it computes, such as `Symbol` and "
+    "`Date`."
 )
 
 
@@ -610,29 +650,31 @@ CATALOG_INSERT = next(
 
 def test_the_rendered_index() -> None:
     index = _rendered()[INDEX]
-    classes = (
-        "| Dataset | `m.stocks` | `m.options` | `m.futures` | `m.indices` | `m.forex` "
-        "| `m.crypto` |"
-    )
-    # `trades` is shared by two classes, so it has a grid row; the ratios are listed only.
-    grid = "| `trades` | [✓](stocks.trades.md) |  |  |  |  | [✓](crypto.trades.md) |"
-    assert f"\n{classes}\n| --- | --- | --- | --- | --- | --- | --- |\n{grid}\n\nTables of" in index
+    # `trades` is shared by two classes, so it has a row; the ratios are listed only.
+    grid = "| `trades` | [Stocks](stocks.trades.md), [Crypto](crypto.trades.md) |"
+    assert f"\n| Dataset | Asset classes |\n| --- | --- |\n{grid}\n\n## Stocks\n" in index
     assert "`financials.ratios` |" not in index
     stocks = (
-        "## `m.stocks`\n\n| Dataset | Summary | Verbs |\n| --- | --- | --- |\n"
+        "## Stocks\n\n| Dataset | Summary | Query methods |\n| --- | --- | --- |\n"
         "| [`m.stocks.trades`](stocks.trades.md) | Trades of stocks, tick by tick. "
-        "| blink, history |\n"
+        "| `blink()`, `history()` |\n"
         "| [`m.stocks.financials.ratios`](stocks.financials.ratios.md) | Financial ratios. | "
-        "fetch, poll |\n"
+        "`fetch()`, `poll()` |\n"
     )
     assert stocks in index
+    assert "\n## Shared arguments\n" in index
+    assert "\n## Merge tables from two asset classes\n" in index
     assert index.endswith(f"\n---\n\n{_FOOTER}\n")
-    # A catalog in which no two classes share a dataset has no grid.
+    # A catalog in which no two classes share a dataset has neither the table of shared
+    # datasets nor the merge recipe.
     alone = Catalog(
         (_RATIOS,),
         source_tables=lambda transport: {k: s for (t, k), s in _SOURCES.items() if t is transport},
     )
-    assert "By asset class" not in render(alone, _PROVENANCE, _CALLS)[INDEX]
+    lone = render(alone, _PROVENANCE, _CALLS)[INDEX]
+    assert "Datasets by asset class" not in lone
+    assert "Merge tables" not in lone
+    assert "## Shared arguments" in lone
 
 
 def test_the_rendered_stocks_trades_page() -> None:
@@ -647,37 +689,35 @@ def test_the_rendered_stocks_trades_page() -> None:
     insert = schema["TimestampInsert"].description
     raw = schema["RawSymbol"].description
     every = "REST, flat files, WebSocket"
-    rule = ARGUMENT_RULES["symbols"]
-    expected = f"""# `m.stocks.trades`
+    expected = f"""# m.stocks.trades
 
 <!-- Generated by `uv run python scripts/render_reference.py`; do not edit by hand. -->
 
 Trades of stocks, tick by tick.
 
+Call it from a session `m`:
+
 ```python
 m.stocks.trades(symbols)
 ```
 
-[All datasets](README.md)
+- Query methods: `blink()`, `history()`
+- Read from: REST, flat files, WebSocket
 
-|  |  |
-| --- | --- |
-| Verbs | `blink()`, `history()` |
-| Served by | REST, flat files, WebSocket |
+[Dataset index](README.md)
 
 ## Arguments
 
-What each argument does for this dataset, and the rule it follows for every dataset that takes \
-it.
+A linked argument follows the [shared rules](README.md#shared-arguments) on the dataset index.
 
-| Argument | For this dataset | For every dataset |
-| --- | --- | --- |
-| `symbols` | Stock tickers \\| or `dm.ALL`. | {rule} |
+| Argument | Description |
+| --- | --- |
+| [`symbols`](README.md#symbols) | Stock tickers \\| or `dm.ALL`. |
 
-## Plan access
+## Plans
 
-Which of Massive's plans include this dataset, how recent its data is on each, and how far \
-back its history goes, as Massive's pages state them.
+How recent the data is on each of Massive's plans, and how far back its history goes, as \
+Massive's pages state them.
 
 | Plan | Trades (Massive) | Trades (WebSocket) |
 | --- | --- | --- |
@@ -688,7 +728,7 @@ back its history goes, as Massive's pages state them.
 
 ## Columns
 
-| Column | Deephaven type | Description | Supplied by |
+| Column | Type | Description | Read from |
 | --- | --- | --- | --- |
 | `Symbol` | String | {symbol} | {every} |
 | `Date` | String | {day} | {every} |
@@ -697,10 +737,12 @@ back its history goes, as Massive's pages state them.
 | `Price` | double | The price, bid \\| ask. | {every} |
 | `TimestampInsert` | Instant | {insert} | {every} |
 
+<a id="massive-fields"></a>
+
 <details><summary>Massive fields</summary>
 
-The Massive field behind each column, per transport (`request` for a value the library fills \
-from the request; empty for a column the library computes).
+The Massive field behind each column, by source. `request` marks a value the library fills \
+from the request, and an empty cell a column the library computes.
 
 | Column | REST field | Flat-file field | WebSocket field |
 | --- | --- | --- | --- |
@@ -713,7 +755,7 @@ from the request; empty for a column the library computes).
 
 </details>
 
-Massive's documentation of this dataset:
+## Massive's documentation
 
 - [Trades (Massive)](https://docs.example/a)
 - [Trades (WebSocket)](https://massive.com/docs/websocket/stocks/trades)
@@ -728,23 +770,25 @@ Massive's documentation of this dataset:
 def test_the_rendered_ratios_page() -> None:
     page = _rendered()["stocks.financials.ratios.md"]
     facts = (
-        "| Verbs | `fetch()`, `poll()` |\n"
-        "| Served by | REST |\n"
-        "| `poll()` | `dm.PollMode.REPLACE`: holds exactly the latest cycle's rows, keyed by "
-        "`Symbol` |\n"
-        "| `sort` | any REST field of the rows (see Massive fields below), or several separated "
-        "by commas, each with an optional `.asc` or `.desc` |\n"
-        "| `filters` | `pe_gte` |\n"
+        "- Query methods: `fetch()`, `poll()`\n"
+        "- Read from: REST\n"
+        "- `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, "
+        "one row per `Symbol`\n"
     )
     assert facts in page
-    # An argument without a docstring line has an empty cell beside its shared rule.
-    assert f"| `sort` |  | {ARGUMENT_RULES['sort']} |\n" in page
+    # An argument without a docstring line shows only what the page adds to it.
+    assert (
+        "| [`sort`](README.md#sort) | Fields: any REST field under "
+        "[Massive fields](#massive-fields). |\n"
+        "| [`filters`](README.md#filters) | Keys: `pe_gte`. |\n"
+    ) in page
     # A page that lists no plan shows its summaries; a page of no plan tables adds nothing.
     assert "\n| Plan |" not in page
-    assert "\n- Ratios (Massive): Access.; Recency.\n" in page
-    # No RawSymbol column.
+    assert "\n- Ratios (Massive): Access. Recency.\n" in page
+    # No RawSymbol column, and no Read from column for a dataset of one transport.
     assert "RawSymbol" not in page
-    assert "| `PriceEarnings` | double | Price \\| earnings. | REST |\n" in page
+    assert "| Column | Type | Description |\n" in page
+    assert "| `PriceEarnings` | double | Price \\| earnings. |\n" in page
 
 
 def test_sort_and_filters_of_a_path_that_takes_neither() -> None:
@@ -758,29 +802,63 @@ def test_sort_and_filters_of_a_path_that_takes_neither() -> None:
         ),
     )
     page = render(catalog, _PROVENANCE, _CALLS)["stocks.financials.ratios.md"]
-    assert "| `sort` | not taken |\n| `filters` | none |\n" in page
+    assert (
+        "| [`sort`](README.md#sort) | Fields: none. |\n"
+        "| [`filters`](README.md#filters) | Keys: none. |\n"
+    ) in page
+
+
+def test_a_page_whose_arguments_have_no_shared_rule_does_not_link_the_rules() -> None:
+    call = dataclasses.replace(
+        _CALLS["crypto.trades"], arguments=("underlying",), descriptions=("The underlying.",)
+    )
+    page = render(_CATALOG, _PROVENANCE, {**_CALLS, "crypto.trades": call})["crypto.trades.md"]
+    assert "## Arguments\n\n| Argument | Description |\n" in page
+    assert "| `underlying` | The underlying. |\n" in page
+    assert "shared rules" not in page
+
+
+def test_a_plan_column_names_the_class_of_each_differing_term() -> None:
+    urls = ["https://docs.example/rest/crypto/ratios.md", "https://docs.example/rest/ratios.md"]
+    plans = {
+        urls[0]: _plan_page((("Stocks Basic", "Included", "Real-time", None),)),
+        urls[1]: _plan_page(
+            (
+                ("Stocks Basic", "Included", "End-of-day", None),
+                ("Stocks Starter", "Included", "Real-time", None),
+            )
+        ),
+    }
+    terms = Provenance(
+        fetched=dt.date(2026, 10, 27),
+        urls={(R, "/ratios"): urls},
+        plans=cast("Mapping[str, Any]", plans),
+        titles=dict.fromkeys(urls, "Ratios"),
+    )
+    page = render(_CATALOG, terms, _CALLS)["stocks.financials.ratios.md"]
+    # A URL that names no class leaves its term unnamed; a term both pages share is not named.
+    assert "| Stocks Basic | crypto: Real-time; End-of-day |\n" in page
+    assert "| Stocks Starter | Real-time |\n" in page
 
 
 def test_the_rendered_crypto_trades_page() -> None:
     page = _rendered()["crypto.trades.md"]
     # One wire-field column for the one transport the dataset reads, and its own URLs only.
     assert "| Column | WebSocket field |\n" in page
-    received = "| `Received` | Instant | When Massive received it. | WebSocket |\n"
-    assert received in page
-    links = (
-        "\nMassive's documentation of this dataset:\n\n"
-        "- [Crypto Trades (Massive)](https://docs.example/ws/crypto)\n"
-    )
+    assert "| `Received` | Instant | When Massive received it. |\n" in page
+    # An argument with neither a docstring line nor anything the page adds has an empty cell.
+    assert "| [`symbols`](README.md#symbols) |  |\n" in page
+    links = "\n## Massive's documentation\n\n- [Crypto Trades (Massive)](https://docs.example/ws/crypto)\n"
     assert page.endswith(f"</details>\n{links}\n---\n\n{_FOOTER}\n")
     # Its page has no plan tables.
-    assert "## Plan access" not in page
+    assert "## Plans" not in page
 
 
 def test_a_dataset_whose_sources_have_no_urls_has_no_url_list() -> None:
     bare = Provenance(fetched=dt.date(2026, 10, 27), urls={})
     page = render(_CATALOG, bare, _CALLS)["crypto.trades.md"]
     assert page.endswith(f"</details>\n\n---\n\n{_FOOTER}\n")
-    assert "documentation of this dataset" not in page
+    assert "## Massive's documentation" not in page
 
 
 def test_the_real_pages_link_only_the_datasets_own_class() -> None:
@@ -918,13 +996,13 @@ def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
     def page(call: str, rows: str) -> str:
         # The facts and the folded wire fields have rows that start like column rows too.
         return (
-            f"# `{call}`\n\nSummary.\n\n| `sort` | `ticker` |\n\n## Columns\n\n"
+            f"# {call}\n\nSummary.\n\n| `sort` | `ticker` |\n\n## Columns\n\n"
             f"| Column | Deephaven type |\n{rows}\n<details><summary>x</summary>\n\n"
             "| `Wire` | `w` |\n\n</details>\n\n## Later\n\n| `After` | long |\n"
         )
 
     before = {
-        INDEX: "# Dataset reference\n\n| `trades` | [✓](a.x.md) |\n",
+        INDEX: "# Dataset index\n\n| `trades` | [Stocks](a.x.md) |\n",
         "a.x.md": page("m.a.x", "| `Keep` | long |\n| `Gone` | double |\n| `Codes` | int[] |\n"),
         "b.y.md": page("m.b.y", "| `Only` | String |\n"),
     }
@@ -940,9 +1018,9 @@ def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
 
 
 def test_a_table_row_before_a_page_s_first_heading_belongs_to_no_dataset() -> None:
-    first = "# `m.a.x`\n\n## Columns\n\n| Column | Deephaven type |\n| `Keep` | long |\n"
+    first = "# m.a.x\n\n## Columns\n\n| Column | Deephaven type |\n| `Keep` | long |\n"
     second = (
-        "# B\n\n## Columns\n\n| `Stray` | String |\n\n# `m.b.y`\n\n## Columns\n\n"
+        "# B\n\n## Columns\n\n| `Stray` | String |\n\n# m.b.y\n\n## Columns\n\n"
         "| `Only` | String |\n"
     )
     report = column_changes({"a.md": first, "b.md": second}, {"a.md": first})
@@ -951,17 +1029,20 @@ def test_a_table_row_before_a_page_s_first_heading_belongs_to_no_dataset() -> No
 
 def test_the_merge_recipe_and_the_grid_are_on_the_index() -> None:
     pages = rendered()
-    assert "To merge them" in pages[INDEX]
-    assert "| `bars` | [✓](stocks.bars.md) | [✓](options.bars.md) |" in pages[INDEX]
-    assert "To merge them" not in pages["stocks.trades.md"]
+    assert "## Merge tables from two asset classes" in pages[INDEX]
+    assert "| `bars` | [Stocks](stocks.bars.md), [Options](options.bars.md)," in pages[INDEX]
+    assert "Merge tables" not in pages["stocks.trades.md"]
 
 
 def test_the_real_index_lists_each_shared_column_whose_type_differs() -> None:
     # Massive declares a snapshot's or a mover's trade size a whole number for stocks and a
     # decimal for crypto, so the index names the column and the cast that merges them.
     index = rendered()[INDEX]
-    assert "\n- `movers`: `LastTradeSize` is long for stocks, double for crypto\n" in index
-    assert "`LastTradeSize` is long for stocks, options and futures, double for crypto" in index
+    assert "\n| `movers` | `LastTradeSize` | long for stocks, double for crypto |\n" in index
+    assert (
+        "| `snapshots` | `LastTradeSize` | long for stocks, options and futures, double for crypto"
+        in index
+    )
     assert '`a.update("LastTradeSize = (double) LastTradeSize")`' in index
     # The test catalog's stock and crypto trades agree on every shared column's type.
     assert "Cast one table's column" not in _rendered()[INDEX]
@@ -969,10 +1050,9 @@ def test_the_real_index_lists_each_shared_column_whose_type_differs() -> None:
 
 def test_the_index_says_what_every_type_holds() -> None:
     index = _rendered()[INDEX]
-    legend = next(line for line in index.splitlines() if "Deephaven type is one of" in line)
     for column_type in ColumnType:
-        assert f"`{column_type.value}`, " in legend
-    assert "`long[]`, an array of `long`" in legend
+        assert f"\n| `{column_type.value}` | " in index
+    assert "| `long[]` | An array of `long` |" in index
 
 
 def test_each_vendor_link_is_labeled_and_opens_the_web_page() -> None:
@@ -988,7 +1068,7 @@ def test_each_vendor_link_is_labeled_and_opens_the_web_page() -> None:
     linked = Provenance(fetched=dt.date(2026, 10, 27), urls={(R, "/ratios"): urls}, titles=titles)
     page = render(_CATALOG, linked, _CALLS)["stocks.financials.ratios.md"]
     assert (
-        "Massive's documentation of this dataset:\n\n"
+        "## Massive's documentation\n\n"
         "- [Ratios (Massive, crypto)](https://docs.example/rest/crypto/ratios)\n"
         "- [Ratios (Massive)](https://docs.example/rest/more/ratios)\n"
         "- [Ratios (Massive)](https://docs.example/rest/ratios)\n"
