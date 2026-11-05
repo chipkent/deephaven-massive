@@ -574,7 +574,7 @@ class _Stocks(Namespace):
         - History is split-adjusted unless you pass `adjusted=False`. Streams and flat files serve
           bars as traded.
         - With `dm.ALL`, `history()` reads one-day bars. It also reads one-minute bars from flat
-          files when `adjusted=False`. Any other bar of `dm.ALL` raises.
+          files when `adjusted=False`. `history()` of any other bar of `dm.ALL` raises `ValueError`.
         - For only the previous day's bar, use `previous_day_bar()`.
 
         Args:

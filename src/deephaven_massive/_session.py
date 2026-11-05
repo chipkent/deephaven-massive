@@ -220,11 +220,9 @@ class MassiveSession:
     them all. In a `with` block, the session closes when the block ends. See
     https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables.
 
-    Massive allows one streaming connection per asset class by default. Sessions in one server that
-    use the same key and the same streaming settings share their connections. The streaming settings
-    include `websocket_hosts`, `max_outage`, and the reconnect timings. When two sessions' settings
-    differ, they compete for that one connection. A WARNING says so, and `m.connections()` shows the
-    waiting connection as `WAITING_SLOT`.
+    Use one session per API key. Massive allows one streaming connection per asset class by default,
+    so two sessions with the same key and different settings compete for it. A WARNING says so when
+    you create the second one.
 
     Example:
         ::

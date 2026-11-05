@@ -1252,8 +1252,8 @@ class Query(QueryBase):
                 call reads Massive's list of crypto tickers.
             EntitlementError: For a crypto dataset, if your plan doesn't include Massive's list of
                 crypto tickers.
-            MassiveError: If the session is closed, or a crypto pair you pass in code isn't on
-                Massive's list.
+            MassiveError: If the session is closed, or a crypto pair passed as a `str` or list isn't
+                on Massive's list.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")
@@ -1306,8 +1306,8 @@ class StreamQuery(QueryBase):
     is skipped and listed in `m.streams()`.
 
     Massive allows 1,000 option contracts on one connection, and the library counts a contract's
-    trades and quotes as two. Contracts listed in code beyond that raise `ValueError`. A watchlist's
-    extra contracts wait for room, and `Deferred` in `m.streams()` counts them.
+    trades and quotes as two. Contracts passed as a list beyond that raise `ValueError`. A
+    watchlist's extra contracts wait for room, and `Deferred` in `m.streams()` counts them.
 
     Example:
         ::
@@ -1419,7 +1419,7 @@ class StreamQuery(QueryBase):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts listed in code pass the connection's limit;
+                - a list of option contracts passes the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -1430,8 +1430,8 @@ class StreamQuery(QueryBase):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - a crypto pair you listed in code isn't on Massive's list of crypto tickers, or the
-                  list can't be read.
+                - a crypto pair passed as a `str` or list isn't on Massive's list of crypto tickers,
+                  or the list can't be read.
         """
         return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
@@ -1458,7 +1458,7 @@ class StreamQuery(QueryBase):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts listed in code pass the connection's limit;
+                - a list of option contracts passes the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -1469,8 +1469,8 @@ class StreamQuery(QueryBase):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - a crypto pair you listed in code isn't on Massive's list of crypto tickers, or the
-                  list can't be read.
+                - a crypto pair passed as a `str` or list isn't on Massive's list of crypto tickers,
+                  or the list can't be read.
         """
         return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
@@ -1501,7 +1501,7 @@ class StreamQuery(QueryBase):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts listed in code pass the connection's limit;
+                - a list of option contracts passes the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -1512,8 +1512,8 @@ class StreamQuery(QueryBase):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - a crypto pair you listed in code isn't on Massive's list of crypto tickers, or the
-                  list can't be read.
+                - a crypto pair passed as a `str` or list isn't on Massive's list of crypto tickers,
+                  or the list can't be read.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -1589,7 +1589,7 @@ class StreamQuery(QueryBase):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts listed in code pass the connection's limit;
+                - a list of option contracts passes the connection's limit;
                 - it opens a fair market value stream of a subscription in
                   `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -1600,8 +1600,8 @@ class StreamQuery(QueryBase):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - a crypto pair you listed in code isn't on Massive's list of crypto tickers, or the
-                  list can't be read.
+                - a crypto pair passed as a `str` or list isn't on Massive's list of crypto tickers,
+                  or the list can't be read.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()

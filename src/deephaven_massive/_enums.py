@@ -472,14 +472,14 @@ class OnError(StrEnum):
 
     One enum for every symbol problem, used in five places:
 
-    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The
-      default there is `RAISE`.
-    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols`
-      that is not Massive's exact ticker. A `str` or a list passed in code always raises,
-      whatever the setting. The default is `LOG`.
+    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The default
+      there is `RAISE`.
+    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols` that
+      is not Massive's exact ticker. A `str` or a list you pass always raises, whatever the setting.
+      The default is `LOG`.
     - `MassiveConfig.unlisted_symbols`, for a crypto pair of a table of symbols that Massive's
-      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default
-      is `LOG`.
+      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default is
+      `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
     - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
@@ -487,14 +487,13 @@ class OnError(StrEnum):
 
     The members:
 
-    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`),
-      and a live table fails when the bad value arrives.
-    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at
-      WARNING for a value the user supplied, and at ERROR, as a library defect to report, for
-      a spelling from Massive the library cannot read. `canonicalize_symbols` writes a null
-      symbol for the row; a bad row of a table of symbols is skipped and listed in its result's
-      `m.streams()` row; an unreadable spelling keeps its row with a null `Symbol` and the text
-      in the `RawSymbol` column.
+    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`), and a
+      live table fails when the bad value arrives.
+    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at WARNING for
+      a value the user supplied, and at ERROR, as a library defect to report, for a spelling from
+      Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
+      bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
+      unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Example:
