@@ -637,7 +637,7 @@ class QueryBase:
         Returns:
             A static table with one row per column, in result column order:
             `Name` (String), the column name; `Type` (String), its Deephaven type (`long`,
-            `int`, `double`, `boolean`, `String`, `Instant`, `long[]`, or `String[]`; every
+            `int`, `double`, `Boolean`, `String`, `Instant`, `long[]`, or `String[]`; every
             calendar date, such as `Date`, is ISO `yyyy-MM-dd` text, a `String`);
             `Description` (String), what the column holds, empty when Massive gives no
             description; and `SuppliedBy` (String), the sources that fill the column for this

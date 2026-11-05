@@ -47,7 +47,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Open` | double | The open price for the symbol in the given time period. |
 | `Close` | double | The close price for the symbol in the given time period. |
 | `ClosingTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |
-| `IsUtc` | boolean | Whether or not the timestamps are in UTC timezone. |
+| `IsUtc` | Boolean | Whether or not the timestamps are in UTC timezone. |
 | `OpenTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 

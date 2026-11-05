@@ -313,7 +313,7 @@ Each column has one of these Deephaven types:
 | --- | --- |
 | `double` | A 64-bit floating-point number, Python's `float` |
 | `long` | A 64-bit integer |
-| `boolean` | True or false |
+| `Boolean` | True or false |
 | `String` | Text |
 | `Instant` | An exact moment in time |
 | `long[]` | An array of `long` |
@@ -321,7 +321,7 @@ Each column has one of these Deephaven types:
 
 ## Columns whose type differs by asset class
 
-The same dataset in two asset classes, such as `m.stocks.snapshots` and `m.crypto.snapshots`, gives these columns different types. To merge two such tables, cast one table's column to the other's type first, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
+These columns have different types in different asset classes of the same dataset, such as `m.stocks.snapshots` and `m.crypto.snapshots`. To merge two such tables, select the same columns from each, then cast one table's column to the other's type, such as `a.update("LastTradeSize = (double) LastTradeSize")`:
 
 | Dataset | Column | Types |
 | --- | --- | --- |

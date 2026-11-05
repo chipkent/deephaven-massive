@@ -61,7 +61,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
-| `Active` | boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
+| `Active` | Boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. |
 | `Cik` | String | The CIK number for this ticker. Find more information here (https://en.wikipedia.org/wiki/Central_Index_Key). |

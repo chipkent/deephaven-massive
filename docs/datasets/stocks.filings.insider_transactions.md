@@ -50,11 +50,11 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0001209191-25-012345'). |
-| `Aff10b5One` | boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. |
+| `Aff10b5One` | Boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. |
 | `DateOfOriginalSubmission` | String | Date of the original filing submission for amendment filings (4/A). Null for standard filings (formatted as YYYY-MM-DD). |
 | `DeemedExecutionDate` | String | Deemed execution date if different from transaction date (formatted as YYYY-MM-DD). |
 | `DirectOrIndirect` | String | Whether ownership is direct ('D') or indirect ('I'). |
-| `EquitySwapInvolved` | boolean | Whether an equity swap was involved in the transaction. |
+| `EquitySwapInvolved` | Boolean | Whether an equity swap was involved in the transaction. |
 | `ExerciseDate` | String | Date exercisable for derivative securities (formatted as YYYY-MM-DD). |
 | `ExercisePrice` | double | Exercise or conversion price of derivative securities in USD. |
 | `ExpirationDate` | String | Expiration date for derivative securities (formatted as YYYY-MM-DD). |
@@ -62,14 +62,14 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. |
 | `Footnotes` | String | List of footnotes from the filing that are relevant to this row, each with an id and description. The column holds Massive's value as JSON text. |
 | `FormType` | String | SEC form type ('4' for standard filing, '4/A' for amendments). |
-| `IsDirector` | boolean | Whether the reporting owner is a director of the issuer. |
-| `IsOfficer` | boolean | Whether the reporting owner is an officer of the issuer. |
-| `IsOther` | boolean | Whether the reporting owner has another relationship with the issuer. |
-| `IsTenPercentOwner` | boolean | Whether the reporting owner holds 10% or more of a class of equity securities. |
+| `IsDirector` | Boolean | Whether the reporting owner is a director of the issuer. |
+| `IsOfficer` | Boolean | Whether the reporting owner is an officer of the issuer. |
+| `IsOther` | Boolean | Whether the reporting owner has another relationship with the issuer. |
+| `IsTenPercentOwner` | Boolean | Whether the reporting owner holds 10% or more of a class of equity securities. |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). |
 | `IssuerName` | String | Name of the issuer company as reported in the filing. |
 | `NatureOfOwnership` | String | Nature of indirect ownership (e.g., 'By Trust', 'By Spouse'). |
-| `NotSubjectToSection16` | boolean | Whether the reporting owner is not subject to Section 16 of the Securities Exchange Act. |
+| `NotSubjectToSection16` | Boolean | Whether the reporting owner is not subject to Section 16 of the Securities Exchange Act. |
 | `OfficerTitle` | String | Title of the officer, if the reporting owner is an officer. |
 | `OwnerCik` | String | SEC Central Index Key of the reporting owner (10 digits, zero-padded). |
 | `OwnerName` | String | Name of the reporting owner (individual or entity). |

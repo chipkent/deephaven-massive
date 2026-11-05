@@ -55,7 +55,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Volume` | double | The trading volume of the symbol in the given time period. Split-adjusted like the prices when the query's adjusted is True, the default, served only by REST: a volume from before a split is restated in the split's terms (multiplied by its ratio). With adjusted=False, from the flat files, and on the WebSocket it is as traded. | REST, flat files, WebSocket |
 | `Vwap` | double | The volume weighted average price. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. | REST, WebSocket |
 | `Transactions` | long | The number of transactions in the aggregate window. | REST, flat files |
-| `Otc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST, WebSocket |
+| `Otc` | Boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. | REST, WebSocket |
 | `DecimalVolume` | String | The tick volume including fractional shares, respresented as a string decimal number | WebSocket |
 | `AccumulatedVolume` | long | Today's accumulated volume. | WebSocket |
 | `AccumulatedDecimalVolume` | String | Today's accumulated volume including fractional shares, respresented as a string decimal number | WebSocket |

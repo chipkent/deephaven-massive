@@ -42,7 +42,7 @@ def test_column_types_map_to_arrow() -> None:
         "long",
         "int",
         "String",
-        "boolean",
+        "Boolean",
         "long[]",
         "String[]",
     }

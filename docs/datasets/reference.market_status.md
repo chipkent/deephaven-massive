@@ -45,10 +45,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `AfterHours` | boolean | Whether or not the market is in post-market hours. |
+| `AfterHours` | Boolean | Whether or not the market is in post-market hours. |
 | `CurrenciesCrypto` | String | The status of the crypto market. From the `currencies` object: Contains the status of various currency markets. |
 | `CurrenciesFx` | String | The status of the forex market. From the `currencies` object: Contains the status of various currency markets. |
-| `EarlyHours` | boolean | Whether or not the market is in pre-market hours. |
+| `EarlyHours` | Boolean | Whether or not the market is in pre-market hours. |
 | `ExchangesNasdaq` | String | The status of the Nasdaq market. From the `exchanges` object: Contains the status of different US stock exchanges (e.g., Nasdaq, NYSE). |
 | `ExchangesNyse` | String | The status of the NYSE market. From the `exchanges` object: Contains the status of different US stock exchanges (e.g., Nasdaq, NYSE). |
 | `ExchangesOtc` | String | The status of the OTC market. From the `exchanges` object: Contains the status of different US stock exchanges (e.g., Nasdaq, NYSE). |

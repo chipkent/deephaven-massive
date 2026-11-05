@@ -51,7 +51,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `DayVolume` | double | The trading volume of the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. |
 | `DayVwap` | double | The volume weighted average price. From the `day` object: The most recent daily bar for this ticker. |
 | `DayDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `day` object: The most recent daily bar for this ticker. |
-| `DayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `day` object: The most recent daily bar for this ticker. |
+| `DayOtc` | Boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `day` object: The most recent daily bar for this ticker. |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `LastQuoteBidPrice` | double | The bid price. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidSize` | long | The bid size in lots. From the `lastQuote` object: The most recent quote for this ticker. This is only returned if your current plan includes quotes. |
@@ -75,7 +75,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `LastMinuteAccumulatedDecimalVolume` | String | The accumulated volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. |
 | `LastMinuteDecimalVolume` | String | The volume including fractional shares, respresented as a string. From the `min` object: The most recent minute bar for this ticker. |
 | `LastMinuteTransactions` | long | The number of transactions in the aggregate window. From the `min` object: The most recent minute bar for this ticker. |
-| `LastMinuteOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `min` object: The most recent minute bar for this ticker. |
+| `LastMinuteOtc` | Boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `min` object: The most recent minute bar for this ticker. |
 | `LastMinuteWindowStart` | Instant | The Unix millisecond timestamp for the start of the aggregate window. From the `min` object: The most recent minute bar for this ticker. |
 | `PrevDayOpen` | double | The open price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
 | `PrevDayHigh` | double | The highest price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
@@ -83,7 +83,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
 | `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
 | `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. |
-| `PrevDayOtc` | boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `prevDay` object: The previous day's bar for this ticker. |
+| `PrevDayOtc` | Boolean | Whether or not this aggregate is for an OTC ticker. This field will be left off if false. From the `prevDay` object: The previous day's bar for this ticker. |
 | `TodaysChange` | double | The value of the change from the previous day. |
 | `TodaysChangePerc` | double | The percentage change since the previous day. |
 | `Updated` | Instant | The last updated timestamp. |

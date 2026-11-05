@@ -156,9 +156,9 @@ _DIFFERENCES_HEADING: Final = "Columns whose type differs by asset class"
 """The heading of the index's table of the shared columns whose type differs between classes."""
 
 _TYPE_DIFFERENCES: Final = (
-    "The same dataset in two asset classes, such as `m.stocks.snapshots` and "
-    "`m.crypto.snapshots`, gives these columns different types. To "
-    "merge two such tables, cast one table's column to the other's type first, such as "
+    "These columns have different types in different asset classes of the same dataset, such "
+    "as `m.stocks.snapshots` and `m.crypto.snapshots`. To merge two such tables, select the "
+    "same columns from each, then cast one table's column to the other's type, such as "
     '`a.update("LastTradeSize = (double) LastTradeSize")`:'
 )
 """The paragraph of the index over the shared columns whose type differs between classes."""

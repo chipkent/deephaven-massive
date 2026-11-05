@@ -6,7 +6,7 @@ carry their long-form PascalCase columns and wire types. This module turns those
 the dataset's table shape:
 
 - `ColumnType`, the closed set of Deephaven column types (`Instant`, `double`, `long`, `int`,
-  `String`, `boolean`, `long[]`, `String[]`), each with its Arrow type, and `COLUMN_TYPES`, the
+  `String`, `Boolean`, `long[]`, `String[]`), each with its Arrow type, and `COLUMN_TYPES`, the
   fixed map from a field's `WireType` to its column type. Every calendar date is ISO `yyyy-MM-dd`
   text, a `String`, so a date joins and compares as text; `Column.calendar_date` marks those
   columns, and the Deephaven side stores one shared `String` per distinct date (`_tables/columns.py`
@@ -103,7 +103,7 @@ class ColumnType(StrEnum):
     LONG = "long"
     INT = "int"
     STRING = "String"
-    BOOLEAN = "boolean"
+    BOOLEAN = "Boolean"
     LONG_ARRAY = "long[]"
     STRING_ARRAY = "String[]"
 
