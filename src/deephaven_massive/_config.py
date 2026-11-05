@@ -207,7 +207,7 @@ class MassiveConfig:
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
         delayed_subscriptions: Lists the subscriptions whose plan gets Massive's delayed data, as
-            Stocks Starter and Developer do, so their streams and current data work. Defaults to an
+            Stocks Starter and Developer do, so their streams and snapshots work. Defaults to an
             empty set.
 
             The delayed feed runs 15 minutes late, or 10 for futures. Leave a delayed subscription
@@ -233,10 +233,9 @@ class MassiveConfig:
             alone, with no scheme, port, or path. Fair Market Value (FMV) streams always use
             `business.massive.com`.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
-            channel before the library asks again. Raise it on a slow network. Defaults to 5
-            seconds.
+            channel before the library asks again. Defaults to 5 seconds.
 
-            Must be below 60 seconds.
+            Must be below 60 seconds. Raise it on a slow network.
         reconnect_backoff: Sets the shortest wait, in seconds, before reconnecting a dropped stream.
             Defaults to 30 seconds.
 
@@ -285,8 +284,8 @@ class MassiveConfig:
         s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
 
             Change it only with `s3_endpoint_url`.
-        noncanonical_symbols: Decides what happens to a row of a table you pass, such as a
-            watchlist, whose value isn't Massive's exact ticker or code for the dataset. Defaults to
+        noncanonical_symbols: Decides what happens when a table you pass, such as a watchlist,
+            holds a value that isn't Massive's exact ticker or futures product code. Defaults to
             `LOG`.
 
             Set `dm.OnError.RAISE` to catch a typo in a watchlist at once. Under `dm.OnError.LOG` or
@@ -296,8 +295,8 @@ class MassiveConfig:
             `dm.OnError.RAISE` raises `ValueError` for a bad row at the call, and fails the live
             table when one is added later. A symbol passed in code, as text or a list, that isn't
             Massive's exact ticker always raises `ValueError`.
-        unlisted_symbols: Decides what happens to a crypto pair in a table you pass that the library
-            can't match to Massive's crypto ticker list. Defaults to `LOG`.
+        unlisted_symbols: Decides what happens when a table you pass, such as a watchlist, holds a
+            crypto pair that isn't on Massive's crypto ticker list. Defaults to `LOG`.
 
             It applies to streams and to calls for a pair's last trade or daily open and close.
             Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, the pair is skipped. A stream keeps its
@@ -317,7 +316,7 @@ class MassiveConfig:
             Massive's text goes in a `RawSymbol` column. `dm.OnError.RAISE` fails the call or stream
             that received it, naming the spelling, and the dataset has no `RawSymbol` column.
         unavailable_symbols: Decides what happens to a symbol Massive answers as not found, or one a
-            `poll()` can't ask for with its arguments. Defaults to `LOG`.
+            `poll()` can't request with the arguments you gave it. Defaults to `LOG`.
 
             That's a symbol Massive answers with HTTP 404, in any call, or, in a `poll()`, one the
             poll can't read, such as a crypto pair in an indicator poll with `adjusted=False`. Under
@@ -1517,9 +1516,9 @@ def _value_forms() -> dict[str, str]:
         "unreadable_symbols": symbol_words,
         "unavailable_symbols": symbol_words,
         "websocket_hosts": f"A mapping from any of {_spellings(AssetClass)} to a lower-case "
-        "hostname, such as `{indices: business.massive.com}`. A `delayed.` host goes only with "
-        "a subscription in `delayed_subscriptions`, and such a subscription takes only a "
-        "`delayed.` host",
+        "hostname, such as `{indices: business.massive.com}`. Pin a `delayed.` host only for an "
+        "asset class whose subscription is in `delayed_subscriptions`, and pin only a `delayed.` "
+        "host for that class",
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "

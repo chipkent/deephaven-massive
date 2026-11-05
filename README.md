@@ -128,7 +128,8 @@ in your browser. Keep the terminal open while you work, and press Control-C ther
 server.
 
 Next, run the tutorial's [first example](#read-daily-bars). If a step fails,
-[Troubleshooting](docs/troubleshooting.md#setup-messages) lists each setup message and its fix.
+[Troubleshooting](docs/troubleshooting.md#setup-messages) lists common setup problems and their
+fixes.
 
 <a id="tutorial"></a>
 
@@ -570,14 +571,20 @@ each on its own plan. Two settings match a session to your plans:
 | `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
 | `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
 
-This session is for an account with Stocks Starter and Options Basic:
+This session is for an account that has bought only Stocks Starter. Every product you haven't
+bought is on its free Basic plan:
 
 ```python
 import deephaven_massive as dm
 
 config = dm.MassiveConfig(
     delayed_subscriptions={dm.Subscription.STOCKS},
-    rest_basic_subscriptions={dm.Subscription.OPTIONS},
+    rest_basic_subscriptions={
+        dm.Subscription.OPTIONS,
+        dm.Subscription.INDICES,
+        dm.Subscription.CURRENCIES,
+        dm.Subscription.FUTURES,
+    },
 )
 m = dm.MassiveSession(config)
 ```

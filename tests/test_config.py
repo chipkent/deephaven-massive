@@ -1143,7 +1143,7 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["unavailable_symbols"] == (
         "Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't "
-        "ask for with its arguments."
+        "request with the arguments you gave it."
     )
 
 

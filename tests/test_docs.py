@@ -695,7 +695,12 @@ def test_the_settings_pages_example_file_loads_as_its_comments_say(
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     config = dm.MassiveConfig.from_file(file)
     assert config.delayed_subscriptions == {dm.Subscription.STOCKS}
-    assert config.rest_basic_subscriptions == {dm.Subscription.OPTIONS}
+    assert config.rest_basic_subscriptions == {
+        dm.Subscription.OPTIONS,
+        dm.Subscription.INDICES,
+        dm.Subscription.CURRENCIES,
+        dm.Subscription.FUTURES,
+    }
     assert config.max_outage == 600
     assert config.noncanonical_symbols is dm.OnError.RAISE
 
