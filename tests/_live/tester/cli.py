@@ -6,7 +6,7 @@
 - `check [--folder DIR] [--console-python PATH | --docker-image NAME]` checks both setups and
   the key (`setup_check.check_setup`) and prints one line per item, then `ready: yes` or
   `ready: no`, and saves the same lines in `DIR/setup-check.txt` for the bug report. The
-  console install is the Python at `PATH` (`~/massive-test/dh-venv/bin/python` by default)
+  console install is the Python at `PATH` (`~/dh-massive/bin/python` by default)
   or the Docker image `NAME`. Exit 0 when no item failed, else 1.
 - `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
   `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
@@ -54,15 +54,15 @@ FOLDER_VARIABLE: Final = "MASSIVE_TEST_FOLDER"
 EXAMPLES_FOLDER: Final = Path("docs") / "tester-examples"
 """The examples, relative to the repository root."""
 
-CONSOLE_PYTHON: Final = Path("~/massive-test/dh-venv/bin/python")
-"""The console install's Python, as the guide makes it."""
+CONSOLE_PYTHON: Final = Path("~/dh-massive/bin/python")
+"""The console install's Python: the virtual environment the README's Install section makes."""
 
 CHECK_OUTPUT: Final = "setup-check.txt"
 """The file in the tester's folder where `check` saves what it printed, for the bug report."""
 
 NO_KEY: Final = (
-    "MASSIVE_API_KEY is not set in this terminal. Set it, then run the command again: "
-    "printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY"
+    "MASSIVE_API_KEY is not set in this terminal. Add it to your shell's startup file, as the "
+    "README's Set your API keys step shows, then open a new terminal and run the command again."
 )
 """What a command says when the API key is not set."""
 
@@ -93,7 +93,7 @@ def parser() -> argparse.ArgumentParser:
                 "--console-python",
                 type=Path,
                 default=CONSOLE_PYTHON,
-                help="the console install's Python (default: ~/massive-test/dh-venv/bin/python)",
+                help="the console install's Python (default: ~/dh-massive/bin/python)",
             )
             console.add_argument(
                 "--docker-image", default="", help="the console install's Docker image instead"

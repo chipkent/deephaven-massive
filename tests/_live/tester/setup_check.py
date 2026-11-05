@@ -3,10 +3,11 @@
 `docs/tester-guide.md` has the tester build two setups from one pinned version:
 
 - **the console install**, the library inside a Deephaven server, for the exercises in the
-  web console: a Python virtual environment with `deephaven-server` and the library installed
-  by pip from the repository's tag (`~/massive-test/dh-venv` by default), or, as the
-  alternative, a Docker image built from `ghcr.io/deephaven/server` with the library
-  installed from the checkout and the commit in its `deephaven-massive.commit` label;
+  web console: the virtual environment the README's Install section makes, with
+  `deephaven-server` and the library installed from the repository's tag (`~/dh-massive` by
+  default), or, as the alternative, a Docker image built from `ghcr.io/deephaven/server` with
+  the library installed from the checkout and the commit in its `deephaven-massive.commit`
+  label;
 - **the source checkout** of the same tag, with `uv` and JDK 17, for the live-run program.
 
 `check_setup` checks both, read only: the live-run program's machine checks
@@ -79,7 +80,7 @@ def console_command(console_python: Path | None, docker_image: str) -> list[str]
     """Return the command that runs `INSPECT_CONSOLE` in the console install.
 
     Args:
-        console_python: The console's Python, such as `~/massive-test/dh-venv/bin/python`.
+        console_python: The console's Python, such as `~/dh-massive/bin/python`.
         docker_image: The Docker image instead, or `""`.
 
     Returns:

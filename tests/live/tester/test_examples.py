@@ -260,6 +260,7 @@ def test_every_example_runs_against_the_fake_market(
         "connections.csv",
         "rate_limits.csv",
         "streams.csv",
+        "symbol_reads.csv",
     ]
     assert KEY not in "".join(p.read_text() for p in out.rglob("*.*"))
     assert len((out / "summary.txt").read_text().splitlines()) == len(files)
@@ -292,7 +293,7 @@ def test_the_paid_examples_run_on_streams_from_the_fake_server(
         "aapl_today",
         "crypto_latest",
         "trades_per_minute",
-        "crypto_board",
+        "latest_trades",
         "gainer_trades",
     ):
         assert name in made
