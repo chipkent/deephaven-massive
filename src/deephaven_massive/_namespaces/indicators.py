@@ -174,10 +174,12 @@ def _check_window(name: str, value: object) -> int:
 
 
 class _Indicators(Namespace):
-    """`m.indicators`: the technical indicator datasets of a session.
+    """The technical indicator datasets, reached as `m.indicators`.
 
-    Created once by `MassiveSession` and reached as `m.indicators`. It holds no state of its
-    own, so it is safe to use from any thread; each method builds a query and never blocks.
+    Its methods cover the simple and exponential moving averages, the relative strength index, and
+    the moving average convergence/divergence. Massive computes them from its bars, for tickers of
+    any asset class. Each method only builds a query, so it never blocks. You can call it from any
+    thread.
 
     Example:
         ::
@@ -185,10 +187,8 @@ class _Indicators(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2025-01-01", end="2025-06-30")
-            macd = m.indicators.macd("AAPL", timespan=dm.Timespan.HOUR, end="2025-06-30", limit=100)
-            averages = sma.fetch()
-            hourly = macd.fetch()
+            averages = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2026-01-02").fetch()
+            hourly = m.indicators.macd("AAPL", timespan=dm.Timespan.HOUR, limit=100).fetch()
     """
 
     __slots__ = ()
@@ -283,47 +283,48 @@ class _Indicators(Namespace):
     ) -> Query:
         """The simple moving average of a ticker's bars, one row per bar.
 
-        Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
-        `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
-        New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
-        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
-        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
-        value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
+        day, in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a
+        `limit` with the default newest-first order; without either, the call reads the whole
+        series.
+
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See README.md#symbols.
-            window: The number of bars averaged, a positive `int`; 50 by default.
-            timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
-            series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
-            adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See README.md#adjusted.
-            start: The first bar start. See README.md#start-and-end.
-            end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
-            order: The timestamp order (the endpoints have no `sort`). See
-                README.md#sort-order-limit.
-            limit: The most rows for each symbol. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
+            window: The number of bars averaged.
+            timespan: The bar size, `MINUTE` or longer.
+            series_type: The bar price the indicator is computed from.
+            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
+                a crypto symbol.
+            start: The first bar's start.
+            end: The end of the range, of the same kind as `start`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
+            limit: The most rows for each symbol.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.sma.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.sma.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or None, the timespan is one the endpoints refuse,
-                a window is not positive, a `datetime` is naive, the range ends before it starts, or
-                a filter is unknown.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                pairs = ["AAPL", "X:BTCUSD"]
-                sma = m.indicators.sma(pairs, start="2025-01-01", end="2025-06-30").fetch()
+                sma = m.indicators.sma(["AAPL", "X:BTCUSD"], start="2026-01-02").fetch()
         """
         return self._query(
             SMA,
@@ -356,46 +357,48 @@ class _Indicators(Namespace):
     ) -> Query:
         """The exponential moving average of a ticker's bars, one row per bar.
 
-        Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
-        `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
-        New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
-        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
-        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
-        value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
+        day, in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a
+        `limit` with the default newest-first order; without either, the call reads the whole
+        series.
+
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See README.md#symbols.
-            window: The number of bars the average spans, a positive `int`; 50 by default.
-            timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
-            series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
-            adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See README.md#adjusted.
-            start: The first bar start. See README.md#start-and-end.
-            end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
-            order: The timestamp order (the endpoints have no `sort`). See
-                README.md#sort-order-limit.
-            limit: The most rows for each symbol. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
+            window: The number of bars the average spans.
+            timespan: The bar size, `MINUTE` or longer.
+            series_type: The bar price the indicator is computed from.
+            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
+                a crypto symbol.
+            start: The first bar's start.
+            end: The end of the range, of the same kind as `start`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
+            limit: The most rows for each symbol.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.ema.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.ema.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or None, the timespan is one the endpoints refuse,
-                a window is not positive, a `datetime` is naive, the range ends before it starts, or
-                a filter is unknown.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                ema = m.indicators.ema("AAPL", 20, start="2025-01-01", end="2025-06-30").fetch()
+                ema = m.indicators.ema("AAPL", 20, start="2026-01-02", end="2026-06-30").fetch()
         """
         return self._query(
             EMA,
@@ -428,48 +431,47 @@ class _Indicators(Namespace):
     ) -> Query:
         """The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 
-        Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
-        `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
-        New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
-        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
-        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
-        value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        Each row holds the index for one bar, with the bar's start and end. `Date` is the bar's day,
+        in UTC for crypto and forex and in New York time for the rest. Pass `start`, or a `limit`
+        with the default newest-first order; without either, the call reads the whole series.
+
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See README.md#symbols.
-            window: The number of bars looked back over, a positive `int`; 14 by default.
-            timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
-            series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
-            adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See README.md#adjusted.
-            start: The first bar start. See README.md#start-and-end.
-            end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
-            order: The timestamp order (the endpoints have no `sort`). See
-                README.md#sort-order-limit.
-            limit: The most rows for each symbol. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
+            window: The number of bars looked back over.
+            timespan: The bar size, `MINUTE` or longer.
+            series_type: The bar price the indicator is computed from.
+            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
+                a crypto symbol.
+            start: The first bar's start.
+            end: The end of the range, of the same kind as `start`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
+            limit: The most rows for each symbol.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.rsi.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.rsi.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or None, the timespan is one the endpoints refuse,
-                a window is not positive, a `datetime` is naive, the range ends before it starts, or
-                a filter is unknown.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                rsi = m.indicators.rsi(
-                    "AAPL", timespan=dm.Timespan.HOUR, end="2025-06-30", limit=100
-                ).fetch()
+                rsi = m.indicators.rsi("AAPL", timespan=dm.Timespan.HOUR, limit=100).fetch()
         """
         return self._query(
             RSI,
@@ -504,48 +506,50 @@ class _Indicators(Namespace):
     ) -> Query:
         """The moving average convergence/divergence of a ticker's bars, one row per bar.
 
-        Served by one REST request per symbol; a `poll()` table is keyed by `Symbol` and
-        `TimestampStart`. `Date` is the bar's day in its class's day zone (UTC for crypto and forex,
-        New York otherwise). Without `start` the whole series is read, so pass `start`, or a `limit`
-        with the default newest-first order. A `poll()`, or a `fetch()` whose `end` is None or
-        today, reads current data: on a delayed plan it raises `dm.EntitlementError` unless the
-        subscription is in `MassiveConfig.delayed_subscriptions`. A past `end` is never checked.
-        See README.md#real-time-or-delayed. `fetch()` and `poll()` include the current period's
-        value, which changes until the period ends; keep finished values with
-        `t.where("TimestampEnd <= TimestampInsert")`. A `poll(mode=dm.PollMode.APPEND)` table
-        keeps the first unfinished value it sees and never receives the finished one, so the
-        filter drops that period for good; `poll()` in its default mode holds the updated value.
+        Each row holds one bar's MACD line in `Value`, its signal line in `Signal`, and their
+        difference in `Histogram`, with the bar's start and end. `Date` is the bar's day, in UTC for
+        crypto and forex and in New York time for the rest. Pass `start`, or a `limit` with the
+        default newest-first order; without either, the call reads the whole series.
+
+        A read through today includes the current bar's value, which changes until the bar ends.
+        `t.where("TimestampEnd <= TimestampInsert")` keeps only finished values. A `poll()` in
+        `APPEND` mode keeps the first value it reads of each bar, so a bar read before it ended
+        never gets its finished value. On a delayed plan, reading through today raises
+        `dm.EntitlementError` unless the subscription is in `MassiveConfig.delayed_subscriptions`.
 
         Args:
-            symbols: Tickers of any asset classes (each prefix selects the class), or a table.
-                `dm.ALL` is refused. See README.md#symbols.
-            short_window: The bars of the fast exponential average; 12 by default.
-            long_window: The bars of the slow exponential average; 26 by default.
-            signal_window: The bars of the signal line's average; 9 by default.
-            timespan: The bar size, `MINUTE` or longer; `DAY` by default, as Massive's.
-            series_type: The bar price used, a `dm.SeriesType`; `CLOSE` by default.
-            adjusted: Split-adjusted bars (default True). The crypto endpoint has no such parameter,
-                so False fails the verb for a crypto symbol. See README.md#adjusted.
-            start: The first bar start. See README.md#start-and-end.
-            end: The end of the range, of the same kind as `start`. See README.md#start-and-end.
-            order: The timestamp order (the endpoints have no `sort`). See
-                README.md#sort-order-limit.
-            limit: The most rows for each symbol. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            symbols: Tickers of any asset class. `dm.ALL` is refused.
+            short_window: The bars of the fast exponential average.
+            long_window: The bars of the slow exponential average.
+            signal_window: The bars of the signal line's average.
+            timespan: The bar size, `MINUTE` or longer.
+            series_type: The bar price the indicator is computed from.
+            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
+                a crypto symbol.
+            start: The first bar's start.
+            end: The end of the range, of the same kind as `start`.
+            order: The direction of the bars' times. The endpoints have no `sort`.
+            limit: The most rows for each symbol.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/indicators.macd.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indicators.macd.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL` or None, the timespan is one the endpoints refuse,
-                a window is not positive, a `datetime` is naive, the range ends before it starts, or
-                a filter is unknown.
+            ValueError: If:
+                - `symbols` is None or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker;
+                - the timespan is `SECOND` or `SESSION`;
+                - a window isn't positive;
+                - a bound is a time without a time zone, or the range ends before it starts;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                macd = m.indicators.macd("AAPL", start="2025-01-01", end="2025-06-30").fetch()
+                macd = m.indicators.macd("AAPL", start="2026-01-02", end="2026-06-30").fetch()
         """
         return self._query(
             MACD,

@@ -1,0 +1,7 @@
+---
+type: llm
+focus: trace
+weight: 1
+---
+
+Every number, plan statement, and command in first-examples.md has a source in src/deephaven_massive, docs/datasets, vendor/massive, or Deephaven's docs; nothing is estimated.

@@ -30,7 +30,7 @@ calls `System.exit(1)`: in a user's Deephaven server, that ends the server.
 
 The library releases every scope under the update graph's shared lock (`release_scope`), so its
 own releases never destroy a table that way. Deephaven's own releases do not take the lock: a
-gRPC thread drops a released export's reference when a user closes a panel in the web UI, and
+gRPC thread drops a released export's reference when a user closes a panel in the Deephaven IDE, and
 the liveness-cleanup thread drops the references of a table the JVM collected. A user's thread
 may release a derived table the same way. Any of them can drop the last reference to the blink
 table while its failure is queued, so the library pins the table as well.

@@ -8,7 +8,8 @@ the network. What a dataset's columns mean is its query's `columns()` and the da
 page that each row links.
 
 `dataset_calls` pairs each dataset with the session method that serves it, for the generated
-dataset reference: the method's signature as a user writes it, and the verbs its queries have.
+dataset reference: the method's signature as a user writes it, the verbs its queries have, with
+each verb's call and summary, and each argument's line from the method's docstring.
 The dataset layer renders the pages but may not import the methods, so the reference command
 and its parity test build these here and pass them down.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import enum
 import inspect
+import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -26,9 +28,14 @@ from deephaven.jcompat import j_hashmap
 from deephaven.table import Table
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._datasets.column_reference import DatasetCall, call_path, page_url
+from deephaven_massive._datasets.column_reference import (
+    DatasetCall,
+    QueryMethod,
+    call_path,
+    page_url,
+)
 from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import verbs
+from deephaven_massive._query import Query, StreamHistoryQuery, verbs
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES, MassiveSession
 
 if TYPE_CHECKING:
@@ -43,8 +50,8 @@ DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Dataset": "The dataset's name: its namespace and method, such as stocks.trades.",
         "Call": "How a session m reaches the dataset, such as m.stocks.trades.",
         "Summary": "What the dataset holds, in one sentence.",
-        "Verbs": (
-            "The verbs its queries have, such as fetch and poll. Bars stream only at some "
+        "Methods": (
+            "The methods its queries have, such as fetch and poll. Bars stream only at some "
             "timespans, as their docstring says."
         ),
         "Transports": "Where its rows come from: REST, flat files, WebSocket.",
@@ -65,15 +72,12 @@ def datasets() -> Table:
     Returns:
         A static table, in the order the namespaces declare their datasets, with the columns
         `Dataset` (String, such as `stocks.trades`), `Call` (String, how a session `m` reaches
-        it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Verbs` (String[],
-        the verbs its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
-        `ring`, `last_by`, `history`), `Transports` (String[], the transports that serve it,
+        it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Methods` (String[],
+        the methods its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
+        `ring`, `last_by`, `history`), `Transports` (String[], where the library reads it from,
         spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
-        Each column carries a description, shown as its tooltip in the web UI.
-
-    The table is created on the calling thread, in the liveness scope at the top of its stack,
-    as any static table the caller makes is.
+        Each column carries a description, shown as its tooltip in the Deephaven IDE.
 
     Example:
         ::
@@ -81,7 +85,7 @@ def datasets() -> Table:
             import deephaven_massive as dm
 
             catalog = dm.datasets()
-            streams = catalog.where("Arrays.asList(Verbs).contains(`blink`)")
+            streams = catalog.where("Arrays.asList(Methods).contains(`blink`)")
             news = catalog.where("Summary.toLowerCase().contains(`news`)")
     """
     specs = tuple(CATALOG.by_name.values())
@@ -90,7 +94,7 @@ def datasets() -> Table:
             string_col("Dataset", [spec.name for spec in specs]),
             string_col("Call", [call_path(spec) for spec in specs]),
             string_col("Summary", [spec.summary for spec in specs]),
-            _string_arrays("Verbs", [verbs(spec) for spec in specs]),
+            _string_arrays("Methods", [verbs(spec) for spec in specs]),
             _string_arrays(
                 "Transports",
                 [
@@ -126,12 +130,25 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
     )
 
 
+_QUERY_CLASSES: Final = (Query, StreamHistoryQuery)
+"""The query classes that between them define every verb, read for each verb's call and summary."""
+
+_RETURN: Final = "Return "
+"""The verb a query method's docstring summary starts with, which the reference drops."""
+
 _AS_OF: Final = "as_of"
 """The shared argument for the day a reference list is read as of, which sets `date`."""
 
+_ARGS_SECTION: Final = re.compile(r"^Args:\n((?:[ \t].*(?:\n|$)|\n)*)", re.MULTILINE)
+"""A docstring's `Args` section: the `Args:` line and every indented or blank line after it,
+the docstring's last line included, which `inspect.getdoc` leaves without a newline."""
+
+_ARGS_ENTRY: Final = re.compile(r"^    (\w+): (.*)$")
+"""One argument's first line in an `Args` section: its name, then the start of its text."""
+
 
 def dataset_calls() -> Mapping[str, DatasetCall]:
-    """Return how each dataset is called: its method's signature, verbs, and arguments.
+    """Return how each dataset is called: its method's signature, verbs, and documented arguments.
 
     Walks every namespace class of the namespace modules, whose public methods are named by
     their path from the session (`stocks.bars`, which `Namespace` sets as each method's
@@ -187,7 +204,8 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         method: Its method; its first parameter is `self`.
 
     Returns:
-        Its signature as written from a session `m`, its verbs, and its arguments' wire names.
+        Its signature as written from a session `m`, its verbs and their calls, and its
+        arguments' lines and wire names.
     """
     parameters = list(inspect.signature(method).parameters.values())[1:]
     parts: list[str] = []
@@ -212,7 +230,61 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         verbs=verbs(spec),
         arguments=tuple(param.name for param in parameters),
         typed=tuple(typed),
+        descriptions=tuple(_argument_lines(method).get(param.name, "") for param in parameters),
+        methods=tuple(_query_method(verb) for verb in verbs(spec)),
     )
+
+
+def _query_method(verb: str) -> QueryMethod:
+    """Describe one query method as the reference shows it.
+
+    Args:
+        verb: The verb, such as `"poll"`; one of the query classes defines it.
+
+    Returns:
+        Its call, with its positional arguments and their defaults (`poll(interval)`,
+        `history(start, end=None)`), and its docstring's first line without its leading
+        "Return ", such as "A live table that fetches the query again every `interval`.".
+    """
+    method = next(getattr(c, verb) for c in _QUERY_CLASSES if hasattr(c, verb))
+    parameters = list(inspect.signature(method).parameters.values())[1:]
+    shown = [
+        param.name
+        if param.default is inspect.Parameter.empty
+        else f"{param.name}={_default(param.default)}"
+        for param in parameters
+        if param.kind is not inspect.Parameter.KEYWORD_ONLY
+    ]
+    summary = (inspect.getdoc(method) or "").split("\n", 1)[0].removeprefix(_RETURN)
+    return QueryMethod(
+        name=verb, call=f"{verb}({', '.join(shown)})", summary=summary[:1].upper() + summary[1:]
+    )
+
+
+def _argument_lines(method: Callable[..., object]) -> dict[str, str]:
+    """Read each argument's entry from the `Args` section of a method's docstring.
+
+    Args:
+        method: A dataset method, whose docstring follows the Google style: an `Args:` line,
+            then one entry per argument, `name: text`, indented one level, its text running on
+            over lines indented further.
+
+    Returns:
+        Each entry's text by argument name, its lines joined by single spaces, such as
+        `{"start": "The first ex-dividend date."}`; empty for a method without an `Args`
+        section.
+    """
+    section = _ARGS_SECTION.search(inspect.getdoc(method) or "")
+    lines: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in (section[1] if section else "").splitlines():
+        entry = _ARGS_ENTRY.match(line)
+        if entry:
+            current = lines.setdefault(entry[1], [])
+            current.append(entry[2])
+        elif line.strip():
+            current.append(line.strip())
+    return {name: " ".join(parts) for name, parts in lines.items()}
 
 
 def _wire_name(argument: str, wire: AbstractSet[str]) -> str:

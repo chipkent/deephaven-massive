@@ -3,7 +3,8 @@
 **Every PR description reads as if an O'Reilly technical editor wrote it, and a reader
 skimming only the headings, the first words of each bullet, and the table rows comes away with
 every fact that matters**: what changed, why, the decisions, how it was checked, and what is
-left. Nothing important hides in a paragraph, and nothing is left out to save space.
+left. Nothing important hides in a paragraph. The description holds every fact the reader
+needs to understand or decide, and nothing they don't.
 
 An editor's text has:
 
@@ -43,7 +44,9 @@ to every commit subject.
 - **Current.** Retitle when the scope changes: `gh pr edit <n> --title`.
 
 CI checks what a program can (the type, the scope, the lowercase start, the period, the length)
-and comments on the PR when a rule breaks. Run it first:
+and comments on the PR when a rule breaks. Dependabot's own pull requests are exempt from the
+length rule and may start the summary with a capital letter, since Dependabot sets both. Run it
+first:
 
 ```bash
 uv run python scripts/check_pr_title.py "fix: stop a failed live table from crashing the server"
@@ -64,7 +67,8 @@ Prefer scannable structure: short headings, bullets, numbered steps, and tables.
 one idea, short, and parallel to its neighbors. Use a paragraph only where prose reads better:
 the Summary, or one decision that needs a sentence of reasoning. No walls of text.
 
-As long as the content needs and no longer: cut padding, repetition and narration, never facts.
+Every fact the reader needs to understand or decide, and nothing they don't: cut padding,
+repetition, narration, and true details the reader has no use for.
 
 ### Sections
 
@@ -147,8 +151,10 @@ Run it on every draft, and before every push that changes the PR:
    and why.
 4. **A reviewer new to the PR knows why it exists and can follow every section without
    asking.**
-5. **Cut padding, never facts.** Delete every sentence that is padding, repetition, or
-   narration; keep every fact the reader needs, however complex the PR.
+5. **Every fact the reader needs, and nothing they don't.** Delete every sentence that is
+   padding, repetition, narration, or a detail the reader has no use for (a private name, a
+   test count); keep every fact the reader needs to understand or decide, however complex the
+   PR.
 6. **Sweep for the banned patterns** above, starting with a grep for narration and hedges, and
    fix every hit that is one:
 

@@ -67,7 +67,7 @@ the lock): `close()` waits neither for the
 diagnostics writer nor for the cycle that applies its final rows, and a verb never waits for
 another thread's open of the same stream (see below). Only update-graph threads themselves
 (table listeners) are refused. A verb that runs long there pauses every live table of the
-worker, which the session reports once (`SessionCore.run_verb`).
+server, which the session reports once (`SessionCore.run_verb`).
 
 Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock.
 Every liveness scope is released holding the UG shared lock and outside `registry_lock`
@@ -215,7 +215,7 @@ WARNING."""
 
 PAUSED_TABLES_WARNING_SECONDS: Final = 5.0
 """Seconds a verb may run on a thread that holds the update graph's lock before the session
-logs, once, that the worker's live tables are paused (`SessionCore.run_verb`)."""
+logs, once, that the server's live tables are paused (`SessionCore.run_verb`)."""
 
 SESSION_WARNINGS: Final = 1_000
 """The most distinct once-per-session warnings a session logs (`SessionCore.warnings`).
@@ -579,7 +579,7 @@ class SessionCore:
         `ValueError` of `refuse_update_graph_thread` whether or not the session is closed, and
         then the session, before the body checks a single argument. A thread that holds the
         update graph's lock, such as a console command's, passes, and the body is timed there:
-        while it runs no live table of the worker updates, so a verb that ran
+        while it runs no live table of the server updates, so a verb that ran
         `PAUSED_TABLES_WARNING_SECONDS` or longer, such as a `history()` of many requests on a
         rate-limited key, logs one WARNING saying so, whether it returned or raised: once per
         pause, so one console command of several long verbs warns once, and the next command

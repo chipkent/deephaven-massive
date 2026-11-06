@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: first-examples-free-then-paid
+expected_outcome: |
+  first-examples.md gives a free-plan example first and a separate paid live example after it. Each says, before its code, the plan it needs, any setting, and how to run it; each block runs as pasted with its imports and session; each is followed by what you see. It passes the calibrated editor.

@@ -23,9 +23,15 @@ pull request whose title is new or changed, with the title as the only argument:
     python3 scripts/check_pr_title.py "fix: stop a failed live table from crashing the server"
 
 It uses only the standard library, so CI runs it with the runner's own Python and no checkout
-of the pull request's code. `--skip-length` turns off the length rule; the workflow passes it
-for Dependabot, whose generated titles name the package and both versions and cannot be
-shortened.
+of the pull request's code.
+
+`--dependabot` relaxes two rules for Dependabot's generated titles, and the workflow passes it
+only when `dependabot[bot]` opened the pull request. The length rule is off, since the titles
+name the package and both versions. The summary may start with a capital letter, as in
+`chore(deps): Bump actions/checkout from 7.0.1 to 7.0.2`. Dependabot infers the case from the
+recent commits on `main`, not from any setting in `.github/dependabot.yml`, and this
+repository's commits lead it to "Bump". The summary must still start with a letter, and every
+other rule applies unchanged.
 
 Exit status: 0 when the title meets every rule, 1 when it breaks at least one (each broken rule
 is printed on its own line, with a link to the standard), 2 for a usage error. When the
@@ -58,13 +64,14 @@ _HEADER = re.compile(r"(?P<type>[A-Za-z]+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!?):
 _PR_NUMBER = re.compile(r" \(#\d+\)$")
 
 
-def find_problems(title: str, *, check_length: bool = True) -> list[str]:
+def find_problems(title: str, *, dependabot: bool = False) -> list[str]:
     """Return one message for each rule of the title standard that the title breaks.
 
     Args:
         title: The pull request title, exactly as GitHub holds it.
-        check_length: Whether to apply the 60-character rule. The workflow turns it off only for
-            Dependabot's generated titles.
+        dependabot: Whether the title is Dependabot's generated one. True turns off the
+            60-character rule and lets the summary start with a capital letter; the workflow
+            passes it only for pull requests that `dependabot[bot]` opened.
 
     Returns:
         The problems in the order the standard lists its rules, each a full sentence that names
@@ -96,7 +103,7 @@ def find_problems(title: str, *, check_length: bool = True) -> list[str]:
                 "Type: put exactly one space after the colon, then the summary, as in"
                 " `docs: explain how history() picks a source`."
             )
-        elif not subject[0].islower():
+        elif not (subject[0].isalpha() if dependabot else subject[0].islower()):
             first_word = subject.split(" ", 1)[0]
             problems.append(
                 "Lowercase: start the summary after the colon with a lowercase letter, the first"
@@ -105,7 +112,7 @@ def find_problems(title: str, *, check_length: bool = True) -> list[str]:
     if title.endswith("."):
         problems.append("No trailing period: remove the period at the end of the title.")
     counted = _PR_NUMBER.sub("", title)
-    if check_length and len(counted) > MAX_LENGTH:
+    if not dependabot and len(counted) > MAX_LENGTH:
         problems.append(
             f"Length: the title has {len(counted)} characters; the limit is {MAX_LENGTH}, type"
             " included. Name the one change a user meets first and leave the rest to the"
@@ -143,10 +150,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("title", help="the pull request title")
     parser.add_argument(
-        "--skip-length", action="store_true", help="do not apply the 60-character limit"
+        "--dependabot",
+        action="store_true",
+        help="the title is Dependabot's: skip the length limit and allow a capital first letter",
     )
     args = parser.parse_args(argv)
-    problems = find_problems(args.title, check_length=not args.skip_length)
+    problems = find_problems(args.title, dependabot=args.dependabot)
     sys.stdout.writelines(f"{problem}\n" for problem in problems)
     output_path = os.environ.get("GITHUB_OUTPUT")
     if problems and output_path:

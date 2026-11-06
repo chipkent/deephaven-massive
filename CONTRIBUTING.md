@@ -35,18 +35,26 @@ A release is one manual run of the Release workflow on `main`;
 
 User documentation has three parts:
 
-- [`README.md`](README.md): the complete landing page, which takes a new user from "what is
-  this?" through install to everyday use and the main recipes.
-- `docs/guide/`: reference pages, looked up when a specific case comes up.
-- [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference. Never edit it by
-  hand; regenerate it with `uv run python scripts/render_reference.py`.
+- [`README.md`](README.md): the landing page, which takes a new user from "what is this?"
+  through install and configuration to a tutorial of thirteen examples.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md): every error message and symptom with
+  its fix, the diagnostics tables, the debug log, and how to report a bug.
+- [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference, one page per
+  dataset with its call, arguments, plans, and columns. Never edit it by hand; regenerate it
+  with `uv run python scripts/render_reference.py`. The rules of the arguments many datasets
+  share come from `src/deephaven_massive/_datasets/argument_rules.py`, and each dataset's own
+  line for an argument from its method's docstring.
 
-[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: who reads
-it, which page owns each fact, the voice, the banned patterns, and the terminology.
+[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: the project
+section (readers and their pains, owner requirements, page map, install facts, teaching plan),
+the rules (sources for every fact, scope, the hook, headings, teaching, sentences, AI tells,
+terminology), the section models, and the pass bar the `writing-user-docs` skill's editor
+grades against.
 `tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
-Docstrings cite a section by its explicit anchor (`README.md#<anchor>` or
-`docs/guide/<page>.md#<anchor>`) and a dataset page as `docs/datasets/<dataset>.md`; the same
-test checks that every cited README anchor and dataset page exists.
+Docstrings cite a page or section by its full GitHub URL, so the link opens from an IDE or
+the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page,
+such as `docs/datasets/<dataset>.md` or `README.md#<anchor>`. The same test checks that every
+citation is a URL and that every cited page and anchor exists.
 
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.
@@ -57,8 +65,21 @@ column, or failure behavior adds an entry there. The facts about Massive that th
 does not settle, and the live tests that settle them, are in
 [`docs/dev/verification-items.md`](docs/dev/verification-items.md).
 
+## Agent instructions and skills
+
+The repository carries every rule a coding agent needs; no agent should depend on notes kept
+outside it.
+
+- [`AGENTS.md`](AGENTS.md) holds only what every agent needs on every task. A rule for one kind
+  of work goes in the skill for that work (`.claude/skills/`) or on a `docs/dev/` page.
+- A skill states general rules. The facts of this project sit in one labeled place in the skill
+  or its standard, never woven into the rules or fitted to the wording of its eval prompts.
+- Skill evals are expensive. Weigh each round against what it gains: stop once the outputs meet
+  the bar, use few prompts to compare models, skip baseline reruns you don't need, and report
+  the eval cost beside the gain.
+
 ## Live integration tests
 
-The tests in `tests/**/test_*_integration.py` call Massive itself with the owner's keys, so
+The tests in `tests/**/test_*_integration.py` call Massive itself with a real key, so
 neither `./scripts/check.sh` nor CI ever runs them. [`docs/live-tests.md`](docs/live-tests.md)
 says how to run them and what each plan can verify.

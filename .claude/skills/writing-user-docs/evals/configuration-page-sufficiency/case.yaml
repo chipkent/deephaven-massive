@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: configuration-page-sufficiency
+expected_outcome: |
+  A reader who has only configuration.md writes a correct settings file for each of the nine
+  tasks in tasks.md, answers the proxy task with the environment variable instead of a setting,
+  and finds nothing on the page it couldn't determine.
+context:
+  scaffold_script: place-files.sh

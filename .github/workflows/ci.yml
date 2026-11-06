@@ -52,6 +52,7 @@ jobs:
       lint: ${{ steps.decide.outputs.lint }}
       test: ${{ steps.decide.outputs.test }}
       build: ${{ steps.decide.outputs.build }}
+      docs: ${{ steps.decide.outputs.docs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +90,13 @@ jobs:
           # export without .git comes from .git_archival.txt; and the wheel check compares the
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
+          # The user pages (README.md and docs/troubleshooting.md, with the images under
+          # docs/assets/), the tester guide, and its examples under docs/tester-examples/:
+          # tests/test_docs.py runs the user pages' examples and checks their links, and
+          # tests/live/tester/test_examples.py runs the tester examples and checks that the guide
+          # shows each one. A change to these alone runs only those two tests, on one Python
+          # version.
+          docs='^README\.md$|^docs/troubleshooting\.md$|^docs/assets/|^docs/tester-guide\.md$|^docs/tester-examples/'
           # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
@@ -99,7 +107,7 @@ jobs:
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An
           # error must never read as "no match", which would skip jobs, so every pattern is
           # checked on every event, and every match below fails the step on an error.
-          for pattern in "$lint" "$test" "$build" "$unread" "$workflows"; do
+          for pattern in "$lint" "$test" "$build" "$docs" "$unread" "$workflows"; do
             status=0
             grep -qE "$pattern" <<< "" || status=$?
             if [ "$status" -gt 1 ]; then
@@ -110,6 +118,8 @@ jobs:
           everything() {
             echo "Every job runs: $1."
             printf '%s=true\n' lint test build >> "$GITHUB_OUTPUT"
+            # The whole suite includes the documentation tests.
+            echo docs=false >> "$GITHUB_OUTPUT"
           }
           if [ "$EVENT" != pull_request ]; then
             everything "a $EVENT event runs every job"
@@ -126,7 +136,7 @@ jobs:
             everything "a workflow changed, and every job must exercise a workflow change"
             exit 0
           fi
-          uncovered=$(grep -vE "$lint|$test|$build|$unread" <<< "$paths" || [ $? -eq 1 ])
+          uncovered=$(grep -vE "$lint|$test|$build|$docs|$unread" <<< "$paths" || [ $? -eq 1 ])
           if [ -n "$uncovered" ]; then
             everything "no rule covers $(head -n 3 <<< "$uncovered" | paste -sd ' ' -)"
             exit 0
@@ -145,10 +155,16 @@ jobs:
           }
           # Every decision is made before any is written, so a failure leaves no partial output.
           decisions=$(decide lint "$lint" && decide test "$test" && decide build "$build")
+          # The documentation tests run on their own only when the whole suite does not.
+          if grep -qx 'test=true' <<< "$decisions"; then
+            decisions+=$'\ndocs=false'
+          else
+            decisions+=$'\n'$(decide docs "$docs")
+          fi
           tee -a "$GITHUB_OUTPUT" <<< "$decisions"
       - name: Install uv
         if: steps.decide.outputs.lint == 'true'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # No uv.lock is committed; key the cache on the declared dependencies.
@@ -196,7 +212,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # No uv.lock is committed; key the cache on the declared dependencies.
@@ -255,7 +271,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # No uv.lock is committed; key the cache on the declared dependencies.
@@ -303,7 +319,7 @@ jobs:
           # The package's version comes from the git history and tags.
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # No uv.lock is committed; key the cache on the declared dependencies.
@@ -405,11 +421,55 @@ jobs:
           name: dist
           path: dist/
 
+  docs:
+    # A change to the user guide or the tester guide alone runs only the tests that read them,
+    # on one Python version, rather than the whole matrix.
+    name: docs
+    needs: lint
+    if: needs.lint.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The package's version comes from the git history and tags.
+          fetch-depth: 0
+      - name: Set up JDK 17 (required by the embedded Deephaven server)
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.14
+      - name: Sync dependencies
+        # uv.lock is not committed, so this resolves the newest versions.
+        run: uv sync --python 3.14
+      - name: Run the documentation tests
+        # The same tests `scripts/check.sh full` runs in its docs scope; --capture=sys leaves
+        # file descriptor 2 alone, so a JVM fatal error's message shows in the job log.
+        run: uv run pytest --capture=sys tests/test_docs.py tests/live/tester/test_examples.py
+      - name: Upload JVM crash logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hs-err-docs
+          path: |
+            hs_err_pid*.log
+            jvm_fatal_pid*.log
+          if-no-files-found: ignore
+
   ci-ok:
     # The single required check. It runs even when a job it needs failed or was cancelled, so
     # it always reports a status: a skipped required check would count as passed.
     name: ci-ok
-    needs: [lint, test, test-lowest, build]
+    needs: [lint, test, test-lowest, build, docs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -420,9 +480,11 @@ jobs:
           TEST: ${{ needs.test.result }}
           TEST_LOWEST: ${{ needs.test-lowest.result }}
           BUILD: ${{ needs.build.result }}
+          DOCS: ${{ needs.docs.result }}
           RUN_LINT: ${{ needs.lint.outputs.lint }}
           RUN_TEST: ${{ needs.lint.outputs.test }}
           RUN_BUILD: ${{ needs.lint.outputs.build }}
+          RUN_DOCS: ${{ needs.lint.outputs.docs }}
         # The lint job runs on every run, since it makes the decision, so it must pass; it
         # skips its own checks when the change cannot affect them. The other jobs wait for it,
         # so they never start after a lint failure. Each decision must be exactly true or
@@ -452,8 +514,10 @@ jobs:
           decision lint "$RUN_LINT"
           decision test "$RUN_TEST"
           decision build "$RUN_BUILD"
+          decision docs "$RUN_DOCS"
           expect lint success "$LINT"
           expect test "$(wanted "$RUN_TEST")" "$TEST"
           expect test-lowest "$(wanted "$RUN_TEST")" "$TEST_LOWEST"
           expect build "$(wanted "$RUN_BUILD")" "$BUILD"
+          expect docs "$(wanted "$RUN_DOCS")" "$DOCS"
           exit "$failed"

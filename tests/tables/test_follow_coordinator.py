@@ -1833,3 +1833,22 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
     assert result.progress.rows == 2 * count
     # About 60 field reads per symbol; one pass over every symbol per batch made it 54 million.
     assert _CountedSymbol.looks < 100 * count
+
+
+def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    # A pool thread queues a read's start, and the symbol leaves the table before the
+    # coordinator takes it: the start is for an older generation, so the symbol stays REMOVED
+    # and the attempt is not counted. The 16-thread stress test hits this only by chance.
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "late start test", 1)
+    read = cast("FollowedRead", _QuietRead())
+    handle = coordinator._handle
+    handle([follow_coordinator._Follow(read, None)])
+    symbols = coordinator._results[id(read)].symbols
+    handle([follow_coordinator._Baseline(read, frozenset({"AAPL"}), 1)])
+    started = symbols["AAPL"].generation
+    handle([follow_coordinator._Changed(read, frozenset(), frozenset({"AAPL"}), 2)])
+    handle([follow_coordinator._Began(read, {"AAPL": started})])
+    assert symbols["AAPL"].state is SymbolReadState.REMOVED
+    assert symbols["AAPL"].attempts == 0
