@@ -10,7 +10,8 @@
 #
 # full lists the files the working tree changes (scripts/check_scope.py): run by hand, against
 # origin/main; in the pre-push hook to a branch the remote already has, since that branch's
-# remote tip, so a push runs only the tests its own commits and uncommitted files need.
+# remote tip, so a push runs only the tests its own commits need. Staged and untracked files
+# count; pre-commit hides unstaged edits to tracked files while the hook runs.
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
 # workers; when CI would not, full runs only tests/test_docs.py if README.md changed, and no
 # tests otherwise. It prints the scope it chose and why.

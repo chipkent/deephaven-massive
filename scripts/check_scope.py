@@ -23,6 +23,8 @@ exactly as that step does, one changed path at a time:
 
 The changed files are those `git diff --no-renames --name-only` lists between a base commit and
 the working tree (so staged and unstaged edits count), plus untracked files git does not ignore.
+In a git hook, pre-commit hides unstaged edits to tracked files first, so there only staged
+edits and untracked files count, and the tests do not see the hidden edits either.
 The base depends on how the script runs:
 
 - In the pre-push hook, pushing to a branch the remote already has, the base is that branch's
