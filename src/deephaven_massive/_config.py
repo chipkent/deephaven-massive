@@ -13,6 +13,16 @@ PyYAML `BaseLoader` subclass that keeps every scalar as text and refuses YAML's 
 turns each setting's text into the value its field takes. The constructor stays the only
 validator of values. Nothing reads a file unless asked: there is no default location.
 
+The settings file's reference, the generated part of `docs/configuration.md`, is rendered
+here too, by `settings_reference`: an example file that sets every setting (`_EXAMPLE`, which
+the tests load), a table of each setting's purpose, values, and default, with each
+`websocket_hosts` key named by its full path, and each setting's advice on when to change it.
+The text comes from the fields' defaults, the `Attributes` entries of the class docstring, and
+each setting's value form (`_value_forms`, whose examples the tests load through the settings
+file). It lives beside `_CONVERTERS` so that the page cannot drift from the code. The module
+runs past 1,000 lines because all three parts are one subject, the settings: what they are, how
+a file spells them, and how they are documented.
+
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
 evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
 so the library learns the tier from REST evidence instead), the REST rate of a Basic
@@ -25,16 +35,17 @@ installed and the standard library otherwise, and logs the choice once at INFO.
 from __future__ import annotations
 
 import difflib
+import inspect
 import logging
 import math
 import os
 import re
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
 
 import yaml
 
@@ -50,7 +61,7 @@ from deephaven_massive._massive import check_rest_base_url, without_userinfo
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 __all__ = [
     "BUSINESS_HOST",
@@ -60,13 +71,17 @@ __all__ = [
     "MIN_RECONNECT_BACKOFF",
     "NO_ACK_RESEND",
     "REALTIME_HOST",
+    "SETTINGS_REFERENCE_END",
+    "SETTINGS_REFERENCE_START",
     "HostMap",
     "MassiveConfig",
     "delayed_fix",
     "environment_text",
     "require_positive_int",
     "require_positive_number",
+    "settings_reference",
     "shown_setting",
+    "with_settings_reference",
 ]
 
 logger = logging.getLogger(__name__)
@@ -162,9 +177,9 @@ class MassiveConfig:
     """Everything a `MassiveSession` needs to know: credentials, plan, hosts, timeouts, limits.
 
     Construct it with keyword arguments; any field left out takes its default, and the
-    credentials default to the environment. The object is frozen and validated at
-    construction, so it can be shared between sessions and threads. Secrets are left out of
-    its `repr`.
+    credentials default to the environment. Every value is checked when you create it, and
+    none can change afterward, so one config can serve several sessions. Its `repr` leaves out
+    your secrets.
 
     Example:
         ::
@@ -182,7 +197,9 @@ class MassiveConfig:
             )
             m = dm.MassiveSession(pinned)
 
-    `MassiveConfig.from_file()` builds one from a settings file instead; see there.
+    `MassiveConfig.from_file()` builds one from a settings file instead; see there. Every
+    setting, with its settings-file spelling, its values, and its default, is on
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md.
 
     Attributes:
         api_key: The Massive API key. Defaults to the `MASSIVE_API_KEY` environment variable;
@@ -192,121 +209,182 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
-        delayed_subscriptions: The subscriptions whose live data you accept from Massive's
-            delayed feed, 15 minutes behind (10 for futures), such as
-            `{dm.Subscription.OPTIONS}`. A listed subscription's streams read the delayed feed.
-            An unlisted one is real-time: a stream, or a `fetch()` or `poll()` of current data,
-            raises `EntitlementError` naming the line to add when Massive shows the data is
-            delayed. Past data and `history()` are never checked. `dm.Subscription.CURRENCIES`
-            cannot be listed and is never refused; FMV streams are real-time only; a
-            `websocket_hosts` pin must match. Defaults to an empty set. See
-            README.md#real-time-or-delayed.
-        rest_basic_subscriptions: The Massive subscriptions this key's account holds on the
-            free Basic tier, such as `{dm.Subscription.OPTIONS}`. Massive limits REST requests
-            per subscription: Basic allows 5 requests per minute, and every paid tier has no
-            limit. The REST requests of a declared subscription are paced at 5 per minute
-            from the first one, shared with every other session of the process that uses the
-            same key. Any other subscription is unpaced until Massive refuses one of its
-            requests with HTTP 429: then its requests pause and resume, and when the refusal
-            says the per-minute maximum was exceeded, the library learns the subscription is
-            Basic and paces it from then on. Forex and crypto are one subscription,
-            `dm.Subscription.CURRENCIES`. `m.rate_limits()` shows each subscription's state.
-            Defaults to an empty set: every subscription is unpaced until a refusal.
-        websocket_hosts: Pins the WebSocket hostname of the TICK channel family of an asset class,
-            for example `{dm.AssetClass.STOCKS: "socket.massive.com"}` (Massive's real-time
-            feed), instead of letting the library decide from REST evidence. A pin must agree with
-            `delayed_subscriptions` (see there). Hostnames only: no scheme, port, or path. The
-            FMV family is never pinned; it is always `business.massive.com`. Defaults to
-            an empty mapping: the library decides every host.
-        subscription_confirmation_timeout: Seconds to wait for a subscription acknowledgement before
-            re-sending it once. Must be below 60 seconds, the spacing of the later re-sends of
-            unacknowledged subscriptions, each of which awaits its answer this long.
-            Defaults to 5 seconds.
-        reconnect_backoff: Seconds of the first wait before the WebSocket client tries again
-            after any failure that is not fatal: a connection that opened and closed (cleanly
-            or not, including a `max_connections` refusal), a TCP or TLS failure, a handshake
-            or authentication timeout, or a retryable HTTP status during the upgrade (500,
-            502, 503, 504). Each further consecutive failure doubles it, up to
-            `max_reconnect_backoff`, and the count resets only once a connection has stayed
-            up for 60 seconds. Must be at least 15 seconds: Massive's
-            knowledge base says the server takes "roughly 10 to 30 seconds" to release a
-            dropped connection, and an earlier retry can be refused for holding the allowance
-            it just lost, which on an individual plan wastes the one connection there is. The
-            30-second default waits out that whole window.
-        max_reconnect_backoff: Cap, in seconds, of the doubling reconnect backoff. Jitter only
-            lengthens a wait, so every wait lies in `[reconnect_backoff,
-            max_reconnect_backoff]`. Defaults to 120 seconds.
-        max_outage: How long, in seconds, a live table may go without data before it fails.
-            A stream fails when its connection has been down this long; a `poll()` table fails when
-            its cycles have kept failing, or a late cycle has received nothing, for this long.
-            Until then, `m.streams()` says so in `Error`. Call the verb again for a new table.
-            `0` fails at the first drop or failed cycle. Defaults to 300 seconds. See
-            README.md#live-tables.
-        flat_file_symbol_threshold: A count of symbols. With `HistorySource.AUTO`, when both
-            flat files and REST can serve a request, this many symbols or more (or `dm.ALL`)
-            read flat files. Defaults to 50.
-        max_concurrency: Maximum parallel REST requests of one `poll()` or `fetch()` fan-out,
-            and of the whole session at once, however many fan-outs overlap; and the most
-            flat files the session reads at once. A count of requests. Defaults to 8.
-        flush_interval: Seconds between WebSocket micro-batch flushes into the live tables.
-            Defaults to 0.05 seconds (50 ms).
-        rest_base_url: The REST API base URL. Defaults to `https://api.massive.com`.
-        s3_endpoint_url: The flat-file S3 endpoint URL; a user and password in it show as
-            `***@` in every log line and message. Defaults to
+        delayed_subscriptions: Lists the subscriptions whose plan gets Massive's delayed data, as
+            Stocks Starter and Developer do, so their streams and snapshots work. Defaults to an
+            empty set.
+
+            List each subscription on a Starter or Developer plan of stocks, options, or futures,
+            or on Indices Starter. Those plans stream data 15 minutes late, or 10 for futures.
+            Leave out Advanced and Business plans, which are real-time. Never list
+            `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
+            no delayed feed for it.
+
+            Leave a delayed subscription out, and a stream or a `fetch()` of its current data
+            raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
+            table of it fails with the same message. `history()` and other past data don't
+            depend on this setting.
+        rest_basic_subscriptions: Lists the subscriptions on Massive's free Basic plan, so their
+            requests keep to Basic's five a minute from the start. Defaults to an empty set.
+
+            Each of the five subscriptions has a free Basic plan, and every subscription you
+            haven't bought is on it: list each of those. Leave out each one you
+            pay for, on any plan, Starter included: a listed subscription's requests are held to
+            five a minute.
+
+            A Basic subscription you leave out runs at full speed until Massive first refuses
+            one of its requests for the rate limit. From then on, it keeps to five a minute. The
+            limit is shared by every session in this server that uses your key.
+            `m.rate_limits()` shows each subscription's pace.
+        websocket_hosts: Streams an asset class from a WebSocket host you name instead of the one
+            the library picks, such as `business.massive.com` for index values. Defaults to an empty
+            mapping.
+
+            Set `indices` to `business.massive.com` to stream index values on a real-time Indices
+            plan. Massive's documentation lists no other host for them, delayed or real-time. Set
+            nothing else unless Massive tells you to.
+
+            Without an entry, a subscription listed in `delayed_subscriptions` streams from
+            `delayed.massive.com`, and every other from `socket.massive.com`. Massive documents
+            those two hosts for every other stream. An entry moves every stream of its asset
+            class, except Fair Market Value (FMV) streams, which always use
+            `business.massive.com`.
+
+            An entry must agree with `delayed_subscriptions`. Give a class a host whose name
+            starts with `delayed.` exactly when its subscription is listed there, and never give
+            one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+        subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
+            channel before the library asks again. Defaults to 5 seconds.
+
+            Raise it on a slow network, where confirmations arrive late. It must be below 60
+            seconds.
+        reconnect_backoff: Sets the shortest wait, in seconds, before reconnecting a dropped stream.
+            Defaults to 30 seconds.
+
+            Lower it to reconnect sooner after a brief drop. It must be at least 15 seconds,
+            since Massive can refuse a sooner reconnect, and at most `max_reconnect_backoff`.
+
+            Each failure in a row doubles the wait, up to `max_reconnect_backoff`, and the count
+            resets once a connection stays up for 60 seconds. A failure no retry can fix, such as a
+            rejected key, isn't retried.
+        max_reconnect_backoff: Sets the longest wait, in seconds, before reconnecting a dropped
+            stream. Defaults to 120 seconds.
+
+            Lower it to retry more often during a long outage, or raise it to retry less often.
+            It must be at least `reconnect_backoff`.
+        max_outage: Sets how many seconds a stream or `poll()` table may stay cut off from Massive
+            before it fails. Defaults to 300 seconds.
+
+            Raise it to ride out longer outages, or set `0` to fail at the first one. A stream
+            counts the time its connection is down, and a `poll()` table counts the time its
+            polls keep failing or stop arriving. Until the limit passes, the table's
+            `m.streams()` row shows the problem in `Error`. A failed table stays failed, so call
+            the method again for a new one. See
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
+        flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
+            Massive's flat files instead of a request per symbol, when both can serve it. Defaults
+            to 50.
+
+            Lower it to read flat files for shorter lists, or raise it to keep them on requests.
+            A call for this many symbols or more reads flat files when all of these hold:
+
+            - `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` are set.
+            - Massive publishes flat files for the dataset.
+            - The call names no `source`.
+            - For bars that take `adjusted`, the call passes `adjusted=False`.
+
+            A `history()` of `dm.ALL` reads flat files under the same conditions. A `history()`
+            of a live table reads REST whenever REST can serve it.
+        max_concurrency: Sets how many REST requests the session runs at a time, and separately how
+            many flat files it reads at a time. Defaults to 8.
+
+            Raise it to run more at once, or lower it to open fewer connections. Both limits
+            cover all the session's calls together. A Basic subscription still keeps to five
+            requests a minute.
+        flush_interval: Sets how many seconds pass between the batches of streamed rows added to
+            live tables. Defaults to 0.05 seconds (50 ms).
+
+            A shorter interval shows each row sooner, and a longer one adds more rows in each
+            update.
+        rest_base_url: Sets the URL REST requests go to. Defaults to `https://api.massive.com`.
+
+            Change it only to reach a server other than Massive's, such as a local test server.
+            The REST client refuses a URL with a path, a query, or a user and password at the
+            first request. It also refuses an `http` URL of a host that isn't on your own machine.
+        s3_endpoint_url: Sets the URL flat files are read from. Defaults to
             `https://files.massive.com`.
-        s3_bucket: The flat-file S3 bucket. Defaults to `flatfiles`.
-        noncanonical_symbols: What a row of a symbol table (a Deephaven table passed as
-            `symbols`) does when it is not Massive's exact ticker, for every verb, whether the
-            row is there at the call or added later. `OnError.LOG`, the default, skips the row
-            and logs each distinct value once at WARNING (at most 100 values per process);
-            `OnError.IGNORE` skips it with nothing logged above DEBUG. Under both, the result
-            keeps running on the other rows, a stream's or `poll()` table's `m.streams()` row
-            lists the skipped values in `Error` (their count and the first five) until they
-            are fixed or deleted, a fixed row is subscribed like any added one, and a table
-            whose rows are all bad raises `ValueError` at the call. `OnError.RAISE` raises
-            `ValueError` for a bad row present at the call and fails the result when one is
-            added later. A `str` or a list passed as `symbols` always raises, whatever this
-            says. Defaults to `LOG`.
-        unlisted_symbols: What a crypto pair of a symbol table does in a live stream
-            (`blink()`, `append_only()`, `ring()`, `last_by()`) when Massive's crypto ticker
-            list does not hold it, so it cannot be split into the topic Massive streams it on,
-            whether the row is there at the call or added later. A pair added later whose
-            lookup cannot read the list is retried twice, after 2 and 8 seconds, and then
-            treated the same way. `OnError.LOG`, the default, skips the pair and logs each
-            distinct value once at WARNING (at most 100 values per process); `OnError.IGNORE`
-            skips it with nothing logged above DEBUG. Under both, the stream keeps its other
-            pairs, a reactive table's skipped pairs are listed in the stream's `m.streams()`
-            `Error` until their rows are deleted (a skipped pair stays skipped until its row
-            is deleted and added again), and a table whose pairs are all skipped raises
-            `MassiveError` at the call. `OnError.RAISE` raises `MassiveError` for such a pair
-            present at the call and fails the stream when one is added later. The REST verbs
-            whose paths take a pair as two currencies (the last trade and quote, the daily
-            open and close) follow it too: under `LOG` and `IGNORE`, `fetch()` and each
-            `poll()` cycle leave the pair out (a `poll()` lists it in `Error`), and a
-            `fetch()` of a refreshing table marks it `FAILED` in `m.symbol_reads()`; under
-            `RAISE`, `fetch()` raises and a `poll()` or followed `fetch()` table fails. A
-            failed read of the list fails them as before. A `str` or a list passed as
-            `symbols` always raises, whatever this says. Defaults to `LOG`.
-        unreadable_symbols: What a symbol Massive sends in a spelling the library cannot read
-            does. Such a spelling is a gap in the library, not in the caller's code.
-            `OnError.LOG`, the default, keeps the row with a null `Symbol` and the text in the
-            `RawSymbol` column, and logs each spelling once at ERROR as a bug to report (at
-            most 100 per process); `OnError.IGNORE` keeps it the same way with nothing logged
-            above DEBUG. Every dataset that reads its symbol from rows has `RawSymbol` under
-            both. `OnError.RAISE` fails the request or stream that received the row, naming the
-            spelling, and the dataset has no `RawSymbol`. Defaults to `LOG`.
-        unavailable_symbols: What a read does with a symbol it cannot read from Massive: one
-            Massive answers with HTTP 404 (no data), in `fetch()`, `history()`, or `poll()`,
-            or, in a `poll()`, one whose endpoint does not take an argument the poll sends
-            (such as a crypto pair added to an indicator poll with `adjusted=False`).
-            `OnError.LOG`, the default, leaves the symbol out and logs it once at WARNING per
-            session; `OnError.IGNORE` does the same with nothing logged above DEBUG. Under
-            both, a `poll()` table lists the symbol in its `m.streams()` `Error` (`no rows this
-            cycle for ...`) until it is readable again or removed, while the other symbols keep
-            polling, and a `REPLACE` table drops its rows. `OnError.RAISE` fails the read,
-            naming the symbol and the reason: a `fetch()` or `history()` raises `MassiveError`,
-            one that follows a table marks the symbol `FAILED` in `m.symbol_reads()` and reads
-            the others, and a `poll()` table fails. Defaults to `LOG`.
+
+            Change it only to reach a server other than Massive's.
+        s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
+
+            Change it only with `s3_endpoint_url`.
+        noncanonical_symbols: Decides what happens when a watchlist or other table you pass holds
+            a value that isn't Massive's exact ticker or futures product code: `SPX` for `I:SPX`,
+            say. Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once.
+
+            - `dm.OnError.LOG` skips the row and logs a warning naming the value.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` raises `ValueError` for a bad row at the call, and fails a live
+              table when one is added later.
+
+            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream or `poll()` table lists the
+            skipped values in its `m.streams()` row's `Error` until you fix or delete the row. A
+            fixed row is read like a new one.
+
+            Under any setting, a table whose rows are all bad raises `ValueError` at the call. So
+            does a symbol passed in code, as text or a list, that isn't Massive's exact ticker.
+        unlisted_symbols: Decides what happens when a watchlist or other table you pass holds a
+            crypto pair that isn't on Massive's crypto ticker list, or one the library couldn't
+            look up there. Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` when a stream must not run without every pair you asked for.
+
+            - `dm.OnError.LOG` skips the pair and logs a warning naming it.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` makes a stream or `fetch()` fail with `MassiveError` at the
+              call, and fails a `poll()` table, or a live table when such a pair is added later.
+
+            It applies to streams and to calls for a pair's last trade or daily open and close. A
+            pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
+            `noncanonical_symbols` instead.
+
+            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream keeps its other pairs. A
+            stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
+            until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
+            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
+            pairs are all skipped raises `MassiveError` at the call.
+        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
+            can't read. Defaults to `LOG`.
+
+            Leave it at `dm.OnError.LOG` so the row stays and shows Massive's text, or set
+            `dm.OnError.RAISE` to stop at the first one. Such a symbol is a library bug; to
+            report it, see
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
+
+            - `dm.OnError.LOG` keeps the row with a null `Symbol`, puts Massive's text in a
+              `RawSymbol` column, and logs an error naming it.
+            - `dm.OnError.IGNORE` does the same without the error: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` fails the call or stream that received it, naming the text, and
+              the table has no `RawSymbol` column.
+        unavailable_symbols: Decides what happens to a symbol Massive answers as not found, or one a
+            `poll()` can't request with the arguments you gave it. Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong and the read
+            should stop.
+
+            - `dm.OnError.LOG` leaves the symbol out, keeps the others, and logs a warning
+              naming it.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` fails a `poll()` table and makes a `fetch()` or `history()`
+              raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
+              symbol `FAILED` in `m.symbol_reads()` and reads the others.
+
+            Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
+            also one the poll can't read, such as a crypto pair in an indicator poll with
+            `adjusted=False`. Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a `poll()` table
+            lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
+            a `dm.PollMode.REPLACE` poll drops its rows.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -420,12 +498,13 @@ class MassiveConfig:
 
         The file is a mapping of setting names, the attribute names of this class, to values;
         a setting it leaves out takes its default. Precedence is code, then the file, then the
-        defaults: override a setting of the file in code with `dataclasses.replace`. The
-        credentials are never read from the file; they come from code or from their
-        environment variables, as for `MassiveConfig()`. Every scalar is read as text and
-        converted by the setting's own rule, so a ticker such as `ON` or `NO` stays text, and
-        an enum word is taken only as spelled exactly (`raise`, not `Raise`). The README's
-        "Settings file" section shows a full file (README.md#settings-file).
+        defaults: override a setting of the file in code with `dataclasses.replace`. The credentials
+        are never read from the file; they come from code or from their environment variables, as
+        for `MassiveConfig()`. Every scalar is read as text and converted by the setting's own rule,
+        so a ticker such as `ON` or `NO` stays text, and an enum word is taken only as spelled
+        exactly (`raise`, not `Raise`). Every setting's spelling, values, and default, with an
+        example file, are on
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md.
 
         Example:
             ::
@@ -445,6 +524,7 @@ class MassiveConfig:
             path: The file, as a `str` or path; a leading `~` is expanded to the home folder.
                 Defaults to the path in the `DEEPHAVEN_MASSIVE_CONFIG_FILE` environment
                 variable, the way a console or container names its file without code.
+                `MassiveConfig()` never reads a file.
 
         Returns:
             The validated configuration.
@@ -1386,3 +1466,439 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
         raise ValueError(f"{where}: {error}") from None
     logger.info("settings file %s%s set %s", file, source, ", ".join(values) or "no settings")
     return config
+
+
+# --- The settings reference ----------------------------------------------------------------------
+
+SETTINGS_REFERENCE_START: Final = (
+    "<!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. "
+    "Edit the class's docstring, not this part of the page. -->"
+)
+"""The line before the generated part of `docs/configuration.md`."""
+
+SETTINGS_REFERENCE_END: Final = "<!-- End of the generated settings. -->"
+"""The line after the generated part of `docs/configuration.md`."""
+
+
+class _Example(NamedTuple):
+    """One setting's entry in the example settings file of `docs/configuration.md`."""
+
+    value: object
+    """The value the example sets, as `MassiveConfig` takes it."""
+    comment: str
+    """What the setting does, in one line, written above it as a comment."""
+
+
+_EXAMPLE_ACCOUNT: Final = (
+    "This file sets every setting, and a line marked `# the default` can be left out. Its "
+    "other values suit an account with Stocks Starter, Options Developer, and Indices Business, "
+    "and the free Basic plan of Currencies and Futures:"
+)
+"""The sentence before the example settings file: the account its values agree with."""
+
+_EXAMPLE: Final[Mapping[str, _Example]] = {
+    "delayed_subscriptions": _Example(
+        frozenset({Subscription.STOCKS, Subscription.OPTIONS}),
+        "Plans that stream 15 minutes late: Stocks Starter and Options Developer.",
+    ),
+    "rest_basic_subscriptions": _Example(
+        frozenset({Subscription.CURRENCIES, Subscription.FUTURES}),
+        "Subscriptions on the free Basic plan, held to five requests a minute.",
+    ),
+    "max_outage": _Example(
+        600.0,
+        "Seconds a stream or poll() table rides out an outage before it fails; 0 fails at once.",
+    ),
+    "flush_interval": _Example(
+        0.05, "Seconds between the batches of streamed rows added to live tables."
+    ),
+    "flat_file_symbol_threshold": _Example(
+        50, "Symbols in one history() call that make it read flat files, once your S3 keys are set."
+    ),
+    "max_concurrency": _Example(
+        8, "REST requests at a time, and separately flat files read at a time."
+    ),
+    "noncanonical_symbols": _Example(
+        OnError.RAISE, "A watchlist value that isn't Massive's exact ticker: log, ignore, or raise."
+    ),
+    "unlisted_symbols": _Example(
+        OnError.LOG, "A watchlist crypto pair that Massive doesn't list: log, ignore, or raise."
+    ),
+    "unreadable_symbols": _Example(
+        OnError.LOG,
+        "A symbol in Massive's data that the library can't read: log, ignore, or raise.",
+    ),
+    "unavailable_symbols": _Example(
+        OnError.LOG, "A symbol Massive answers as not found: log, ignore, or raise."
+    ),
+    "websocket_hosts": _Example(
+        {AssetClass.INDICES: BUSINESS_HOST},
+        "The WebSocket host per asset class: index values stream only from business.massive.com.",
+    ),
+    "subscription_confirmation_timeout": _Example(
+        5.0, "Seconds Massive has to confirm a stream's channel before the library asks again."
+    ),
+    "reconnect_backoff": _Example(
+        30.0, "Shortest wait, in seconds, before reconnecting a dropped stream; at least 15."
+    ),
+    "max_reconnect_backoff": _Example(
+        120.0, "Longest wait, in seconds, before reconnecting a dropped stream."
+    ),
+    "rest_base_url": _Example(
+        "https://api.massive.com", "Where REST requests go: change it only for another server."
+    ),
+    "s3_endpoint_url": _Example(
+        "https://files.massive.com",
+        "Where flat files are read from: change it only for another server.",
+    ),
+    "s3_bucket": _Example(
+        "flatfiles", "The flat files' S3 bucket: change it only with s3_endpoint_url."
+    ),
+}
+"""The example settings file: every setting a file may hold, each once, in the order of the
+page's table, the ones a new user sets first. Its values agree with one account
+(`_EXAMPLE_ACCOUNT`), and the tests load the file and compare each value with these."""
+
+
+_ATTRIBUTE: Final = re.compile(r"^    (\w+): (.*)$")
+"""One setting's first line in the `Attributes` section of `MassiveConfig`'s cleaned docstring."""
+
+_ENTRY_INDENT: Final = " " * 8
+"""The indent of an entry's later lines in the `Attributes` section of the cleaned docstring."""
+
+_DEFAULT_SENTENCE: Final = re.compile(r" ?Defaults to [^.]*(?:\.[^ ][^.]*)*\.$")
+"""An entry's last sentence when it gives the default, which the reference shows from the code.
+
+A period followed by a character other than a space (`0.05`, `api.massive.com`) does not end
+the sentence."""
+
+_ENUM_IN_CODE: Final = re.compile(r"`dm\.(OnError|Subscription|AssetClass)\.([A-Z]+)`")
+"""An enum member as code spells it, such as `dm.OnError.RAISE`, which a settings file spells
+`raise`."""
+
+_DOCS_PAGE_URL: Final = re.compile(
+    r"https://github\.com/chipkent/deephaven-massive/blob/main/docs/([\w-]+\.md)#([\w-]+)"
+)
+"""A docstring's full link to a section of another page under `docs/`, which the console opens
+and the settings page, itself under `docs/`, writes as a relative link."""
+
+
+def _docstring_entries() -> dict[str, list[list[str]]]:
+    """Read each setting's entry from the `Attributes` section of `MassiveConfig`'s docstring.
+
+    Returns:
+        Each entry's paragraphs, keyed by the setting's name: each paragraph is its lines,
+        without the entry's indent, so a list item keeps its `- ` and its continuation lines
+        their two extra spaces.
+    """
+    doc = inspect.cleandoc(MassiveConfig.__doc__ or "")
+    section = doc[doc.index("\nAttributes:\n") :].splitlines()[2:]
+    entries: dict[str, list[list[str]]] = {}
+    new_paragraph = False
+    for line in section:
+        match = _ATTRIBUTE.match(line)
+        if match is not None:
+            entries[match.group(1)] = [[match.group(2)]]
+            new_paragraph = False
+        elif line.strip():
+            paragraphs = entries[next(reversed(entries))]
+            if new_paragraph:
+                paragraphs.append([])
+                new_paragraph = False
+            paragraphs[-1].append(line.removeprefix(_ENTRY_INDENT))
+        else:
+            new_paragraph = True
+    return entries
+
+
+def _setting_texts() -> dict[str, str]:
+    """Read each setting's summary: the first paragraph of its docstring entry.
+
+    The summary says what the setting does and gives its default. The paragraphs after it say
+    when to change the setting and what each value does (`_setting_details`).
+
+    Returns:
+        Each setting's summary as one line, without its last sentence when that sentence gives
+        the default, keyed by the setting's name.
+    """
+    return {
+        name: _DEFAULT_SENTENCE.sub("", " ".join(" ".join(paragraphs[0]).split()))
+        for name, paragraphs in _docstring_entries().items()
+    }
+
+
+def _setting_details() -> dict[str, list[str]]:
+    """Read each setting's detail: the paragraphs of its docstring entry after the summary.
+
+    Returns:
+        Each setting's later paragraphs as Markdown, line breaks kept, keyed by its name.
+    """
+    return {
+        name: ["\n".join(lines) for lines in paragraphs[1:]]
+        for name, paragraphs in _docstring_entries().items()
+    }
+
+
+def _as_file_words(text: str) -> str:
+    """Return docstring text with each enum member in a settings file's spelling.
+
+    Args:
+        text: Text from the docstring, such as ``"`dm.OnError.RAISE` raises"``.
+
+    Returns:
+        The text with each member written as its value, such as ``"`raise` raises"``.
+    """
+    enums: dict[str, type[StrEnum]] = {
+        "OnError": OnError,
+        "Subscription": Subscription,
+        "AssetClass": AssetClass,
+    }
+    return _ENUM_IN_CODE.sub(lambda match: f"`{enums[match[1]][match[2]].value}`", text)
+
+
+def _as_page_links(text: str) -> str:
+    """Return docstring text with each full link to a `docs/` page as a relative Markdown link.
+
+    The link's text is its anchor in words, which is the section's heading.
+
+    Args:
+        text: Text from the docstring, with a link such as
+            `https://github.com/.../blob/main/docs/troubleshooting.md#report-a-bug`.
+
+    Returns:
+        The text with each such link written as `[Report a bug](troubleshooting.md#report-a-bug)`.
+    """
+    return _DOCS_PAGE_URL.sub(
+        lambda match: f"[{match[2].replace('-', ' ').capitalize()}]({match[1]}#{match[2]})", text
+    )
+
+
+def _spellings(members: Iterable[StrEnum]) -> str:
+    """Return enum members' settings-file words as a list for a page: `` `a`, `b`, or `c` ``."""
+    words = [f"`{member.value}`" for member in members]
+    return ", ".join(words[:-1]) + ", or " + words[-1]
+
+
+_HOSTS_KEY: Final = "websocket_hosts"
+"""The one setting whose value is a mapping; the page names each of its keys by its full path."""
+
+
+def _host_path(asset_class: AssetClass) -> str:
+    """Return the full path of one `websocket_hosts` key, such as `websocket_hosts.indices`."""
+    return f"{_HOSTS_KEY}.{asset_class.value}"
+
+
+def _value_forms() -> dict[str, str]:
+    """Return what a settings file writes for each setting, within the range the class accepts.
+
+    Each form's example value, after "such as" (or, for a list of words, its last word), is one
+    that `MassiveConfig.from_file` accepts; the tests load every one.
+
+    Returns:
+        A sentence fragment per row of the page's table, keyed by the row's setting: each
+        setting a file may hold, except that each key of `websocket_hosts` has its own row,
+        named by its full path (`_host_path`). For example, ``A positive whole number, such
+        as `4` `` for `max_concurrency`.
+    """
+    delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
+    symbol_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
+    url = (
+        "An `https` URL of a host alone, or `http` for your own machine, such as "
+        "`https://api.massive.com`"
+    )
+    forms = {
+        "delayed_subscriptions": f"A list of any of {_spellings(delayed)}, such as "
+        "`[stocks]`, or `[]` for none",
+        "rest_basic_subscriptions": f"A list of any of {_spellings(Subscription)}, such as "
+        "`[options]`, or `[]` for none",
+        "max_outage": "A number of seconds, `0` or more, such as `600`",
+        "flush_interval": "A positive number of seconds, such as `0.1`",
+        "flat_file_symbol_threshold": "A positive whole number, such as `100`",
+        "max_concurrency": "A positive whole number, such as `4`",
+        "noncanonical_symbols": symbol_words,
+        "unlisted_symbols": symbol_words,
+        "unreadable_symbols": symbol_words,
+        "unavailable_symbols": symbol_words,
+        "subscription_confirmation_timeout": f"A positive number of seconds below "
+        f"{NO_ACK_RESEND:g}, such as `10`",
+        "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "
+        "`max_reconnect_backoff`, such as `60`",
+        "max_reconnect_backoff": "A number of seconds, at least `reconnect_backoff`, such as `300`",
+        "rest_base_url": url,
+        "s3_endpoint_url": "An `http` or `https` URL, such as `https://files.massive.com`",
+        "s3_bucket": "A bucket name, such as `flatfiles`",
+    }
+    for asset_class in AssetClass:
+        subscription = subscription_of(asset_class)
+        example = BUSINESS_HOST if asset_class is AssetClass.INDICES else REALTIME_HOST
+        rule = (
+            "never a `delayed.` host"
+            if subscription is Subscription.CURRENCIES
+            else "a `delayed.` host exactly when `delayed_subscriptions` lists "
+            f"`{subscription.value}`"
+        )
+        forms[_host_path(asset_class)] = f"A lower-case hostname, such as `{example}`; {rule}"
+    return forms
+
+
+def _host_row(asset_class: AssetClass, form: str) -> str:
+    """Return the table row of one `websocket_hosts` key, named by its full path.
+
+    Args:
+        asset_class: The key.
+        form: Its value form (`_value_forms`).
+
+    Returns:
+        The Markdown row: the key's path, what it sets, the form, and the host used without it.
+    """
+    purpose = f"Sets the WebSocket host {asset_class.value} streams come from."
+    subscription = subscription_of(asset_class)
+    default = (
+        f"`{REALTIME_HOST}`"
+        if subscription is Subscription.CURRENCIES
+        else f"`{DELAYED_HOST}` when `delayed_subscriptions` lists `{subscription.value}`, "
+        f"else `{REALTIME_HOST}`"
+    )
+    return f"| `{_host_path(asset_class)}` | {purpose} | {form} | {default} |"
+
+
+def _file_value(value: object) -> str:
+    """Return a value as a settings file writes it on one line, such as `[]`, `log`, or `0.05`."""
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, AbstractSet):
+        return "[" + ", ".join(sorted(member.value for member in value)) + "]"
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{key.value}: {host}" for key, host in value.items()) + "}"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _defaults() -> dict[str, object]:
+    """Return each field's default, from the field itself, keyed by its name."""
+    return {
+        f.name: f.default if f.default_factory is MISSING else f.default_factory()
+        for f in fields(MassiveConfig)
+    }
+
+
+def _example_file() -> str:
+    """Render the example settings file: every setting of `_EXAMPLE`, each under its comment.
+
+    A value equal to the setting's default is marked `# the default`. The `websocket_hosts`
+    mapping is written in block form, one asset class per indented line.
+
+    Returns:
+        The file's YAML text.
+    """
+    defaults = _defaults()
+    lines: list[str] = []
+    for name, example in _EXAMPLE.items():
+        if lines:
+            lines.append("")
+        lines.append(f"# {example.comment}")
+        marker = "  # the default" if example.value == defaults[name] else ""
+        if isinstance(example.value, Mapping):
+            lines.append(f"{name}:{marker}")
+            lines.extend(f"  {key.value}: {host}" for key, host in example.value.items())
+        else:
+            lines.append(f"{name}: {_file_value(example.value)}{marker}")
+    return "\n".join(lines) + "\n"
+
+
+def settings_reference() -> str:
+    """Render the generated part of `docs/configuration.md` from `MassiveConfig` itself.
+
+    Three parts, each under its own heading and anchor, so the page cannot drift from the code:
+
+    - the example settings file (`_example_file`), which sets every setting;
+    - a table with one row per setting a file may hold, in `_EXAMPLE` order, and one per key of
+      `websocket_hosts`, named by its full path: what the setting is for (the first paragraph of
+      its docstring entry), the values a file may write (`_value_forms`), and its default (from
+      the field's own default);
+    - per setting, the rest of its docstring entry: when to change it and what each value does.
+
+    Enum members in the docstring's text are shown as a file spells them (`_as_file_words`).
+
+    Returns:
+        The Markdown that goes between `SETTINGS_REFERENCE_START` and `SETTINGS_REFERENCE_END`.
+
+    Raises:
+        ValueError: If `_EXAMPLE` does not hold every setting a file may hold.
+    """
+    if sorted(_EXAMPLE) != sorted(_CONVERTERS):
+        raise ValueError(
+            f"the settings reference lists {sorted(_EXAMPLE)}, not every file setting "
+            f"once: {sorted(_CONVERTERS)}"
+        )
+    texts = _setting_texts()
+    details = _setting_details()
+    forms = _value_forms()
+    defaults = _defaults()
+    lines = [
+        '<a id="example-settings-file"></a>',
+        "",
+        "### Every setting in one file",
+        "",
+        _EXAMPLE_ACCOUNT,
+        "",
+        "```yaml",
+        _example_file() + "```",
+        "",
+        '<a id="settings-table"></a>',
+        "",
+        "### Values and defaults",
+        "",
+        (
+            f"A key inside the `{_HOSTS_KEY}` mapping is named by its full path: "
+            f"`{_host_path(AssetClass.INDICES)}` is the `indices` key under `{_HOSTS_KEY}`."
+        ),
+        "",
+        "| Setting | What it's for | Values | Default |",
+        "|---|---|---|---|",
+    ]
+    for name in _EXAMPLE:
+        if name == _HOSTS_KEY:
+            lines.extend(_host_row(c, forms[_host_path(c)]) for c in AssetClass)
+            continue
+        default = _file_value(defaults[name])
+        text = _as_file_words(texts[name])
+        lines.append(f"| `{name}` | {text} | {forms[name]} | `{default}` |")
+    lines += [
+        "",
+        '<a id="setting-details"></a>',
+        "",
+        "### When to change each setting",
+        "",
+        "`help(dm.MassiveConfig)` shows the same text in the console, written for Python code.",
+    ]
+    for name in _EXAMPLE:
+        lines += ["", f"#### {name}"]
+        for paragraph in details[name]:
+            lines += ["", _as_page_links(_as_file_words(paragraph))]
+    return "\n".join(lines) + "\n"
+
+
+def with_settings_reference(page: str) -> str:
+    """Return `docs/configuration.md` with its generated part replaced by `settings_reference()`.
+
+    Args:
+        page: The page's text. Everything outside its two markers is kept as written.
+
+    Returns:
+        The page as `scripts/render_reference.py` writes it.
+
+    Raises:
+        ValueError: If the page lacks `SETTINGS_REFERENCE_START`, or
+            `SETTINGS_REFERENCE_END` after it.
+    """
+    start = page.find(SETTINGS_REFERENCE_START)
+    end = page.find(SETTINGS_REFERENCE_END, max(start, 0))
+    if start < 0 or end < 0:
+        raise ValueError(
+            "the configuration page needs the lines SETTINGS_REFERENCE_START and "
+            "SETTINGS_REFERENCE_END around its generated part"
+        )
+    head = page[: start + len(SETTINGS_REFERENCE_START)]
+    return f"{head}\n\n{settings_reference()}\n{page[end:]}"

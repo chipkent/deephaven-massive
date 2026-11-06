@@ -88,10 +88,11 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 class _Economy(Namespace):
-    """`m.economy`: the US economic data datasets of a session.
+    """The US economic datasets, reached as `m.economy`.
 
-    Created once by `MassiveSession` and reached as `m.economy`. It holds no state of its own,
-    so it is safe to use from any thread; each method builds a query and never blocks.
+    Its methods cover Treasury yields, inflation, inflation expectations, the labor market, and
+    short-term funding conditions. They take no symbols, and each row is one date of the series.
+    Each method only builds a query, so it never blocks. You can call it from any thread.
 
     Example:
         ::
@@ -99,7 +100,7 @@ class _Economy(Namespace):
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
-            yields = m.economy.treasury_yields(start="2025-01-01").fetch()
+            yields = m.economy.treasury_yields(start="2026-01-02").fetch()
     """
 
     __slots__ = ()
@@ -154,29 +155,31 @@ class _Economy(Namespace):
     ) -> Query:
         """US Treasury yields at constant maturities from one month to 30 years, one row per day.
 
-        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
+        Each row holds one day's yields, one column per maturity, such as `Yield10Year`.
 
         Args:
-            start: The first date; a calendar date only. See README.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                README.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first date.
+            end: The last date.
+            sort: Any of Massive's field names, such as `"yield_10_year"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.treasury_yields.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.treasury_yields.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
-                given without `sort`, or a filter is unknown.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                yields = m.economy.treasury_yields(start="2025-01-01").fetch()
+                yields = m.economy.treasury_yields(start="2026-01-02").fetch()
         """
         return self._query(
             TREASURY_YIELDS,
@@ -201,24 +204,27 @@ class _Economy(Namespace):
     ) -> Query:
         """US inflation: CPI, core CPI, and the PCE price indexes and spending, one row per month.
 
-        One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
+        Each row holds one month's CPI, core CPI, and year-over-year CPI, and its PCE, core PCE, and
+        PCE spending.
 
         Args:
-            start: The first date; a calendar date only. See README.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                README.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first date.
+            end: The last date.
+            sort: Any of Massive's field names, such as `"cpi_year_over_year"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.inflation.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.inflation.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
-                given without `sort`, or a filter is unknown.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -248,29 +254,32 @@ class _Economy(Namespace):
     ) -> Query:
         """US inflation expectations from market prices and models, one row per day.
 
-        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
+        Each row holds one day's expected inflation over several horizons. Market-price columns,
+        such as `Market10Year`, sit beside model columns, such as `Model10Year`.
 
         Args:
-            start: The first date; a calendar date only. See README.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                README.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first date.
+            end: The last date.
+            sort: Any of Massive's field names, such as `"market_10_year"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.inflation_expectations.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.inflation_expectations.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
-                given without `sort`, or a filter is unknown.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                expected = m.economy.inflation_expectations(start="2025-01-01").fetch()
+                expected = m.economy.inflation_expectations(start="2026-01-02").fetch()
         """
         return self._query(
             INFLATION_EXPECTATIONS,
@@ -295,24 +304,27 @@ class _Economy(Namespace):
     ) -> Query:
         """US labor-market indicators: unemployment, participation, earnings, and job openings.
 
-        One row per month. A `poll()` table is keyed by `Date`. It takes no symbols.
+        Each row holds one month's unemployment rate, labor force participation rate, average hourly
+        earnings, and job openings.
 
         Args:
-            start: The first date; a calendar date only. See README.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                README.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first date.
+            end: The last date.
+            sort: Any of Massive's field names, such as `"unemployment_rate"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.labor_market.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.labor_market.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
-                given without `sort`, or a filter is unknown.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -342,29 +354,33 @@ class _Economy(Namespace):
     ) -> Query:
         """US short-term funding conditions: policy, overnight, and repo rates, one row per day.
 
-        One row per day. A `poll()` table is keyed by `Date`. It takes no symbols.
+        Each row holds one day's fed funds target range and effective rate, the overnight bank
+        funding rate, SOFR, the tri-party general collateral rate, interest on reserve balances,
+        commercial paper rates, and the Fed's repo amounts.
 
         Args:
-            start: The first date; a calendar date only. See README.md#start-and-end.
-            end: The last date, inclusive; None also returns rows dated in the future. See
-                README.md#start-and-end.
-            sort: The wire field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`; it needs `sort`. See README.md#sort-order-limit.
-            limit: The total-row cap. See README.md#sort-order-limit.
-            filters: Further endpoint parameters. See README.md#filters.
+            start: The first date.
+            end: The last date.
+            sort: Any of Massive's field names, such as `"effective_fed_funds_rate"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total.
+            filters: Further endpoint parameters.
 
         Returns:
-            A query. Columns: docs/datasets/economy.funding_conditions.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/economy.funding_conditions.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If a bound is a `datetime`, the range ends before it starts, `order` is
-                given without `sort`, or a filter is unknown.
+            ValueError: If:
+                - a bound is a time instead of a date, or the range ends before it starts;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                rates = m.economy.funding_conditions(start="2025-01-01").fetch()
+                rates = m.economy.funding_conditions(start="2026-01-02").fetch()
         """
         return self._query(
             FUNDING_CONDITIONS,

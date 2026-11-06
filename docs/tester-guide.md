@@ -1,358 +1,232 @@
 # Tester guide
 
-You are among the first people outside the project to use `deephaven-massive`. This guide is
-your manual for the whole test: install the library, try it in Deephaven, leave a long run
-going against Massive's servers, and send back what you found. Every step says what to type
-and what you should see. You need no earlier knowledge of Deephaven, Massive, git, or Python.
+You're one of the first people outside the project to use `deephaven-massive`, and your job is
+to find what goes wrong before the release. You install the library, try its examples, and
+leave it running against Massive's servers for a week. You don't need to know Deephaven,
+Massive, git, or Python before you start. The project's owner, who invited you, reads every
+report you send.
 
-## What you do
+## Plan your test
 
-| Part | What you do | Your time | Computer time |
-|---|---|---|---|
-| [1. Set up](#part-1-set-up) | Install the tools, get the code, check your setup | 45 to 90 minutes | the same |
-| [2. Console exercises](#part-2-console-exercises) | Paste 26 short examples into Deephaven and judge what they show | 90 minutes | the same |
-| [3. Live run](#part-3-the-live-run) | Start one program that runs every check your Massive plan allows | 30 minutes to start, then 10 minutes a day | at least five trading days |
-| [4. Report](#part-4-reporting-a-problem) | Report each problem as it happens | 15 minutes a problem | a few minutes |
-| [5. Finish](#part-5-finish-and-clean-up) | Pack the results, send them, clean up | 15 minutes | a few minutes |
+The test runs for at least five trading days. The live run, one program that checks the
+library against Massive's servers, does most of that work on its own. One of the days must be
+a full stream day, when it uses your key from 03:15 to 20:30 New York time.
 
-**How long the test runs:** at least five trading days, and one of them must be a full stream
-day, a whole trading day of live data (part 3 explains it).
+Keep the computer on and awake the whole time, with 25 GB of free disk. During a stream day, and
+an overnight stream night if your plan includes Currencies or Futures, the live run needs your
+Massive key to itself. A free Massive account is enough to start, and the live run checks
+more on each paid plan your key holds.
 
-## What you send back
+You spend about four hours on the first day, then about 10 minutes a day:
 
-1. The live run's zip, `~/massive-live/live-results-<date>.zip` ([3.7](#37-pack-and-send)).
-2. One bug-report zip, `~/massive-test/bug-report-<time>.zip`, for each problem you report
-   ([part 4](#part-4-reporting-a-problem)).
-3. Your filled-in [checklist](#checklist), with your notes.
+| Part | What you do | Your time |
+|---|---|---|
+| [Set up](#set-up) | Install the tools, get the code, and check your setup | 45 to 90 minutes |
+| [Run the examples](#run-the-examples) | Run the 25 examples with one command, then paste each into the console of the Deephaven IDE and judge what it shows | About 2 hours |
+| [Leave the live run going](#leave-the-live-run-going) | Start one program that runs every check your Massive plan allows, and look in once a day | 30 minutes, then 10 minutes a day |
+| [Report a problem](#report-a-problem) | Write up each problem as it happens | 15 minutes a problem |
+| [Finish the test](#finish) | Pack the results, send them, and clean up | 15 minutes |
 
-Send them as a GitHub issue on `chipkent/deephaven-massive`, with the zips attached. If GitHub
-refuses the upload, email them to the owner at the address in your invitation.
+You send each file on an issue in the project's GitHub repository. You send a bug report,
+`~/massive-test/bug-report-<time>.zip`, as each problem happens. At the end, you send two more
+things:
 
-## What to report
+- the live run's results, `~/massive-live/live-results-<date>.zip`
+- your checklist, with your notes
 
-Report anything that goes wrong:
-
-- a step that fails, hangs, or shows something other than this guide says;
-- an error message you cannot understand or act on;
-- a step whose instructions were unclear. "The instructions were unclear" is a finding, not
-  a failure on your part;
-- a console command that waits more than a few minutes. The free plan allows 5 requests a
-  minute per subscription, so some commands pause for a free slot, but none should pause for
-  long;
-- a `WARNING` in the debug log about a bar's time. Massive stamps each price bar with a time.
-  When a stamp is one the library does not expect, such as a daily bar at 14:30, you still get
-  the bar, and the log gets one `WARNING` that names the time. Send that warning in a bug
-  report.
-
-## Quick reference
-
-The commands of the whole test, for when you have done it once. Part 1 explains each.
-
-```bash
-# Part 1: set up
-mkdir -p ~/massive-test && cd ~/massive-test
-TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-git clone --branch "$TAG" https://github.com/chipkent/deephaven-massive.git
-cd ~/massive-test/deephaven-massive && uv sync
-uv venv --seed --python 3.12 ~/massive-test/dh-venv
-~/massive-test/dh-venv/bin/pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
-printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY
-uv run python scripts/tester.py check
-
-# Part 2: the console
-~/massive-test/dh-venv/bin/deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=massive-test" 2>&1 | tee ~/massive-test/server.log
-
-# Part 3: the live run, from ~/massive-test/deephaven-massive, with the server stopped
-uv run python scripts/live_run.py check
-uv run python scripts/live_run.py run --out ~/massive-live --any-time
-uv run python scripts/live_run.py status --out ~/massive-live
-uv run python scripts/live_run.py pack --out ~/massive-live
-
-# Part 4: a problem
-uv run python scripts/tester.py bug-report
-```
-
-## Checklist
-
-Copy this list into a file, `~/massive-test/checklist.md`, and tick each box as you go. Next to
-each item, note anything that surprised you.
+Make the test folder with `mkdir -p ~/massive-test`. Then paste this checklist into
+`~/massive-test/checklist.md` with any text editor, and tick each box as you go. Next to each
+item, note anything that surprised you or took longer than it should:
 
 ```markdown
-## Setup
-- [ ] 1.1 Tools installed: git, GitHub CLI, Java 17 with JAVA_HOME set, uv
-- [ ] 1.2 Repository access works (git ls-remote prints a commit)
-- [ ] 1.3 Massive key made and set; S3 keys too, if your plan has them
-- [ ] 1.4 Source checkout made, uv sync done; version tag noted
-- [ ] 1.5 Console install made in ~/massive-test/dh-venv
-- [ ] 1.6 tester.py check says ready: yes
-- [ ] 1.7 Deephaven IDE open
-## Console exercises
-- [ ] 01 session          - [ ] 02 datasets         - [ ] 03 daily bars
-- [ ] 04 first queries    - [ ] 05 reference data   - [ ] 06 live tables
-- [ ] 07 pacing           - [ ] 08 release          - [ ] 09 background download
-- [ ] 10 year analysis    - [ ] 11 plan refusals    - [ ] 12 symbols
-- [ ] 11: what Massive did with the free key's live minute bars (rejected the key, refused
-      the subscription, or closed the connection)
-- [ ] 13 debug log        - [ ] 14 to 17 try your own (free plan)
-- [ ] 18 to 20 try your own (paid plans only)       - [ ] 21 watchlist poll (free plan)
-- [ ] 22 crypto watchlist (Currencies) - [ ] 23 gainers to trades (Stocks)
-- [ ] 24 history that follows a watchlist (free plan)
-- [ ] 25 save diagnostics - [ ] 26 finish         - [ ] tester.py examples ran all of them at once
+## Set up
+- [ ] Installed the tools, and noted their versions
+- [ ] Signed in to GitHub, and reached the repository with git
+- [ ] Set the Massive API key, and the S3 keys for flat files if your dashboard shows them
+- [ ] Copied the code, and noted the release tag
+- [ ] Installed Deephaven and the library
+- [ ] Ran `tester.py check`, which says `ready: yes`
+- [ ] Opened the Deephaven IDE
+
+## Examples
+- [ ] Ran `tester.py examples`, and noted any failures
+- [ ] Ran examples 1 to 12 by hand
+- [ ] Noted how Massive answered the free key's live minute bars in example 10
+- [ ] Ran examples 13 to 19 by hand
+- [ ] Ran examples 20 to 23 by hand, with the watchlist steps of 20, 21, and 23
+- [ ] Ran examples 24 and 25 by hand
+
 ## Live run
-- [ ] live_run.py check says ready: yes
-- [ ] first run started with --any-time
-- [ ] Control-C and resume tested
-- [ ] status read once a day; dates noted
-- [ ] at least five trading days, one of them a full stream day
-- [ ] pack done; zip sent
+- [ ] Ran `live_run.py check`, which says `ready: yes`
+- [ ] Started the first run, and tested Control-C and the resume
+- [ ] Read the status once a day, and noted the dates
+- [ ] Covered five trading days or more, one of them a full stream day
+- [ ] Packed and sent the results
+
 ## Reports
-- [ ] each problem sent with its bug report zip
+- [ ] Sent each problem with its bug-report zip
 ```
 
----
+<a id="set-up"></a>
 
-<a id="part-1-set-up"></a>
+## Set up
 
-# Part 1: Set up
+Setup takes 45 to 90 minutes, most of it spent waiting for downloads. You'll install the same
+release twice. The checkout is a copy of the code, and from it you run the setup check, the
+live run, and bug reports. The Deephaven environment is a separate Python environment that
+runs Deephaven, with the library installed the way a user installs it. At the end, your
+browser shows the Deephaven IDE, ready for the examples.
 
-## 1.0 Words to know
+### Check what you need
 
-| Word | Meaning |
-|---|---|
-| Terminal | The program where you type commands. On macOS it is the Terminal app, in Applications, Utilities. Type a command and press Return to run it. |
-| [Massive](https://massive.com) | The market-data vendor, formerly Polygon.io. It sells stock, option, index, futures, currency, and crypto data. |
-| Subscription, plan | Massive sells one subscription per market (Stocks, Options, Indices, Currencies, Futures), each on a plan: the free Basic plan, or a paid one (Starter, Developer, Advanced, Business). Basic allows 5 requests a minute per subscription, has no live data, and keeps two years of history (all history on Indices Basic). |
-| API key | The key that lets a program use your Massive account. Keep it private. |
-| [Deephaven](https://deephaven.io) | A real-time query engine. It holds static and live data as tables, and its table operations work the same on both. |
-| Server | The Deephaven process you start on your computer. |
-| Deephaven IDE | Deephaven's browser interface. Its **Console** panel runs the Python you paste, inside the server. |
-| Static table, live table | A static table never changes after it is made. A live table changes as new data arrives. |
-| Session | `m = dm.MassiveSession()`: the library's connection to Massive, inside the server. |
-| Tag, `$TAG` | A tag, such as `v0.1.0rc1` (an example), names one fixed version of the code. `$TAG` holds the version you test, set in [1.4](#14-setup-one-the-source-checkout). |
-| Virtual environment | A private folder of Python packages, so this test cannot disturb anything else on your computer. |
-| uv | The tool the project uses to run its own programs. It brings its own Python. |
+You need a computer that runs macOS or Linux, or Windows with WSL 2, with 8 GB of memory and
+25 GB of free disk. The test also needs four tools, each with a command that prints its
+version:
 
-## 1.1 Install the tools
+| What | Why | Check | Get it |
+|---|---|---|---|
+| git | Copies the code from GitHub | `git --version` | [git-scm.com](https://git-scm.com/downloads) |
+| GitHub CLI | Signs you in to GitHub and finds the newest release | `gh --version` | [cli.github.com](https://cli.github.com/) |
+| Java 17 or later, with `JAVA_HOME` set | Runs the Deephaven server | `java -version` and `echo $JAVA_HOME` | [Deephaven's install guide](https://deephaven.io/core/docs/getting-started/pip-install/) |
+| uv | Runs the project's programs, and installs Python when your computer lacks it | `uv --version` | [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) |
 
-You need:
+Deephaven's install guide covers Java on each platform, setting `JAVA_HOME`, and Windows
+through WSL 2. On Windows, run every command of the test inside the Ubuntu terminal of WSL 2.
+Note each version in your checklist.
 
-| Tool | Why | Check |
-|---|---|---|
-| git | Copies the code from GitHub | `git --version` |
-| GitHub CLI (`gh`) | Logs you in to the private repository and finds the newest release | `gh --version` |
-| Java 17, with `JAVA_HOME` set | Runs the Deephaven server | `java -version` and `echo $JAVA_HOME` |
-| uv | Runs the project's programs and brings its own Python | `uv --version` |
+<a id="1-sign-in-to-github"></a>
 
-You also need about 25 GB of free disk and 8 GB of memory.
+### 1. Sign in to GitHub
 
-### macOS
+The code is on GitHub, at <https://github.com/chipkent/deephaven-massive>. Open that page, and
+you should see the project's files. Then sign in from the terminal, and let git use that
+sign-in:
 
-1. If `brew --version` says "command not found", install Homebrew, the macOS package
-   manager: run the one command on [brew.sh](https://brew.sh), then open a new terminal.
-2. Install the tools:
+```bash
+gh auth login
+gh auth setup-git
+```
 
-   ```bash
-   brew install git gh uv
-   brew install --cask temurin@17
-   ```
+When `gh` asks, choose `GitHub.com`, then `HTTPS`, answer `Yes` to "Authenticate Git with
+your GitHub credentials?", and sign in with a web browser. To check that git can reach the
+repository, run this command:
 
-   If `brew install uv` fails, use uv's own installer, then open a new terminal:
-   `curl -LsSf https://astral.sh/uv/install.sh | sh`.
-3. Set `JAVA_HOME` in every new terminal, then open a new terminal:
+```bash
+git ls-remote https://github.com/chipkent/deephaven-massive.git HEAD
+```
 
-   ```bash
-   echo 'export JAVA_HOME=$(/usr/libexec/java_home -v 17)' >> ~/.zshrc
-   ```
+You should see one line, with a 40-character commit id and then `HEAD`.
 
-### Linux (Ubuntu or Debian)
+<a id="2-set-your-massive-key"></a>
 
-1. Install the tools, then open a new terminal:
+### 2. Set your Massive API key
 
-   ```bash
-   sudo apt update
-   sudo apt install -y git gh openjdk-17-jdk curl
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+Create an account at <https://massive.com>. The free plan is enough for setup and for every
+example, though a few examples show their full result only on a paid plan. On Massive's
+dashboard, open **API Keys** and copy your API key. Keep it private, and never paste it into a
+report, a screenshot, or a chat.
 
-   If `apt` has no `gh`, follow [cli.github.com](https://cli.github.com/).
-2. Set `JAVA_HOME` in every new terminal, then open a new terminal:
+Run this line, paste the key when it asks, and press Return. The key doesn't appear as you
+paste it, and it stays out of your shell's history:
 
-   ```bash
-   echo 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(command -v java))))' >> ~/.bashrc
-   ```
+```bash
+printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY
+```
 
-### Windows
+To check the key without printing it, run `echo "${#MASSIVE_API_KEY} characters"`. You
+should see the length of the key you copied, such as `32 characters`. The key lives only in
+the terminal where you set it, so set it again in every new terminal you use for the test.
 
-1. Install WSL 2 with Ubuntu ([Microsoft's guide](https://learn.microsoft.com/windows/wsl/install)).
-2. Open the Ubuntu terminal and follow the Linux steps there. Do everything in this guide
-   inside that Ubuntu terminal.
-3. Apply one of Deephaven's [WSL 2 time-sync
-   workarounds](https://deephaven.io/core/docs/reference/community-questions/wsl2-clock-drift/):
-   WSL 2's clock can jump, which stalls live tables.
-4. For the live run, set **Windows Settings > System > Power > Sleep** to **Never**.
-
-### Check
-
-Run each line of the table's Check column. **You should see** a version from each, Java 17
-from `java -version`, and a folder from `echo $JAVA_HOME`.
-
-- `java -version` says "No Java runtime present": repeat the install step, open a new
-  terminal, and check again.
-- `java -version` shows another version: the project's tests run on Java 17, so test with it.
-  On macOS, the `JAVA_HOME` line picks 17. On Linux, choose 17 with
-  `sudo update-alternatives --config java`, then open a new terminal.
-- `echo $JAVA_HOME` prints an empty line: repeat the `JAVA_HOME` step and open a new terminal.
-
-**Record** each version in your checklist.
-
-<a id="12-get-access-to-the-code"></a>
-
-## 1.2 Get access to the code
-
-The code is in a private GitHub repository, `chipkent/deephaven-massive`. The owner has
-invited your GitHub account.
-
-1. Accept the invitation: open <https://github.com/notifications>, or the invitation email,
-   and click **Accept**. Open <https://github.com/chipkent/deephaven-massive>. **You should
-   see** the project's files.
-2. Log in from the terminal, and let git use that login:
-
-   ```bash
-   gh auth login
-   gh auth setup-git
-   ```
-
-   Choose `GitHub.com`, then `HTTPS`, answer `Yes` to "Authenticate Git with your GitHub
-   credentials?", and log in with a web browser.
-3. Check:
-
-   ```bash
-   git ls-remote https://github.com/chipkent/deephaven-massive.git HEAD
-   ```
-
-   **You should see** one line: a 40-character commit id and `HEAD`. If git asks for a
-   password or says `Repository not found`, repeat steps 1 and 2.
-
-## 1.3 Get your Massive keys
-
-1. Create an account at <https://massive.com>. The free plan is enough for parts 1 and 2; the
-   owner tells you whether to buy anything for part 3.
-2. On the dashboard, open **API Keys** and copy your key.
-3. **Keep the key private**: never paste it into a report, a screenshot, or a chat.
-4. Set the key in the terminal. Run this line, paste the key (nothing appears), and press
-   Return. It keeps the key out of your shell's history.
-
-   ```bash
-   printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY
-   ```
-
-5. Check it without printing it: `echo "${#MASSIVE_API_KEY} characters"`. **You should see**
-   a number above 20.
-
-The key lives only in the terminal where you set it. **Set it again in every new terminal**
-you use for this test.
-
-**Flat-file keys, paid plans only.** Paid plans include flat files, Massive's daily bulk
-files, which need a second pair of keys: an S3 access key id and an S3 secret access key. If
-the dashboard's keys page shows them, set them the same way:
+Paid plans also come with S3 keys, which let the library read Massive's daily flat files. If
+your dashboard's keys page shows them, set them the same way:
 
 ```bash
 printf 'S3 access key id: '; read -rs MASSIVE_S3_ACCESS_KEY_ID; echo; export MASSIVE_S3_ACCESS_KEY_ID
 printf 'S3 secret access key: '; read -rs MASSIVE_S3_SECRET_ACCESS_KEY; echo; export MASSIVE_S3_SECRET_ACCESS_KEY
 ```
 
-## 1.4 Setup one: the source checkout
+<a id="3-copy-the-code"></a>
 
-You install two copies of the same version:
+### 3. Copy the code at the release tag
 
-| Copy | Where | What it runs |
-|---|---|---|
-| The source checkout | `~/massive-test/deephaven-massive` | The setup check, the live run, and bug reports |
-| The console install | `~/massive-test/dh-venv` | The Deephaven server and the library, installed as a user installs them |
+The checkout holds the code of the release you test, named by its tag. Do this step and the
+next in the same terminal, because both use the tag that this command finds:
 
-Do 1.4 and 1.5 in one terminal: both use `$TAG`.
+```bash
+TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
+echo $TAG
+```
 
-1. Find the newest release:
+You should see a tag such as `v0.1.0rc1` (an example). If the owner named another release,
+set it instead, as in `TAG=v0.1.0rc1`. Note the tag in your checklist, then copy the code:
 
-   ```bash
-   TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-   echo $TAG
-   ```
+```bash
+mkdir -p ~/massive-test
+cd ~/massive-test
+git clone --branch "$TAG" https://github.com/chipkent/deephaven-massive.git
+cd ~/massive-test/deephaven-massive
+uv sync
+```
 
-   **You should see** a tag such as `v0.1.0rc1` (an example). If the owner named another
-   version, set it instead, such as `TAG=v0.1.0rc1`. **Record** the tag in your checklist.
-2. Make the checkout:
+You should see `Cloning into 'deephaven-massive'...` and a message that you're in "detached
+HEAD" state, which is normal for a tag. Then uv installs packages for a few minutes. From now
+on, start every program you run in the checkout with `uv run`.
 
-   ```bash
-   mkdir -p ~/massive-test
-   cd ~/massive-test
-   git clone --branch "$TAG" https://github.com/chipkent/deephaven-massive.git
-   cd ~/massive-test/deephaven-massive
-   uv sync
-   ```
+Leave the checkout as it is until the test ends. The live run records the commit it started
+on, and it refuses to resume on another one.
 
-   **You should see** `Cloning into 'deephaven-massive'...`, a message that you are in "detached
-   HEAD" state (expected for a tag), then uv installing packages. The first time takes a few
-   minutes.
+<a id="4-install-deephaven"></a>
 
-If git asks for a username or says `Repository not found`, repeat step 2 of
-[1.2](#12-get-access-to-the-code) and run the commands again. Report any other error
-([part 4](#part-4-reporting-a-problem)).
+### 4. Install Deephaven and the library
 
-Rules for the checkout:
+To run Deephaven in Docker instead, skip steps 4 to 6 and follow
+[Run Deephaven in Docker](#run-deephaven-in-docker).
 
-- Commands marked "from the checkout" run in `~/massive-test/deephaven-massive` and start with
-  `uv run`. Never run `python` there without `uv run`.
-- **Do not change the checkout during the test.** The live run records the commit it started
-  on and refuses to resume on another: it stops with "... was started on commit ...: to
-  resume, run git checkout ...".
-
-## 1.5 Setup two: the console install
-
-In the same terminal as 1.4, so `$TAG` is still set:
+The Deephaven environment, `~/massive-test/dh-venv`, holds the Deephaven server and the
+library. The first of the two commands below makes it with Python 3.12, which uv installs if
+your computer lacks it. In the same terminal as step 3, so `$TAG` is still set, run these two
+commands:
 
 ```bash
 uv venv --seed --python 3.12 ~/massive-test/dh-venv
 ~/massive-test/dh-venv/bin/pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
-# with uv:  uv pip install --python ~/massive-test/dh-venv deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
 ```
 
-The first line makes the virtual environment, with uv's own Python 3.12, so the Python your
-computer came with does not matter. The second installs the Deephaven server and the library
-into it.
+After a few minutes of downloads, pip prints a line that starts `Successfully installed` and
+names `deephaven-server` and `deephaven-massive`. The library's version is the tag without its
+leading `v`, such as `0.1.0rc1`. Note how long the install took, and copy every line that
+says `ERROR` or `WARNING` into your checklist.
 
-**You should see** a few minutes of downloads, then a line that starts
-`Successfully installed`. It names `deephaven-server` and `deephaven-massive` with their
-versions: the library's version is the tag without its leading `v`, such as `0.1.0rc1` for
-`v0.1.0rc1`. **Record** how long it took, and every line that says `ERROR` or `WARNING`.
+To install with uv instead of pip, run this in place of the `pip` line. uv prints a line such
+as `Installed 40 packages`, then one line per package, such as
+`+ deephaven-massive==0.1.0rc1` (an example):
 
-If it asks for a username or says `Repository not found`, repeat step 2 of
-[1.2](#12-get-access-to-the-code) and run the commands again. Report any other error.
+```bash
+uv pip install --python ~/massive-test/dh-venv deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+```
 
-To run Deephaven in Docker instead, follow [appendix A](#appendix-a-the-docker-console-setup)
-in place of this section.
+<a id="5-run-the-setup-check"></a>
 
-## 1.6 Check both setups
+### 5. Run the setup check
 
-From the checkout, with your key set:
+The setup check confirms that the checkout and the Deephaven environment hold the same
+release, and that Massive accepts your key. Run it from the checkout, in a terminal where your
+key is set:
 
 ```bash
 cd ~/massive-test/deephaven-massive
 uv run python scripts/tester.py check
 ```
 
-It checks Java, uv, the checkout's version, the console install, that both copies hold the
-same commit, your free disk and memory, and your key, with a few requests to Massive. It
-changes nothing except `~/massive-test/setup-check.txt`, where it saves its output for your
-bug reports.
-
-**You should see** one line per item, each starting `OK`, `WARN`, or `FAIL`, and
-`ready: yes` at the end. For example (your versions, commit, and dates differ):
+You should see one line per item, each starting `OK`, `WARN`, or `FAIL`, and `ready: yes` at
+the end. The check also saves its lines in `~/massive-test/setup-check.txt`, for your bug
+reports. Here are some of the lines, with your versions, commit, and dates in place of these:
 
 ```text
 OK   java: Java 17
 OK   uv: uv 0.9.5
 OK   commit: 1a2b3c..., tree clean
+...
 OK   version: the checkout is on v0.1.0rc1
 OK   console: deephaven-massive 0.1.0rc1, deephaven-core 42.7, in /Users/you/massive-test/dh-venv/bin/python
 OK   same commit: both are 1a2b3c...
@@ -362,222 +236,255 @@ OK   plan stocks: basic, history from 2024-10-30
 ready: yes
 ```
 
-| Line | What you do |
-|---|---|
-| `OK` | Nothing. |
-| `WARN` | Note it in your checklist, and carry on. |
-| `FAIL` | Do what the line says, then run the check again. |
+A `WARN` line needs only a note in your checklist. A `FAIL` line says what to fix, so fix it
+and run the check again.
 
-With the Docker console of [appendix A](#appendix-a-the-docker-console-setup), run this
-instead:
+<a id="6-start-deephaven"></a>
+
+### 6. Start Deephaven
+
+Start the server in a terminal where your key is set. The server reads the key when it
+starts, so a key you set later doesn't reach it:
 
 ```bash
-uv run python scripts/tester.py check --docker-image deephaven-massive-test
+~/massive-test/dh-venv/bin/deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=massive-test" 2>&1 | tee ~/massive-test/server.log
 ```
 
-## 1.7 Start Deephaven and open the Deephaven IDE
+The command gives the server 4 GB of memory, sets the Deephaven IDE's password to
+`massive-test`, and keeps a copy of the server's output in `~/massive-test/server.log` for
+bug reports. Within a minute, you should see these lines:
 
-1. In a terminal where your key is set, start the server:
+```text
+Deephaven is running at http://localhost:10000/?psk=massive-test with authentication type io.deephaven.authentication.psk.PskAuthenticationHandler
+Press Control-C to exit
+```
 
-   ```bash
-   ~/massive-test/dh-venv/bin/deephaven server --port 10000 --jvm-args "-Xmx4g -Dauthentication.psk=massive-test" 2>&1 | tee ~/massive-test/server.log
-   ```
+Your browser opens the Deephaven IDE, already signed in. If it doesn't, open
+<http://localhost:10000/?psk=massive-test>. You should see the Deephaven IDE, with a
+**Console** panel where you'll paste the examples.
 
-   | Part | What it does |
-   |---|---|
-   | `--port 10000` | Serves the Deephaven IDE at `http://localhost:10000` |
-   | `-Xmx4g` | Gives the server 4 GB of memory |
-   | `-Dauthentication.psk=massive-test` | Sets the IDE's password to `massive-test` |
-   | `tee ~/massive-test/server.log` | Keeps a copy of the server's output for bug reports |
-
-2. Wait up to a minute. **You should see**:
-
-   ```text
-   Deephaven is running at http://localhost:10000/?psk=massive-test with authentication type io.deephaven.authentication.psk.PskAuthenticationHandler
-   Press Control-C to exit
-   ```
-
-3. Your browser opens the Deephaven IDE, logged in. If it does not, open the URL the
-   terminal printed: <http://localhost:10000/?psk=massive-test>. **You should see** the
-   Deephaven IDE with a **Console** panel.
-
-Leave this terminal open: Control-C in it stops the server. Open a second terminal for
+Leave this terminal open, because Control-C in it stops the server. Open a second terminal for
 anything else, and set your key there too.
 
-| Problem | Fix |
+### Fix a step that fails
+
+Most setup problems come from a sign-in that didn't reach git, or from a key set in a
+different terminal from the one that runs the command:
+
+| You see | Why | What to do |
+|---|---|---|
+| git asks for a password, or says `Repository not found` | git can't use your GitHub sign-in | Run `gh auth login` and `gh auth setup-git` again, as in step 1, then repeat the command |
+| `refused: MASSIVE_API_KEY is not set in this terminal` | The key isn't set in the terminal that ran the command | Set it as in step 2, then run the command again |
+| `java -version` says "No Java runtime present", or `echo $JAVA_HOME` prints an empty line | Java isn't installed, or this terminal started before you set `JAVA_HOME` | Follow [Deephaven's install guide](https://deephaven.io/core/docs/getting-started/pip-install/), then open a new terminal |
+| `java -version` shows a version below 17 | An older Java comes first | Point `JAVA_HOME` at Java 17 or later, as Deephaven's install guide shows, and open a new terminal |
+| The server stops at once and prints a Java error | Your platform needs a setting that Deephaven's install guide names, as some Apple M2 Macs do | Find the error in [Deephaven's install guide](https://deephaven.io/core/docs/getting-started/pip-install/), and add the setting it gives inside the `--jvm-args` quotes |
+| The server stops with `Address already in use` | Another program holds port 10000 | Add `--port 10010` instead, and open `http://localhost:10010/?psk=massive-test` |
+
+Report any other error, as [Report a problem](#report-a-problem) shows.
+
+<a id="run-the-examples"></a>
+
+## Run the examples
+
+The 25 examples try the library the way a user would, from reading history to live tables
+that follow a watchlist. You'll run them twice. First, one
+command runs them all and saves what each did, which tells you quickly whether anything fails
+on your key. Then you paste each one into the Deephaven IDE and judge what it shows, which is
+the part only a person can check.
+
+Massive sells one subscription per asset class, such as Stocks or Currencies, and each is on a
+plan, from the free Basic plan up. Most examples work on Basic, and a few need a paid plan:
+
+| Examples | Plan |
 |---|---|
-| The server stops at once with a Java error on an Apple M2 Mac | Add `-Dprocess.info.system-info.enabled=false` inside the `--jvm-args` quotes, and start it again. |
-| Another program uses port 10000 | Use `--port 10010`, and open `http://localhost:10010/?psk=massive-test`. |
-| The page does not load | Check that the terminal printed "Deephaven is running at". |
+| 1 to 16, 20, and 23 to 25 | Any plan, Basic included |
+| 17 and 18 | Stocks Starter or higher |
+| 22 | Stocks Developer or higher |
+| 19 and 21 | Currencies Starter or higher |
 
----
+Run the paid examples on a free key too. Their live tables open, and a few seconds later
+Massive refuses them. Each refusal shows as a `FAILED` row, quoting Massive's answer, in
+`streams`, a diagnostics table that example 6 introduces. Seeing that refusal is part of the
+test.
 
-<a id="part-2-console-exercises"></a>
+### Run every example with one command
 
-# Part 2: Console exercises
+The example runner starts its own Deephaven server, runs every example in order, and saves
+what each one printed and made. Run it before you paste the examples by hand, because the
+console's examples use the same key's request limits.
 
-## 2.0 How the console works
+1. If the Deephaven server of step 6 is running, stop it with Control-C in its terminal.
+2. From the checkout, in a terminal where your key is set, run the examples:
 
-"The console" is the **Console** panel of the Deephaven IDE in your browser. Every Python
-block in this part goes there; only the `bash` blocks go in a terminal.
-
-- **Run code**: paste a whole block into the input box at the bottom of the **Console**
-  panel, and press **Enter**. **Shift+Enter** adds a line without running it.
-- **Output**: printed text appears above the input box. Each table you assign to a variable
-  opens in a panel named after it; if one does not, click its name in the console output.
-- **Order**: run the examples in order, in one console. Each uses variables from the ones
-  before.
-- **Live tables** change in Deephaven's update cycles, about once a second. No cycle runs
-  while a console command runs, so a live table shows new data only after the command
-  finishes.
-- **Errors** appear in red, starting `Error in Python interpreter`. The line that matters is
-  the last line of the Python part, right before the first line that starts with `at `. It
-  names the error's type and its message.
-- **A live table stops after a long outage.** If its connection to Massive stays down for 5
-  minutes (the computer slept, or the network dropped), the table stops. Its `Error` in the
-  `streams` panel says the connection has been down since a given time. That is expected: run
-  its example again.
-- **Results vary.** Market data changes daily, so judge the shape of each result: the
-  columns, roughly how many rows, the kind of message. Exact numbers differ.
-
-For each example, **record** pass or fail, how long it took, and anything unclear.
-
-### Run an example from its file
-
-Each example is also a file in the checkout, under
-`~/massive-test/deephaven-massive/docs/tester-examples/`, named in its heading. Instead of
-pasting, you can run a file by its number:
-
-1. Paste this helper into the console once:
-
-   ```python
-   import glob, os
-   def run(n):
-       path, = glob.glob(os.path.expanduser(f"~/massive-test/deephaven-massive/docs/tester-examples/{n:02d}_*.py"))
-       exec(compile(open(path).read(), path, "exec"), globals())
+   ```bash
+   cd ~/massive-test/deephaven-massive
+   uv run python scripts/tester.py examples
    ```
 
-2. Run an example by its number, such as the first: `run(1)`.
+   The runner first asks Massive which plans your key holds, and adjusts each example's settings
+   to them. It takes 15 minutes or more. You should see one line per example as it runs, then
+   `no example failed` or the names of the examples that failed.
+3. Read the verdicts in `~/massive-test/examples-output/summary.txt`. Each example has its
+   own file there with everything it printed, and its tables are under `tables/`:
 
-Run them in order, as when pasting. If you restart the console, paste the helper again. The
-helper does not work in the Docker setup of [appendix A](#appendix-a-the-docker-console-setup):
-the container cannot see the checkout, so paste the examples there.
+   | Verdict | What you do |
+   |---|---|
+   | `passed` | Nothing. A paid example passes on a free key once its live table opens. |
+   | `refused by your plan` | Nothing, unless your plan should include this example's data. |
+   | `failed` | Report it, as [Report a problem](#report-a-problem) shows. |
 
-## 2.1 The exercises
+4. Start the Deephaven server again, as in [step 6](#6-start-deephaven).
 
-### 1. Start a session (`01_start_a_session.py`)
+### Run the examples by hand
+
+Every Python block in this part goes into the **Console** panel of the Deephaven IDE. Paste a
+whole block into the input box at the bottom of the panel, and press Enter. Shift+Enter adds a
+line without running it. Each example opens its own session, so it runs as pasted, and you
+can run any one of them again on its own.
+
+Each table an example assigns to a variable opens in a panel named after the variable. If one
+doesn't open, click its name in the console's output.
+
+When an example fails, the console prints the error in red, starting
+`Error in Python interpreter`. Its last Python line, right before the first line that starts
+with `at `, names the error and says what went wrong.
+
+Market data changes every day, so your numbers will differ from the ones here. Judge each
+result by its shape, such as its columns, roughly how many rows it has, and the kind of
+message. For each example, note in your checklist whether it worked, how long it took, and
+anything unclear.
+
+Instead of pasting, you can run an example from its file in the checkout. Paste this helper
+into the console once:
 
 ```python
-# Turns on the debug log and opens a session on your Massive key. You should see the
-# library's version, such as 0.1.0rc1, then <MassiveSession #1 open>.
+import glob
+import os
+
+def run(n):
+    pattern = f"~/massive-test/deephaven-massive/docs/tester-examples/{n:02d}_*.py"
+    (path,) = glob.glob(os.path.expanduser(pattern))
+    exec(compile(open(path).read(), path, "exec"), globals())
+```
+
+Then run an example by its number, as in `run(1)` for the first. If you restart the console,
+paste the helper again. The helper doesn't work in the Docker setup, whose server can't see
+the checkout, so paste the examples there.
+
+Three examples make a watchlist, a table of symbols you edit in its panel. A table that
+follows the watchlist reads or streams each symbol you add, and drops each one you delete:
+
+- To add a row, click the empty row at the bottom of the panel, type the symbol, and press
+  Enter. Then click **Commit** below the table. Nothing is added until you commit.
+- To delete a row, right-click it, and choose **Delete Selected Rows**.
+
+If your IDE shows other button or menu names, note them in your checklist.
+
+#### 1. Open a session
+
+The first example turns on the library's debug log and opens a session, the library's
+connection to Massive. The debug log, `~/massive-test/massive-debug.log`, records every
+request the library sends and every decision it makes, and your bug reports include it. This
+code prints the library's version and the session:
+
+```python
+# Turn on the debug log, and open a session on your Massive key.
 import os
 
 import deephaven_massive as dm
 
-FOLDER = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-os.makedirs(FOLDER, exist_ok=True)
-LOG = os.path.join(FOLDER, "massive-debug.log")
-dm.enable_debug_logging(LOG)
+# tester.py and the Docker setup name the test folder in MASSIVE_TEST_FOLDER.
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+os.makedirs(folder, exist_ok=True)
+dm.enable_debug_logging(os.path.join(folder, "massive-debug.log"))
 
-# The free plan's session. With a paid Stocks plan, use the line the guide gives instead.
 m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 print(dm.__version__)
 print(m)
 ```
 
-**You should see**:
+You should see the version without its leading `v`, such as `0.1.0rc1`, and then
+`<MassiveSession #1 open>`. The number counts the sessions this console has opened, and most
+examples open one more.
 
-- the version without its leading `v`, such as `0.1.0rc1`;
-- `<MassiveSession #1 open>`.
+The setting `rest_basic_subscriptions` tells the library that each subscription is on Basic.
+The library then spaces your requests to Basic's limit of 5 a minute from the first one. Every
+free-plan example opens its session with this setting. On a paid key, they still run as
+written, and they wait between requests.
 
-What the code does:
+If you see an error that ends `AuthenticationError: no Massive API key ...`, the server didn't
+get your key. Stop the server with Control-C, set the key in that terminal, and start the
+server again, as in [step 6](#6-start-deephaven).
 
-- `rest_basic_subscriptions=set(dm.Subscription)` tells the library that all five of your
-  subscriptions are on the free Basic plan, so it spaces your requests to 5 a minute per
-  subscription from the start.
-- Opening the session sends nothing to Massive.
-- The debug log, `~/massive-test/massive-debug.log`, records every request and decision of
-  the library. It never holds your key.
+#### 2. List the datasets
 
-**With a paid Stocks plan**, replace the `m = ...` line before you run it:
-
-- Stocks Advanced or Business, which stream real-time data:
-
-  ```python
-  m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription) - {dm.Subscription.STOCKS}))
-  ```
-
-- Stocks Starter or Developer, which stream data 15 minutes late. The library serves delayed
-  data only when you ask for it, as this line does:
-
-  ```python
-  m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription) - {dm.Subscription.STOCKS}, delayed_subscriptions={dm.Subscription.STOCKS}))
-  ```
-
-**If you see** an error ending `AuthenticationError: no Massive API key ...`, the server did
-not get your key. Stop it (Control-C), set the key in that terminal
-([1.3](#13-get-your-massive-keys)), and start it again ([1.7](#17-start-deephaven-and-open-the-deephaven-ide)).
-
-### 2. List the datasets and describe a query (`02_explore_datasets.py`)
+The library reads more than 100 of Massive's datasets, and `dm.datasets()` lists them. Next, the
+code describes the columns of one query without sending Massive a request:
 
 ```python
-# Lists every dataset, then describes the columns of one query without sending a request.
-# You should see one line describing the query, and two new tables: catalog, one row per
-# dataset, and bar_columns, one row per column of daily stock bars.
-catalog = dm.datasets()
+# List every dataset, and describe the columns of daily stock bars without a request.
+import deephaven_massive as dm
 
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+catalog = dm.datasets()
 bars = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY)
 print(bars)
 bar_columns = bars.columns()
 ```
 
-**You should see** this line, and two panels:
+You should see the line `m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)` and two
+panels. The `catalog` panel has one row per dataset, with what it holds and a link to its
+columns. It also lists the verbs that read the dataset, which are the methods that return a
+table, such as `history` and `fetch`. The `bar_columns` panel has one row
+per column of daily bars, with a description of each.
 
-```text
-m.stocks.bars(['AAPL', 'MSFT', 'NVDA'], dm.Timespan.DAY)
-```
+#### 3. Download two weeks of daily bars
 
-- `catalog` lists every dataset: what it holds, its verbs (the methods that get data, such as
-  `history` and `fetch`), and a link to its columns.
-- `bars` is a query: a description of the data. Making it sends nothing.
-- `bar_columns` lists the query's columns, with a description of each.
-
-### 3. Download two weeks of daily bars (`03_daily_bars.py`)
-
-A bar summarizes trading over a stretch of time: the open, high, low, and close prices, and
-the volume. A daily bar covers one trading day.
+Two weeks of daily bars for three stocks take three requests to Massive. This block downloads
+them and prints how many rows arrived:
 
 ```python
-# Downloads two weeks of daily price bars for three stocks: three requests to Massive.
-# You should see a number between 24 and 30, and a new table named daily.
+# Download two weeks of daily bars for three stocks: three requests to Massive.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-today = datetime.now(ZoneInfo("America/New_York")).date()
-last_day = today - timedelta(days=1)
-first_day = last_day - timedelta(days=13)
+import deephaven_massive as dm
 
-daily = bars.history(first_day, last_day)
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
+daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
+    yesterday - timedelta(days=13), yesterday
+)
 print(daily.size)
 ```
 
-**You should see** a number between 24 and 30, and a panel named `daily`, after a few seconds:
+After a few seconds, you should see a number between 24 and 30 and a panel named `daily`. It
+has eight to ten bars per stock, oldest first, with none for weekends and holidays. Its `Date`
+column holds each trading day as text, such as `2026-10-30`. Hover over the `Close` header,
+and you should see a description of the column. If you see something else, note it.
 
-- eight to ten bars per stock, oldest first; weekends and holidays have none;
-- `Date`, the trading day, as text;
-- split-adjusted prices.
+#### 4. Summarize the bars with Deephaven
 
-Hover over the `Close` header. **You should see** a description of the column. If your IDE
-shows something different, note it in your report.
-
-### 4. Your first Deephaven queries (`04_first_queries.py`)
+Deephaven's table operations work on these bars directly. Here you read the same bars, add a
+column, keep one stock's rows, and summarize each stock:
 
 ```python
-# Adds a column, keeps some rows, and summarizes by stock, with Deephaven's table operations.
-# You should see three new tables: ranges, nvda (NVDA's rows only), and per_symbol (one row
-# per stock).
+# Add a column, keep some rows, and summarize by stock, with Deephaven's table operations.
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from deephaven import agg
 
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
+daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
+    yesterday - timedelta(days=13), yesterday
+)
 ranges = daily.update("Range = High - Low").view(["Symbol", "Date", "Close", "Range"])
 nvda = ranges.where("Symbol == `NVDA`")
 per_symbol = daily.agg_by(
@@ -586,41 +493,53 @@ per_symbol = daily.agg_by(
 )
 ```
 
-**You should see** three panels: `ranges`, `nvda` with only NVDA's rows, and `per_symbol` with
-one row per stock. Text inside a query string goes between back-quotes, as in `` `NVDA` ``.
+You should see three more panels besides `daily`. The `ranges` panel adds each day's
+high-to-low range, `nvda` holds only NVDA's rows, and `per_symbol` has one row per stock, with
+its average close, highest high, and number of days.
 
-### 5. Reference data (`05_reference_data.py`)
+#### 5. Read reference data
+
+Reference data describes companies and markets: here, three companies' details, the market's
+status, the coming holidays, and two weeks of Treasury yields:
 
 ```python
-# Reads facts about companies and markets rather than prices. You should see four new
-# tables: companies (three rows), market_now (one row), holidays, and yields (one row per
-# business day).
+# Read facts about companies and markets: company details, market hours, Treasury yields.
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
 details = m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch()
 companies = details.view(["Symbol", "Name", "PrimaryExchange", "ListDate", "MarketCap"])
 
 market_now = m.reference.market_status().fetch()
 holidays = m.reference.market_holidays().fetch()
-yields = m.economy.treasury_yields(start=first_day).fetch()
+two_weeks_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=14)
+yields = m.economy.treasury_yields(start=two_weeks_ago).fetch()
 ```
 
-**You should see** four panels:
+You should see four new panels besides `details`:
 
-| Table | What it holds |
+| Panel | What it holds |
 |---|---|
 | `companies` | Three rows: each company's name, its exchange (`XNAS` is Nasdaq), its listing date, and its market value in dollars |
-| `market_now` | One row; `Market` reads `open`, `closed`, or `extended-hours` |
+| `market_now` | One row, whose `Market` reads `open`, `closed`, or `extended-hours` |
 | `holidays` | The coming market holidays |
-| `yields` | US Treasury yields, in percent, one row per business day |
+| `yields` | US Treasury yields in percent, one row per business day |
 
-Reference and economy requests count against no subscription, so they do not slow your stock
-requests.
+#### 6. Make a table that updates itself
 
-### 6. Tables that update themselves (`06_refreshing_tables.py`)
+A live table updates as new data arrives. Here you make one that asks Massive for the market's
+status every 60 seconds, and open the session's three diagnostics tables:
 
 ```python
-# Makes a table that asks Massive again every minute, and opens the three diagnostics
-# tables. You should see four new tables: live_status, which changes about once a minute,
-# and rate_limits, streams, and connections.
+# Make a table that asks Massive again every minute, and open the diagnostics tables.
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
 live_status = m.reference.market_status().poll(60)
 
 rate_limits = m.rate_limits()
@@ -628,80 +547,91 @@ streams = m.streams()
 connections = m.connections()
 ```
 
-**You should see** four panels. `live_status` asks Massive again every 60 seconds, so its
-`ServerTime` changes about once a minute. The other three are the diagnostics tables:
+You should see `live_status`, whose `ServerTime` changes about once a minute. The diagnostics
+tables show what this session is doing:
 
-| Table | What you see now |
+| Panel | What you should see |
 |---|---|
-| `rate_limits` | One row per subscription, plus `other`. The `stocks` row shows `RequestsPerMinute` 5 and `LimitSource` `DECLARED`; on a paid Stocks plan, no limit of 5. |
-| `streams` | One row per live table or background download: here `live_status`, `RUNNING`. |
-| `connections` | Live connections to Massive: none yet. |
+| `rate_limits` | One row per subscription, plus `other`. The `stocks` row shows `RequestsPerMinute` 5 and `LimitSource` `DECLARED`. |
+| `streams` | One row per live table or background download of this session: here `live_status`, with `State` `RUNNING` |
+| `connections` | The session's live connections to Massive: none yet |
 
-### 7. Watch the free plan's pace (`07_pacing.py`)
+#### 7. Watch Basic's limit
+
+Six stocks read every 30 seconds make 12 Stocks requests a minute, against Basic's limit of 5.
+This block asks for exactly that, and its last line lets the library stop the table once
+nothing else uses it:
 
 ```python
-# Asks for more than the free plan allows: the previous day's bar of six stocks every 30
-# seconds, 12 Stocks requests a minute against a limit of 5. You should see a new table,
-# paced, fill within about a minute, and the stocks row of rate_limits switch between READY
-# and PACED.
+# Ask for more than Basic allows, then let the library stop the table.
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+# 12 Stocks requests a minute: six stocks every 30 seconds, against a limit of 5.
 paced = m.stocks.previous_day_bar(["AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"]).poll(30)
-```
+rate_limits = m.rate_limits()
+streams = m.streams()
 
-Watch `rate_limits` and `paced` for two minutes without running anything else. **You should
-see**:
-
-- the `stocks` row of `rate_limits` switch between `READY` and `PACED` (waiting for a free
-  slot);
-- `paced` get its six rows within about a minute;
-- a `WARNING` in the debug log that the table's requests are paced at 5 a minute.
-
-On a paid Stocks plan nothing is paced: `paced` fills at once, and the row stays `READY`.
-
-### 8. Stop a live table (`08_release_a_table.py`)
-
-```python
-# Stops the table of the previous example. You should see its row in streams change to
-# RELEASED within a few seconds, and the stocks row of rate_limits settle back to READY.
+# The table keeps updating while its panel is open, and stops once you close the panel.
 m.release(paced)
 ```
 
-**You should see** `paced`'s row in `streams` change to `RELEASED` within a few seconds.
+Watch `rate_limits` and `paced` for two minutes without running anything else. You should
+see the `stocks` row of `rate_limits` switch between `READY` and `PACED`, which means a request
+is waiting for a free slot. The `paced` panel should get its six rows within about a minute,
+and the debug log gets a `WARNING` that the table's requests are paced at 5 a minute.
 
-### 9. Download in the background (`09_background_download.py`)
+Then close the `paced` panel. Within a minute, the `stocks` row of `rate_limits` should settle
+at `READY`. Until you close it, the panel keeps the table updating, even though its row in
+`streams` already reads `RELEASED`.
+
+#### 8. Download in the background
 
 A long download holds the console until it finishes. With `wait=False`, the call returns at
-once and the table fills when the download is done.
+once, and the table fills when the download is done. Here a year of two stocks downloads that
+way:
 
 ```python
-# Starts a one-year download of two stocks in the background, so the console stays free.
-# You should see a new table, year, with no rows at first; its row in streams reads
-# LOADING, then DONE, and the rows appear all at once.
-year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(
-    today - timedelta(days=365), wait=False
-)
+# Start a one-year download of two stocks in the background, so the console stays free.
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
+year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago, wait=False)
+streams = m.streams()
 ```
 
-**You should see** an empty `year` panel. In `streams`, its row's `State` reads `LOADING`,
-then `DONE`, and the rows appear all at once.
+You should see an empty `year` panel at first. In `streams`, its row's `State` reads
+`LOADING`, then `DONE`, and the rows appear all at once.
 
-### 10. A first analysis (`10_year_analysis.py`)
+#### 9. Analyze a year of two stocks
 
-Run this only once `year`'s row in `streams` reads `DONE`. `snapshot()` takes a static copy
-of `year`: taken while the download is still loading, the copy is empty, and so is every
-table made from it.
+A year of daily bars is enough to compare two stocks' returns, growth, and volatility, and how
+closely they moved together. Reading the same year, this block also draws a chart and saves a
+file:
 
 ```python
-# Compares the year of the two stocks: daily returns, growth, volatility, correlation, a
-# chart, and a saved file. Run it once year's row in streams reads DONE. You should see a
-# correlation between -1 and 1 (positive for these two stocks), new tables (pair, returns,
-# growth, summary_year, and side_by_side), a chart named growth_chart, and the file
-# growth.parquet in your test folder.
-from deephaven import parquet
+# Compare a year of two stocks: daily returns, growth, volatility, correlation, a chart, a file.
+import os
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from deephaven import agg, parquet
 from deephaven.pandas import to_pandas
 from deephaven.plot.figure import Figure
 from deephaven.updateby import delta
 
-pair = year.snapshot()
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
+pair = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago)
 returns = (
     pair.sort(["Symbol", "Date"])
     .update_by(ops=[delta(cols=["Change = Close"])], by=["Symbol"])
@@ -748,25 +678,29 @@ growth_chart = (
     .show()
 )
 
-parquet.write(growth, os.path.join(FOLDER, "growth.parquet"))
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+parquet.write(growth, os.path.join(folder, "growth.parquet"))
 ```
 
-**You should see**:
+You should see a printed correlation between -1 and 1, which measures how closely the two
+stocks' daily moves agreed. Expect a positive value for these two. The `summary_year` panel
+has two rows: `TotalReturn` is the year's price change as a fraction, so 0.15 means 15%, and
+`AnnualVolatility` measures how much the price swings. The `growth_chart` panel draws two
+lines that both start at 1.0, and the file `~/massive-test/growth.parquet` holds the `growth`
+table.
 
-- the correlation, a number between -1 and 1: how closely the two stocks' daily moves
-  agreed. Expect a positive value for these two stocks, usually between 0.4 and 0.8;
-- `summary_year`, with two rows. `TotalReturn` is the year's price change as a fraction (0.15
-  is 15%). `AnnualVolatility`, how much the price swings, is typically between 0.15 and 0.45;
-- `growth_chart`, with two lines that both start at 1.0;
-- the file `~/massive-test/growth.parquet`, which holds the `growth` table.
+#### 10. See what Basic refuses
 
-### 11. What the free plan refuses (`11_plan_refusals.py`)
+Basic doesn't include the latest trade, live minute bars, or bars from 2015. Ask for each, and
+print how Massive refused it:
 
 ```python
-# Asks for three things the free Basic plan does not include, and prints how each was
-# refused. You should see three lines, each starting with what was asked. The first and the
-# third show EntitlementError and the reason; the live minute bars open, and Massive's live
-# connection refuses them a few seconds later, in the streams panel.
+# Ask for three things the free Basic plan doesn't include, and print how each was refused.
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+streams = m.streams()
+
 try:
     m.stocks.last_trade(["AAPL"]).fetch()
     print("the latest trade: no error, so your plan includes it")
@@ -786,44 +720,46 @@ except dm.MassiveError as error:
     print(f"bars from 2015: {type(error).__name__}: {error}")
 ```
 
-**You should see** three lines:
+On a free key, you should see three lines:
 
 | Line | What it says |
 |---|---|
 | The latest trade | `EntitlementError`, quoting Massive's refusal |
-| Live minute bars | That they opened. A few seconds later, Massive refuses them: in the `streams` panel, the new `stocks.bars` row turns `FAILED`, and its `Error` quotes Massive's answer and says the free plan has no live data. |
-| Bars from 2015 | `EntitlementError`: your plan does not reach back to 2015 |
+| Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` turns `FAILED`, with an `Error` that quotes Massive and says Basic has no live data. |
+| Bars from 2015 | `EntitlementError`: your plan doesn't reach back to 2015 |
 
-On a paid plan, the first or third line may say "no error", and the stream may keep running.
-On Stocks Starter or Developer with the free plan's session line, the second line is an
-`EntitlementError` that names `delayed_subscriptions`. That is expected: example 1 gives the
-line for those plans.
+On Stocks Advanced, the first line says "no error". On Starter and Business, which don't include the
+latest trade, it's an `EntitlementError`. On Developer, it's an `EntitlementError` that names
+`delayed_subscriptions`, because this session doesn't accept delayed data. On Starter and Developer,
+the second line is also an `EntitlementError` that names `delayed_subscriptions`, or, if Massive
+refuses after the table opens, the `stocks.bars` row in `streams` shows the refusal. That's
+expected, and example 17 shows the setting. On Advanced or Business, the third line says "no error",
+and the live minute bars keep streaming.
 
-**Record**:
+Note in your checklist whether each message, the `Error` in `streams` included, told you what
+went wrong and what you could do about it. Note any message that suggested your key was wrong
+when the cause was your plan. Nobody has yet seen what Massive does with a free key's live
+minute bars, so note which of these you see:
 
-- whether each message, the `Error` in the `streams` panel included, told you what went
-  wrong and what you could do;
-- whether any message suggested your key was wrong when the cause was your plan;
-- what Massive did with the live minute bars. Nobody has seen this on a free key yet:
+| Massive | What you see |
+|---|---|
+| Rejected the key | The `Error` says Massive rejected the API key. |
+| Refused the subscription | The `Error` quotes a refusal of `AM.AAPL`. |
+| Closed the connection | Open `m.connections()`: it shows the connection reconnecting, again and again. |
 
-  | Massive | What you see |
-  |---|---|
-  | Rejected the key | The `Error` says Massive rejected the API key. |
-  | Refused the subscription | The `Error` quotes a refusal of `AM.AAPL`. |
-  | Closed the connection | The `connections` panel shows it reconnecting, again and again. |
+#### 11. Convert symbols from other sources
 
-### 12. Convert symbols (`12_symbols.py`)
-
-You give the library each symbol exactly as Massive writes it: `AAPL`, `BRK.B`, `C:EURUSD`
-for the euro against the dollar, `X:BTCUSD` for Bitcoin, `I:SPX` for the S&P 500. Other
-sources write symbols differently; these functions convert them.
+The library takes each symbol exactly as Massive writes it, such as `BRK.B`, `C:EURUSD` for
+the euro against the dollar, `X:BTCUSD` for Bitcoin, and `I:SPX` for the S&P 500. Other
+sources write symbols differently, and these functions convert them, one symbol at a time or a
+whole table at once. They need no session:
 
 ```python
-# Converts symbols written in other conventions into Massive's, one at a time and as a
-# table. You should see C:EURUSD, X:BTCUSD, I:SPX, and BRK.B, then a ValueError that names
-# the conventions to choose from, and a new table, converted, whose bad row is empty.
+# Convert symbols written in other conventions into Massive's, one at a time and as a table.
 from deephaven import new_table
 from deephaven.column import string_col
+
+import deephaven_massive as dm
 
 print(dm.canonical_symbol("EUR/USD", dm.AssetClass.FOREX))
 print(dm.canonical_symbol("btc-usd", dm.AssetClass.CRYPTO))
@@ -835,27 +771,29 @@ try:
 except ValueError as error:
     print(f"ValueError: {error}")
 
-watchlist = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
+yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
-    watchlist, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+    yahoo_symbols, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )
 ```
 
-**You should see**:
+You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line. Next comes
+a line that starts `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another
+convention's separators`, which names the conventions to choose from. The `converted` panel
+holds `BRK.B`, `AAPL`, and a row whose `Symbol` cell is blank. A symbol the function can't
+convert becomes null, and the debug log records a WARNING for it.
 
-- `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`;
-- a line starting `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another
-  convention's separators`, which names the conventions to choose from;
-- a panel, `converted`, holding `BRK.B`, `AAPL`, and an empty row. A symbol that cannot be
-  converted becomes empty and is logged; `on_error=dm.OnError.RAISE` would stop with an error
-  instead.
+#### 12. Check the debug log
 
-### 13. Check the debug log (`13_check_the_log.py`)
+The debug log must never hold your key. Count the log's lines, its warnings and errors, and any
+copy of your key:
 
 ```python
-# Counts the debug log's lines, its warnings and errors, and any copy of your key. You
-# should see hundreds of lines, a few warnings and errors, and 0 copies of the key.
-with open(LOG, encoding="utf-8") as log_file:
+# Count the debug log's lines, its warnings and errors, and any copy of your key.
+import os
+
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+with open(os.path.join(folder, "massive-debug.log"), encoding="utf-8") as log_file:
     text = log_file.read()
 lines = text.splitlines()
 print(len(lines), "lines")
@@ -863,31 +801,29 @@ print(sum(" WARNING " in line or " ERROR " in line for line in lines), "warnings
 print(text.count(os.environ["MASSIVE_API_KEY"]), "copies of the key")
 ```
 
-**You should see** a number of lines, a few warnings and errors (from examples 7 and 11), and
-`0 copies of the key`.
+You should see `0 copies of the key`. Any other number of copies is a serious problem. Report
+it, and don't send the log. You should also see a few warnings and errors, from examples 7,
+10, and 11 among others. The line count runs to hundreds, or more if the example runner wrote
+to the same log.
 
-**Any other number of copies is a serious problem: report it, and do not send the log.**
+#### 13. Chart a moving average
 
-## 2.2 Try your own
-
-These examples show what the library is for. Change the symbols and dates, and combine them
-with what you learned above.
-
-- Examples 14 to 17 work on the free plan.
-- Examples 18 to 20 need a paid plan's live data. On a free key, a live table opens, and a few
-  seconds later Massive refuses it: the `streams` panel shows its row `FAILED`, with
-  Massive's answer, as in example 11. That is expected.
-
-### 14. A moving average (`14_moving_average.py`)
+Examples 13 to 16 are short analyses of the kind you'd write yourself: a moving average,
+company size against return, a dividend's yield, and the yield curve. Rerun them with your own
+symbols and dates. The first charts NVDA's daily close over six months with its 20-day moving
+average:
 
 ```python
-# Charts NVDA's daily close over six months with its 20-day moving average: one Stocks
-# request. You should see a new table, nvda_daily, and a chart, nvda_chart, with two lines.
+# Chart NVDA's daily close over six months with its 20-day moving average: one request.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from deephaven.plot.figure import Figure
 from deephaven.updateby import rolling_avg_tick
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 six_months_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=182)
 nvda_daily = (
@@ -903,14 +839,24 @@ nvda_chart = (
 )
 ```
 
-### 15. Company size beside return (`15_size_and_return.py`)
+You should see the `nvda_daily` panel, with an `Average20` column, and the `nvda_chart`
+panel, with two lines.
+
+#### 14. Compare company size with return
+
+Company facts join to prices on the `Symbol` column, which puts each company's market value
+beside its return over the last three months:
 
 ```python
-# Joins company facts to prices: each company's market value beside its return over the
-# last three months. Three Stocks requests and three reference requests. You should see a
-# new table, size_and_return, with one row per company.
+# Put each company's market value beside its return over the last three months.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from deephaven import agg
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 symbols = ["AAPL", "JPM", "XOM"]
 quarter_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=91)
@@ -926,14 +872,22 @@ size_and_return = facts.natural_join(returns_3m, on=["Symbol"], joins=["Return3m
 )
 ```
 
-### 16. Dividend yield (`16_dividend_yield.py`)
+You should see the `size_and_return` panel, with one row per company and its `Return3m` and
+`MarketCapBillions`.
+
+#### 15. Work out a dividend's yield
+
+A dividend's yield is its cash amount divided by the price. Find each Apple dividend of the
+past year, and divide it by the close on the trading day before the stock went ex-dividend:
 
 ```python
-# Finds each Apple dividend of the past year and the closing price on the trading day
-# before it, to give each payment's yield: two requests. You should see a new table,
-# dividend_yield, with about four rows.
+# Find each Apple dividend of the past year, and its yield on the close the day before.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 year_ago = yesterday - timedelta(days=364)
@@ -948,16 +902,24 @@ dividend_yield = dividends.aj(
 ).update("PaymentYieldPercent = 100 * CashAmount / Close")
 ```
 
-### 17. The yield curve (`17_yield_curve.py`)
+You should see the `dividend_yield` panel, with one row per payment, about four for a year of
+Apple, each with its `PriceDate` and `PaymentYieldPercent`.
+
+#### 16. Chart the yield curve
+
+The gap between the 10-year and 2-year US Treasury yields is the yield curve's slope, charted
+here over two years:
 
 ```python
-# Charts the gap between the 10-year and 2-year US Treasury yields over two years: one
-# request, counted against no subscription. You should see a new table, curve, and a chart,
-# curve_chart, whose line falls below zero when the curve is inverted.
+# Chart the gap between the 10-year and 2-year US Treasury yields over two years.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from deephaven.plot.figure import Figure
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
 
 two_years_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=730)
 curve = (
@@ -968,50 +930,79 @@ curve = (
 curve_chart = Figure().plot_xy(series_name="10y - 2y", t=curve, x="Day", y="Spread").show()
 ```
 
-### 18. Live minute bars, paid plans (`18_live_minute_bars.py`)
+You should see the `curve` panel, with a `Spread` column, and the `curve_chart` panel. Its
+line falls below zero wherever the curve was inverted.
+
+#### 17. Stream live minute bars
+
+A `last_by` table keeps the latest minute bar of each stock, replaced as each minute ends. To
+run it, you need a paid Stocks plan. Stocks Starter and Developer stream data 15 minutes late,
+so the session accepts delayed data. On Stocks Advanced or Business, which stream in real time,
+delete the `delayed_subscriptions` setting before you run it:
 
 ```python
-# Needs a paid Stocks plan (Starter or higher). Keeps the latest minute bar of five stocks,
-# updated live. You should see a new table, latest_bars, with one row per stock while the
-# market is open. On a free key the table opens, and a few seconds later Massive's live
-# connection refuses it: the streams panel shows its row FAILED, with Massive's answer.
-# On Stocks Starter or Developer, the session needs example 1's line for those plans; if
-# this stops with an error that names delayed_subscriptions, run m.close() first, open the
-# session with that line, and run this again.
+# Keep the latest minute bar of five stocks, updated live. Needs a paid Stocks plan.
+import deephaven_massive as dm
+
+# Stocks Starter and Developer stream 15 minutes late, so this session accepts delayed
+# data. On Stocks Advanced or Business, which stream in real time, delete that setting.
+m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+
 latest_bars = m.stocks.bars(
     ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"], dm.Timespan.MINUTE
 ).last_by()
+streams = m.streams()
 ```
 
-### 19. History and live in one table, paid plans (`19_history_plus_live.py`)
+While the stocks trade, you should see the `latest_bars` panel with one row per stock, each
+row replaced as its next minute ends. Once trading stops, the table keeps each stock's last
+bar. If you run it while the market is closed, it stays empty until the stocks next trade. On
+a free key, the table opens, and a few seconds later its row in `streams` turns `FAILED` with
+Massive's answer.
+
+#### 18. Join today's history to live bars
+
+One table can hold AAPL's minute bars for all of today. The minutes already past come
+from history, and each new minute is added as it ends. To run it, you need a paid Stocks plan
+and the same setting as example 17:
 
 ```python
-# Needs a paid Stocks plan (Starter or higher). Joins today's minute bars from history with
-# the live ones that follow, into one table that keeps growing. You should see a new table,
-# aapl_today, with a row for each traded minute since 04:00 New York time, when pre-market
-# trading starts, and a new row each minute until 20:00; before 04:00 or on a weekend, it is
-# empty. On Stocks Starter or Developer, the live bars run 15 minutes behind; history is not
-# affected. The stream opens before history is read, so the two overlap, and last_by keeps
-# one row per minute: the stream's, where both have it.
+# Join today's minute bars from history with the live ones that follow. Needs a paid Stocks plan.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from deephaven import merge
 
+import deephaven_massive as dm
+
+# Stocks Starter and Developer stream 15 minutes late, so this session accepts delayed
+# data. On Stocks Advanced or Business, which stream in real time, delete that setting.
+m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+
 aapl_minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
 session_day = datetime.now(ZoneInfo("America/New_York")).date()
+# Open the stream before reading history, so no minute falls between the two.
 aapl_live = aapl_minutes.append_only()
 aapl_past = aapl_minutes.history(session_day)
 aapl_today = merge([aapl_past, aapl_live]).last_by(["Symbol", "TimestampStart"])
 ```
 
-### 20. Live crypto, paid plans (`20_live_crypto.py`)
+You should see the `aapl_today` panel, with a row for each minute AAPL has traded today and a
+new row as each minute ends. It holds one row per minute, and where history and the stream
+both have a minute, it keeps the stream's bar. On a day AAPL hasn't traded, such as a weekend, the
+table is empty.
+
+#### 19. Stream crypto trades
+
+Crypto trades around the clock, so this stream of Bitcoin and Ether trades works at any hour.
+To run it, you need a paid Currencies plan. It counts the trades by the minute:
 
 ```python
-# Needs a paid Currencies plan (Starter or higher). Streams Bitcoin and Ether trades and
-# counts them by the minute. You should see two new tables: crypto_latest, one row per coin
-# with its latest trade, and trades_per_minute, which grows each minute. Crypto trades
-# around the clock, so this works at any hour.
+# Stream Bitcoin and Ether trades, and count them by the minute. Needs a paid Currencies plan.
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
 crypto_trades = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).append_only()
 crypto_latest = crypto_trades.last_by("Symbol")
 trades_per_minute = crypto_trades.update("Minute = lowerBin(Timestamp, MINUTE)").count_by(
@@ -1019,132 +1010,129 @@ trades_per_minute = crypto_trades.update("Minute = lowerBin(Timestamp, MINUTE)")
 )
 ```
 
-## 2.3 Follow a watchlist
+You should see `crypto_latest`, with one row per coin holding its latest trade, and
+`trades_per_minute`, which gains a row per coin each minute.
 
-A watchlist is a live table of symbols that chooses a dataset's symbols. The library follows
-it: a symbol you add is read or streamed, and one you delete is dropped.
+#### 20. Follow a watchlist
 
-| Examples | Plan |
-|---|---|
-| 21 and 24 | The free plan |
-| 22 and 23 | A paid plan's live data. On a free key their tables open, and a few seconds later Massive refuses them: the `streams` panel shows their rows `FAILED`, as in example 11. |
-
-These examples make each watchlist an input table, a table you edit in its panel:
-
-- **Add a row**: click the empty row at the bottom of the panel, type the symbol, press
-  **Enter**, then click **Commit** below the table. Nothing is added until you commit.
-- **Delete a row**: click the row, right-click it, and choose **Delete Selected Rows**.
-
-If your IDE shows something different, such as other button or menu names, note it in your
-report.
-
-### 21. A watchlist that drives a poll (`21_watchlist_poll.py`)
+Two watchlists drive three tables here. One table polls the previous day's bar of each stock
+on the stock watchlist every minute, which is three Stocks requests a minute, within Basic's
+five. Another reads those stocks' dividends, and a third reads the contracts of each futures
+product on the product watchlist:
 
 ```python
-# Makes a watchlist you can edit, a table that reads the previous day's bar of each of its
-# stocks every minute (three Stocks requests a minute, within the free plan's five), and a
-# fetch() of their dividends that follows the watchlist. Then a second watchlist, of futures
-# products, and a fetch() of each product's contracts that follows it: one Futures request for
-# each product you add. You should see five new tables: stock_watchlist, with three rows;
-# watched_bars, with one row per stock within about a minute; watched_dividends, with each
-# stock's dividends; product_watchlist, with one row; and watched_contracts, with up to 10 ES
-# rows. Then follow the steps after this block.
+# Make two watchlists you can edit, and tables that follow them. Free plan.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
 
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+reads = m.symbol_reads()
+streams = m.streams()
+
+# Three Stocks requests a minute, within Basic's five.
 stock_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 stock_watchlist.add(new_table([string_col("Symbol", ["JPM", "XOM", "TSLA"])]))
 watched_bars = m.stocks.previous_day_bar(stock_watchlist).poll(60)
 watched_dividends = m.stocks.dividends(stock_watchlist).fetch()
 
+# One Futures request for each product you add.
 product_watchlist = input_table({"ProductCode": dht.string}, key_cols="ProductCode")
 product_watchlist.add(new_table([string_col("ProductCode", ["ES"])]))
 watched_contracts = m.futures.contracts(product_code=product_watchlist, limit=10).fetch()
 ```
 
-Then, in the `stock_watchlist` panel:
+You should see `stock_watchlist` with three rows, `watched_bars` with one row per stock
+within about a minute, and `watched_dividends` with each stock's dividends. You should also
+see `product_watchlist` with one row, and `watched_contracts` with up to 10 ES contracts. Then
+edit the watchlists:
 
-1. Add `AAPL`. **You should see** an `AAPL` row in `watched_bars` at its next read, within
-   about a minute, and AAPL's dividends join `watched_dividends` once they are read.
-2. Delete `TSLA`. **You should see** the `TSLA` row leave `watched_bars` at the next read, and
-   TSLA's dividends leave `watched_dividends` at once.
-3. Look at the `streams` panel. **You should see** `SymbolCount` 3 in the
-   `stocks.previous_day_bar` row (the symbols its latest read covered), and `Kind` `read` in
-   the `stocks.dividends` row.
-4. Run `reads = m.symbol_reads()`. **You should see** one row per symbol of
-   `watched_dividends`: `DONE` for JPM, XOM, and AAPL, and `REMOVED` for TSLA.
+1. In `stock_watchlist`, add `AAPL`. Within about a minute, you should see an `AAPL` row in
+   `watched_bars`, and AAPL's dividends join `watched_dividends`.
+2. Delete `TSLA`. You should see TSLA's dividends leave `watched_dividends` at once, and its
+   row leave `watched_bars` at the next read.
+3. Look at `streams`. You should see `SymbolCount` 3 in the `stocks.previous_day_bar` row, the
+   number of symbols its latest read covered, and `Kind` `read` in the `stocks.dividends` row.
+4. Look at `reads`. For `watched_dividends`, you should see `DONE` for JPM, XOM, and AAPL,
+   and `REMOVED` for TSLA. The `ES` row belongs to `watched_contracts`.
+5. In `product_watchlist`, add `NQ`. Within about a minute, you should see up to 10 NQ
+   contracts land in `watched_contracts` together, and an `NQ` row in `reads` whose `State` is
+   `DONE`.
+6. Delete `NQ`. You should see every NQ contract leave `watched_contracts` at once, while the
+   ES contracts stay.
 
-Then, in the `product_watchlist` panel:
+#### 21. Stream a crypto watchlist
 
-5. Add `NQ`. **You should see** up to 10 rows whose `ProductCode` is `NQ` land in
-   `watched_contracts` together, within about a minute, and an `NQ` row in `reads` with
-   `State` `DONE`.
-6. Delete `NQ`. **You should see** every `NQ` row leave `watched_contracts` at once, while the
-   `ES` rows stay.
-
-### 22. A crypto watchlist, paid plans (`22_crypto_watchlist.py`)
+A stream can follow a watchlist too, keeping each pair's latest trade. To run it, you need a
+paid Currencies plan, and it works at any hour:
 
 ```python
-# Needs a paid Currencies plan (Starter or higher). Makes a watchlist of crypto pairs and
-# streams their trades, keeping each pair's latest. You should see three new tables:
-# crypto_watchlist, with two rows; crypto_board, with one row per pair after its first trade,
-# within seconds; and streams. Then follow the steps after this block. Crypto trades around
-# the clock, so this works at any hour.
+# Stream the trades of a watchlist of crypto pairs. Needs a paid Currencies plan.
 from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
 
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+streams = m.streams()
+
 crypto_watchlist = input_table({"Symbol": dht.string}, key_cols="Symbol")
 crypto_watchlist.add(new_table([string_col("Symbol", ["X:ETHUSD", "X:LINKUSD"])]))
 crypto_board = m.crypto.trades(crypto_watchlist).last_by()
-streams = m.streams()
 ```
 
-Then, in the `crypto_watchlist` panel, watching `crypto_board` and the `crypto.trades` row of
-`streams`:
+You should see `crypto_watchlist` with two rows, and `crypto_board` with one row per pair
+after its first trade, usually within seconds. Then edit the watchlist, watching
+`crypto_board` and the `crypto.trades` row of `streams`:
 
-1. Add `X:SOLUSD`. **You should see** an `X:SOLUSD` row in `crypto_board` after its first
-   trade, usually within seconds, and `X:SOLUSD` in that stream's `Symbols`, with
-   `SymbolCount` 3.
-2. Delete `X:SOLUSD`. **You should see** its row leave `crypto_board` at once, and `Symbols`
-   drop it, with `SymbolCount` 2.
-3. Add `X:SOLUSD` again. **You should see** no `X:SOLUSD` row until its next trade, then a row
+1. Add `X:SOLUSD`. You should see an `X:SOLUSD` row in `crypto_board` after its first trade,
+   and `X:SOLUSD` in the stream's `Symbols`, with `SymbolCount` 3.
+2. Delete `X:SOLUSD`. You should see its row leave `crypto_board` at once, and `Symbols` drop
+   it, with `SymbolCount` 2.
+3. Add `X:SOLUSD` again. You should see no `X:SOLUSD` row until its next trade, then a row
    whose `Timestamp` is later than when you added it. The old row never comes back.
-4. Add `btcusd`, in lower case. **You should see** no row for it, and the stream's `Error`
-   names `btcusd`, which is not Massive's spelling. The other pairs keep streaming. Then
-   delete the `btcusd` row and add `X:BTCUSD`. **You should see** the `Error` clear, and an
-   `X:BTCUSD` row in `crypto_board` after its first trade.
-5. Add `X:ZZZZUSD`, a pair Massive does not list. **You should see** no row for it, and the
-   stream's `Error` names `X:ZZZZUSD`; the other pairs keep streaming. Delete it. **You should
-   see** the `Error` clear.
+4. Add `btcusd`, in lower case. You should see no row for it, and the stream's `Error` names
+   `btcusd`, which isn't Massive's spelling, while the other pairs keep streaming. Delete the
+   `btcusd` row and add `X:BTCUSD`. You should see the `Error` clear, and an `X:BTCUSD` row in
+   `crypto_board` after its first trade.
+5. Add `X:ZZZZUSD`, a pair Massive doesn't list. You should see no row for it, and the
+   stream's `Error` names `X:ZZZZUSD`, while the other pairs keep streaming. Delete it, and
+   you should see the `Error` clear.
 
-### 23. Gainers choose the trades, paid plans (`23_gainers_trades.py`)
+#### 22. Stream the trades of the day's gainers
+
+One live table can choose another's symbols. Here the day's top gainers, read again every
+minute, choose whose trades to stream. To run it, you need Stocks Developer or higher, the
+plans that include trades:
 
 ```python
-# Needs a paid Stocks plan with trades (Developer or higher). Lets one table choose another's
-# symbols: the day's top gainers, re-read every minute, choose whose trades to stream. You
-# should see two new tables: gainers, with up to 20 rows, and gainer_trades, with one row per
-# gainer after its first trade, while the market is open.
+# Stream the trades of the day's top gainers. Needs Stocks Developer or higher.
+import deephaven_massive as dm
+
+# Stocks Developer streams 15 minutes late, so this session accepts delayed data. On
+# Stocks Advanced or Business, which stream in real time, delete that setting.
+m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+streams = m.streams()
+
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
 gainer_trades = m.stocks.trades(gainers).last_by()
 ```
 
-**You should see** the gainers listed in the `Symbols` of the `stocks.trades` row of
-`streams`. When a stock joins or leaves the gainers at a minute's read, it joins or leaves
-`Symbols` and `gainer_trades` too.
+While the market is open, you should see `gainers` with up to 20 rows, and `gainer_trades`
+with one row per gainer after its first trade. The `stocks.trades` row of `streams` lists the
+gainers in its `Symbols`. When a stock joins or leaves the gainers at a minute's read, it joins
+or leaves `Symbols` and `gainer_trades` too.
 
-On Stocks Developer the trades run 15 minutes behind, and the session needs example 1's line
-for that plan, as example 18 says.
+#### 23. Read history that follows a watchlist
 
-### 24. History that follows a watchlist (`24_followed_history.py`)
+History can follow a watchlist as well. Each stock you add is read over the same month, with
+one Stocks request, and each one you delete leaves the table:
 
 ```python
-# Makes a watchlist you can edit and a month of daily bars that follows it: each stock you add
-# is read over the same month, and each one you delete leaves. One Stocks request for each
-# stock you add, within the free plan. You should see three new tables: names, with two rows;
-# followed, with about 20 bars each of AAPL and MSFT; and reads, with one DONE row for each.
-# Then follow the steps after this block.
+# Read a month of daily bars that follows a watchlist you can edit. Free plan.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -1152,40 +1140,43 @@ from deephaven import dtypes as dht
 from deephaven import input_table, new_table
 from deephaven.column import string_col
 
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+reads = m.symbol_reads()
+
 names = input_table({"Symbol": dht.string}, key_cols="Symbol")
 names.add(new_table([string_col("Symbol", ["AAPL", "MSFT"])]))
 month_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=30)
 followed = m.stocks.bars(names, dm.Timespan.DAY).history(month_ago)
-reads = m.symbol_reads()
 ```
 
-Then, in the `names` panel:
+You should see `names` with two rows, `followed` with about 20 bars each of AAPL and MSFT, and
+`reads` with a `DONE` row for each. Then edit `names`:
 
-1. Add `NVDA`. **You should see** NVDA's bars join `followed` a few seconds later, all in one
-   update. In `reads`, NVDA goes `QUEUED`, `LOADING`, then `DONE`, with `Rows` equal to its
-   bars in `followed`.
-2. Delete `NVDA`. **You should see** its bars leave `followed` in one update, and its row in
+1. Add `NVDA`. A few seconds later, you should see NVDA's bars join `followed`, all in one
+   update. In `reads`, NVDA goes from `QUEUED` to `LOADING` to `DONE`, and its `Rows` equals
+   its number of bars in `followed`.
+2. Delete `NVDA`. You should see its bars leave `followed` in one update, and its row in
    `reads` become `REMOVED`.
-3. Add `NVDA` again. **You should see** it downloaded again: its `ReadAt` in `reads` is newer.
-   To get the earlier download back without a request, pass `reread=dm.Reread.NEVER` to
-   `history()`.
+3. Add `NVDA` again. You should see it downloaded again, with a newer `ReadAt` in `reads`.
 
-## 2.4 Save the diagnostics, and finish
+<a id="24-save-the-diagnostics"></a>
 
-### 25. Save the diagnostics (`25_save_diagnostics.py`)
+#### 24. Save the diagnostics
 
-Run this whenever something goes wrong, first, before you close the session: the bug report
-([part 4](#part-4-reporting-a-problem)) collects these files.
+When something goes wrong, run this example first, in the same console. It saves the
+diagnostics tables of the session in `m`, which is the session the last example opened, and
+your bug report includes them:
 
 ```python
-# Saves the session's diagnostics tables as files for a bug report. Run it right after a
-# problem, before you close the session. You should see the folder the files went to.
+# Save the diagnostics tables of the session in m, the one the last example opened.
 import os
 
 from deephaven.pandas import to_pandas
 
-FOLDER = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
-diagnostics = os.path.join(FOLDER, "diagnostics")
+folder = os.environ.get("MASSIVE_TEST_FOLDER", os.path.expanduser("~/massive-test"))
+diagnostics = os.path.join(folder, "diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {"streams": m.streams(), "connections": m.connections(), "rate_limits": m.rate_limits()}
 for name, table in tables.items():
@@ -1193,467 +1184,452 @@ for name, table in tables.items():
 print("saved to", diagnostics)
 ```
 
-**You should see** `saved to` and the folder, such as `/Users/you/massive-test/diagnostics`.
+You should see `saved to` and the folder, such as `/Users/you/massive-test/diagnostics`.
 
-### 26. Close the session (`26_finish.py`)
+#### 25. Close a session
+
+Closing a session stops all its live tables. This block closes one and shows that a closed
+session refuses new work. Then it reads a week of bars in a `with` block, which closes its
+session when the block ends:
 
 ```python
-# Closes the session, shows that a closed session refuses new work, and downloads once more
-# in a with block, which closes its session by itself. You should see
-# <MassiveSession #1 closed>, a MassiveError that says the session is closed, then
-# <MassiveSession #2 closed> and a number between 3 and 5.
+# Close a session, and see that a closed session refuses new work.
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+closing_status = m.reference.market_status().poll(60)
 m.close()
 print(m)
 
+yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 try:
-    m.stocks.bars("AAPL", dm.Timespan.DAY).history(first_day, last_day)
+    m.stocks.bars("AAPL", dm.Timespan.DAY).history(yesterday - timedelta(days=6), yesterday)
 except dm.MassiveError as error:
     print(f"MassiveError: {error}")
 
+# A with block closes its session when the block ends.
 config = dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription))
 with dm.MassiveSession(config) as m2:
     last_week = m2.stocks.bars("NVDA", dm.Timespan.DAY).history(
-        last_day - timedelta(days=6), last_day
+        yesterday - timedelta(days=6), yesterday
     )
 print(m2, last_week.size)
 ```
 
-**You should see**:
+You should see three lines like these, with your own session numbers and a row count between
+3 and 5:
 
-- `<MassiveSession #1 closed>`;
-- `MassiveError: MassiveSession #1 is closed`;
-- `<MassiveSession #2 closed>` and a number between 3 and 5.
+```text
+<MassiveSession #7 closed>
+MassiveError: MassiveSession #7 is closed
+<MassiveSession #8 closed> 5
+```
 
-Each session number is one higher if you opened the session again in example 18.
+The `closing_status` panel shows an error that says the session was closed, and it keeps its
+rows. The other examples' sessions are still open, and their tables carry on. When you're
+done with the console, stop the server with Control-C in its terminal.
 
-Closing a session stops all its live tables: `live_status` now shows an error that says the
-session was closed, and keeps its rows. Static tables such as `daily` are unaffected.
+<a id="leave-the-live-run-going"></a>
 
-When you are done with the console, stop the server with Control-C in its terminal.
+## Leave the live run going
 
-## 2.5 Run every example at once
+The live run checks the library against Massive's real servers for at least five trading
+days, and it needs about 10 minutes of your time a day. One program, `scripts/live_run.py`,
+runs every check your Massive plan allows at set times of the New York day, and records
+Massive's answers for the owner. You start it once and leave it running.
 
-After the exercises by hand, run them all with one command. It is a second check that every
-example works on your key.
+When it starts, and again each trading morning, the program asks Massive which plan your key holds
+for each subscription, such as Stocks Starter, or Stocks Basic if you're on the free plan. This
+check is the probe. Because of it, your plans can change at any time, and the program runs the
+checks your current plans allow.
 
-1. Close the console's session first (example 26): both use the same key's limits.
-2. From the checkout, in a terminal with your key set:
+Two kinds of check keep the computer busy for many hours, and they need it on and awake:
 
-   ```bash
-   uv run python scripts/tester.py examples
-   ```
+| Check | When, in New York time | Which plans |
+|---|---|---|
+| A stream day: a whole trading day of live data | 03:15 to 20:30 on a day the program picks | Any paid plan, since the free Basic plans don't stream |
+| A stream night: Bitcoin, Ether, and the main stock-index futures overnight | 16:30 to 09:30 the next morning, on a Sunday to Thursday evening | A paid Currencies or Futures plan |
 
-It asks Massive which plans your key holds, so example 1 opens the session they need. It then
-starts its own Deephaven server and runs every example in order, as the console would. It can
-take 15 minutes or more: it waits up to 15 minutes for example 9's download.
+The `status` command of [step 4](#4-look-in-once-a-day) shows when the next stream day and
+night are planned. At least one full stream day, from its start to its end, must fall within
+your test.
 
-**You should see** a one-line verdict per example, saved with everything each example printed,
-raised, and made in `~/massive-test/examples-output/`, the verdicts in `summary.txt`:
+### 1. Prepare the computer
 
-| Verdict | Meaning |
-|---|---|
-| `passed` | The example worked. On a key without live stocks or crypto data, examples 18 to 20, 22, and 23 pass too: their live tables open before Massive refuses them, and the refusals show in `~/massive-test/diagnostics/streams.csv`, which example 25 writes. |
-| `refused by your plan` | Expected for an example your plan does not include. |
-| `failed` | Report it. |
+Use a computer that can stay on and awake for the whole test, at least seven calendar days,
+on a stable network with 20 GB of free disk. The program keeps the computer awake while it
+runs, but closing a laptop's lid still puts it to sleep. On Windows, set
+**Settings > System > Power > Sleep** to **Never**.
 
----
+Stop every other use of your key first, including the Deephaven server you used for the
+examples. A live check fails or waits when another program holds the key's connection.
 
-<a id="part-3-the-live-run"></a>
+Then open a terminal, and set your keys as in [step 2 of Set up](#2-set-your-massive-key),
+including the S3 keys if you have them. From the checkout, run the program's check, which
+writes nothing:
 
-# Part 3: The live run
+```bash
+cd ~/massive-test/deephaven-massive
+uv run python scripts/live_run.py check
+```
 
-## 3.1 What it is
+You should see one line for each part of the machine, then your plan for each subscription,
+the flat files your S3 keys reach, and `ready: yes`. Here are some of the lines, with your own
+values in place of these:
 
-The live-run program, `scripts/live_run.py`, runs every check your Massive plan allows against
-Massive's real servers, and records Massive's answers. The checks answer questions only the
-real servers can: a timestamp's unit, where a day's bar starts, what Massive sends when a
-plan lacks some data, whether the library keeps up with a full trading day of live data. You
-start it once and leave it running for at least five trading days, one of them a full stream
-day.
+```text
+OK   java: Java 17
+OK   disk: 212 GB free
+OK   keep-awake: caffeinate
+...
+ready: yes
+```
 
-- **It finds your plan by itself.** It probes the key (asks Massive what each subscription
-  allows) when it starts and every trading morning. Buy, upgrade, or cancel at any time: it
-  notices at the next probe, or at once if you restart it.
-- **A skip is not a failure.** A check your plan cannot run reads `skipped: needs <plan>`,
-  such as `skipped: needs Stocks Starter`. A check fails only when something your plan allows
-  goes wrong.
-- **No check waits long on the free plan.** None waits more than about a minute for a request;
-  a check that would need longer is skipped as needing a paid plan.
+A `WARN` line is advice. A `FAIL` line says how to fix it.
 
-It runs by New York time:
+### 2. Start the first run
 
-| When | What |
-|---|---|
-| 08:00 each trading day | The probe |
-| 09:28 | The opening check |
-| From 11:30 | The main checks, after Massive publishes the previous day's files |
-| From 16:15 | The connection-limit checks |
-| 03:45 to 20:30 on a stream day | A full trading day of live data, when your plan allows it. The probe runs at 03:15. |
-| 09:15 to 11:00 the next morning | A throughput measurement |
-| 16:30 to 09:30 the next morning, on a stream night | Crypto and futures, when your plan allows them |
+Start the program with `--any-time`. It runs the checks that need no market hours right away.
+Without it, they wait until 11:30 New York time, when each trading day's regular checks
+begin. The option counts only on a results folder's first start. Later starts run each check
+at its set New York time:
 
-**The stream night.** With a paid Currencies or Futures plan, it plans a stream night: it
-streams Bitcoin and Ether, and the main stock-index futures, through the hours only those
-markets trade.
+```bash
+uv run python scripts/live_run.py run --out ~/massive-live --any-time
+```
 
-- A night falls on a Sunday to Thursday evening before a normal trading day; never around a
-  holiday, and never on a stream day.
-- It checks that each row is dated to the right day as the futures session changes at the
-  16:00 Chicago close (17:00 New York) and the crypto day changes at midnight UTC (19:00 or
-  20:00 New York). The next day it compares the night's prices with Massive's history.
-- Leave the computer on and awake that night.
+You should see a line that names the results folder, such as
+`10:01 EST results folder: /Users/you/massive-live`, and your subscriptions. Every line starts
+with the New York time. Then a line appears as each group of checks starts and ends, such as
+these:
 
-## 3.2 Before you start
+```text
+10:02 EST start evidence
+10:02 EST evidence: 74 checks; on Basic, up to 40 minutes of requests
+10:49 EST end evidence
+```
 
-1. Use a computer that can stay on and awake, on a stable network, with 20 GB free.
-2. Open a terminal, go to the checkout, and set your keys ([1.3](#13-get-your-massive-keys)),
-   S3 keys included if you have them:
+When nothing is due until a set time, the program writes a zip of everything so far, prints
+`packed live-results-<date>.zip`, then prints a line such as
+`16:20 EST idle: nothing more to run until Tue 08:00 EST (probe)`, and sleeps. Leave it
+running.
 
-   ```bash
-   cd ~/massive-test/deephaven-massive
-   ```
+### 3. Stop and resume the run
 
-3. **Stop every other use of your key**: the Deephaven server of part 2, and any other
-   program. Live checks fail or wait when something else holds the key's connection.
-4. Check:
+The program can stop and resume at any time, and this step checks that it does. About ten
+minutes after the first start, press Control-C once. Within a minute, you should see a line
+like this:
 
-   ```bash
-   uv run python scripts/live_run.py check
-   ```
+```text
+10:12 EST interrupted; to resume, run: uv run python scripts/live_run.py run --out /Users/you/massive-live
+```
 
-   It writes nothing. **You should see** one line per item of the machine (Java, uv, the
-   commit, your keys, the clock, the disk, the memory, keep-awake), then your plan per
-   subscription, the flat files your S3 keys reach, and `ready: yes`. A `FAIL` line says how
-   to fix it.
+Run that same command, without `--any-time`. You should see `resuming`, and the run carries
+on where it stopped. Checks that passed stay passed.
 
-## 3.3 The first run
+<a id="4-look-in-once-a-day"></a>
 
-1. Start it:
+### 4. Look in once a day
 
-   ```bash
-   uv run python scripts/live_run.py run --out ~/massive-live --any-time
-   ```
-
-   `--any-time` runs at once the checks that need no market hours, instead of waiting for
-   11:30. It works once per results folder; later starts follow the timetable.
-
-2. **You should see** `results folder: /Users/you/massive-live`, your subscriptions, then a
-   line as each group of checks starts and ends, with how long its requests may take on the
-   free plan. Every line starts with the New York time:
-
-   ```text
-   10:02 EST start evidence
-   10:02 EST evidence: 74 checks; on Basic, up to 40 minutes of requests
-   10:49 EST end evidence
-   ```
-
-3. When it has nothing to do until a set time, it prints a line such as
-   `16:20 EST idle: nothing more to run until Tue 08:00 EST (probe)`, writes a zip of
-   everything so far, and sleeps. Leave it running. It keeps the computer awake while it runs,
-   but closing a laptop's lid still puts it to sleep.
-
-4. **Test the resume now.** About ten minutes in, press Control-C once. **You should see**,
-   within a minute:
-
-   ```text
-   10:12 EST interrupted; to resume, run: uv run python scripts/live_run.py run --out /Users/you/massive-live
-   ```
-
-5. Run that same command, without `--any-time`. **You should see** `resuming`, and the run
-   carries on where it stopped. Checks that passed stay passed.
-
-## 3.4 Look in once a day
-
-In a second terminal, from the checkout:
+Once a day, check on the run from a second terminal in the checkout. The `status` command
+changes nothing:
 
 ```bash
 uv run python scripts/live_run.py status --out ~/massive-live
 ```
 
-It changes nothing. **You should see**:
+You should see the latest probe and your subscriptions, the next stream day, and the next
+stream night if one is planned, such as
+`next stream night: Sun 2026-11-08 16:30 EST to Mon 09:30 EST`. Every check follows, grouped,
+with when its group runs next, and then a summary table:
 
-- the latest probe, and your subscriptions;
-- the next stream day, and the next stream night if one is planned, such as
-  `next stream night: Sun 2026-11-08 16:30 EST to Mon 09:30 EST`;
-- every check, grouped, with when its group runs next;
-- a summary table:
+```text
+group | passed | failed | error | refused | skipped | not run
+evidence | 52 | 0 | 0 | 0 | 22 | 0
+```
 
-  ```text
-  group | passed | failed | error | refused | skipped | not run
-  evidence | 52 | 0 | 0 | 0 | 22 | 0
-  ```
+Most statuses need nothing from you:
 
 | Status | What you do |
 |---|---|
-| `passed`, `skipped: needs ...`, `not run` | Nothing. |
-| `refused` | Nothing. Massive refused something its own documentation says your plan includes; the owner reads it in the results. |
-| `failed` or `error` | Nothing the first time: a failed check runs once more. Write to the owner if a check fails twice. |
+| `passed` or `not run` | Nothing |
+| `skipped: needs <plan>`, such as `skipped: needs Stocks Starter` | Nothing. Your plan doesn't include that check, and a skip isn't a failure. |
+| `refused` | Nothing. Massive refused something its own documentation says your plan includes, and the owner reads it in the results. |
+| `failed` or `error` | Nothing the first time, because a failed check runs once more. If a check fails twice, pack the results and send them on a GitHub issue, as [Finish the test](#finish) describes. |
 
-**Record** the dates you looked in, and the date of the full stream day.
+Note in your checklist each date you looked in, and the date of the full stream day.
 
-## 3.5 Stops, restarts, and changes
+Between check-ins, you can run the examples again on a new Deephaven server, but only while the
+run's last line says `idle`, and stop before the time that line names. Several checks besides
+the stream day and night need your key's live connection.
 
-| What happened | What you do |
-|---|---|
-| Control-C, a closed terminal, a crash, or a lost network | Run the same `run` command again. It resumes. |
-| A reboot | Open a terminal, `cd ~/massive-test/deephaven-massive`, set your keys again ([1.3](#13-get-your-massive-keys)), and run the same command. |
-| You changed your plan | Nothing: the next probe notices. To make it notice at once, press Control-C and run the same command. |
-| You got S3 keys for the first time | It prints a reminder to set them: stop it, set them, and start it again. |
-| The owner sends a new version | Make a new checkout of it, and start a new results folder, such as `--out ~/massive-live-2`. The run refuses to resume a folder on another commit. |
+While the run goes, read `README.md` and the dataset pages in `docs/datasets/`, and note
+anything unclear for your report.
 
-## 3.6 While it runs
+<a id="5-pack-and-send-the-results"></a>
 
-You are free most of the time. Good uses of it:
+### 5. Pack and send the results
 
-- the try-your-own examples ([2.2](#22-try-your-own)), with a new Deephaven server, but
-  **not while a stream day, a stream night, or a connection-limit check runs**: they use
-  your key's live connection. `status` shows when those are planned;
-- reading `README.md` and the dataset reference in `docs/datasets/` of the checkout, and
-  noting anything unclear;
-- writing up anything from part 2 you have not reported yet.
+Pack the results whenever a comment on your issue asks, and when you stop for good. To pack, press
+Control-C and run this in the same terminal, which must hold exactly the keys the run used:
 
-## 3.7 Pack and send
+```bash
+uv run python scripts/live_run.py pack --out ~/massive-live
+```
 
-Pack whenever the owner asks, and when you stop for good.
-
-1. Press Control-C.
-2. In the same terminal, which must hold exactly the keys the run used:
-
-   ```bash
-   uv run python scripts/live_run.py pack --out ~/massive-live
-   ```
-
-3. **You should see** `wrote /Users/you/massive-live/live-results-<date>.zip`. Each zip holds
-   everything so far, so send only the newest.
+You should see `wrote /Users/you/massive-live/live-results-<date>.zip`. Each zip holds
+everything so far, so send only the newest, on a GitHub issue as
+[Finish the test](#finish) describes. If `pack` refuses, its message says why:
 
 | Message | What you do |
 |---|---|
-| It names files in which it found a key, and writes no zip | Send the owner that list instead. |
+| It names files in which it found a key, and writes no zip | Put that list of file names, without the files, on a GitHub issue instead. |
 | It says to set exactly the secrets the run used | Set the same keys as when you ran `run`, and pack again. |
 
-The zip holds Massive's market data: send it only to the owner.
+Unless you're stopping for good, start the run again with the same `run` command.
 
-## 3.8 The upgrade check, only when the owner asks
+### Restart after a stop
 
-It tests that once you upgrade a subscription from the free plan, the library stops limiting
-it to 5 requests a minute.
+The same `run` command resumes the run after any stop:
 
-1. Before you upgrade, stop the run (Control-C).
-2. Run the check, naming the subscription: `stocks`, `options`, `indices`, `currencies`, or
-   `futures`.
+| What happened | What you do |
+|---|---|
+| Control-C, a closed terminal, a crash, or a lost network | Run the same `run` command again. |
+| The computer restarted | Open a terminal, set your keys again, go to the checkout, and run the same command. |
+| You changed your plan | Nothing, because the next morning's probe notices. To make it notice at once, press Control-C and run the same command. |
+| You got S3 keys for the first time | The program prints a reminder. Stop it, set the keys, and start it again. |
+| A new release comes out | Copy the code of the new release, and start a new results folder, such as `--out ~/massive-live-2`. The program refuses to resume a folder on another commit. |
+
+### Run the upgrade check when asked
+
+The upgrade check tests that once you upgrade a subscription from the free plan, the library
+stops limiting it to 5 requests a minute. Run it only when a comment on your issue asks:
+
+1. Stop the run with Control-C, before you upgrade.
+2. Start the check with the name of the subscription you'll upgrade, which is `stocks`,
+   `options`, `indices`, `currencies`, or `futures`. For stocks, run this command:
 
    ```bash
    uv run python scripts/live_run.py upgrade-check stocks --out ~/massive-live
    ```
 
-3. After a few minutes it prints `Now upgrade stocks on the dashboard, then press Enter`.
-   Upgrade on Massive's dashboard, and press Enter.
-4. Wait up to 15 minutes. **You should see** `upgrade check: passed`, or `failed` with a
-   reason.
-5. Start `run` again.
+   After a few minutes, you should see `Now upgrade stocks on the dashboard, then press Enter`.
+3. Upgrade the subscription on Massive's dashboard, and press Enter. Within 15 minutes, you
+   should see `upgrade check: passed`, or `failed` with a reason.
+4. Start the run again, with the same `run` command.
 
-Pressing Enter without upgrading is a rehearsal. It ends
+Pressing Enter without upgrading makes the check a rehearsal, and it ends
 `upgrade check: failed: tier stayed Basic (recorded as a rehearsal)`.
 
-## 3.9 When something goes wrong
+### Fix a live run that fails
 
-| Message or symptom | What you do |
+Most live-run problems come from the key, from another program using it, or from a computer
+that slept:
+
+| You see | What you do |
 |---|---|
-| `the API key was rejected` | Copy the key again from the dashboard, and set it ([1.3](#13-get-your-massive-keys)). |
-| `a run or an upgrade check is using ...` | Another `run` is already going: use it, or stop it first. |
+| `the API key was rejected` | Copy the key again from the dashboard, and set it again. |
+| `a run or an upgrade check is using ...` | Another `run` is already going. Use it, or stop it first. |
 | The probe shows a lower plan than you bought | A purchase can take minutes to reach the key. Wait ten minutes, then restart the run. |
-| A stream day or night shows a gap | The computer slept. Keep it awake, with the lid open. A gap of more than 30 minutes makes the program plan another stream day or night. |
-| A stream night fails because an hour its market was open brought no data | Nothing: it is for the owner, in the zip. |
-| Anything else | Send the owner the `status` output and the zip. |
+| A gap in a stream day or night, in the zip's `REPORT.md` | Keep the computer awake with the lid open. After a first gap of more than 30 minutes, the program plans one more stream day or night. |
+| A stream night fails because an hour its market was open brought no data | Nothing. The owner reads it in the zip. |
+| Anything else | Open an issue in this repository with the `status` output, and attach the newest zip. |
 
----
+<a id="report-a-problem"></a>
 
-<a id="part-4-reporting-a-problem"></a>
+## Report a problem
 
-# Part 4: Reporting a problem
+When anything goes wrong, report it at once. You save the diagnostics, fill in a short
+template, and run one command that zips your logs with your keys removed. These count as
+problems:
 
-## 4.1 A library bug, or your plan?
+- a step that fails, hangs, or shows something other than the step says
+- an error message you can't understand or act on
+- instructions that were unclear, which is a finding, not a failure on your part
+- a console command that hasn't returned after 5 minutes, unless its example says it takes
+  longer
+- a `WARNING` in the debug log about a bar stamped at an unexpected time, such as a daily bar
+  at 14:30
 
-The error's type tells you:
+### Decide whether to report an error
+
+An error message tells you whether the library, your plan, or your code caused it. A library
+bug's message ends with the sentence "This is a bug in deephaven-massive", followed by how to
+report it. Other errors depend on their type:
 
 | Error | What it means | Report it? |
 |---|---|---|
-| `EntitlementError` | Massive refused because of your plan: the message names the plan or quotes Massive's refusal | Only if the message was unclear, or your plan should include the data |
-| `AuthenticationError` | The key is missing or wrong | Only if the message was unclear |
-| `ValueError` or `TypeError` | The call itself was wrong, such as a misspelled symbol; the message says how to fix it | If the message did not help you fix it |
-| `MassiveError`, any other error, a Java error, a hang, or a crash | Something went wrong in the library or at Massive | **Yes** |
+| A message containing "This is a bug in deephaven-massive" | A bug in the library | Yes |
+| `EntitlementError` | Massive refused the request. The message names the subscription and the refused request, and quotes Massive. | Only if the message was unclear, or your plan should include the data |
+| `AuthenticationError` | The key is missing, or Massive rejected it | Only if the message was unclear |
+| Any other `MassiveError` | A condition the message explains, such as a closed session or a lost connection | Only if the message didn't tell you what happened or what to do |
+| `ValueError` or `TypeError` | The call itself was wrong, such as a misspelled symbol, and the message says how to fix it | Only if the message didn't help you fix it |
+| Any other error, a Java error, a hang, or a crash | Something failed that the library didn't catch | Yes |
 
-Elsewhere:
+An example the runner marks `refused by your plan` is a refusal by Massive. Report it only if
+your plan should include that data. Report every example the runner marks `failed`.
 
-- In `tester.py examples`, a refusal reads `refused by your plan`, and anything else
-  `failed`.
-- In the live run, a refusal of something your plan should include reads `refused`, recorded
-  for the owner.
+The live run marks `refused` anything Massive refused although your plan should include it.
+The owner reviews those, so you don't report them.
 
-## 4.2 Make the report
+### Make the report
 
-1. **Right away**, in the console, run example 25 (`25_save_diagnostics.py`) to save the
-   diagnostics tables. Take a screenshot of anything on screen that looks wrong.
-2. Write `~/massive-test/bug-report.md` from the [template](#43-the-template).
-3. If your setup changed since you last ran `tester.py check`, run it again
-   ([1.6](#16-check-both-setups)).
-4. From the checkout, with your key set, bundle everything:
+The command `scripts/tester.py bug-report` zips everything the owner needs into one report
+zip, with your keys removed. Before you run it, save what the zip needs:
+
+1. Right away, in the console where the problem happened, run
+   [example 24](#24-save-the-diagnostics) to save the diagnostics tables. It saves the
+   diagnostics of the session named `m`. If your session has another name, change `m` in the
+   example to that name. Take a screenshot of anything on screen that looks wrong.
+2. Copy this template into `~/massive-test/bug-report.md`, and fill in each part:
+
+   ```markdown
+   # <one line: what went wrong>
+
+   ## What I did
+   The exact code, pasted (or the example's number), and the steps before it.
+
+   ## What I expected
+
+   ## What happened
+   The full error text, from `Error in Python interpreter` to the end, or what the table
+   showed.
+
+   ## When
+   Date, time, and time zone (such as 2026-10-30 14:15 America/Chicago).
+
+   ## My setup
+   - Plan of each subscription (Basic, Starter, ...):
+   - Console setup: virtual environment, or Docker
+
+   ## Attachments
+   - bug-report-<time>.zip
+   - screenshots, for anything shown on screen
+   ```
+
+3. If your setup changed since you last ran the setup check, run it again, as in
+   [step 5 of Set up](#5-run-the-setup-check).
+4. From the checkout, in a terminal where your key is set, build the report zip:
 
    ```bash
    uv run python scripts/tester.py bug-report
    ```
 
-   **You should see** it write `~/massive-test/bug-report-<time>.zip`. If it finds a key in
-   any file, it writes nothing and names the files instead: send the owner that list.
+   You should see it write `~/massive-test/bug-report-<time>.zip`. If the command finds a key
+   in any file, it writes nothing and names the files instead. Put that list of file names,
+   without the files, on a GitHub issue.
 5. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, paste your
-   report, and attach the zip and the screenshots. If GitHub will not take the upload, email
-   them to the owner.
+   report, and attach the report zip and the screenshots.
 
-The zip holds, with your keys removed:
+The report zip holds these files, each with your keys replaced by `***`:
 
-- your report;
-- the debug log, and the server's output;
-- the diagnostics, and the examples' output;
-- what `tester.py check` printed last: the console's versions, whether both setups hold the
-  same commit, your plans;
-- a description of your machine: operating system, Python, Java, and which keys are set,
-  never their values.
+- `bug-report.md`, your report
+- `setup-check.txt`, what the setup check printed last
+- `massive-debug.log`, the library's debug log
+- `server.log`, the server's output
+- `diagnostics/`, the tables example 24 saved
+- `examples-output/`, what the example runner saved
+- `environment.json`, a description of your machine, which names the keys you set but never
+  their values
 
-## 4.3 The template
+<a id="finish"></a>
 
-```markdown
-# <one line: what went wrong>
+## Finish the test
 
-## What I did
-The exact code, pasted (or the example's file name), and the steps before it.
+The test ends once the live run has covered five trading days, one of them a full stream day.
+If the dates in your checklist fall short, leave the run going and come back later. When they do,
+send your results and clean up:
 
-## What I expected
-
-## What happened
-The full error text, from `Error in Python interpreter` to the end, or what the table
-showed.
-
-## When
-Date, time, and time zone (such as 2026-10-30 14:15 America/Chicago).
-
-## My setup
-- Plan of each subscription (Basic, Starter, ...):
-- Console setup: virtual environment, or Docker
-
-## Attachments
-- bug-report-<time>.zip
-- screenshots, for anything shown on screen
-```
-
----
-
-<a id="part-5-finish-and-clean-up"></a>
-
-# Part 5: Finish and clean up
-
-1. Check your notes from [3.4](#34-look-in-once-a-day): the live run covered at least five
-   trading days, one of them a full stream day.
-2. Pack and send the live run's zip ([3.7](#37-pack-and-send)), your checklist, and any open
-   reports.
-3. Stop the live run (Control-C) and any Deephaven server.
-4. Keep `~/massive-test` and `~/massive-live` until the owner confirms receipt. Then delete
-   them:
+1. Stop the live run with Control-C in its terminal, and stop any Deephaven server with
+   Control-C in its own terminal.
+2. In the live run's terminal, with the same keys still set, pack each results folder as in
+   [step 5 of Leave the live run going](#5-pack-and-send-the-results). For a second folder,
+   use `--out ~/massive-live-2`.
+3. Open an issue at <https://github.com/chipkent/deephaven-massive/issues/new>, and attach the
+   newest `live-results-<date>.zip` from each folder, your checklist, and any bug-report zips
+   you haven't sent.
+4. Keep `~/massive-test` and every live-run folder, such as `~/massive-live` and
+   `~/massive-live-2`, until your results issue is closed. Then delete them:
 
    ```bash
-   rm -rf ~/massive-test ~/massive-live
+   rm -rf ~/massive-test ~/massive-live ~/massive-live-2
    ```
 
-5. Cancel any paid plan as the owner says: plans renew monthly until cancelled.
+   The command prints nothing. If you ran Deephaven in Docker, also remove its image, as
+   [Run Deephaven in Docker](#run-deephaven-in-docker) shows.
 
----
+<a id="run-deephaven-in-docker"></a>
 
-<a id="appendix-a-the-docker-console-setup"></a>
+## Run Deephaven in Docker
 
-# Appendix A: The Docker console setup
+To run the Deephaven IDE from Docker instead of from a second Python environment, follow
+these steps. They replace steps 4 to 6 of Set up and end with the Deephaven IDE open in your
+browser. You still need Java and [the checkout](#3-copy-the-code), because the setup check and
+the example runner use the checkout's own Deephaven.
 
-Instead of the virtual environment of [1.5](#15-setup-two-the-console-install), you can run
-the console's Deephaven server in Docker, from Deephaven's own image,
-`ghcr.io/deephaven/server`, with the library installed from your checkout. You still need the
-checkout of [1.4](#14-setup-one-the-source-checkout).
+A Docker image is a saved starting point for a small Linux system, and a container is that
+system running on your computer. The image here is Deephaven's own `ghcr.io/deephaven/server`,
+with the library added from your checkout.
 
-## Before you start
-
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-2. In its settings, give it at least 6 GB of memory.
-3. On Windows, turn on Docker Desktop's WSL integration for Ubuntu: **Settings > Resources >
-   WSL integration**.
-4. Check: `docker info` prints no error.
-
-## Build and start
-
-1. Build the image from the checkout:
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/), and give it at
+   least 6 GB of memory. On macOS and Linux, set the memory in Docker Desktop's settings. On
+   Windows, set it in WSL's `.wslconfig` file, as
+   [Microsoft's WSL settings guide](https://learn.microsoft.com/windows/wsl/wsl-config) shows.
+   Then turn on Docker Desktop's WSL integration for Ubuntu, under **Settings > Resources >
+   WSL integration**. Run `docker info`, and you should see no error.
+2. Build the image from the checkout. The first build downloads Deephaven's image, which is
+   over 1 GB:
 
    ```bash
    cd ~/massive-test/deephaven-massive
    git archive HEAD | docker build -f docs/tester-docker/Dockerfile --build-arg TESTER_COMMIT=$(git rev-parse HEAD) -t deephaven-massive-test -
    ```
 
-   The first build downloads Deephaven's image, over 1 GB. The image records the commit it was
-   built from, which `tester.py check --docker-image deephaven-massive-test` compares with the
-   checkout's.
+   The build takes a few minutes, and its last lines name `deephaven-massive-test`. The image
+   records the commit it was built from, so the setup check can compare it with the checkout.
+3. In a terminal where your key is set, check the setup against the image:
 
-2. Start it, in a terminal where your key is set:
+   ```bash
+   uv run python scripts/tester.py check --docker-image deephaven-massive-test
+   ```
+
+   You should see `ready: yes` at the end, as in [step 5 of Set up](#5-run-the-setup-check).
+4. In a terminal where your keys are set, start the server:
 
    ```bash
    docker run --rm --name massive-test -p 10000:10000 \
      -e MASSIVE_API_KEY \
+     -e MASSIVE_S3_ACCESS_KEY_ID \
+     -e MASSIVE_S3_SECRET_ACCESS_KEY \
      -e MASSIVE_TEST_FOLDER=/massive-test \
      -e START_OPTS="-Xmx4g -Dauthentication.psk=massive-test" \
      -v "$HOME/massive-test:/massive-test" \
      deephaven-massive-test 2>&1 | tee ~/massive-test/server.log
    ```
 
-   | Option | What it does |
-   |---|---|
-   | `-e MASSIVE_API_KEY` | Passes your key in, without showing it |
-   | `-e MASSIVE_TEST_FOLDER` and `-v` | Make the examples write their files to `~/massive-test` on your computer |
-   | `-e START_OPTS` | Gives the server 4 GB of memory and the password `massive-test` |
-
-3. Wait about 30 seconds, then open <http://localhost:10000/?psk=massive-test>. Docker opens
-   no browser for you. **You should see** the Deephaven IDE.
-4. Check that the key reached the container, from a second terminal:
+   The three key options pass your keys into the container without showing them. Docker
+   skips a variable you haven't set, so the same command works without S3 keys. The
+   `MASSIVE_TEST_FOLDER` and `-v` options make the examples write their files to
+   `~/massive-test` on your computer. `START_OPTS` gives the server 4 GB of memory and the
+   password `massive-test`.
+5. Within a minute, the server's output shows `Server started on port 10000`. Then open
+   <http://localhost:10000/?psk=massive-test>, because Docker doesn't open a browser for you.
+   You should see the Deephaven IDE.
+6. From a second terminal, check that the key reached the container:
 
    ```bash
    docker exec massive-test sh -c 'echo "${#MASSIVE_API_KEY} characters"'
    ```
 
-   **You should see** the same count as in [1.3](#13-get-your-massive-keys).
-5. Continue at [part 2](#part-2-console-exercises). Paste the examples: the container cannot
-   see the checkout's files.
+   You should see the same count as in [step 2 of Set up](#2-set-your-massive-key).
 
-To stop the container, press Control-C: it also removes the container. To remove the image,
-run `docker rmi deephaven-massive-test`. On Linux, files the container wrote belong to
-`root`: delete them with `sudo rm`.
+Continue at [Run the examples](#run-the-examples). Where it says to stop or start the server
+of step 6, use step 4 here instead. When you're done:
 
-## Optional: a settings file
-
-A settings file gives the container settings such as `delayed_subscriptions`, so you need not
-type them into every example.
-
-1. Write the settings in `~/massive-test/settings.yaml`. The README's
-   [settings file](../README.md#settings-file) section shows a full example. Never put your
-   key in the file: the library refuses it there, and `-e MASSIVE_API_KEY` passes it in
-   already.
-2. Add two options to the `docker run` line, before the image name:
-
-   ```bash
-     -v "$HOME/massive-test/settings.yaml:/settings/settings.yaml:ro" \
-     -e DEEPHAVEN_MASSIVE_CONFIG_FILE=/settings/settings.yaml \
-   ```
-
-   The first mounts the file, read-only; the second tells the library where it is inside the
-   container.
-3. In the console, open the session from it:
-   `m = dm.MassiveSession(dm.MassiveConfig.from_file())`.
-
-| Message | Fix |
-|---|---|
-| `no settings file: pass its path ...` | The `-e DEEPHAVEN_MASSIVE_CONFIG_FILE=...` option is missing. Stop the container, and start it again with it. |
-| `settings file /settings/settings.yaml does not exist (from DEEPHAVEN_MASSIVE_CONFIG_FILE)` | The `-v` option is missing, or its left side names a file that does not exist on your computer. Check that `~/massive-test/settings.yaml` is a file. |
-| `Is a directory` | Docker made a folder at `~/massive-test/settings.yaml`, because the file did not exist when the container started. Stop the container, delete the folder, create the file there, and start the container again. |
-| `settings file ..., line ..., column ...: ...` | The file holds a mistake on that line: an unknown setting (the message suggests the right name), a word in the wrong case, or a key. Fix the file and run `from_file()` again; no restart is needed. |
+- To stop the server, press Control-C in its terminal. Docker also deletes the container.
+- To delete the image, run `docker rmi deephaven-massive-test`.
+- On Linux with Docker Engine rather than Docker Desktop, `root` owns the files the container
+  wrote, so delete them with `sudo rm`.

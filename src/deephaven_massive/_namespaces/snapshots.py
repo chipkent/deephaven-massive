@@ -3,10 +3,12 @@
 The unified snapshot (`/v3/snapshot`) takes tickers of any asset classes in one call, so it
 hangs off the session (`MassiveSession.snapshots()`) rather than off a namespace, and its
 dataset is named after the method, `snapshots`, with no namespace: the name `m.streams()`,
-messages, and the column reference (`docs/datasets/snapshots.md`) show. Each ticker's prefix
-selects its class (`O:` options, `I:` indices, `C:` forex, `X:` crypto, none for stocks), so the
-spec declares no asset class (`ClassFromPrefix.ANY`). Its rows are the union of what every class
-sends; an options row also has `Underlying` and `OptionRoot`, as `m.options.snapshots` has.
+messages, and the column reference
+(https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/snapshots.md) show.
+Each ticker's prefix selects its class (`O:` options, `I:` indices, `C:` forex, `X:` crypto,
+none for stocks), so the spec declares no asset class (`ClassFromPrefix.ANY`). Its rows are the
+union of what every class sends; an options row also has `Underlying` and `OptionRoot`, as
+`m.options.snapshots` has.
 
 This module owns only the `DatasetSpec`, exported as `DATASETS` and composed into the dataset
 catalog (`CATALOG` in `_session.py`); the factory method is `MassiveSession.snapshots`.
@@ -24,7 +26,7 @@ __all__ = ["DATASETS", "SNAPSHOTS"]
 
 SNAPSHOTS: Final = DatasetSpec(
     name="snapshots",
-    summary="The current state of tickers of any asset classes, from Massive's unified snapshot.",
+    summary="The current state of tickers of any asset class, from Massive's unified snapshot.",
     fetch_path="/v3/snapshot",
     serves_current_data=True,
     keys={

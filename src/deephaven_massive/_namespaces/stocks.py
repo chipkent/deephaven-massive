@@ -14,10 +14,10 @@ wire parameters behind `start`, `end`, and `symbols`, its `poll()` defaults, and
 size (the largest `limit` the endpoint documents); columns, types, and units come from the
 generated schemas.
 
-The REST list datasets (dividends through share float) share one shape: `symbols` is optional
-and only filters the request, `dm.ALL` is refused in favour of `symbols=None` (`EVERY_TICKER`),
-`start` and `end` bound the dataset's date axis where it has one, and `sort`, `order`,
-`limit`, and `filters` work as README.md#sort-order-limit and README.md#filters describe.
+The REST list datasets (dividends through share float) share one shape: `symbols` is optional and
+only filters the request, `dm.ALL` is refused in favour of `symbols=None` (`EVERY_TICKER`), `start`
+and `end` bound the dataset's date axis where it has one, and `sort`, `order`, `limit`, and
+`filters` work as each dataset's page describes.
 
 The module is one subject although it runs past 1,000 lines: it is one namespace, and each
 dataset's spec and its factory method, whose docstring is the dataset's documentation, belong
@@ -368,11 +368,12 @@ its nested namespaces have their own (`stock_financials.py`, `stock_filings.py`)
 
 
 class _Stocks(Namespace):
-    """`m.stocks`: the US equities datasets of a session.
+    """The US stock datasets, reached as `m.stocks`.
 
-    Created once by `MassiveSession` and reached as `m.stocks`, together with its nested
-    `m.stocks.financials` and `m.stocks.filings` namespaces. It holds no mutable state, so it
-    is safe to use from any thread; each method builds a query and never blocks.
+    Its methods cover trades, quotes, bars, limit up-limit down bands, imbalances, fair market
+    value, snapshots, movers, dividends, splits, IPOs, short interest, short volume, and free float.
+    `m.stocks.financials` holds the financial statements, and `m.stocks.filings` the SEC filings.
+    Each method only builds a query, so it never blocks, and you can call it from any thread.
 
     Example:
         ::
@@ -381,7 +382,7 @@ class _Stocks(Namespace):
 
             m = dm.MassiveSession()
             live = m.stocks.trades(["AAPL", "MSFT"]).last_by()
-            daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-01-02", "2025-06-30")
+            daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-01-02", "2026-06-30")
     """
 
     __slots__ = ("_filings", "_financials")
@@ -399,39 +400,41 @@ class _Stocks(Namespace):
 
     @property
     def financials(self) -> _StockFinancials:
-        """The financial statements and ratios datasets (`m.stocks.financials`)."""
+        """The financial statements and valuation ratios, reached as `m.stocks.financials`."""
         return self._financials
 
     @property
     def filings(self) -> _StockFilings:
-        """The SEC filings and taxonomy datasets (`m.stocks.filings`)."""
+        """The SEC filings and the insider data built from them, reached as `m.stocks.filings`."""
         return self._filings
 
     @raises_through(build_query)
     def trades(self, symbols: Symbols) -> StreamHistoryQuery:
         """Trades of US-listed stocks, tick by tick.
 
-        Each row is one trade reported to the SIP; `Timestamp` is the SIP time. Trades stream from
-        the WebSocket, and `history()` reads REST or the flat files. With `dm.ALL`, streams and
-        flat-file history serve every ticker, while REST history refuses it. Each symbol's latest
-        trade alone is `last_trade()`.
+        Each row holds one trade reported to the SIP. `Timestamp` is the SIP's time. Streams and
+        flat-file history take `dm.ALL`. REST history needs named tickers. For only each symbol's
+        latest trade, use `last_trade()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.trades.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.trades.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
 
                 recent = m.stocks.trades(["AAPL", "MSFT"]).ring(10_000)
-                friday = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06")
+                friday = m.stocks.trades("AAPL").history("2026-10-30", "2026-10-30")
         """
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
@@ -439,23 +442,24 @@ class _Stocks(Namespace):
     def last_trade(self, symbols: Symbols) -> Query:
         """The latest trade of each US-listed stock.
 
-        Each row is one symbol's most recent trade, read by REST one request per symbol; a symbol
-        with no trade (HTTP 404) is left out, with a WARNING. `poll()` replaces the table each
-        cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps each new last trade, but a trade
-        between two cycles is never seen (`trades()` streams every one). Some plans lack the
-        endpoint and raise `EntitlementError`; `snapshots()` also carries each ticker's last trade.
+        Each row holds one symbol's most recent trade. A symbol with no trade is left out, and the
+        library logs a WARNING. Each poll sees only the trade that is latest at that moment. For
+        every trade, stream `trades()`.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                README.md#symbols.
+            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
+                ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.last_trade.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_trade.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is `dm.ALL`, None, empty, or holds an invalid ticker, or a
-                `Table` has no `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -474,21 +478,23 @@ class _Stocks(Namespace):
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
-        Each row is one NBBO update; `Timestamp` is the SIP time. Quotes stream from the WebSocket,
-        and `history()` reads REST or the flat files. With `dm.ALL`, streams and flat-file history
-        serve every ticker, while REST history refuses it. Each symbol's latest NBBO alone is
+        Each row holds one NBBO update. `Timestamp` is the SIP's time. Streams and flat-file history
+        take `dm.ALL`. REST history needs named tickers. For only each symbol's latest NBBO, use
         `last_quote()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.quotes.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.quotes.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -501,23 +507,24 @@ class _Stocks(Namespace):
     def last_quote(self, symbols: Symbols) -> Query:
         """The latest national best bid and offer of each US-listed stock.
 
-        Each row is one symbol's most recent NBBO, read by REST one request per symbol; a symbol
-        with no quote (HTTP 404) is left out, with a WARNING. `poll()` replaces the table each
-        cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps each new last quote, but a quote
-        between two cycles is never seen (`quotes()` streams every one). Some plans lack the
-        endpoint and raise `EntitlementError`; `snapshots()` also carries each ticker's last quote.
+        Each row holds one symbol's most recent NBBO. A symbol with no quote is left out, and the
+        library logs a WARNING. Each poll sees only the quote that is latest at that moment. For
+        every quote, stream `quotes()`.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.snapshots(dm.ALL)`). See
-                README.md#symbols.
+            symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
+                ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.last_quote.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_quote.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is `dm.ALL`, None, empty, or holds an invalid ticker, or a
-                `Table` has no `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -561,32 +568,37 @@ class _Stocks(Namespace):
     ) -> HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
-        Each row is one bar of `multiplier` times `timespan`. One-second and one-minute bars also
-        stream from the WebSocket; every other length is history only. Windows, stamps, `Date`, and
-        which bars `history()` returns follow README.md#bars. Daily `dm.ALL` history reads Massive's
-        grouped daily bars, one request per day. Intraday `dm.ALL` history needs `adjusted=False`,
-        since only REST adjusts and its intraday bars need named symbols. The previous session's bar
-        alone is `previous_day_bar()`.
+        Each row is one bar of `multiplier` times `timespan`. The dataset's page, linked below, says
+        how each bar's window and `Date` are set.
+
+        - History is split-adjusted unless you pass `adjusted=False`. Streams and flat files serve
+          bars as traded.
+        - With `dm.ALL`, `history()` reads one-day bars. It also reads one-minute bars from flat
+          files when `adjusted=False`. `history()` of any other bar of `dm.ALL` raises `ValueError`.
+        - For only the previous day's bar, use `previous_day_bar()`.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
-            timespan: The bar unit, any but `SESSION`; required. See
-                README.md#timespan-and-multiplier.
-            multiplier: Units per bar, 1 by default; only 1 streams.
-            adjusted: Split-adjusted prices, served by REST only. See README.md#adjusted.
+            symbols: Stock tickers, or `dm.ALL`.
+            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            multiplier: Units per bar.
+            adjusted: Adjusts volume as well as prices.
 
         Returns:
-            A query of the class the timespan picks. Columns: docs/datasets/stocks.bars.md.
+            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
+            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
+            history only. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `timespan` is `SESSION`, `multiplier` is below 1, or `symbols` is None,
-                empty, or holds an invalid ticker.
+            ValueError: If:
+                - `timespan` is `SESSION`, or `multiplier` is below 1;
+                - `symbols` is None or empty, or holds a ticker that isn't Massive's exact ticker.
 
         Example:
             ::
 
-                daily = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2025-06-02", "2025-06-06")
+                week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
                 live = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()
         """
         query = build_query(
@@ -603,29 +615,29 @@ class _Stocks(Namespace):
     def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
-        Each row is one symbol's 1-day bar of the previous completed session, read by REST one
-        request per symbol; a symbol with no bar (HTTP 404) is left out, with a WARNING. `poll()`
-        replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps each new
-        day's bar. Massive stamps the bar at the session close, which is moved to the day's start as
-        README.md#bars describes; an unexpected stamp is served with a WARNING.
+        Each row holds one symbol's bar of the previous completed session. A symbol with no bar is
+        left out, and the library logs a WARNING. The dataset's page says how the bar is stamped.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
-                dm.Timespan.DAY).history(day, day)`). See README.md#symbols.
-            adjusted: Split-adjusted prices and volume. See README.md#adjusted.
+            symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
+                `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            adjusted: Adjusts volume as well as prices.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.previous_day_bar.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.previous_day_bar.md.
 
         Raises:
-            TypeError: If `adjusted` is not a `bool`, or `symbols` is not an accepted form.
-            ValueError: If `symbols` is `dm.ALL`, None, empty, or holds an invalid ticker, or a
-                `Table` has no `Symbol` column.
+            TypeError: If `adjusted` isn't a `bool`, or `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
 
-                prev = m.stocks.previous_day_bar(["AAPL", "MSFT"]).fetch()
+                previous = m.stocks.previous_day_bar(["AAPL", "MSFT"]).fetch()
         """
         query = build_query(
             self._core,
@@ -644,19 +656,22 @@ class _Stocks(Namespace):
     def luld(self, symbols: Symbols) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
-        Each row is one band update from the SIP: the upper and lower price limits, the indicators,
-        and the tape. The bands only stream from the WebSocket; there is no history.
+        Each row holds one band update from the SIP, with its upper and lower price limits. The
+        bands only stream, so there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.luld.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.luld.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -669,20 +684,22 @@ class _Stocks(Namespace):
     def imbalances(self, symbols: Symbols) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
-        Each row is one imbalance message: the auction type and time, the imbalance and paired
-        quantities, the book clearing price, and the exchange. Imbalances only stream from the
-        WebSocket; there is no history.
+        Each row holds one imbalance message, with the auction's type and time and the imbalance
+        quantity. Imbalances only stream, so there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.imbalances.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.imbalances.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -695,19 +712,22 @@ class _Stocks(Namespace):
     def fmv(self, symbols: Symbols) -> StreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
-        Each row is one fair market value with the time it was computed. It streams only from
-        Massive's Business host, so it needs a Business plan; there is no history.
+        Each row holds one fair market value and the time Massive computed it. It streams only on a
+        Business plan, and there's no history.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL`. See README.md#symbols.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.fmv.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md.
 
         Raises:
-            TypeError: If `symbols` is not one of the accepted forms.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `symbols` isn't one of the accepted forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
@@ -720,28 +740,29 @@ class _Stocks(Namespace):
     def snapshots(self, symbols: Symbols, *, include_otc: bool = False) -> Query:
         """Current market snapshots of US-listed stocks, one row per ticker.
 
-        Each row is a ticker's state now: the day's and previous day's bars, the latest minute bar,
-        last trade and quote, today's change, and the fair market value where the plan includes it.
-        `poll()` replaces the table each cycle, keyed by `Symbol`; `mode=dm.PollMode.APPEND` keeps
-        each new state by its `Updated` time. Snapshots need a paid plan
-        (README.md#plans-and-errors).
+        Each row holds a ticker's state now: the day's bar, the previous day's bar, the latest
+        minute bar, the last trade and quote, and the day's change.
 
         Args:
-            symbols: Stock tickers, or `dm.ALL` for the full market. See README.md#symbols.
-            include_otc: True to include OTC securities; False, the default, leaves them out.
+            symbols: Stock tickers, or `dm.ALL` for every ticker.
+            include_otc: True to include OTC securities.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.snapshots.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.snapshots.md.
 
         Raises:
-            TypeError: If `include_otc` is not a `bool`, or `symbols` is not an accepted form.
-            ValueError: If `symbols` is None, empty, or holds an invalid ticker, or a `Table` has no
-                `Symbol` column.
+            TypeError: If `include_otc` isn't a `bool`, or `symbols` isn't one of the accepted
+                forms.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column.
 
         Example:
             ::
 
-                board = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).poll(5)
+                latest = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).poll(5)
         """
         query = build_query(
             self._core,
@@ -755,19 +776,19 @@ class _Stocks(Namespace):
     def movers(self, direction: Direction, *, include_otc: bool = False) -> Query:
         """The twenty US stocks with the largest percentage move today, up or down.
 
-        Each row is the full snapshot of one mover, as `snapshots()` returns it, for the tickers
-        with the largest gain or loss since the previous close. `poll()` replaces the table each
-        cycle, keyed by `Symbol`, so a ticker that leaves the list is removed.
+        Each row holds one mover's full snapshot, as `snapshots()` returns it. In a `poll()` table,
+        a ticker that leaves the list leaves the table.
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
-            include_otc: True to include OTC securities; False, the default, leaves them out.
+            include_otc: True to include OTC securities.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.movers.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.movers.md.
 
         Raises:
-            TypeError: If `direction` is not a `dm.Direction` or `include_otc` is not a `bool`.
+            TypeError: If `direction` isn't a `dm.Direction`, or `include_otc` isn't a `bool`.
 
         Example:
             ::
@@ -788,31 +809,32 @@ class _Stocks(Namespace):
     def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
-        Each row is one ticker's session on `date`, with the day's window as a 1-day bar's, read by
-        REST one request per symbol; a symbol with no session that day (a holiday) is left out, with
-        a WARNING. `poll()` replaces the table each cycle, keyed by `Symbol`.
+        Each row holds one ticker's session on `date`. A symbol with no session that day, such as on
+        a holiday, is left out, and the library logs a WARNING.
 
         Args:
-            symbols: Stock tickers; `dm.ALL` is refused (use `m.stocks.bars(dm.ALL,
-                dm.Timespan.DAY).history(day, day)`). See README.md#symbols.
-            date: The trading day, a calendar date; a `datetime` or an instant raises. See
-                README.md#time.
-            adjusted: Split-adjusted prices and volume. Massive does not echo the basis here, so it
-                cannot be checked. See README.md#adjusted.
+            symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
+                `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            date: The trading day, as a date.
+            adjusted: Adjusts volume as well as prices. Massive doesn't report the basis of these
+                prices, so the library can't check it.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.daily_open_close.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.daily_open_close.md.
 
         Raises:
-            TypeError: If `symbols` or `date` is of another type, or `adjusted` is not a `bool`.
-            ValueError: If `symbols` is `dm.ALL`, None, empty, or holds an invalid ticker, a `Table`
-                has no `Symbol` column, or `date` is a `datetime`, another time, or text that is not
-                a date.
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a table has no `Symbol` column;
+                - `date` is a `datetime`, another time, or text that isn't a date.
 
         Example:
             ::
 
-                t = m.stocks.daily_open_close(["AAPL", "MSFT"], "2025-06-06").fetch()
+                friday = m.stocks.daily_open_close(["AAPL", "MSFT"], "2026-10-30").fetch()
         """
         query = build_query(
             self._core,
@@ -841,35 +863,36 @@ class _Stocks(Namespace):
     ) -> Query:
         """Cash dividends of US-listed stocks, one row per distribution.
 
-        Each row is one dividend: its ex-dividend, record, pay, and declaration dates, the cash
-        amount as declared and split-adjusted, the currency, frequency, and distribution type.
-        `poll()` replaces the table each cycle, keyed by `Id`.
+        Each row holds a dividend's ex-dividend, record, pay, and declaration dates, its cash amount
+        as declared and split-adjusted, its currency, its frequency, and its distribution type.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first ex-dividend date. See README.md#start-and-end.
-            end: The last ex-dividend date; without it, announced dividends still to come are
-                returned too. See README.md#start-and-end.
-            sort: The field to sort by, such as `"ex_dividend_date"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"distribution_type": "special"}`. See
-                README.md#filters.
+            symbols: Stock tickers; leave it out for every ticker.
+            start: The first ex-dividend date.
+            end: The last ex-dividend date.
+            sort: Any of Massive's field names, such as `"pay_date"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. With a watchlist, `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"distribution_type": "special"}`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.dividends.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty, or holds a ticker that isn't Massive's exact
+                  ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.dividends(["AAPL", "MSFT"], start="2024-01-01").fetch()
+                dividends = m.stocks.dividends(["AAPL", "MSFT"], start="2024-01-01").fetch()
         """
         return list_query(
             self._core,
@@ -898,34 +921,38 @@ class _Stocks(Namespace):
     ) -> Query:
         """Stock splits, reverse splits, and stock dividends of US-listed stocks.
 
-        Each row is one split: its `ExecutionDate`, the ratio (`SplitFrom` to `SplitTo`), the
-        adjustment type, and `HistoricalAdjustmentFactor`, the cumulative factor that adjusts
-        earlier prices. `poll()` replaces the table each cycle, keyed by `Id`. Use it to adjust
-        as-traded bars yourself, with the recipe in README.md#split-adjustment.
+        Each row holds one split's `ExecutionDate`, its ratio of `SplitFrom` to `SplitTo`, its
+        adjustment type, and its `HistoricalAdjustmentFactor`. To adjust a price from day D,
+        multiply it by the factor of the first split executed after D. Bars' `history()` already
+        returns split-adjusted prices unless you pass `adjusted=False`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first execution date. See README.md#start-and-end.
-            end: The last execution date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"execution_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
+            symbols: Stock tickers; leave it out for every ticker.
+            start: The first execution date.
+            end: The last execution date.
+            sort: Any of Massive's field names, such as `"execution_date"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
-                See README.md#filters.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.splits.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.splits.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.splits("NVDA", start="2024-01-01").fetch()
+                nvidia = m.stocks.splits("NVDA", start="2024-01-01").fetch()
         """
         return list_query(
             self._core,
@@ -954,31 +981,30 @@ class _Stocks(Namespace):
     ) -> Query:
         """Initial public offerings on US exchanges, upcoming and past, one row per offering.
 
-        Each row is one IPO: the issuer, ticker, dates, status (rumored, pending, new, withdrawn,
-        and so on), price range, final price, and shares offered. The endpoint takes one ticker per
-        request, so a symbol list fans out. `poll()` updates each offering in place, keyed by
-        `Symbol` and `IssuerName`, as it moves through its statuses; rows are never deleted. The key
-        assumes Massive keeps an issuer's name through an offering's statuses, which it does not
-        document: a renamed issuer would leave its old row beside the new one.
+        Each row holds an offering's issuer, ticker, dates, status, price range, final price, and
+        shares offered. A `poll()` table updates each offering in place as its status changes. If
+        Massive renames an issuer during an offering, the old row stays beside the new one.
 
         Args:
-            symbols: Stock tickers; None, the default, for every offering. See README.md#symbols.
-            start: The first listing date. See README.md#start-and-end.
-            end: The last listing date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"listing_date"`. See README.md#sort-order-limit.
-            order: The sort direction; here it works without `sort` too.
+            symbols: Stock tickers; leave it out for every offering.
+            start: The first listing date.
+            end: The last listing date.
+            sort: Any of Massive's field names, such as `"listing_date"`.
+            order: The direction of the rows. Here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
-            filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`. See
-                README.md#filters.
+            filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.ipos.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.ipos.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, or a filter is unknown, reserved, or of
-                the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
@@ -1012,33 +1038,36 @@ class _Stocks(Namespace):
     ) -> Query:
         """Short interest of US-listed stocks, one row per ticker and FINRA settlement date.
 
-        Each row is the number of shares sold short and not yet covered on a settlement date, with
-        the average daily volume and the days to cover, as reported to FINRA twice a month. `poll()`
-        replaces the table each cycle, keyed by `Symbol` and `SettlementDate`.
+        Each row holds the shares sold short and not yet covered on a settlement date, the average
+        daily volume, and the days to cover. Short interest is reported to FINRA twice a month.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first settlement date. See README.md#start-and-end.
-            end: The last settlement date. See README.md#start-and-end.
-            sort: The field to sort by, such as `"settlement_date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. See
-                README.md#filters.
+            symbols: Stock tickers; leave it out for every ticker.
+            start: The first settlement date.
+            end: The last settlement date.
+            sort: Any of Massive's field names, such as `"settlement_date"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.short_interest.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.short_interest.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.short_interest("GME", start="2024-01-01").fetch()
+                gamestop = m.stocks.short_interest("GME", start="2025-01-01").fetch()
         """
         return list_query(
             self._core,
@@ -1067,33 +1096,36 @@ class _Stocks(Namespace):
     ) -> Query:
         """Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 
-        Each row is a day's short volume, exempt and non-exempt volume, total volume, and short
-        volume ratio, with the per-venue breakdown FINRA publishes. `poll()` replaces the table each
-        cycle, keyed by `Symbol` and `Date`.
+        Each row holds a day's short volume, the total volume, the short volume ratio, and the
+        breakdown by venue that FINRA publishes.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            start: The first trading day. See README.md#start-and-end.
-            end: The last trading day. See README.md#start-and-end.
-            sort: The field to sort by, such as `"date"`. See README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. See
-                README.md#filters.
+            symbols: Stock tickers; leave it out for every ticker.
+            start: The first trading day.
+            end: The last trading day.
+            sort: Any of Massive's field names, such as `"short_volume_ratio"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.short_volume.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.short_volume.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, a bound is not
-                a date or ISO date, `end` is before `start`, `order` is given without `sort`, or a
-                filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - a bound isn't a date, or `end` is before `start`;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.short_volume(["AAPL", "TSLA"], start="2025-06-01").fetch()
+                shorts = m.stocks.short_volume(["AAPL", "TSLA"], start="2026-10-01").fetch()
         """
         return list_query(
             self._core,
@@ -1120,31 +1152,34 @@ class _Stocks(Namespace):
     ) -> Query:
         """The free float of US-listed stocks: the latest count of shares the public can trade.
 
-        Each row is one ticker's most recent free float, its percentage of shares outstanding, and
-        the date it took effect. The endpoint has no date filter, so there is no `start` or `end`.
-        `poll()` replaces the table each cycle, keyed by `Symbol`.
+        Each row holds one ticker's most recent free float, its percentage of shares outstanding,
+        and the date it took effect. Massive offers no date filter here, so there's no `start` or
+        `end`.
 
         Args:
-            symbols: Stock tickers; None, the default, for every ticker. See README.md#symbols.
-            sort: The field to sort by, such as `"free_float_percent"`. See
-                README.md#sort-order-limit.
-            order: The direction of `sort`. See README.md#sort-order-limit.
-            limit: The most rows to return, in total. See README.md#sort-order-limit.
-            filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. See
-                README.md#filters.
+            symbols: Stock tickers; leave it out for every ticker.
+            sort: Any of Massive's field names, such as `"free_float_percent"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`.
 
         Returns:
-            A query. Columns: docs/datasets/stocks.share_float.md.
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.share_float.md.
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If `symbols` is `dm.ALL`, empty, or holds an invalid ticker, `order` is
-                given without `sort`, or a filter is unknown, reserved, or of the wrong kind.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker;
+                - `order` is given without `sort`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
             ::
 
-                t = m.stocks.share_float(["AAPL", "MSFT"]).fetch()
+                floats = m.stocks.share_float(["AAPL", "MSFT"]).fetch()
         """
         return list_query(
             self._core,

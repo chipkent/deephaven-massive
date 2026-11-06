@@ -302,7 +302,7 @@ def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
     assert not hasattr(q, "fetch")
     with pytest.raises(
         AttributeError,
-        match=r"^indices\.values has no fetch\(\); its verbs are blink\(\), append_only\(\), "
+        match=r"^indices\.values has no fetch\(\); its methods are blink\(\), append_only\(\), "
         r"ring\(\), last_by\(\), history\(\); for each symbol's current state use "
         r"m\.indices\.snapshots\(\.\.\.\)\.fetch\(\)$",
     ):

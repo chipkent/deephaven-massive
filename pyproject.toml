@@ -111,6 +111,13 @@ dev = [
     "pyright>=1.1.414",
     "pre-commit>=4.7",
     "deephaven-server>=42.0",
+    # The README's chart and dashboard examples import these two Deephaven plugins, which
+    # deephaven-server does not include, and tests/test_docs.py runs those examples. 0.40.0 is
+    # the first deephaven-plugin-ui release built for deephaven-core 42. 0.19.0 is the first
+    # deephaven-plugin-plotly-express release that accepts deephaven-core 42 (it asks for 41.1
+    # or later; 0.20.0 and later ask for 42.2, above the deephaven-core floor).
+    "deephaven-plugin-ui>=0.40.0",
+    "deephaven-plugin-plotly-express>=0.19.0",
 ]
 
 [tool.hatch.version]

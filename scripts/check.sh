@@ -10,8 +10,8 @@
 #
 # full compares the branch and its uncommitted files with origin/main (scripts/check_scope.py).
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
-# workers; when CI would not, full runs only tests/test_docs.py if README.md changed, and no
-# tests otherwise. It prints the scope it chose and why.
+# workers; when CI would not, full runs only the documentation tests if the user pages or the
+# tester guide changed, and no tests otherwise. It prints the scope it chose and why.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
 # failing step and exits non-zero.
@@ -88,7 +88,7 @@ if [[ "$tier" == "full" ]]; then
     case "$scope" in
         # -n stays out of addopts, so a plain `uv run pytest` runs in one process for debuggers.
         full) step "pytest with coverage" uv run pytest -n auto --maxprocesses=4 --cov --cov-report=term-missing:skip-covered ;;
-        readme) step "pytest tests/test_docs.py" uv run pytest tests/test_docs.py ;;
+        docs) step "pytest of the documentation" uv run pytest tests/test_docs.py tests/live/tester/test_examples.py ;;
         lint) ;;
         *)
             echo "check.sh: unknown scope '$scope' from scripts/check_scope.py" >&2

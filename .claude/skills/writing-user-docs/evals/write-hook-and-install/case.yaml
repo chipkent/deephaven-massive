@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: write-hook-and-install
+expected_outcome: |
+  hook-install.md sells the library in its first 90 or so words through its readers' job-level
+  pain, states no unsourced fact, and gives an Install whose every command works as written:
+  environment with venv or uv stated up front, the release tag looked up, all keys in one step,
+  the server started from the activated environment, and a first table. It passes the checker and
+  the calibrated editor.

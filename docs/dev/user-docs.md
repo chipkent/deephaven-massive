@@ -1,197 +1,476 @@
 # Writing user documentation
 
-This page is the standard for every page a user reads: `README.md`, the guide pages under
-`docs/guide/`, the tester guide, and the hand-written intro text of the generated dataset
-reference. Docstrings follow the `writing-docstrings` skill; PR descriptions follow
-[`pull-requests.md`](pull-requests.md). The `writing-user-docs` skill walks through this page
-for each edit.
+This is the standard for every page a user reads: `README.md`, `docs/troubleshooting.md`,
+`docs/configuration.md`, the tester guide, and the hand-written text of the generated dataset
+reference. The
+`writing-user-docs` skill is the workflow, and its grader,
+[`agents/editor.md`](../../.claude/skills/writing-user-docs/agents/editor.md), scores a page
+against this standard. Docstrings follow the `writing-docstrings` skill, and PR descriptions
+follow [`pull-requests.md`](pull-requests.md).
 
-## Who reads the user docs
+The bar is a page an O'Reilly development editor would send to print, and that every reader
+finishes thinking the library is simple. The library is simple: one pattern, a session, a
+query, and a method that returns a Deephaven table. A reader who comes away thinking it's hard
+was misled by the page.
 
-Four kinds of reader, and each must fully understand every user page:
+Contents:
+
+1. [This project](#this-project): readers, pains, owner requirements, page map, install facts,
+   teaching plan
+2. [Facts need sources](#accuracy)
+3. [Scope: only what the reader needs here](#placement)
+4. [The hook](#hook)
+5. [Headings and example titles](#headings)
+6. [Teaching with examples](#teaching)
+7. [Sentences](#sentences)
+8. [AI tells](#ai-tells)
+9. [Terminology](#terminology)
+10. [Section models](#models)
+11. [Anchors](#anchors)
+12. [Grading and the pass bar](#rubric)
+
+<a id="this-project"></a>
+
+## This project
+
+Everything specific to deephaven-massive is here, and the rest of the standard is general. When
+the project changes, update this section and leave the rules alone.
+
+<a id="readers"></a>
+
+### Readers
+
+Four kinds of reader use these pages. Each must understand every page, and each must finish it
+believing the library is simple:
 
 | Reader | What they bring | What they need from the page |
 |---|---|---|
-| Quants | Statistics, pandas, research habits | The exact data: units, time zones, adjustment, gaps |
-| Traders who can barely program | Markets, Massive's products | Complete code they paste and run, and what they will see |
-| Vibe coders | An AI assistant and a goal | Correct, whole examples that an assistant copies faithfully |
-| Software engineers | Python, threads, APIs | The behavior behind the API: lifetimes, failures, limits |
+| Quant researcher | Statistics, pandas, research habits | The exact data: units, time zones, adjustment, gaps |
+| Quantitative trader | Markets, Massive's products, and Python for their own signals | Code that runs live as pasted, the plan and delay of its data, and what they'll see |
+| Vibe coder | An AI assistant and a goal | Whole, correct examples an assistant copies faithfully |
+| Software engineer | Python, threads, APIs | Lifetimes, failures, limits |
 
-Test each section against the reader least like you: would a trader who has never written a
-loop follow it to the end?
+<a id="pains"></a>
 
-## What the README does
+### Pains and the library's answer
 
-A prospective user goes from "what is this?" to real, productive work **without leaving the
-README**. It is the sales page, the quick start, and the guide to everyday use at once, never a
-thin page of links. Reading only the README, you can:
+A hook names the reader's job-level pain: the months, the team, or the missing data that stand
+between an idea and a result. A technical irritation (429 errors, pagination, reconnect code) is
+not a pain at this level; it's mechanism. These pains come from practitioner forums and vendor
+blogs, gathered on 2026-11-04. The evidence is anecdotal, so state a pain in the reader's words
+and keep numbers out of it unless you cite where they come from.
 
-1. **See what the library is and why you want it**: one or two paragraphs that sell it, then
-   bullets of concrete outcomes.
-2. **Watch it work**: a free-plan example with enough data to be interesting, then a paid live
-   example with ticking prices.
-3. **Install it and get a first table**: complete steps for the common platforms (Java,
-   Python, the install, the API key, the server, opening the Deephaven IDE, the first table), each
-   saying what you should see.
-4. **Use the core every day**: the one call pattern; `fetch`, `history`, `poll`, and the live
-   shapes (`blink`, `append_only`, `ring`, `last_by`); symbols and the watchlists that drive
-   live tables; dates; what your plan allows; the API key and common settings; and the errors
-   new users actually hit, with their fixes.
-5. **Copy complete recipes** for the main uses: a live board, history backfilled and then
-   continued live, an option chain driving streams, a whole-market screen, and history that
-   follows a watchlist.
-6. **Know where to go next** for depth.
+| Reader | Pain | What the library changes |
+|---|---|---|
+| Quant researcher | Months go into data infrastructure before an idea is tested, and research code is rewritten for live trading | One query gives history and a live table with the same columns, and the same Deephaven code runs on both |
+| Quant researcher | Finding affordable data and making it usable | 112 datasets, listed by `dm.datasets()`, each with documented columns |
+| Quantitative trader | A signal waits on live infrastructure before it trades; screeners don't compute their own signal, live | Their own signal on their own stocks is a live table, a few lines in a browser console |
+| Vibe coder | The assistant builds the prototype but not the real-time parts | Live tables, reconnects, and watchlist-driven subscriptions are already built; the assistant writes table logic |
+| Software engineer | A real-time stack is several systems and most of a year of work | The feed, the processing, and the UI are one Python process of Deephaven tables |
 
-Its length is whatever that job needs. Clarity and organization decide it, not a line count.
+What the library doesn't do: backtest, route orders, send alerts, or read any vendor but
+Massive. Never imply it does.
 
-### The placement test
+<a id="owner-requirements"></a>
 
-For each fact, ask:
+### Owner requirements
 
-- **Will a new user need this in the first hour of real use?** It belongs in the README.
-- **Is it looked up only when a specific case comes up?** It belongs on a guide page, and the
-  README keeps a one-line summary with a link.
+The owner's specifications, with the dates (in 2026) they came from. Each is binding, and a
+later date refines an earlier one:
 
-Reference material that moves out by this test: every argument's full rules; bar-window edge
-cases; split-adjustment mechanics; live-table lifetime details; the settings file's full syntax;
-the diagnostics tables column by column; the full troubleshooting table, the log, and reporting
-a bug; install paths beyond the main one (Docker, Jupyter or embedded, WSL).
+| Topic | Requirement | Dates |
+|---|---|---|
+| Quality | The docs read as an experienced O'Reilly editor's work, never as AI-written. Clarity and organization come first; scannable lists and tables beat walls of text. | 10-23, 11-03, 11-04 |
+| Simplicity | Every reader finishes a page believing the product is simple and easy to use. A passage that makes it seem hard (a needless step, reference detail in a tutorial, a stack of caveats, jargon, length) is a fault of the page. | 11-04 |
+| Accuracy | Every factual claim has a source in the code, Massive's vendored docs, or Deephaven's docs, or it's cut. Nothing invented: no estimated durations or sizes. | 11-03, 11-04 |
+| Outcomes | Users want to know how to use the library, not how it works. | 11-04 |
+| Hook | The README sells the library in 20 seconds of reading, through the reader's job-level pains: short bullets, each led by a bold outcome. A code sample stays only if it shows a visible result, such as a chart. | 11-04, 11-05 |
+| Approved text | Owner-approved intent and content bind every revision and every grader. Wording may improve, but a revision never dilutes an approved message's clarity or directness. | 11-05 |
+| Only requested sections | The README holds the hook, Install, the examples, Configuration, next steps, and contributing, in that order. No recipes, no common-errors section, no status section, no "Terms", "How it works", or "How do I" sections. | 11-04, 11-05 |
+| Order | Don't bury the lead: the hook, then Install, then the tutorial. Install reaches the first result by the shortest path and sets every key in one step. Reference (environment variables, settings, configuration tables) comes after the tutorial. | 11-05 |
+| Install | Best practice: in order, scannable, every command working as written. Until the PyPI release, install from git at the newest release tag, looked up in the same step, never hard-coded. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
+| Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. Every configuration concept a page mentions links to its reference page, generated from the code: `docs/configuration.md` for `MassiveConfig` and the settings file. | 11-04, 11-05 |
+| Examples | Each is complete and runs as pasted, with its imports and session. Each says the plan it needs, any setting, and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
+| Terms | Industry-standard words: Massive's for its data, Deephaven's for its operations, practitioners' for market concepts, Python's for Python. | 11-04 |
+| Deephaven and Massive | Describe Deephaven in its own terms, from deephaven.io. Keep Massive's names for its products, datasets, and columns. Dates in examples are ISO strings. | 10-27, 10-28, 11-03 |
+| Coverage | Live tables driven by a watchlist; which plans include each dataset, generated so it follows Massive's changes; split adjustment, documented with the `adjusted` argument; how to filter out a known problem in Massive's data; column meanings on the generated dataset pages. | 10-27, 10-28, 10-30, 11-02 |
+| Tester guide | Every step, its commands, example code, and what to put in a report, automated as far as possible. | 10-30 |
+| Hero image and badges | A slot for the owner's hero image after the title. Only badges that render for the page's viewers and can't go stale; the CI badge renders on github.com for people with access to the private repository. At the public launch and the PyPI release, add the badges that become possible then, such as a PyPI version badge. | 11-03, 11-05 |
+| Repository | Never describe the repository as private. No legal, licensing, data-sharing, access, or contact instructions. Testers report on a GitHub issue. | 11-04 |
+| Process | A code change that alters documented behavior updates the user docs in the same PR. Moved text is rewritten to this standard. Docs are graded before they go out. | 10-31, 11-03, 11-04 |
 
-The docs carry no affiliation or legal notice section.
+<a id="page-map"></a>
 
-## Which page owns each fact
+### Which page owns each fact
 
-Each fact has one home. Other pages link to it instead of repeating it.
+Each fact has one home, and other pages link to it:
 
 | Page | Owns |
 |---|---|
-| `README.md` | Everything the placement test keeps: the pitch, the first table, everyday use, the main recipes |
-| `docs/guide/install.md` | Install paths beyond the main one, platform details, the API key and S3 keys, the settings file |
-| `docs/guide/concepts.md` | How the library maps Massive's data onto Deephaven tables; time and column conventions; live-table lifetime |
-| `docs/guide/watchlists.md` | Live tables driven by a table of symbols: editing it, schedules, limits |
-| `docs/guide/history.md` | History sources, bars and their edge cases, split adjustment |
-| `docs/guide/plans.md` | What each Massive plan allows, real-time and delayed data, the errors a plan causes |
-| `docs/guide/arguments.md` | The full rules of every shared argument, one anchored section each |
-| `docs/guide/recipes.md` | Recipes beyond the README's main ones |
-| `docs/guide/troubleshooting.md` | The full troubleshooting table, the diagnostics tables, the log, reporting a bug |
+| `README.md` | The hook, Install, the teaching examples, Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
+| `docs/configuration.md` | Every `MassiveConfig` setting, its settings-file key, values, and default, and how to write and load a settings file; the settings are generated from the code |
+| `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
+| `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
+| Docstrings, read with `help()` | The fine detail of every method, setting, enum, and exception |
 | `docs/tester-guide.md` | What release-candidate testers do and report |
-| `docs/datasets/` | Every dataset's columns; generated by `scripts/render_reference.py`, never edited by hand |
 
-Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`, never on a user page.
+Installing and running Deephaven belongs to Deephaven's docs, and Massive's plans to Massive's
+site: link them, never copy them. Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`.
 
-## Voice
+<a id="install-decision"></a>
 
-- **Second person, active voice, present tense.** The subject is "you" or the thing that acts.
-  "You get one row per trade", not "the library returns one row per trade to the user".
-- **Outcome first.** Say what you get, then how, then the exceptions. Exceptions go in bullets
-  or in troubleshooting.
-- **Bullets and tables over walls of text.** A paragraph holds one idea in at most four lines.
-  Four or more parallel items become a list or a table, not a sentence.
-- **One question per section.** The heading is a short noun or task ("Install", "Follow a
-  watchlist"), and the section answers only that.
-- **Define every term at first use, or avoid it.** One sentence, with a link to Deephaven's or
-  Massive's docs where they define it. Use the words in the [terminology](#terminology) table.
-- **A number appears only when you act on it.** A plan's five-calls-a-minute limit changes what
-  you do; the cost of one flush in milliseconds does not.
-- **Examples are complete and pasteable.** Each block runs as written after the page's stated
-  setup, and the text right after it says what you see: the table's rows, its columns, how it
-  changes.
+### Install facts
 
-## Install commands
+Each of these has a source. Check it again before you write:
 
-- **pip first, uv as the alternative.** Many users have no `uv`, so every install step shows
-  the `pip` command, with the `uv pip` form as a one-line comment after it.
-- **State the prerequisites plainly**, with how to get each: Python 3.11 or later, Java 17 or
-  later with `JAVA_HOME` set, and, while the repository is private, `gh auth login`.
-- **Until the PyPI release, install from git at the newest release tag**, looked up in the same
-  step, so the docs never need an edit at release time:
+- Python 3.11 or later (`pyproject.toml`); Java 17 or later with `JAVA_HOME` set (Deephaven's
+  [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/)).
+- Until the PyPI release, sign in with `gh auth login` and `gh auth setup-git`, then install at
+  the newest release tag, looked up in the same command. `gh release list` includes release
+  candidates, and `gh release view` skips them. Write the repository name out, because it
+  never changes:
 
   ```bash
   TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-  pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
-  # with uv:  uv pip install deephaven-server "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
+    "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
   ```
 
-  `gh release list` includes release candidates; `gh release view` skips them.
-- **After the PyPI release**, the block becomes `pip install deephaven-server deephaven-massive`,
-  which gets the newest release by itself (add `--pre` while only release candidates exist).
-- **Never hard-code a release version.** Link to a release as
-  `https://github.com/chipkent/deephaven-massive/releases/latest`; an example that shows a
-  version string marks it as an example, never the current version.
+- `deephaven-plugin-ui` (imported as `from deephaven import ui`) and
+  `deephaven-plugin-plotly-express` (imported as `import deephaven.plot.express as dx`) are
+  separate packages from `deephaven-server` (deephaven.io's
+  [deephaven.ui install](https://deephaven.io/core/ui/docs/installation/) and
+  [Deephaven Express](https://deephaven.io/core/plotly/docs/) pages).
 
-## Banned patterns
+- `deephaven` is a command inside the environment, so the step that starts the server runs it
+  from the activated environment.
+- `MASSIVE_API_KEY` is required. `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY`
+  are optional, set both or neither (`_config.py`), and make a `history()` of 50 or more
+  symbols, or of `dm.ALL`, read flat files instead of a request per symbol. Set all three in
+  one step.
+- `deephaven server` prints a line starting `Deephaven is running at` and opens the Deephaven
+  IDE in the browser, signed in (`deephaven_server/cli.py`). `-Xmx4g` is the example on
+  Deephaven's install page; no source gives a minimum memory or a startup time.
+- The `MassiveConfig` settings a new user needs are `rest_basic_subscriptions` (free Basic
+  plans, five requests a minute) and `delayed_subscriptions` (Starter and Developer plans that
+  stream late).
 
-Quoted "Before" text comes from the README as it stood before this standard; the hype, filler,
-formula, and colon rows show the typical form.
+<a id="teaching-plan"></a>
 
-| Pattern | Before | After |
+### Teaching plan
+
+Approved by the owner on 2026-11-04. Each example adds one idea, in dependency order: the call
+pattern, static tables, charts, polling, stopping, watchlists, settings, then streaming. Each
+title names the idea, then what the example does. Examples 1 to 7 run on Stocks Basic, the free
+plan, and 8 to 13 on Stocks Starter or higher.
+
+| # | Title | Builds on | Plan |
+|---|---|---|---|
+| 1 | Queries: read a week of Apple's daily bars | | Stocks Basic |
+| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 | Stocks Basic |
+| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
+| 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
+| 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
+| 6 | Stopping live tables: stop the news feed and keep a snapshot | 5 | Stocks Basic |
+| 7 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5, 6 | Stocks Basic |
+| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
+| 9 | Streaming: stream minute bars for the stocks on your list | 7, 8 | Stocks Starter or higher |
+| 10 | Live calculations: track each stock's change since the previous close | 7, 9 | Stocks Starter or higher |
+| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 | Stocks Starter or higher |
+| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 | Stocks Starter or higher |
+| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 | Stocks Starter or higher |
+
+The owner's decisions behind it:
+
+- Example 7's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
+  types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
+- Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
+  reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
+  no path; never imply that a session reads it.
+- Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
+  `deephaven-server` doesn't include, so the install command adds them.
+- Stock streams carry data only while stocks trade, so the streaming examples say so and
+  offer crypto, which trades around the clock. Free-plan examples stay under five requests a
+  minute where they poll.
+- Install ends by starting the server and hands off to Example 1, without repeating its code.
+
+<a id="accuracy"></a>
+
+## Facts need sources
+
+Every factual claim traces to a source, or it's cut. A claim is anything a reader could check:
+a number, a duration, a size, a count, a plan's behavior, a column, an error message, a
+command, or what a command prints.
+
+- Sources are the code in `src/`, the generated pages in `docs/datasets/`, Massive's vendored
+  docs in `vendor/massive/`, and Deephaven's docs. Keep a list of each claim and its source
+  while you write, because the grader asks for it.
+- Never estimate. "Setup takes about 15 minutes", "after about a minute", and "at least 8 GB"
+  were invented, and each one cost the page its credibility. If no source gives a number, the
+  sentence has no number.
+- Every command works as written, in the state the previous step left: the right directory,
+  the activated environment, the variables set. Readers come back in a new terminal, so a step
+  that needs an earlier step's state restores it. Run each command, or trace each piece to its
+  source.
+- Every example runs: `tests/test_docs.py` runs each Python block on a user page against fake
+  Massive servers. Never invent output: describe the table's shape and columns, and leave real
+  rows for the owner's keyed run.
+- Claims about another product use that product's words, with a link.
+
+<a id="placement"></a>
+
+## Scope: only what the reader needs here
+
+Each sentence must serve the reader at this point on this page. A fact this reader doesn't
+need here goes to its home page, or nowhere.
+
+- Write only the sections the owner asked for (see [Owner requirements](#owner-requirements)).
+  A section nobody asked for is a fault, however useful it seems.
+- Put each fact on the page that owns it ([page map](#page-map)). Reference detail (every
+  argument, edge case, error, or column) belongs in the reference, never in a tutorial.
+- Document a setting with the object it belongs to: `MassiveConfig` settings under
+  `MassiveConfig`, never under a heading like "Settings in code".
+- Describe each environment variable or setting by what the reader gets ("Reads whole-market
+  history faster on plans with flat files"), not by how the library uses it.
+- Take out every needless step, variable, and choice: a shell variable that never changes, a
+  key set in a second place, an alternative only a special case needs.
+- Mechanism (paging, pacing, retries, threads) stays out unless the reader acts on it.
+
+<a id="hook"></a>
+
+## The hook
+
+A visitor decides within about 10 seconds whether to stay, and most leave by 30 (NN/g, *How
+Long Do Users Stay on Web Pages*). The hook sells the library in the first 20 seconds of
+reading, about 80 to 90 words of prose:
+
+1. **Who, what, outcome** in the first sentence, 10 to 20 words: who it's for, what it reads,
+   and what they get. "[Name] is a [category] for [job]" is the pattern of the best READMEs.
+2. **The pain, at the job level**, then the outcome: one or two short sentences, or two to
+   four short bullets, each a before and after from [the pains table](#pains). "Months of
+   plumbing before an idea is tested" is a job-level pain; "429 errors" isn't.
+3. **An optional sample of six lines or fewer**, only if its result is visible: a comment or
+   output that shows what the table holds. No prose between the tagline and the sample, and no
+   plan caveats before it.
+4. **One specific call to action**: "Install it with one `pip` command", not "Get started".
+
+A sample earns its place only by showing a visible result, such as a chart, in a few lines,
+followed by one or two plain sentences on how little it took. Code that shows no result goes.
+
+Everything else moves down the page: plan details, dataset counts, prerequisites, and
+definitions. The hook has no asides, no history ("formerly ..."), and no caveats. Link
+"Massive" and "Deephaven" instead of explaining them. The hero image goes after the title,
+with alt text that says what it shows.
+
+<a id="headings"></a>
+
+## Headings and example titles
+
+Readers scan the first two or three words of a heading (NN/g, *First 2 Words*).
+
+- Task sections get an imperative verb and an object: "Install the library", "Set your API
+  keys". Reference sections get a noun phrase: "Configuration", "Environment variables". Never
+  start with a gerund.
+- Say exactly what the section delivers, in the reader's words, keyword first, sentence case,
+  under about 60 characters. No numbers for sequence, no inline code, no idioms, no repeated
+  word.
+- Keep headings at one level parallel. Use standard names for standard sections:
+  "Prerequisites", "Troubleshooting", "Next steps", "Contributing".
+- An example title names the reader's goal or skill as an imperative, 3 to 7 words, with the
+  domain noun up front: "Join live bars to the previous close", "Backfill a live table". Test
+  it alone in the table of contents: could a reader predict the code? A title that carries two
+  ideas ("and the methods it has") or a coined word ("board") fails.
+
+<a id="teaching"></a>
+
+## Teaching with examples
+
+The examples teach the library, so there's no "How it works" section. They follow worked-example
+research (Sweller), Diátaxis tutorials, and the Rust book:
+
+- **Goal before code.** One to three sentences: the question a trader or researcher asks, the
+  plan it needs, and how to run it. Nothing about how the code works yet.
+- **One new idea per example.** The code is at most about 15 lines, complete, with realistic
+  symbols and dates, and brings in one idea the reader hasn't met. Two or three comments label
+  steps; they don't narrate.
+- **What to notice, after the code.** Describe the result (the table's shape, one useful thing
+  in it), then state the new idea as a rule that holds beyond the example. Never narrate the
+  code line by line, and never restate what the code shows (`head(20)` means 20 rows).
+- **Visible progression.** A short table before the first example lists each example's goal
+  and new idea. Each example ends with one sentence on what the next adds. Explain an idea
+  once. Later examples rely on it and carry less prose.
+- **No diversions.** Edge cases, error variants, tables of alternatives, and reference detail
+  get a link, not a paragraph. A table in an example teaches that example's idea or goes.
+
+<a id="sentences"></a>
+
+## Sentences
+
+- **Point first.** Open each section and paragraph with its point. A reader who reads only
+  first sentences should follow the page.
+- **One idea per sentence**, about 15 to 20 words on average. The subject and its verb sit
+  close together: more than about eight words between them is a digression.
+- **State a choice up front.** "Create an environment with venv or uv:", then the two blocks
+  side by side. Never "do A", other material, then "or you could do B".
+- **One topic per paragraph.** Every sentence's subject is about the paragraph's topic; a
+  sentence that drifts goes where its topic lives.
+- **Talk to the reader.** Second person, active voice, present tense, contractions. No
+  exclamation points, "please", "simply", "easy", or "just".
+- **Concrete over vague**, but only with sourced numbers ([Facts need sources](#accuracy)).
+
+<a id="ai-tells"></a>
+
+## AI tells
+
+One tell proves nothing; readers hear a cluster. Structural tells are what made the owner call
+a page AI-written, and a word list can't see them, so check structure first:
+
+| Tell | Test | Fix |
 |---|---|---|
-| Meta-commentary | "This README is the whole user guide." "Words the rest of this guide uses without defining them again:" | Start with the content. Define each word where it first appears. |
-| Filler negation | "where you type Python that runs inside the server. It is not a terminal." | "where you type Python that runs inside the server." |
-| Coined jargon | "Massive delivers data three ways, which this guide calls *transports*" | "Massive delivers data three ways: web requests (REST), a live WebSocket stream, and daily bulk files." |
-| Precision theater | "Each stream costs the server about 0.3 ms at every flush that brings it rows" | "Put many symbols in one stream: hundreds of one-symbol streams make every table fall behind." |
-| So-chains | "fails with `…`, so no table looks live while it is not. … builds nothing new on it, so take a static copy" | Two sentences: what happens, then what you do. "The table stops updating and shows the error. To keep its rows, take a static copy:" |
-| Defensive justification | "so no table looks live while it is not" | Cut it. State the behavior; the reader does not need the library's defense. |
-| Invented claims | "Deephaven builds nothing new on it" | Say what Deephaven does, in its words, with a link: "the table no longer updates". |
-| Pasted rule text | "`LOG`, the default, skips the symbol or row and logs each distinct value once at WARNING; `IGNORE` skips it and logs only at DEBUG; `RAISE` fails the read or the table instead." | A table of the three settings: what you see in the table, and in the log. |
-| Telegraphic compression | "`State` (`CONNECTED`, `RECONNECTING`, `WAITING_SLOT` when another program uses your key's connection, `FAILED`)" | A table: each state, what it means, and what you do about it. |
-| Hype words | "simply", "just", "easily", "seamless", "powerful", "robust", "leverage", "comprehensive", "unlock", "dive in" | Cut the word, or replace it with the concrete fact it gestures at. |
-| Filler openers | "Note that…", "It's worth noting…", "In order to…", "Whether you're…" | Start with the fact: "To…", or the subject itself. |
-| The anaphora and tricolon formula | "Fast to start. Easy to scale. Built for traders." | One concrete sentence: "Ten years of daily prices arrive as one table you can sort, join, and plot." |
-| Colon reveals | "The answer: one stream." "Here's the thing:" | Say it straight: "Use one stream." |
-| Bold-label paragraph walls | "**Stop everything with `m.close()`.** Every stream, poll, and download…" for a whole paragraph | A heading, or a one-line bullet with its label. |
+| Asides: appositives and parentheticals ("Massive (formerly Polygon.io)", "a watchlist, a table of symbols you edit,") | Delete the aside. Is the point intact? Does this reader need it here? | Delete it, or give it its own sentence where it's needed |
+| Stacked clauses: two or more of ", such as", ", which", ", including", "like" in one sentence | Count them | One per sentence |
+| A, digression, "or B" | Does an alternative come more than a sentence after its option? | State "A or B:" up front |
+| Topic drift | Underline each subject. Is each about the topic sentence? | Cut or move the sentence |
+| Repetition | A content word repeated in a heading or sentence; a phrase of four words or more reused on the page; a fact stated twice | Say it once |
+| Invented numbers | Can the number be traced to a source? | Cite it or cut it |
+| Caveat before the point | Does the paragraph open with "If", "On", "Once", or "Until"? | Point first |
+| Defensive justification | Would the reader act differently without the "because"? | Cut it |
+| Narrating code | Does the prose restate what the code says? | Say what to notice instead |
 
-Grep a draft before review:
+The checker finds most of the lexical tells:
 
-```bash
-grep -nwiE 'simply|just|easily|seamless(ly)?|powerful|robust|leverage|comprehensive|unlock|note that|in order to|worth noting|whether you' <page>
-grep -nE 'this (README|guide|page) (is|uses)|, so [^,]*, so ' <page>
-```
+- A contrast ("not X but Y") with a misconception nobody holds
+- Reflexive series of three, and taglines ("That's it.")
+- A question answered at once, or a colon that reveals the point
+- Signposts and summaries ("Here's what", "In summary")
+- Hype ("powerful", "seamless", "robust", "leverage", "delve"), and "serves as" for "is"
+- Bold labels on bullets of running explanation, bold for emphasis, em dashes, and emoji
+
+Before:
+
+> A query names the data you want from Massive (formerly Polygon.io), such as the minute bars
+> of Apple and Microsoft.
+
+After:
+
+> A query names the data you want, such as Apple's minute bars.
 
 <a id="terminology"></a>
 
 ## Terminology
 
-Use Deephaven's words for Deephaven and Massive's names for Massive's products. Link a term's
-definition the first time a page uses it.
+Use each concept's own community's word. Ask whose concept a term names:
 
-| Say | Never | Meaning |
+| The concept belongs to | Use | Example |
 |---|---|---|
-| Deephaven IDE | web UI, web IDE, UI | Deephaven's browser interface, opened by `deephaven server` |
-| console | terminal, REPL | The Console panel of the Deephaven IDE, where you run Python inside the server |
-| server | worker, JVM (in user text) | The Deephaven process you start; "worker" is a Deephaven Enterprise term |
-| static table | snapshot table | A table that never changes after it is made |
-| live table, ticking table | refreshing table (except when quoting Deephaven) | A table that changes as new data arrives |
-| update cycle | flush, tick | Deephaven applies a batch of changes to live tables during a cycle, about once a second by default; between cycles every table is consistent |
-| blink table | — | A live table that holds only the rows added in the current update cycle |
-| append-only table | — | A live table that only adds rows, keeping every one |
-| ring table | — | A live table that keeps the last N rows |
-| `last_by` | a table type, keyed table | An aggregation: one row per key, the latest value for each |
-| `snapshot()` | — | A static copy of a live table as it stands now |
-| Massive | Polygon (except "formerly Polygon.io") | The market-data vendor |
-| plan | tier | What a Massive account pays for, by Massive's names, such as Stocks Basic or Options Starter |
-| API key | token, PSK | The key Massive gives you; the PSK is Deephaven's login password, a different thing |
-| flat files, S3 keys | bulk files, S3 credentials | Massive's daily bulk files and the separate keys that read them |
-| REST, WebSocket | transports | Massive's request API and its streaming API |
-| symbol | — | The library's word for a Massive ticker, spelled exactly as Massive spells it; say "ticker" when you mean Massive's own field |
-| symbol table | — | A Deephaven table with a column of symbols, passed as `symbols` |
-| watchlist | followed table | A live symbol table: a call given one reads or streams the symbols it holds, and keeps up as you add or delete rows |
+| Massive's data and products | Massive's word, from its docs | "plan", not "tier"; Massive's dataset and column names |
+| Deephaven's tables and operations | Deephaven's word, from deephaven.io | "server", not "worker" (an Enterprise term); "Deephaven IDE"; "blink table" |
+| Markets and trading | Practitioners' word | "backfill", "watchlist", "previous close" |
+| Python | Python's word | "method", "argument", "virtual environment" |
+| Something only this library has | A coined word, defined at first use | Rare: check that no community already has a word |
 
-## Accuracy
+There's no list of approved words. The grader reads the page as a quant researcher, a
+quantitative trader, a vibe coder, and a software engineer, flags each word that reader
+wouldn't use, and names the word they would, with a source. Once you pick a word, use it every
+time: elegant variation reads as AI.
 
-- **Every claim is verified** against the code, a test, Deephaven's docs, or Massive's docs.
-  A claim you cannot trace to one of them is cut, or kept only after you verify it.
-- **Every example runs.** `tests/test_docs.py` runs each Python block on a user page against
-  the fake Massive servers, so an example is real code that matches the API.
-- **Claims about the Deephaven IDE** (what a panel shows, what a hover reveals) are checked in a
-  running Deephaven IDE before they go in.
+<a id="models"></a>
+
+## Section models
+
+The README runs broad to specific, and never buries the lead: the title and hero image, the
+badges, the hook, Install, the examples, then reference (Configuration), next steps,
+contributing. Install reaches the first result by the shortest path and sets every key in one
+step, and no reference stands between it and the first example.
+
+<a id="model-install"></a>
+
+### Install
+
+- A short prerequisites table: what, a command to check it, where to get it.
+- Steps in order, one action each, under verb-first headings with no numbers: the order of
+  the headings is the sequence (Google's style guide). A sentence introduces each
+  command; after it, say what the reader sees. No duration estimates.
+- State each choice up front ("with venv or uv:") and show both blocks together.
+- Set every key in one step, in the terminal that starts the server.
+- Start the server from the activated environment, and say what it prints.
+- End with a first table and what it holds. Send failures to troubleshooting with one link.
+
+<a id="model-configuration"></a>
+
+### Configuration
+
+Reference, so it describes and doesn't narrate:
+
+- Environment variables, in one table: Variable, What you get, Default. Say once where to set
+  them and that a running server doesn't see a change.
+- `MassiveConfig`, under its own name: what it is in one sentence, a table of the settings a
+  new user needs (setting, set it when, what changes), one complete code block, and
+  `help(dm.MassiveConfig)` for the rest.
+
+<a id="model-structure"></a>
+
+### File formats and data structures
+
+A page that documents a file format, a settings file, or a data structure shows its full shape:
+every level of nesting, which values are single words or numbers, lists, or mappings, and at
+least one example of each nested form in ordinary block syntax. Inline examples in table cells
+don't count: the reader must never infer the structure from them.
+
+Its reference also shows one complete example that sets every field, each with a one-line
+comment, generated from the code so that a new field can't be left out. Its tables name each
+nested key by its full path, such as `websocket_hosts.indices`. For each field, a reader can
+decide from the page alone: what it does for them, the values it takes, its default, when to
+change it, and what each choice does.
+
+The page must pass a sufficiency test. Give a fresh reader only the page and about eight
+realistic tasks, and ask for the file each task needs and for anything the page left them to
+guess. The page passes when every file is right and nothing is left to guess. The
+`configuration-page-sufficiency` eval case is the test for `docs/configuration.md`.
+
+<a id="model-teaching"></a>
+
+### Examples
+
+Each example has a goal-first title, the goal and plan in one to three sentences, one complete
+block, then what to notice and the one idea, and a bridge to the next. See
+[Teaching with examples](#teaching).
+
+<a id="anchors"></a>
 
 ## Anchors
 
-- **Every cited section has an explicit anchor**: `<a id="sort-order-limit"></a>` on the line
-  before its heading. Docstrings and other pages cite the anchor, never a heading's generated
-  slug, so rewording a heading breaks nothing.
-- **Anchors are stable.** Keep an anchor's id when its section is reworded.
-- **A moved or renamed anchor rewrites its citations in the same PR**: in `src/`, in other user
-  pages, and in the tester guide. `tests/test_docs.py` fails on a cited anchor or page that
-  does not exist.
+- Give every cited section an explicit anchor, `<a id="install"></a>`, on the line before its
+  heading. Keep the id when you reword the heading.
+- A docstring cites a page by its full URL,
+  `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`; a user page links
+  another with a relative path. When you move or rename an anchor, rewrite its citations in the
+  same PR; `tests/test_docs.py` fails on a missing one.
+
+<a id="rubric"></a>
+
+## Grading and the pass bar
+
+[`agents/editor.md`](../../.claude/skills/writing-user-docs/agents/editor.md) in the skill is
+the grader. It reads cold, as an O'Reilly editor and then as each of the four readers. It returns
+every finding with its quoted sentence and a rewrite, and every claim without a source. Its ten
+criterion scores come from counted findings, and its holistic score is out of 10.
+
+A page passes only when all of these hold:
+
+1. All four readers answer yes to "Is this product simple and easy to use?"
+2. No claim is unsourced or false, and every command works as written.
+3. No criterion scores below 2.
+4. The holistic score is 9 or more.
+
+Each round has a separate fact check, by a subagent that traces every claim, command, and
+column name in the changed lines and any new page to its source, and one pair of independent
+graders scoped to the changed sections. Apply only the fixes both graders agree on, plus every
+false claim either finds, and fix wording nits directly. A second pair grades only when the
+first finds a false or unsourced claim or the page misses the bar. A grader may flag owner-approved text but never
+rewrites its intent or content, and it judges a revised hook against the approved version for
+clarity and directness. A page passes when both graders pass it with a mean holistic score of 9
+or more.
+
+A page still short of the bar after two revision rounds goes to the owner with the last score
+sheet. Nobody loops on it further.

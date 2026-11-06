@@ -1,0 +1,25 @@
+# The settings each task of files/tasks.md needs, worked out from MassiveConfig's code and
+# Massive's plan tables. A task's answer is right when MassiveConfig.from_file loads it and every
+# field equals the configuration these settings give, every other field at its default. Task 4
+# needs no setting: a proxy is the HTTPS_PROXY environment variable.
+1:
+  delayed_subscriptions: [stocks]
+  rest_basic_subscriptions: [indices, currencies, futures]
+2:
+  noncanonical_symbols: raise
+3:
+  rest_basic_subscriptions: [options, currencies, futures]
+  websocket_hosts:
+    indices: business.massive.com
+4: {}
+5:
+  max_outage: 600
+6:
+  flat_file_symbol_threshold: 20
+7:
+  unlisted_symbols: ignore
+8:
+  max_concurrency: 16
+9:
+  delayed_subscriptions: [futures]
+  rest_basic_subscriptions: [stocks, options, indices]
