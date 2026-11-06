@@ -34,7 +34,8 @@ pushes.
   resolved it. Never merge only to stay current, and never resolve a conflict by taking one
   side wholesale (`--ours`, `--theirs`) without reading both.
 - **The pre-push hook is the check.** It runs `./scripts/check.sh` and picks the scope from the
-  files the branch changes, so never run the check yourself just before a push.
+  files the push changes (the whole branch on its first push), so never run the check yourself
+  just before a push.
 
 ## Taking a number
 

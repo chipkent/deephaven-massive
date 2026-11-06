@@ -8,7 +8,9 @@
 #   --all     with full: run the whole suite with coverage, whatever changed
 #   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
 #
-# full compares the branch and its uncommitted files with origin/main (scripts/check_scope.py).
+# full lists the files the working tree changes (scripts/check_scope.py): run by hand, against
+# origin/main; in the pre-push hook to a branch the remote already has, since that branch's
+# remote tip, so a push runs only the tests its own commits and uncommitted files need.
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
 # workers; when CI would not, full runs only tests/test_docs.py if README.md changed, and no
 # tests otherwise. It prints the scope it chose and why.
