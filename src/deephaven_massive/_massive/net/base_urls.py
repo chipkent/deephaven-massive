@@ -99,8 +99,10 @@ def check_rest_base_url(base_url: str, *, setting: str) -> Origin:
     invalid = "is not an absolute http or https URL with a valid port"
     try:
         origin = origin_of(base_url)
-    except ValueError as error:
-        raise ValueError(_refusal(setting, base_url, invalid)) from error
+    except ValueError:
+        # Not chained: the parser's error can quote part of a password, as in the port error
+        # of `https://user:s3cr3t?x@host`.
+        raise ValueError(_refusal(setting, base_url, invalid)) from None
     if origin[2] == 0:  # the client would keep `:0` in every request URL and never connect
         raise ValueError(_refusal(setting, base_url, invalid))
     parts = urlsplit(base_url)

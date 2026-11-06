@@ -1,6 +1,7 @@
 """Tests for `check_rest_base_url`, the rule of a URL the REST client may send the API key to."""
 
 import logging
+import traceback
 
 import pytest
 
@@ -107,15 +108,14 @@ def test_each_check_logs_its_outcome_at_debug(caplog: pytest.LogCaptureFixture) 
         "https://api.massive.com/#hunter2",
         "ftp://api.massive.com?apiKey=hunter2",
         "http://api.massive.com:0?apiKey=hunter2",
+        "https://user:hunter2?part@api.massive.com",
     ],
 )
 def test_a_refused_base_url_never_shows_its_query_or_fragment(
     base_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
-    shown = r"^base_url '[a-z]+://api\.massive\.com[^']*[?#]\*\*\*' "
-    with pytest.raises(ValueError, match=shown) as info:
+    with pytest.raises(ValueError, match=r"^base_url '[a-z]+://[^']*\*\*\*' ") as info:
         check_rest_base_url(base_url, setting="base_url")
-    assert "hunter2" not in str(info.value)
-    assert "hunter2" not in str(info.value.__cause__)
+    assert "hunter2" not in "".join(traceback.format_exception(info.value))
     assert "hunter2" not in caplog.text
