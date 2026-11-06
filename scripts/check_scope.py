@@ -28,9 +28,10 @@ The base depends on how the script runs:
 - In the pre-push hook, pushing to a branch the remote already has, the base is that branch's
   remote tip. pre-commit names it in `PRE_COMMIT_FROM_REF` and the remote branch in
   `PRE_COMMIT_REMOTE_NAME` and `PRE_COMMIT_REMOTE_BRANCH`; the script uses it when it equals
-  the local remote-tracking branch. So a push that adds an image to a long-lived PR branch
-  runs no tests, even when earlier pushes changed code: CI already tested those. A tree diff
-  is used, not a merge base, so the files a merge of `main` brings in count as changed.
+  the local remote-tracking branch. So a push that changes only a developer guide on a
+  long-lived PR branch runs no tests, even when earlier pushes changed code: CI already ran
+  the tests on those. A tree diff is used, not a merge base, so the files a merge of `main`
+  brings in count as changed.
 - Otherwise (a new branch, a stale or missing remote-tracking branch, or a run by hand), the
   base is the merge base of `HEAD` with `origin/main`: the whole branch, as CI compares it.
 
