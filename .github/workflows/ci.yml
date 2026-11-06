@@ -81,22 +81,24 @@ jobs:
           set -euo pipefail
           # Ruff and mypy check src/, tests/, and scripts/, configured by pyproject.toml.
           lint='^(src|tests|scripts)/|^pyproject\.toml$'
-          # The suite also reads the vendored snapshot under vendor/ and the committed column
-          # reference under docs/datasets/, whose line endings .gitattributes fixes, and it runs
-          # scripts/spec-drift-issue.sh.
-          test='^(src|tests|scripts|vendor)/|^docs/datasets/|^(pyproject\.toml|\.gitattributes)$'
+          # The suite also reads the vendored snapshot under vendor/, the committed column
+          # reference under docs/datasets/, whose line endings .gitattributes fixes, and
+          # docs/configuration.md, whose generated settings reference tests/test_config.py
+          # compares with the code; and it runs scripts/spec-drift-issue.sh.
+          test='^(src|tests|scripts|vendor)/|^docs/datasets/|^docs/configuration\.md$|^(pyproject\.toml|\.gitattributes)$'
           # The sdist carries src/, tests/, and docs/datasets/; the package metadata takes
           # README.md and LICENSE; hatchling leaves out what .gitignore lists; the version of an
           # export without .git comes from .git_archival.txt; and the wheel check compares the
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
-          # The user pages (README.md and docs/troubleshooting.md, with the images under
-          # docs/assets/), the tester guide, and its examples under docs/tester-examples/:
+          # The user pages (README.md and docs/troubleshooting.md, with any image under docs/;
+          # docs/configuration.md is a test input above), the tester guide, and its examples
+          # under docs/tester-examples/:
           # tests/test_docs.py runs the user pages' examples and checks their links, and
           # tests/live/tester/test_examples.py runs the tester examples and checks that the guide
           # shows each one. A change to these alone runs only those two tests, on one Python
           # version.
-          docs='^README\.md$|^docs/troubleshooting\.md$|^docs/assets/|^docs/tester-guide\.md$|^docs/tester-examples/'
+          docs='^README\.md$|^docs/(troubleshooting|tester-guide)\.md$|^docs/tester-examples/|^docs/.+\.(png|jpe?g|gif|svg|webp)$'
           # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
