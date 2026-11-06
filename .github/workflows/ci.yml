@@ -92,8 +92,10 @@ jobs:
           # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
-          # settings, which only the release workflow reads.
-          unread='^(docs/dev/|docs/live-tests\.md$|CONTRIBUTING\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)'
+          # settings, which only the release workflow reads. Images under docs/ count as
+          # documentation: only tests/test_docs.py reads them, to check that the README's links
+          # resolve, and the local pre-push check runs that test when one changes.
+          unread='^(docs/dev/|docs/live-tests\.md$|CONTRIBUTING\.md$|AGENTS\.md$|\.claude/|\.github/pull_request_template\.md$|\.github/ISSUE_TEMPLATE/|\.github/dependabot\.yml$|\.github/cliff\.toml$|\.pre-commit-config\.yaml$)|^docs/.+\.(png|jpe?g|gif|svg|webp)$'
           # A change to a workflow or a composite action runs everything.
           workflows='^\.github/(workflows|actions)/'
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An
