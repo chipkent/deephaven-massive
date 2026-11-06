@@ -417,6 +417,17 @@ every level of nesting, which values are single words or numbers, lists, or mapp
 least one example of each nested form in ordinary block syntax. Inline examples in table cells
 don't count: the reader must never infer the structure from them.
 
+Its reference also shows one complete example that sets every field, each with a one-line
+comment, generated from the code so that a new field can't be left out. Its tables name each
+nested key by its full path, such as `websocket_hosts.indices`. For each field, a reader can
+decide from the page alone: what it does for them, the values it takes, its default, when to
+change it, and what each choice does.
+
+The page must pass a sufficiency test. Give a fresh reader only the page and about eight
+realistic tasks, and ask for the file each task needs and for anything the page left them to
+guess. The page passes when every file is right and nothing is left to guess. The
+`configuration-page-sufficiency` eval case is the test for `docs/configuration.md`.
+
 <a id="model-teaching"></a>
 
 ### Examples

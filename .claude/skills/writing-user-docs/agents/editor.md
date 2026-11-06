@@ -127,7 +127,10 @@ reader who returns later gets `command not found`.
 - Structure: does a page that documents a file format, settings file, or data structure show
   its full shape: every level of nesting, which values are scalars, lists, or mappings, and at
   least one example of each nested form in ordinary block syntax? A structure the reader must
-  infer from inline examples in table cells is a fault.
+  infer from inline examples in table cells is a fault. Does its reference show one complete
+  example that sets every field, each with a one-line comment, and name each nested key by its
+  full path? Could a reader with only this page write the file for a realistic task without
+  guessing? A field whose effect, values, default, or reason to change is missing is a fault.
 - Badges: does each badge render for the page's viewers and stay current? A static badge that
   can go stale is a fault.
 - Steps: is every step needed? Is anything the reader sets up once (keys, an environment) split

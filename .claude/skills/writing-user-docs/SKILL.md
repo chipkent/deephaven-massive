@@ -51,6 +51,11 @@ go:
   between it and the first result.
 - Links: every configuration concept links to its generated reference page
   (`docs/configuration.md`).
+- Reference for a file format or settings: show the full shape, one complete example that sets
+  every field with a one-line comment, and each nested key by its full path. Then run the
+  sufficiency test: a fresh subagent given only the page writes the file for about eight
+  realistic tasks and lists what it had to guess. The page passes only when every file is right
+  and nothing is left to guess (`evals/configuration-page-sufficiency` for the settings page).
 - Numbers: none without a source. No setup times, memory minimums, or "about a minute".
 - Commands: each runs as written where the last step left the reader. A new terminal loses the
   activated environment.
@@ -124,5 +129,7 @@ with why.
 ## Evals
 
 `evals/` holds the calibration cases: the 4/10 README must fail and surface the owner's
-complaints, a known-good first screen must pass, and writing cases exercise the workflow. When
-you change the standard or the editor, rerun the two calibration cases before trusting a grade.
+complaints, a known-good first screen must pass, and writing cases exercise the workflow.
+`configuration-page-sufficiency` is the settings page's sufficiency test, and
+`scripts/compare_settings_answers.py` checks its answers. When you change the standard or the
+editor, rerun the two calibration cases before trusting a grade.
