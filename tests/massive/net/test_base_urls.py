@@ -1,6 +1,7 @@
 """Tests for `check_rest_base_url`, the rule of a URL the REST client may send the API key to."""
 
 import logging
+import traceback
 
 import pytest
 
@@ -41,7 +42,14 @@ def test_a_base_url_names_only_an_origin(base_url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "base_url", ["ftp://api.massive.com", "api.massive.com", "https://api.massive.com:99999"]
+    "base_url",
+    [
+        "ftp://api.massive.com",
+        "api.massive.com",
+        "https://api.massive.com:99999",
+        "https://api.massive.com:0",
+        "http://localhost:0",
+    ],
 )
 def test_a_base_url_is_http_or_https_with_a_valid_port(base_url: str) -> None:
     with pytest.raises(
@@ -91,3 +99,23 @@ def test_each_check_logs_its_outcome_at_debug(caplog: pytest.LogCaptureFixture) 
             ),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.massive.com?apiKey=hunter2",
+        "https://api.massive.com/#hunter2",
+        "ftp://api.massive.com?apiKey=hunter2",
+        "http://api.massive.com:0?apiKey=hunter2",
+        "https://user:hunter2?part@api.massive.com",
+    ],
+)
+def test_a_refused_base_url_never_shows_its_query_or_fragment(
+    base_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive")
+    with pytest.raises(ValueError, match=r"^base_url '[a-z]+://[^']*\*\*\*' ") as info:
+        check_rest_base_url(base_url, setting="base_url")
+    assert "hunter2" not in "".join(traceback.format_exception(info.value))
+    assert "hunter2" not in caplog.text

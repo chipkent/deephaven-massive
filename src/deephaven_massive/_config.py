@@ -57,7 +57,12 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import AuthenticationError
-from deephaven_massive._massive import check_rest_base_url, without_userinfo
+from deephaven_massive._massive import (
+    check_api_key,
+    check_rest_base_url,
+    without_userinfo,
+    without_userinfo_or_query,
+)
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -203,7 +208,8 @@ class MassiveConfig:
 
     Attributes:
         api_key: The Massive API key. Defaults to the `MASSIVE_API_KEY` environment variable;
-            with neither, construction raises `AuthenticationError`.
+            with neither, construction raises `AuthenticationError`. A key with a space, a line
+            break, or a character outside ASCII raises `ValueError`, which never shows the key.
         s3_access_key_id: The flat-file S3 access key id. Defaults to the
             `MASSIVE_S3_ACCESS_KEY_ID` environment variable, else None. Flat-file history
             needs both S3 credentials; without them, `history()` cannot read flat files.
@@ -308,8 +314,9 @@ class MassiveConfig:
         rest_base_url: Sets the URL REST requests go to. Defaults to `https://api.massive.com`.
 
             Change it only to reach a server other than Massive's, such as a local test server.
-            The REST client refuses a URL with a path, a query, or a user and password at the
-            first request. It also refuses an `http` URL of a host that isn't on your own machine.
+            The config refuses a URL with a path, a query, a fragment, a user and password, or
+            port 0. It also refuses an `http` URL of a host that isn't on your own machine. The
+            error shows `***` in place of the URL's query and password.
         s3_endpoint_url: Sets the URL flat files are read from. Defaults to
             `https://files.massive.com`.
 
@@ -426,13 +433,15 @@ class MassiveConfig:
                 `reconnect_backoff`, `max_outage` is negative or not finite, a timeout, backoff,
                 interval, or count is not positive, only one of the two S3 credentials is set,
                 `api_key` or an S3 credential has leading or trailing whitespace (or an S3
-                credential is blank), `rest_base_url` or `s3_endpoint_url` is not an `http` or
-                `https` URL with a host, `rest_base_url` names more than a scheme, host, and
-                port (a user and password, a path, or a query) or is `http` to a host other
-                than this machine, `s3_bucket` is blank, a `websocket_hosts` value is not a
-                bare lower-case hostname, an environment variable read for a default has leading or
-                trailing whitespace, `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or
-                a `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
+                credential is blank), `api_key` holds whitespace or a character outside
+                visible ASCII, which no header can carry, `rest_base_url` or `s3_endpoint_url`
+                is not an `http` or `https` URL with a host, `rest_base_url` names port 0 or
+                more than a scheme, host, and port (a user and password, a path, or a query),
+                or is `http` to a host other than this machine, `s3_bucket` is blank, a
+                `websocket_hosts` value is not a bare lower-case hostname, an environment
+                variable read for a default has leading or trailing whitespace,
+                `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or a
+                `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
         """
         if not isinstance(self.api_key, str):
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
@@ -445,6 +454,7 @@ class MassiveConfig:
                 "api_key has leading or trailing whitespace; pass the key without any (the key "
                 "is not shown)"
             )
+        check_api_key(self.api_key, setting="api_key")
         _check_s3_credential("s3_access_key_id", self.s3_access_key_id)
         _check_s3_credential("s3_secret_access_key", self.s3_secret_access_key)
         if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):
@@ -575,8 +585,14 @@ class MassiveConfig:
         return f"MassiveConfig({shown})"
 
 
-_URL_SETTINGS: Final = frozenset({"rest_base_url", "s3_endpoint_url"})
-"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials."""
+_URL_SETTINGS: Final[dict[str, Callable[[str], str]]] = {
+    "rest_base_url": without_userinfo_or_query,
+    "s3_endpoint_url": without_userinfo,
+}
+"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials, and
+how each is shown. `rest_base_url` may hold no query or fragment, so a value that has one is
+refused, and its query can carry the API key (`?apiKey=<key>`): it is shown with them hidden
+too. An S3 endpoint may hold a query, which is shown."""
 
 
 def shown_setting(name: str, value: object) -> str:
@@ -588,10 +604,12 @@ def shown_setting(name: str, value: object) -> str:
 
     Returns:
         The value's `repr`; for a URL setting, with `***@` in place of a user and password
-        (`without_userinfo`).
+        (`without_userinfo`), and for `rest_base_url` with `***` in place of a query and a
+        fragment as well (`without_userinfo_or_query`).
     """
-    if name in _URL_SETTINGS and isinstance(value, str):
-        return repr(without_userinfo(value))
+    show = _URL_SETTINGS.get(name)
+    if show is not None and isinstance(value, str):
+        return repr(show(value))
     return repr(value)
 
 
@@ -828,7 +846,8 @@ def _check_url(name: str, value: object) -> None:
         TypeError: If `value` is not a `str`.
         ValueError: If `value` holds whitespace, or its scheme is not `http` or `https`, or it
             names no host. The message shows the value with `***@` in place of a user and
-            password (`shown_setting`).
+            password, and a `rest_base_url` with `***` in place of a query and a fragment
+            (`shown_setting`).
     """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")

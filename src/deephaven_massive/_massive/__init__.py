@@ -47,12 +47,18 @@ Interface:
       recording Massive's real replies. Off by default.
     - `origin_of`: the `(scheme, host, port)` a REST base URL reaches, which keys the
       governor the library shares. It is part of `net` and loads no client.
+    - `check_api_key`: the rule of an API key (non-empty visible ASCII, as a header needs),
+      which the REST client and `MassiveConfig.api_key` both apply. It is part of `net` and
+      loads no client.
     - `check_rest_base_url`: the rule of a REST base URL (an origin alone, and `https` unless
       the host is loopback), which the REST client and `MassiveConfig.rest_base_url` both
       apply. It is part of `net` and loads no client.
     - `without_userinfo`: a URL with its user and password replaced by `***`, the one rule
       every message and log line that shows a configured URL uses. It is part of `net` and
       loads no client.
+    - `without_userinfo_or_query`: a URL with its query and fragment hidden as well, for a
+      URL that may hold neither, such as `MassiveConfig.rest_base_url`. It is part of `net`
+      and loads no client.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
@@ -112,6 +118,7 @@ __all__ = [
     "WireUnit",
     "WsClient",
     "WsState",
+    "check_api_key",
     "check_rest_base_url",
     "encode_value",
     "object_key",
@@ -122,6 +129,7 @@ __all__ = [
     "sources",
     "to_batch",
     "without_userinfo",
+    "without_userinfo_or_query",
 ]
 
 # Each name of the interface, and the module that defines it.
@@ -162,9 +170,11 @@ _EXPORTS: dict[str, str] = {
     "WireType": "deephaven_massive._massive.spec.types",
     "WireUnit": "deephaven_massive._massive.spec.types",
     "object_key": "deephaven_massive._massive.flatfiles.object_keys",
+    "check_api_key": "deephaven_massive._massive.net.api_keys",
     "check_rest_base_url": "deephaven_massive._massive.net.base_urls",
     "origin_of": "deephaven_massive._massive.net.origins",
     "without_userinfo": "deephaven_massive._massive.net.redaction",
+    "without_userinfo_or_query": "deephaven_massive._massive.net.redaction",
     "to_batch": "deephaven_massive._massive.rest.batch",
     "encode_value": "deephaven_massive._massive.spec.values",
 }
@@ -175,6 +185,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.flatfiles.client import FlatFileClient
     from deephaven_massive._massive.flatfiles.object_keys import object_key
     from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
+    from deephaven_massive._massive.net.api_keys import check_api_key
     from deephaven_massive._massive.net.base_urls import check_rest_base_url
     from deephaven_massive._massive.net.cancel import Cancel
     from deephaven_massive._massive.net.capture import CapturedReply, set_reply_capture
@@ -184,7 +195,7 @@ if TYPE_CHECKING:
         WireError,
     )
     from deephaven_massive._massive.net.origins import origin_of
-    from deephaven_massive._massive.net.redaction import without_userinfo
+    from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
     from deephaven_massive._massive.rest.batch import to_batch
     from deephaven_massive._massive.rest.client import RestClient
     from deephaven_massive._massive.rest.governor import (

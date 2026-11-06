@@ -15,3 +15,13 @@ def test_origin_of_fills_the_default_port_and_lowers_the_host() -> None:
 def test_origin_of_refuses_anything_but_an_absolute_http_url(url: str) -> None:
     with pytest.raises(ValueError, match="is not an absolute http or https URL"):
         origin_of(url)
+
+
+def test_origin_of_keeps_a_written_port_of_zero() -> None:
+    assert origin_of("https://h:0") == ("https", "h", 0)
+
+
+def test_origin_of_never_shows_a_query_value() -> None:
+    with pytest.raises(ValueError, match=r"^'ftp://h\?\*\*\*' is not an absolute") as info:
+        origin_of("ftp://h?apiKey=hunter2")
+    assert "hunter2" not in str(info.value)

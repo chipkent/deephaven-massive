@@ -13,7 +13,7 @@ from deephaven_massive import _massive
 from deephaven_massive._massive import spec, ws
 from deephaven_massive._massive.flatfiles import client as flatfiles_client
 from deephaven_massive._massive.flatfiles import object_keys, reader
-from deephaven_massive._massive.net import base_urls, errors
+from deephaven_massive._massive.net import api_keys, base_urls, errors
 from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
 
@@ -49,6 +49,7 @@ EXPECTED_INTERFACE = [
     "WireUnit",
     "WsClient",
     "WsState",
+    "check_api_key",
     "check_rest_base_url",
     "encode_value",
     "object_key",
@@ -59,6 +60,7 @@ EXPECTED_INTERFACE = [
     "sources",
     "to_batch",
     "without_userinfo",
+    "without_userinfo_or_query",
 ]
 
 
@@ -94,6 +96,7 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.to_batch is batch.to_batch
     assert _massive.encode_value is values.encode_value
     assert _massive.check_rest_base_url is base_urls.check_rest_base_url
+    assert _massive.check_api_key is api_keys.check_api_key
 
 
 def test_every_lazy_name_is_in_all_and_none_is_bound() -> None:

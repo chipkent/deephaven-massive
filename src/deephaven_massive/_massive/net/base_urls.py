@@ -1,9 +1,9 @@
 """REST base URLs: which URLs the REST client may send the API key to.
 
 The REST client sends the API key as a bearer header on every request to its base URL, so a
-base URL must be an origin alone: an `http` or `https` scheme, a host, and an optional port,
-with no user and password, path, query, or fragment. Plain `http` would send the key in clear
-text, so it is allowed only for a loopback host, such as a local test server.
+base URL must be an origin alone: an `http` or `https` scheme, a host, and an optional port
+other than 0, with no user and password, path, query, or fragment. Plain `http` would send the
+key in clear text, so it is allowed only for a loopback host, such as a local test server.
 
 `check_rest_base_url` is the one body of that rule. The REST client applies it when it is
 created, and `MassiveConfig` applies it to `rest_base_url` when the config is built, so a URL
@@ -21,7 +21,10 @@ import logging
 from urllib.parse import urlsplit
 
 from deephaven_massive._massive.net.origins import Origin, origin_of
-from deephaven_massive._massive.net.redaction import without_userinfo
+from deephaven_massive._massive.net.redaction import (
+    without_userinfo,
+    without_userinfo_or_query,
+)
 
 __all__ = ["check_rest_base_url"]
 
@@ -53,14 +56,15 @@ def _refusal(setting: str, base_url: str, reason: str) -> str:
 
     Args:
         setting: The name the caller knows the URL by, for the message.
-        base_url: The refused URL; its user and password never reach the message or the log.
+        base_url: The refused URL; its user, password, query, and fragment never reach the
+            message or the log (`without_userinfo_or_query`).
         reason: What is wrong with it, completing the message after the URL.
 
     Returns:
-        A message naming the setting, the URL with `***@` in place of a user and password, and
-        the reason.
+        A message naming the setting, the URL with `***` in place of a user and password, a
+        query, and a fragment, and the reason.
     """
-    message = f"{setting} {without_userinfo(base_url)!r} {reason}"
+    message = f"{setting} {without_userinfo_or_query(base_url)!r} {reason}"
     logger.debug("REST base URL refused: %s", message)
     return message
 
@@ -86,17 +90,21 @@ def check_rest_base_url(base_url: str, *, setting: str) -> Origin:
         The URL's `(scheme, host, port)`, the scheme's default port filled in.
 
     Raises:
-        ValueError: If `base_url` is not an `http` or `https` URL with a host and a valid port,
-            names more than an origin (a user and password, a path, a query, or a fragment), or
-            is `http` for a host that is not loopback, which would send the API key in clear
-            text. The message shows the URL with `***@` in place of a user and password.
+        ValueError: If `base_url` is not an `http` or `https` URL with a host and a valid port
+            (port 0, which no connection can reach, is not valid), names more than an origin (a
+            user and password, a path, a query, or a fragment), or is `http` for a host that is
+            not loopback, which would send the API key in clear text. The message shows the URL
+            with `***` in place of a user and password, a query, and a fragment.
     """
+    invalid = "is not an absolute http or https URL with a valid port"
     try:
         origin = origin_of(base_url)
-    except ValueError as error:
-        raise ValueError(
-            _refusal(setting, base_url, "is not an absolute http or https URL with a valid port")
-        ) from error
+    except ValueError:
+        # Not chained: the parser's error can quote part of a password, as in the port error
+        # of `https://user:s3cr3t?x@host`.
+        raise ValueError(_refusal(setting, base_url, invalid)) from None
+    if origin[2] == 0:  # the client would keep `:0` in every request URL and never connect
+        raise ValueError(_refusal(setting, base_url, invalid))
     parts = urlsplit(base_url)
     if parts.path not in {"", "/"} or parts.query or parts.fragment or "@" in parts.netloc:
         raise ValueError(_refusal(setting, base_url, "must name only a scheme, host, and port"))

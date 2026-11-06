@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Final
 from urllib.parse import urlsplit
 
-from deephaven_massive._massive.net.redaction import without_userinfo
+from deephaven_massive._massive.net.redaction import without_userinfo_or_query
 
 __all__ = ["Origin", "origin_of"]
 
@@ -32,7 +32,7 @@ def origin_of(url: str) -> Origin:
 
     Returns:
         `(scheme, host, port)`: the scheme and host lower-cased, as `urlsplit` gives them,
-        and the scheme's default port filled in.
+        and the port as written (even 0), or the scheme's default when none is written.
 
     Raises:
         ValueError: If `url` is not an absolute `http` or `https` URL with a host, or its port
@@ -40,5 +40,6 @@ def origin_of(url: str) -> Origin:
     """
     parts = urlsplit(url)
     if parts.scheme not in _DEFAULT_PORTS or not parts.hostname:
-        raise ValueError(f"{without_userinfo(url)!r} is not an absolute http or https URL")
-    return parts.scheme, parts.hostname, parts.port or _DEFAULT_PORTS[parts.scheme]
+        raise ValueError(f"{without_userinfo_or_query(url)!r} is not an absolute http or https URL")
+    port = _DEFAULT_PORTS[parts.scheme] if parts.port is None else parts.port
+    return parts.scheme, parts.hostname, port

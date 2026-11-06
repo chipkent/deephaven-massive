@@ -440,6 +440,13 @@ def test_api_key_must_be_a_string() -> None:
         MassiveConfig(api_key=cast("str", None))
 
 
+@pytest.mark.parametrize("api_key", ["s3c r3t", "s3c\tr3t", "s3cr3t\r\nX: y", "s3cr\u00e9t"])
+def test_an_api_key_no_header_can_carry_is_refused_at_the_config(api_key: str) -> None:
+    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as info:
+        MassiveConfig(api_key=api_key)
+    assert "s3c" not in str(info.value)
+
+
 def test_configs_are_hashable_and_compare_by_value() -> None:
     hosts = {AssetClass.STOCKS: "fullmarket-business.massive.com"}
     a = MassiveConfig(api_key="k", websocket_hosts=hosts)
@@ -522,6 +529,7 @@ def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> No
         ("http://api.massive.com", "would send the API key in clear text; use https"),
         ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
         ("https://api.massive.com:99999", "is not an absolute http or https URL"),
+        ("https://api.massive.com:0", "is not an absolute http or https URL"),
     ],
 )
 def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
@@ -1122,6 +1130,37 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
     assert not getattr(sys, "_is_gil_enabled", lambda: True)()
+
+
+def test_a_refused_rest_base_url_never_shows_its_query() -> None:
+    with pytest.raises(ValueError, match="must name only") as info:
+        MassiveConfig(api_key="k", rest_base_url="https://api.massive.com?apiKey=hunter2")
+    assert "'https://api.massive.com?***'" in str(info.value)
+    assert "hunter2" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("ftp://api.massive.com?apiKey=hunter2", "'ftp://api.massive.com?***'"),
+        ("https://api.massive.com?apiKey=hun ter2", "'https://api.massive.com?***'"),
+        ("ftp://u:pw@api.massive.com#hunter2", "'ftp://***@api.massive.com#***'"),
+    ],
+)
+def test_an_early_rest_base_url_refusal_never_shows_its_query(
+    url: str, shown: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive")
+    with pytest.raises(ValueError, match=r"^rest_base_url must be an http") as info:
+        MassiveConfig(api_key="k", rest_base_url=url)
+    assert str(info.value).endswith(f"not {shown}")
+    assert "hunter2" not in str(info.value)
+    assert "hunter2" not in caplog.text
+
+
+def test_an_s3_endpoint_refusal_still_shows_its_query() -> None:
+    with pytest.raises(ValueError, match=r"not 'ftp://files\.massive\.com\?x=1'$"):
+        MassiveConfig(api_key="k", s3_endpoint_url="ftp://files.massive.com?x=1")
 
 
 # --- The settings reference --------------------------------------------------------------------

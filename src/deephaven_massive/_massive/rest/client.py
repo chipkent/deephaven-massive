@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import logging
 import random
-import re
 import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
@@ -53,6 +52,7 @@ from urllib.parse import urlsplit
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net.api_keys import check_api_key
 from deephaven_massive._massive.net.base_urls import check_rest_base_url
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import capture_response
@@ -145,10 +145,6 @@ _READ_CHUNK = 1024 * 1024
 """Bytes of decompressed body read at a time."""
 
 
-_VISIBLE_ASCII = re.compile(r"[!-~]+")
-"""A non-empty run of visible ASCII: what an API key, sent in a header, may contain."""
-
-
 def _new_pool(proxy: str | None) -> urllib3.PoolManager:
     """Build one connection slot's pool: one connection, with a TLS context of its own.
 
@@ -179,26 +175,6 @@ def _new_pool(proxy: str | None) -> urllib3.PoolManager:
         timeout=timeout,
         ssl_context=context,
     )
-
-
-def _check_api_key(api_key: str) -> None:
-    """Refuse an API key that cannot be sent in a header, without ever showing it.
-
-    A key read from a file often ends in a newline; sent as is, `http.client` raises an error
-    that quotes the header, key included. Checking here keeps the key out of every message.
-
-    Args:
-        api_key: The key.
-
-    Raises:
-        ValueError: If the key is empty or holds anything but visible ASCII (a space, a tab,
-            a line break, a non-ASCII letter); the message never includes the key.
-    """
-    if not _VISIBLE_ASCII.fullmatch(api_key):
-        raise ValueError(
-            "api_key must be non-empty visible ASCII, with no whitespace or line break "
-            "(check for a trailing newline)"
-        )
 
 
 class RefusalHook(Protocol):
@@ -327,12 +303,12 @@ class RestClient:
 
         Raises:
             ValueError: If `max_concurrency` is less than 1. A bad `api_key` or `base_url`
-                raises `ValueError` too, from `_check_api_key` and
+                raises `ValueError` too, from `net.api_keys.check_api_key` and
                 `net.base_urls.check_rest_base_url`: an empty key or one with whitespace (never
                 quoted), a base URL that is not an origin alone, or an `http` base URL for a
                 host that is not loopback.
         """
-        _check_api_key(api_key)
+        check_api_key(api_key, setting="api_key")
         origin = check_rest_base_url(base_url, setting="base_url")
         if max_concurrency < 1:
             raise ValueError(f"max_concurrency must be at least 1, not {max_concurrency}")

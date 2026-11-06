@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from typing import Final, overload
 
-__all__ = ["REDACTED", "Redactor", "redact", "without_userinfo"]
+__all__ = ["REDACTED", "Redactor", "redact", "without_userinfo", "without_userinfo_or_query"]
 
 REDACTED: Final = "***"
 """What each occurrence of a secret becomes."""
@@ -84,6 +84,38 @@ def without_userinfo(url: str) -> str:
         return url
     host = authority.rpartition("@")[2]
     return f"{prefix}{scheme_mark}{REDACTED}@{host}{slash}{tail}"
+
+
+def without_userinfo_or_query(url: str) -> str:
+    """Return a URL with its user, password, query, and fragment replaced by `REDACTED`.
+
+    A URL that must name an origin alone, such as the REST base URL, is refused when it holds
+    a query or a fragment, and the refusal quotes it. A query can carry a secret
+    (`?apiKey=<key>`), so the refusal shows this form instead: the text from the first `?` or
+    `#` on becomes that mark and `***`, and a user and password become `***@`
+    (`without_userinfo`). When the text cut off holds an `@`, a password holding `?` or `#`
+    may end there, so the whole authority is hidden as well.
+
+    Args:
+        url: The URL or host, as configured.
+
+    Returns:
+        The URL with nothing left that can hold a secret, such as `"https://h.example?***"`;
+        `url` itself when it has no user information, query, or fragment.
+
+    Example:
+        ::
+
+            assert without_userinfo_or_query("https://h.example?key=k") == "https://h.example?***"
+            assert without_userinfo_or_query("https://u:p?w@h.example") == "https://***"
+    """
+    cut = min((i for i in (url.find("?"), url.find("#")) if i >= 0), default=len(url))
+    head, tail = url[:cut], url[cut:]
+    if "@" in tail:
+        prefix, scheme_mark, _ = head.partition("://")
+        return f"{prefix}{scheme_mark}{REDACTED}" if scheme_mark else REDACTED
+    hidden = without_userinfo(head)
+    return f"{hidden}{tail[0]}{REDACTED}" if tail else hidden
 
 
 class Redactor:

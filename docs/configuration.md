@@ -346,8 +346,9 @@ It must be at least `reconnect_backoff`.
 #### rest_base_url
 
 Change it only to reach a server other than Massive's, such as a local test server.
-The REST client refuses a URL with a path, a query, or a user and password at the
-first request. It also refuses an `http` URL of a host that isn't on your own machine.
+The config refuses a URL with a path, a query, a fragment, a user and password, or
+port 0. It also refuses an `http` URL of a host that isn't on your own machine. The
+error shows `***` in place of the URL's query and password.
 
 #### s3_endpoint_url
 
