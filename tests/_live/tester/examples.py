@@ -430,7 +430,7 @@ def run_examples(
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
     tiers: Mapping[str, str] = MappingProxyType({}),
-    settle: Callable[[], None] = lambda: time.sleep(REFUSAL_WAIT),
+    settle: Callable[[list[dm.MassiveSession]], None] = lambda _sessions: time.sleep(REFUSAL_WAIT),
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
 
@@ -448,8 +448,9 @@ def run_examples(
             (`settings_text`); empty, the default, writes the free plan's file. An example
             that names `SETTINGS_PATH` or `TEST_FOLDER` runs from a copy under `out/fitted/`
             (`fitted`).
-        settle: Waits, after the last example, for Massive's answers to the streams; called
-            only when an example opened a session.
+        settle: Waits, after the last example, for Massive's answers to the streams of the
+            sessions the examples opened, which it is given; called only when an example
+            opened a session.
 
     Returns:
         Each example's outcome, with the verdict of the streams its sessions failed
@@ -481,7 +482,7 @@ def run_examples(
             for line in unsaved:
                 echo(secrets.clean(f"  table not saved: {line}"))
         if opened:
-            settle()
+            settle([session for session, _ in opened.values()])
         errors: dict[str, list[str]] = {}
         for session, name in opened.values():
             errors.setdefault(name, []).extend(failed_streams(session))

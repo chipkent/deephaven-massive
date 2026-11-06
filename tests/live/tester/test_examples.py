@@ -30,6 +30,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
 from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
+from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter
 from tests._live.tester import examples
 
@@ -228,13 +229,31 @@ def test_every_example_runs_against_the_fake_market(
     fake_ws_server: FakeMassiveServer,
 ) -> None:
     # The free plan's snapshot is refused, so the live minute bars open on the real-time host
-    # and Massive's live connection refuses their topic.
+    # and Massive's live connection refuses their topic. The fake answers only once every
+    # example has returned: a refusal that came while example 10 still built its table would
+    # fail the open instead, so an immediate answer would race the example.
     _clients_reach(fake_ws_server, monkeypatch)
-    fake_ws_server.refuse["AM.AAPL"] = "You are not entitled to this data."
+    fake_ws_server.silent.add("AM.AAPL")
+
+    def refuse(opened: list[dm.MassiveSession]) -> None:
+        # Example 10's connection is the run's only WebSocket connection. The refusal names
+        # the topic, so it fails the stream whether or not its acknowledgement's deadline passed.
+        fake_ws_server.send(status_frame("error", "You are not entitled to AM.AAPL."))
+        pace = threading.Event()  # never set; only paces the loop
+        for _ in range(1500):
+            if any(examples.failed_streams(session) for session in opened):
+                return
+            pace.wait(0.02)
+
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
-        files, tmp_path / "out", tmp_path, secrets=SecretFilter((KEY,)), echo=lines.append
+        files,
+        tmp_path / "out",
+        tmp_path,
+        secrets=SecretFilter((KEY,)),
+        echo=lines.append,
+        settle=refuse,
     )
     # Example 10's live minute bars return before Massive refuses them, and the run reads the
     # refusal from their stream.
@@ -554,6 +573,7 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
     folder.mkdir()
     _write(folder, "01_a.py", "import deephaven_massive as dm\nm = dm.MassiveSession()\n")
     seen: list[weakref.ref[SessionCore]] = []
+    settled: list[int] = []
 
     def remember(namespace: dict[str, Any]) -> bool:
         seen.extend(weakref.ref(s._core) for s in examples.sessions(namespace))
@@ -568,9 +588,10 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
         secrets=SecretFilter(()),
         echo=print,
         wait=remember,
-        settle=lambda: None,
+        settle=lambda opened: settled.append(len(opened)),
     )
     assert len(seen) == 1  # seen before the second example, after the first made it
+    assert settled == [1]  # once, after the last example, with the session it opened
     core = seen[0]()
     assert core is None or core.closed
     del core
