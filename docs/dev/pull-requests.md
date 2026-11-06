@@ -43,7 +43,9 @@ to every commit subject.
 - **Current.** Retitle when the scope changes: `gh pr edit <n> --title`.
 
 CI checks what a program can (the type, the scope, the lowercase start, the period, the length)
-and comments on the PR when a rule breaks. Run it first:
+and comments on the PR when a rule breaks. Dependabot's own pull requests are exempt from the
+length rule and may start the summary with a capital letter, since Dependabot sets both. Run it
+first:
 
 ```bash
 uv run python scripts/check_pr_title.py "fix: stop a failed live table from crashing the server"
