@@ -1137,3 +1137,27 @@ def test_a_refused_rest_base_url_never_shows_its_query() -> None:
         MassiveConfig(api_key="k", rest_base_url="https://api.massive.com?apiKey=hunter2")
     assert "'https://api.massive.com?***'" in str(info.value)
     assert "hunter2" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("ftp://api.massive.com?apiKey=hunter2", "'ftp://api.massive.com?***'"),
+        ("https://api.massive.com?apiKey=hun ter2", "'https://api.massive.com?***'"),
+        ("ftp://u:pw@api.massive.com#hunter2", "'ftp://***@api.massive.com#***'"),
+    ],
+)
+def test_an_early_rest_base_url_refusal_never_shows_its_query(
+    url: str, shown: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive")
+    with pytest.raises(ValueError, match=r"^rest_base_url must be an http") as info:
+        MassiveConfig(api_key="k", rest_base_url=url)
+    assert str(info.value).endswith(f"not {shown}")
+    assert "hunter2" not in str(info.value)
+    assert "hunter2" not in caplog.text
+
+
+def test_an_s3_endpoint_refusal_still_shows_its_query() -> None:
+    with pytest.raises(ValueError, match=r"not 'ftp://files\.massive\.com\?x=1'$"):
+        MassiveConfig(api_key="k", s3_endpoint_url="ftp://files.massive.com?x=1")

@@ -1457,6 +1457,7 @@ _WIRE_VOCABULARY = frozenset(
         "check_rest_base_url",
         "check_api_key",
         "without_userinfo",
+        "without_userinfo_or_query",
         "provenance",
         "source",
         "sources",

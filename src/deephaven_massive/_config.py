@@ -46,7 +46,12 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import AuthenticationError
-from deephaven_massive._massive import check_api_key, check_rest_base_url, without_userinfo
+from deephaven_massive._massive import (
+    check_api_key,
+    check_rest_base_url,
+    without_userinfo,
+    without_userinfo_or_query,
+)
 from deephaven_massive._types import override
 
 if TYPE_CHECKING:
@@ -498,8 +503,14 @@ class MassiveConfig:
         return f"MassiveConfig({shown})"
 
 
-_URL_SETTINGS: Final = frozenset({"rest_base_url", "s3_endpoint_url"})
-"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials."""
+_URL_SETTINGS: Final[dict[str, Callable[[str], str]]] = {
+    "rest_base_url": without_userinfo_or_query,
+    "s3_endpoint_url": without_userinfo,
+}
+"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials, and
+how each is shown. `rest_base_url` may hold no query or fragment, so a value that has one is
+refused, and its query can carry the API key (`?apiKey=<key>`): it is shown with them hidden
+too. An S3 endpoint may hold a query, which is shown."""
 
 
 def shown_setting(name: str, value: object) -> str:
@@ -511,10 +522,12 @@ def shown_setting(name: str, value: object) -> str:
 
     Returns:
         The value's `repr`; for a URL setting, with `***@` in place of a user and password
-        (`without_userinfo`).
+        (`without_userinfo`), and for `rest_base_url` with `***` in place of a query and a
+        fragment as well (`without_userinfo_or_query`).
     """
-    if name in _URL_SETTINGS and isinstance(value, str):
-        return repr(without_userinfo(value))
+    show = _URL_SETTINGS.get(name)
+    if show is not None and isinstance(value, str):
+        return repr(show(value))
     return repr(value)
 
 
@@ -751,7 +764,8 @@ def _check_url(name: str, value: object) -> None:
         TypeError: If `value` is not a `str`.
         ValueError: If `value` holds whitespace, or its scheme is not `http` or `https`, or it
             names no host. The message shows the value with `***@` in place of a user and
-            password (`shown_setting`).
+            password, and a `rest_base_url` with `***` in place of a query and a fragment
+            (`shown_setting`).
     """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
