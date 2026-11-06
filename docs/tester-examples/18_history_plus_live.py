@@ -1,4 +1,3 @@
-# Join today's minute bars from history with the live ones that follow. Needs a paid Stocks plan.
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -6,9 +5,8 @@ from deephaven import merge
 
 import deephaven_massive as dm
 
-# Stocks Starter and Developer stream 15 minutes late, so this session accepts delayed
-# data. On Stocks Advanced or Business, which stream in real time, delete that setting.
-m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+# Load the settings file that the README's settings example saves for your plan.
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 
 aapl_minutes = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
 session_day = datetime.now(ZoneInfo("America/New_York")).date()

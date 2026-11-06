@@ -1,10 +1,9 @@
-# Find each Apple dividend of the past year, and its yield on the close the day before.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 year_ago = yesterday - timedelta(days=364)

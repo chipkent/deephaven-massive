@@ -64,6 +64,9 @@ would. Two passes help:
 
 ## 4. Publish
 
+Keep the body file inside your own worktree, never under a shared name such as `pr.md` in a
+scratchpad other agents use: two agents have overwritten each other's bodies that way.
+
 - New PR: `gh pr create --title "<title>" --body-file <file>`.
 - Existing PR: `gh pr edit <n> --body-file <file>`, in the same batch as the push it describes.
 - Confirm the issue link: `gh pr view <n> --json closingIssuesReferences`.

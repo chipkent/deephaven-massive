@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import FAIL, OK, Item
 from tests._live.live_run.run_probe import ProbeResult
 from tests._live.tester import cli
@@ -69,7 +70,19 @@ def _run(
 def test_every_command_refuses_without_the_key(command: str, tmp_path: Path) -> None:
     status, lines = _run([command, "--folder", str(tmp_path)], {"MASSIVE_API_KEY": " "})
     assert status == cli.REFUSED
-    assert lines == [f"refused: {cli.NO_KEY}"]
+    assert lines == [f"refused: {NO_KEY}"]
+
+
+@pytest.mark.parametrize(("argv", "status"), [(["--help"], 0), (["chek"], 2)])
+def test_help_and_a_refused_command_line_return_their_status(
+    argv: list[str], status: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The script exits through os._exit, so argparse's SystemExit must come back as a status,
+    # not reach the script as an exception it prints with a traceback.
+    assert _run(argv, {"MASSIVE_API_KEY": "k"})[0] == status
+    printed = capsys.readouterr()
+    assert "usage: tester.py" in printed.out + printed.err
+    assert "Traceback" not in printed.out + printed.err
 
 
 def test_check_prints_each_item_and_whether_the_setup_is_ready(tmp_path: Path) -> None:
@@ -142,7 +155,6 @@ def test_examples_runs_the_folder_and_reports_the_failures(tmp_path: Path) -> No
     )
     assert status == 1
     assert started == [True]
-    assert environ[cli.FOLDER_VARIABLE] == str(folder.resolve())
     assert lines[-2:] == [f"saved to {folder.resolve() / 'examples-output'}", "failed: 02_b.py"]
     assert (folder / "examples-output" / "01_a.txt").read_text() == "ok\n"
 
@@ -197,7 +209,7 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
     }
 
 
-def test_examples_opens_the_session_the_keys_plans_need(tmp_path: Path) -> None:
+def test_examples_writes_the_settings_the_keys_plans_need(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
     (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
@@ -210,10 +222,9 @@ def test_examples_opens_the_session_the_keys_plans_need(tmp_path: Path) -> None:
         plans=lambda _environ: tiers,
     )
     assert status == 0
-    assert lines[0] == (
-        "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-        "{dm.Subscription.OPTIONS}, delayed_subscriptions={dm.Subscription.STOCKS}))"
-    )
+    assert lines[0] == "settings: delayed_subscriptions: [stocks]"
+    settings = tmp_path / "t" / "examples-output" / "settings.yaml"
+    assert settings.read_text(encoding="utf-8") == "delayed_subscriptions: [stocks]\n"
 
 
 def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: Path) -> None:
@@ -228,8 +239,5 @@ def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: 
     )
     assert lines[:2] == [
         "could not tell the key's plans; the examples run as on the free plan",
-        (
-            "session: m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-            "set(dm.Subscription)))"
-        ),
+        "settings: delayed_subscriptions: []",
     ]

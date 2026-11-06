@@ -1,4 +1,3 @@
-# Put each company's market value beside its return over the last three months.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -6,7 +5,7 @@ from deephaven import agg
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 symbols = ["AAPL", "JPM", "XOM"]
 quarter_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=91)

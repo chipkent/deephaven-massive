@@ -5,8 +5,9 @@ This is the standard for every page a user reads: `README.md`, `docs/troubleshoo
 reference. The
 `writing-user-docs` skill is the workflow, and its grader,
 [`agents/editor.md`](../../.claude/skills/writing-user-docs/agents/editor.md), scores a page
-against this standard. Docstrings follow the `writing-docstrings` skill, and PR descriptions
-follow [`pull-requests.md`](pull-requests.md).
+against this standard. Docstrings follow the `writing-docstrings` skill, which has the same
+editor grade a public docstring as reference text. PR descriptions follow
+[`pull-requests.md`](pull-requests.md).
 
 The bar is a page an O'Reilly development editor would send to print, and that every reader
 finishes thinking the library is simple. The library is simple: one pattern, a session, a
@@ -111,7 +112,7 @@ Each fact has one home, and other pages link to it:
 | `docs/configuration.md` | Every `MassiveConfig` setting, its settings-file key, values, and default, and how to write and load a settings file; the settings are generated from the code |
 | `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
 | `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
-| Docstrings, read with `help()` | The fine detail of every method, setting, enum, and exception |
+| Docstrings, read with `help()` | What a caller needs to use each method, setting, enum, and exception correctly |
 | `docs/tester-guide.md` | What release-candidate testers do and report |
 
 Installing and running Deephaven belongs to Deephaven's docs, and Massive's plans to Massive's
@@ -472,5 +473,5 @@ rewrites its intent or content, and it judges a revised hook against the approve
 clarity and directness. A page passes when both graders pass it with a mean holistic score of 9
 or more.
 
-A page still short of the bar after two revision rounds goes to the owner with the last score
-sheet. Nobody loops on it further.
+A page gets at most two grading rounds. One still short of the bar after the second goes to the
+owner with its graders' score sheets, and nobody loops on it further.

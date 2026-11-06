@@ -1,7 +1,6 @@
-# Ask for more than Basic allows, then let the library stop the table.
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 # 12 Stocks requests a minute: six stocks every 30 seconds, against a limit of 5.
 paced = m.stocks.previous_day_bar(["AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"]).poll(30)

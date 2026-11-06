@@ -317,6 +317,13 @@ def _open_state(ctx: RunContext) -> RunState:
     return state
 
 
+NO_KEY: Final = (
+    "MASSIVE_API_KEY is not set in this terminal. Add it to your shell's startup file, as the "
+    "README's Set your API keys step shows, then open a new terminal and run the command again."
+)
+"""What a command of the live run or of the tester tools says when the API key is not set."""
+
+
 def require_key(ctx: RunContext) -> None:
     """Refuse to start without the API key, before anything is probed or written.
 
@@ -327,11 +334,7 @@ def require_key(ctx: RunContext) -> None:
         RunRefusedError: When `MASSIVE_API_KEY` is unset or blank, saying how to set it.
     """
     if not ctx.environ.get("MASSIVE_API_KEY", "").strip():
-        msg = (
-            "MASSIVE_API_KEY is not set in this terminal. Set it, then run the command again: "
-            "printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY"
-        )
-        raise RunRefusedError(msg)
+        raise RunRefusedError(NO_KEY)
 
 
 def safe_probe(ctx: RunContext) -> ProbeResult:

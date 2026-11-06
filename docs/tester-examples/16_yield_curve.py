@@ -1,4 +1,3 @@
-# Chart the gap between the 10-year and 2-year US Treasury yields over two years.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -6,7 +5,7 @@ from deephaven.plot.figure import Figure
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 two_years_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=730)
 curve = (

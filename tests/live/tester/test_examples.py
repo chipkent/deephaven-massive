@@ -30,6 +30,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
 from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
+from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter
 from tests._live.tester import examples
 
@@ -227,18 +228,39 @@ def test_every_example_runs_against_the_fake_market(
     monkeypatch: pytest.MonkeyPatch,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
-    monkeypatch.setenv("MASSIVE_TEST_FOLDER", str(tmp_path))
     # The free plan's snapshot is refused, so the live minute bars open on the real-time host
-    # and Massive's live connection refuses their topic.
+    # and Massive's live connection refuses their topic. The fake answers only once every
+    # example has returned: a refusal that came while example 10 still built its table would
+    # fail the open instead, so an immediate answer would race the example.
     _clients_reach(fake_ws_server, monkeypatch)
-    fake_ws_server.refuse["AM.AAPL"] = "You are not entitled to this data."
+    fake_ws_server.silent.add("AM.AAPL")
+
+    def refuse(opened: list[dm.MassiveSession]) -> None:
+        # Example 10's connection is the run's only WebSocket connection. The refusal names
+        # the topic, so it fails the stream whether or not its acknowledgement's deadline passed.
+        fake_ws_server.send(status_frame("error", "You are not entitled to AM.AAPL."))
+        pace = threading.Event()  # never set; only paces the loop
+        for _ in range(1500):
+            if any(examples.failed_streams(session) for session in opened):
+                return
+            pace.wait(0.02)
+
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
-        files, tmp_path / "out", secrets=SecretFilter((KEY,)), echo=lines.append
+        files,
+        tmp_path / "out",
+        tmp_path,
+        secrets=SecretFilter((KEY,)),
+        echo=lines.append,
+        settle=refuse,
     )
-    failures = [examples.summary_line(o) for o in outcomes if o.status != examples.PASSED]
-    assert failures == []
+    # Example 10's live minute bars return before Massive refuses them, and the run reads the
+    # refusal from their stream.
+    verdicts = {o.name: o.status for o in outcomes if o.status != examples.PASSED}
+    assert verdicts == {"10_plan_refusals.py": examples.REFUSED}
+    refusal = next(o for o in outcomes if o.status == examples.REFUSED)
+    assert "AM.AAPL" in refusal.error
     assert [o.name for o in outcomes] == [p.name for p in files]
     out = tmp_path / "out"
     printed = {p.stem: (out / f"{p.stem}.txt").read_text() for p in files}
@@ -255,11 +277,11 @@ def test_every_example_runs_against_the_fake_market(
     assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
     assert (out / "tables" / "23_followed_history" / "followed.csv").exists()
-    assert (tmp_path / "growth.parquet").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
         "rate_limits.csv",
         "streams.csv",
+        "symbol_reads.csv",
     ]
     assert KEY not in "".join(p.read_text() for p in out.rglob("*.*"))
     assert len((out / "summary.txt").read_text().splitlines()) == len(files)
@@ -292,7 +314,7 @@ def test_the_paid_examples_run_on_streams_from_the_fake_server(
         "aapl_today",
         "crypto_latest",
         "trades_per_minute",
-        "crypto_board",
+        "latest_trades",
         "gainer_trades",
     ):
         assert name in made
@@ -366,11 +388,6 @@ def test_the_guide_shows_each_example_exactly_as_its_file() -> None:
     assert blocks == files
 
 
-def test_every_example_starts_with_a_comment() -> None:
-    for path in examples.example_files(EXAMPLES):
-        assert path.read_text(encoding="utf-8").startswith("# "), path.name
-
-
 GUIDE_SAMPLE = """\
 #### 1. First
 Some prose.
@@ -413,12 +430,10 @@ def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
     for path in examples.example_files(EXAMPLES):
         opens = examples.SESSION_LINE.search(path.read_text(encoding="utf-8")) is not None
         assert opens == (path.name not in without), path.name
-    assert examples.FREE_PLAN_SESSION in (EXAMPLES / "01_start_a_session.py").read_text()
+    assert "m = dm.MassiveSession()\n" in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
-def test_session_line_fits_the_keys_plans() -> None:
-    free = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
-    assert examples.session_line(free) == examples.FREE_PLAN_SESSION
+def test_settings_text_fits_the_keys_plans() -> None:
     # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
     paid = {
         "stocks": "developer",
@@ -427,32 +442,43 @@ def test_session_line_fits_the_keys_plans() -> None:
         "currencies": "starter",
         "futures": "starter",
     }
-    assert examples.session_line(paid) == (
-        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions="
-        "{dm.Subscription.INDICES}, delayed_subscriptions={dm.Subscription.FUTURES, "
-        "dm.Subscription.STOCKS}))\n"
-    )
-    assert examples.session_line({"stocks": "advanced"}) == (
-        "m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(), "
-        "delayed_subscriptions=set()))\n"
-    )
+    assert examples.settings_text(paid) == "delayed_subscriptions: [futures, stocks]\n"
+    assert examples.settings_text({}) == "delayed_subscriptions: []\n"
 
 
-def test_fitted_runs_a_copy_only_when_the_session_line_changes(tmp_path: Path) -> None:
-    first = _write(tmp_path, "01_a.py", f"x = 1\n{examples.FREE_PLAN_SESSION}")
-    other = _write(tmp_path, "02_b.py", "y = 2\n")
-    delayed = "m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions=set()))\n"
-    third = _write(tmp_path, "03_c.py", f"# delayed\n{delayed}z = 3\n")
-    paid = "m = dm.MassiveSession()\n"
-    assert examples.fitted(first, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == first
-    assert examples.fitted(third, examples.FREE_PLAN_SESSION, tmp_path / "fitted") == third
-    assert examples.fitted(other, paid, tmp_path / "fitted") == other
-    copy = examples.fitted(first, paid, tmp_path / "fitted")
-    assert copy == tmp_path / "fitted" / "01_a.py"
-    assert copy.read_text(encoding="utf-8") == f"x = 1\n{paid}"
-    # Every session line fits the plans, the paid examples' own lines included.
-    copy = examples.fitted(third, paid, tmp_path / "fitted")
-    assert copy.read_text(encoding="utf-8") == f"# delayed\n{paid}z = 3\n"
+def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:
+    free = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
+    reads = f'm = dm.MassiveSession(dm.MassiveConfig.from_file("{examples.SETTINGS_PATH}"))\n'
+    paid = _write(tmp_path, "02_b.py", f"# paid\n{reads}")
+    logs = _write(tmp_path, "03_c.py", f'log = "{examples.TEST_FOLDER}/massive-debug.log"\n')
+    settings, folder, copies = tmp_path / "settings.yaml", tmp_path / "t", tmp_path / "fitted"
+    assert examples.fitted(free, settings=settings, test_folder=folder, folder=copies) == free
+    copy = examples.fitted(paid, settings=settings, test_folder=folder, folder=copies)
+    assert copy == copies / "02_b.py"
+    assert copy.read_text(encoding="utf-8") == (
+        f'# paid\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
+    )
+    copy = examples.fitted(logs, settings=settings, test_folder=folder, folder=copies)
+    assert copy.read_text(encoding="utf-8") == f'log = "{folder}/massive-debug.log"\n'
+
+
+def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() -> None:
+    passed = examples.Outcome("17_a.py", examples.PASSED, 1.0, "")
+    refusal = f"the WebSocket server x {examples.STREAM_REFUSAL} to AM.AAPL; Massive said: no"
+    assert examples.stream_verdict(passed, []) is passed
+    refused = examples.stream_verdict(passed, [refusal])
+    assert (refused.status, refused.error) == (examples.REFUSED, f"a stream failed: {refusal}")
+    failed = examples.stream_verdict(passed, [refusal, "the connection closed"])
+    assert failed.status == examples.FAILED
+    already = examples.Outcome("10_b.py", examples.FAILED, 1.0, "RuntimeError: x")
+    assert examples.stream_verdict(already, [refusal]) is already
+
+
+def test_failed_streams_lists_none_once_the_session_is_closed(market: MarketServer) -> None:
+    session = dm.MassiveSession()
+    assert examples.failed_streams(session) == []
+    session.close()
+    assert examples.failed_streams(session) == []
 
 
 def _write(folder: Path, name: str, code: str) -> Path:
@@ -524,6 +550,7 @@ def test_run_examples_writes_errors_tables_and_a_summary_without_the_secret(
     outcomes = examples.run_examples(
         examples.example_files(folder),
         tmp_path / "out",
+        tmp_path,
         secrets=SecretFilter(("K-1",)),
         echo=lines.append,
         wait=lambda _namespace: False,
@@ -546,6 +573,7 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
     folder.mkdir()
     _write(folder, "01_a.py", "import deephaven_massive as dm\nm = dm.MassiveSession()\n")
     seen: list[weakref.ref[SessionCore]] = []
+    settled: list[int] = []
 
     def remember(namespace: dict[str, Any]) -> bool:
         seen.extend(weakref.ref(s._core) for s in examples.sessions(namespace))
@@ -554,9 +582,16 @@ def test_run_examples_closes_the_sessions_left_open(market: MarketServer, tmp_pa
     _write(folder, "02_b.py", "pass\n")
     files = examples.example_files(folder)
     examples.run_examples(
-        files, tmp_path / "out", secrets=SecretFilter(()), echo=print, wait=remember
+        files,
+        tmp_path / "out",
+        tmp_path,
+        secrets=SecretFilter(()),
+        echo=print,
+        wait=remember,
+        settle=lambda opened: settled.append(len(opened)),
     )
     assert len(seen) == 1  # seen before the second example, after the first made it
+    assert settled == [1]  # once, after the last example, with the session it opened
     core = seen[0]()
     assert core is None or core.closed
     del core
@@ -654,6 +689,7 @@ def test_run_examples_names_a_table_it_could_not_save(
     examples.run_examples(
         examples.example_files(folder),
         tmp_path / "out",
+        tmp_path,
         secrets=SecretFilter(()),
         echo=lines.append,
         wait=lambda _namespace: True,

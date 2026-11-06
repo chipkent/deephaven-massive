@@ -1,4 +1,3 @@
-# Add a column, keep some rows, and summarize by stock, with Deephaven's table operations.
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -6,7 +5,7 @@ from deephaven import agg
 
 import deephaven_massive as dm
 
-m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(

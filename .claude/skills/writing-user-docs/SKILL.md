@@ -104,9 +104,9 @@ verdict alone fails the page. Fix wording nits directly, with no new round. Grad
 second pair, given the first pair's sheets, only when the first pair finds a false or unsourced
 claim or the page misses the bar.
 
-Stop after two revision rounds. For a draft still short of the pass bar, report
-to the owner what blocks it, with the last sheet, instead of handing the draft over to read.
-Never call a failing draft done.
+Grade a page at most twice. A page still short of the pass bar after its second grade goes to
+the owner with both graders' sheets and what blocks it, instead of another round. Never call a
+failing draft done. Push a page as soon as it passes; never hold it back for other pages.
 If you can't spawn a subagent, grade it yourself with `editor.md` and say the grade is your own.
 
 ### 6. Check the facts one last time

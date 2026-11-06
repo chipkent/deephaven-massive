@@ -1,4 +1,3 @@
-# Convert symbols written in other conventions into Massive's, one at a time and as a table.
 from deephaven import new_table
 from deephaven.column import string_col
 

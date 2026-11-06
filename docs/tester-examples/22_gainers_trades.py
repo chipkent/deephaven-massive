@@ -1,9 +1,7 @@
-# Stream the trades of the day's top gainers. Needs Stocks Developer or higher.
 import deephaven_massive as dm
 
-# Stocks Developer streams 15 minutes late, so this session accepts delayed data. On
-# Stocks Advanced or Business, which stream in real time, delete that setting.
-m = dm.MassiveSession(dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS}))
+# Load the settings file that the README's settings example saves for your plan.
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 streams = m.streams()
 
 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)

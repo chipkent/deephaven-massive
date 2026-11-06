@@ -78,6 +78,18 @@ def _main(argv: list[str], recorder: Recorder) -> int:
     )
 
 
+@pytest.mark.parametrize(("argv", "status"), [(["--help"], 0), (["run", "--bogus"], 2)])
+def test_help_and_a_refused_command_line_return_their_status(
+    argv: list[str], status: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The script exits through os._exit, so argparse's SystemExit must come back as a status,
+    # not reach the script as an exception it prints with a traceback.
+    assert _main(argv, Recorder()) == status
+    printed = capsys.readouterr()
+    assert "usage: live_run.py" in printed.out + printed.err
+    assert "Traceback" not in printed.out + printed.err
+
+
 @pytest.mark.parametrize(
     ("argv", "command", "options"),
     [

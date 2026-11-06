@@ -6,14 +6,14 @@
 - `check [--folder DIR] [--console-python PATH | --docker-image NAME]` checks both setups and
   the key (`setup_check.check_setup`) and prints one line per item, then `ready: yes` or
   `ready: no`, and saves the same lines in `DIR/setup-check.txt` for the bug report. The
-  console install is the Python at `PATH` (`~/massive-test/dh-venv/bin/python` by default)
+  console install is the Python at `PATH` (`~/dh-massive/bin/python` by default)
   or the Docker image `NAME`. Exit 0 when no item failed, else 1.
 - `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
   `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
-  `DIR/examples-output/`. The examples write their debug log and files to `DIR` too, through
-  the `MASSIVE_TEST_FOLDER` variable this command sets. It first asks Massive which plan the
-  key holds per subscription, so the first example opens the session those plans need. Exit 0
-  when no example failed (a refusal by the key's plan is not a failure), else 1.
+  `DIR/examples-output/`. The examples write their debug log and diagnostics to `DIR` too. It
+  first asks Massive which plan the key holds per subscription, and writes the settings file
+  the paid examples read for those plans. Exit 0 when no example failed (a refusal by the
+  key's plan is not a failure), else 1.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -34,6 +34,7 @@ from typing import IO, TYPE_CHECKING, Final
 
 from tests._live.live_run.children import run_command
 from tests._live.live_run.cli import credentials
+from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import check_machine, ready
 from tests._live.live_run.run_probe import probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
@@ -48,23 +49,14 @@ if TYPE_CHECKING:
 REFUSED: Final = 2
 """The exit status when the API key is not set."""
 
-FOLDER_VARIABLE: Final = "MASSIVE_TEST_FOLDER"
-"""The variable that tells the examples where the tester's folder is."""
-
 EXAMPLES_FOLDER: Final = Path("docs") / "tester-examples"
 """The examples, relative to the repository root."""
 
-CONSOLE_PYTHON: Final = Path("~/massive-test/dh-venv/bin/python")
-"""The console install's Python, as the guide makes it."""
+CONSOLE_PYTHON: Final = Path("~/dh-massive/bin/python")
+"""The console install's Python: the virtual environment the README's Install section makes."""
 
 CHECK_OUTPUT: Final = "setup-check.txt"
 """The file in the tester's folder where `check` saves what it printed, for the bug report."""
-
-NO_KEY: Final = (
-    "MASSIVE_API_KEY is not set in this terminal. Set it, then run the command again: "
-    "printf 'Massive API key: '; read -rs MASSIVE_API_KEY; echo; export MASSIVE_API_KEY"
-)
-"""What a command says when the API key is not set."""
 
 
 def parser() -> argparse.ArgumentParser:
@@ -93,7 +85,7 @@ def parser() -> argparse.ArgumentParser:
                 "--console-python",
                 type=Path,
                 default=CONSOLE_PYTHON,
-                help="the console install's Python (default: ~/massive-test/dh-venv/bin/python)",
+                help="the console install's Python (default: ~/dh-massive/bin/python)",
             )
             console.add_argument(
                 "--docker-image", default="", help="the console install's Docker image instead"
@@ -166,19 +158,24 @@ def main(
         argv: The arguments, without the program's name.
         root: The repository root.
         start_server: Starts an embedded Deephaven server; only `examples` calls it.
-        environ: The environment; `examples` sets `MASSIVE_TEST_FOLDER` in it.
+        environ: The environment.
         stdout: Where the command prints.
         check: Checks both setups and the key (`check_both`).
         describe: Describes the machine for a bug report (`describe_machine`).
         now: Reads the time, which names a bug report's zip.
-        plans: Asks Massive which plan the key holds per subscription, for the session line
-            of the first example; None when it cannot tell. Only `examples` calls it.
+        plans: Asks Massive which plan the key holds per subscription, for the settings file
+            the paid examples read; None when it cannot tell. Only `examples` calls it.
 
     Returns:
         The exit status: 0; 1 when an item of the check failed, an example failed, or a
-        secret blocked the zip; 2 when the API key is not set.
+        secret blocked the zip; 2 when the API key is not set. `--help` returns 0 after the
+        usage, and a command line the parser refuses returns 2 after the usage and the error,
+        so the script prints no traceback for either.
     """
-    arguments = parser().parse_args(argv)
+    try:
+        arguments = parser().parse_args(argv)
+    except SystemExit as stop:
+        return int(stop.code or 0)
     folder = arguments.folder.expanduser().resolve()
     secrets = SecretFilter.from_environment(environ)
 
@@ -200,22 +197,20 @@ def main(
         (folder / CHECK_OUTPUT).write_text(text, encoding="utf-8")
         return 0 if ready(items) else 1
     if arguments.command == "examples":
-        environ[FOLDER_VARIABLE] = str(folder)
         start_server()
         examples = importlib.import_module("tests._live.tester.examples")
         tiers = plans(environ)
         if tiers is None:
-            session = examples.FREE_PLAN_SESSION
+            tiers = {}
             echo("could not tell the key's plans; the examples run as on the free plan")
-        else:
-            session = examples.session_line(tiers)
-        echo(f"session: {session.strip()}")
+        echo(f"settings: {examples.settings_text(tiers).strip()}")
         outcomes = examples.run_examples(
             examples.example_files(root / EXAMPLES_FOLDER),
             folder / "examples-output",
+            folder,
             secrets=secrets,
             echo=echo,
-            session=session,
+            tiers=tiers,
         )
         failed = [o.name for o in outcomes if o.status == examples.FAILED]
         echo(f"saved to {folder / 'examples-output'}")

@@ -22,7 +22,10 @@ a close reason, or a named owner question.
 One PR holds one coherent change and everything it needs. Two changes to the same code path go
 in one PR. Unrelated pieces stay separate, however small; never split or merge PRs only by size.
 Never plan a step you already know is bad, such as text moved verbatim to be rewritten later, to
-make a diff easier to review: fix the content as you move it.
+make a diff easier to review: fix the content as you move it. Docs that share a file, a
+generated page, or a generator go on one branch, never on parallel branches. Each user doc gets
+at most two grading rounds, then goes to the owner with its graders' notes, and a doc that
+passes is pushed at once, never held back for others.
 
 ## 3. Set the merge order
 
@@ -69,6 +72,8 @@ A brief says only what the agent cannot know:
 - the files other agents are changing at the same time, and any rename in flight;
 - the owner decisions it must follow, quoted or linked, and anything only this task has learned;
 - whether to stop at a local commit and report, or open the PR (and when to push).
+- that it writes its PR-body file inside its own worktree, never under a shared scratchpad name
+  such as `pr.md`, which another agent may overwrite.
 
 ## 6. Review and readiness
 
