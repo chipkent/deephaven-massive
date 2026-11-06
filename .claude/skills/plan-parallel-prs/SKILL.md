@@ -36,8 +36,9 @@ reason features land slowly. A planned merge order limits it; stacking does not 
   PRs: each upper PR branches from the PR below it, opens with
   `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
   top>` (`gh extension install github/gh-stack` once). Never run `gh stack submit`, `push`,
-  `sync`, or `rebase`, which rewrite pushed branches. A stack is one chain, so a PR that two
-  others need sits below both.
+  `sync`, or `rebase`, which rewrite pushed branches. A stack is one chain: when two PRs need
+  the same lower PR but not each other, stack one on it and start the other from `main` once
+  the lower PR merges.
 - Plan the merge order now and tell the owner as one list ("merge #A, then #B"). The owner
   merges from the bottom up; after each merge GitHub re-targets and rebases the next PR, and its
   agent pulls it.
