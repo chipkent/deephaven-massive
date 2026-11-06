@@ -13,8 +13,9 @@
 # remote tip, so a push runs only the tests its own commits need. Staged and untracked files
 # count; pre-commit hides unstaged edits to tracked files while the hook runs.
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
-# workers; when CI would not, full runs only the documentation tests if the user pages or the
-# tester guide changed, and no tests otherwise. It prints the scope it chose and why.
+# workers; when CI would not, full runs only the documentation tests if a user page, an image
+# under docs/, or the tester guide changed, and no tests otherwise. It prints the scope it
+# chose and why.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
 # failing step and exits non-zero.
