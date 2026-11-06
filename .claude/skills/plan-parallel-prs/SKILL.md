@@ -1,6 +1,6 @@
 ---
 name: plan-parallel-prs
-description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks overlapping PRs in a planned merge order, reserves decision and verification-item numbers, writes short briefs, and holds every PR to its author's adversarial pre-push review. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
+description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks PRs that need each other's content in a planned merge order, reserves decision and verification-item numbers, writes short briefs, and holds every PR to its author's adversarial pre-push review. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
 ---
 
 # Planning parallel PRs
@@ -30,18 +30,22 @@ passes is pushed at once, never held back for others.
 ## 3. Set the merge order
 
 Contention at merge time (rebases, `main` merges, and the CI reruns they trigger) is a main
-reason features land slowly. Stacking is how parallel work avoids it, so use it.
+reason features land slowly. A planned merge order limits it; stacking does not remove it.
 
-- When parallel PRs touch the same files or build on each other, stack them with GitHub's
-  native stacked PRs: each upper PR branches from the PR below it, opens with
+- Stack a PR only when it needs the content of the PR below it. Use GitHub's native stacked
+  PRs: each upper PR branches from the PR below it, opens with
   `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
   top>` (`gh extension install github/gh-stack` once). Never run `gh stack submit`, `push`,
   `sync`, or `rebase`, which rewrite pushed branches. A stack is one chain, so a PR that two
   others need sits below both.
 - Plan the merge order now and tell the owner as one list ("merge #A, then #B"). The owner
   merges from the bottom up; after each merge GitHub re-targets and rebases the next PR, and its
-  agent pulls it. Only a conflict GitHub cannot resolve needs a merge of the base branch.
-- PRs that share no files stay independent, each from `main`.
+  agent pulls it.
+- GitHub's rebase is not always clean: squash-merging the bottom PR can still leave the next
+  one conflicting with `main` (#495 and #497 on 2026-11-03, and the stack on #517). Budget one
+  merge of `main` per stacked PR after the PR below it merges, each a full check and a CI run.
+- PRs that do not need each other's content stay independent, each from `main`, even when they
+  share files; the second to land merges `main` if it conflicts.
 - When a PR renames a public name, tell every open agent the new name; the second PR to land
   merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
   A brief that asks for a repository-wide grep to prove an old name is gone excludes

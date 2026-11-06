@@ -261,7 +261,8 @@ followed by one or two plain sentences on how little it took. Code that shows no
 Everything else moves down the page: plan details, dataset counts, prerequisites, and
 definitions. The hook has no asides, no history ("formerly ..."), and no caveats. Link
 "Massive" and "Deephaven" instead of explaining them. The hero image goes after the title,
-with alt text that says what it shows.
+with alt text that says what it shows. Give every doc asset a plain, conventional name, such as
+`docs/images/hero.webp`.
 
 <a id="headings"></a>
 
@@ -374,6 +375,11 @@ There's no list of approved words. The grader reads the page as a quant research
 quantitative trader, a vibe coder, and a software engineer, flags each word that reader
 wouldn't use, and names the word they would, with a source. Once you pick a word, use it every
 time: elegant variation reads as AI.
+
+Lead with a feature's idea, not its everyday example. When the point of a feature is that you
+can change what data a live table loads while it runs, say that first; a watchlist is only the
+example. "Watchlist" stays the practitioner's word for the reader's own list of symbols, and
+never becomes the headline concept.
 
 <a id="models"></a>
 
