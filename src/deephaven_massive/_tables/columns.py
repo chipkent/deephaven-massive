@@ -8,7 +8,7 @@ description:
 - `dh_type` maps each `ColumnType` to its Deephaven `DType`, and `col_defs` turns a `Schema`
   into the `{name: DType}` column definitions that `blink_publisher` takes.
 - `describe` returns a copy of a result table in the dataset's column order that carries the
-  dataset's column descriptions (the web UI's column-header tooltips) and its table
+  dataset's column descriptions (the Deephaven IDE's column-header tooltips) and its table
   description, `"<dataset>: <summary>"`. Every verb calls it on the exact table it returns,
   so every verb returns the columns in the order `columns()` lists them.
 - `column_table` builds the static table a query's `columns()` returns: one row per column,
@@ -383,7 +383,7 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | Non
     attributes. The copy then gets two table attributes through
     Deephaven's `GridAttributes` methods, which `io.deephaven.engine.table.Table` extends:
     `withColumnDescriptions` with every column of the schema whose description is not empty
-    (`ColumnDescriptions`, which Barrage sends to clients and the web UI shows as the
+    (`ColumnDescriptions`, which Barrage sends to clients and the Deephaven IDE shows as the
     column-header tooltip), then `withDescription` with `"<dataset>: <summary>"`
     (`TableDescription`), such as `"stocks.trades: Trades of US-listed stocks, tick by tick."`,
     followed by `note` when one is given (a `history()` table's source).
@@ -519,7 +519,7 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "Name": "The column name.",
         "Type": (
-            "The column's Deephaven type: long, int, double, boolean, String, Instant, long[], or "
+            "The column's Deephaven type: long, int, double, Boolean, String, Instant, long[], or "
             "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
         ),
         "Description": "What the column holds; empty when Massive gives no description.",

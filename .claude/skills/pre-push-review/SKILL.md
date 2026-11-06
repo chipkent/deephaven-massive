@@ -1,166 +1,101 @@
 ---
 name: pre-push-review
-description: "Mandatory gate before any push that runs paid CI and the review bots. Use this skill whenever the user asks to open, create, or ship a PR, or to push commits to a branch that already has a PR. That includes pushing review fixes, addressing reviewer or bot comments (coderabbit, the owner), updating a PR description, or \"push the batch\". Invoke it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is already green. The skill does a hostile self-review of the diff, checks that the tests would catch a regression, checks the docs, edits the PR description until it passes the writing checklist, drafts replies to review threads, fixes every finding, and only then pushes once. Skip it for pushing a work-in-progress branch that has no PR (backups), for reviewing someone else's PR, for debugging CI, and for general questions."
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it), proves the tests catch a regression, checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
 ---
 
 # Review locally before you push
 
-Every push to a branch with an open PR runs the review bots and every CI job its changes affect
-(the full test matrix whenever code or a test input changes), and both cost money. Find the
-problems here, where they are free, so the push that follows is the last one for that batch.
+Every push to a PR branch runs paid CI and the review bots. This review exists so that they run
+as rarely as possible: find here, for free, every problem they or the owner would find, and push
+once per finished batch. A green check proves only what the tests already pin. This review looks
+for what they do not: code in the wrong place, a test that passes for wrong code, a lock whose
+scope changed, and words that no longer match the code.
 
-Run this review **before** the push that opens the PR or delivers a batch of fixes. Fix every
-finding and push once, with the review fixes, any merge of `main`, and the description edits
-together; the pre-push hook runs `./scripts/check.sh`, so do not run it first. A branch with no
-PR runs no CI, so pushing it only to keep work safe is fine; open its PR when it is ready.
+**Be adversarial.** You are not the author checking your work; you are a hostile senior
+reviewer whose job is to reject this change. Assume it is wrong until the diff proves otherwise.
+Attack it: hunt for the input that breaks it, the thread interleaving that deadlocks it, the
+test that would still pass if the code were wrong, the simpler design it missed, and the rule it
+quietly bends. A review that finds nothing on a non-trivial change has usually not looked hard
+enough, so look again before you conclude it is clean.
 
-A green check proves only what the tests already pin. This review looks for what they do not:
-code in the wrong place, a choice hidden behind `None`, a test that passes for wrong code, a lock
-whose scope changed, and words that no longer match the code. Write each finding down as you go
-(file and line, what is wrong, the fix), so none is lost between reading and fixing.
+**Only a trivial change skips this review**: a typo, or a one-word fix in a comment or a doc,
+that changes no code, test, configuration, public name, or documented behavior. Anything else,
+however small it looks, gets the full review.
 
-## 1. Read the whole diff as a reviewer, not as its author
+A risky change (concurrency, connections, TLS, or the public contract) may also get a second,
+separate reviewer agent. That review comes in addition to this one, never instead of it.
 
-```bash
-git fetch origin
-git diff origin/main...HEAD --stat
-git diff origin/main...HEAD
-```
+Scope it to what is new. The push that opens the PR reviews the whole branch
+(`git diff origin/main...HEAD`); a later push reviews the commits since the last push and how
+they interact with the rest. Keep a findings list (file and line, what is wrong, the fix) as you
+go, and fix every item before the push.
 
-Read it hunting for defects, with the spec open: the PR's issue, the user-doc pages and
-public docstrings it touches, the decisions it follows in `docs/dev/decisions.md`, and
-`AGENTS.md`. In the `--stat`, look first at deleted lines under
-`tests/`: a deleted or weakened test is a finding unless the diff adds one that pins the same
-property. For each changed file ask:
+## 1. Review the diff
 
-- **Correctness.** Does every branch do what the spec says? Empty inputs, one element, many,
-  `None`, boundaries (midnight, day zones, nanosecond limits), errors from the network and from
-  Deephaven. Is any failure swallowed, logged without failing the table that needs it, or retried
-  forever?
-- **Contract.** A user-visible change (a public signature, default, column, or failure
-  behavior) needs a new `docs/dev/decisions.md` entry and matching user-doc, docstring, and
-  test changes in the same PR; a change that keeps documented behavior cites the decision it
-  follows in the PR body. Does the new behavior match how the API already treats the same
-  concept elsewhere (ranges, dates, missing data, errors)? An inconsistency with a sibling call
-  is a finding even when no decision covers it.
-- **Verification items.** Every `verifies` or `settles` marker the diff adds names an item of
-  `docs/dev/verification-items.md` (`tests/live/test_summary.py` checks the number exists);
-  a new open question gets a new item, and an item the evidence settles gets its one-line
-  settlement in that file.
-- **Concurrency** (any code that runs off the caller's thread, and any change to a `with ...lock:`
-  block). Write down what now runs under each lock the diff touches: a constructor that reads
-  files or settings counts as blocking work. The Deephaven invariants in
-  `AGENTS.md`: execution context entered; update-graph lock before `registry_lock`, which stays a
-  leaf; nothing blocking in a listener; results in their own liveness scope; no reliance on
-  `dict`/`set` atomicity. Look for a state written before the operation that can still fail.
-  A lock change ships with a test that races two threads through it.
-- **Layers and boundaries.** `tests/test_layout.py` passes, but also: does the change put logic
-  in the layer that owns it, or work around a shared bug locally? Report shared bugs instead of
-  patching around them. Did the diff widen `tests/test_layout.py` to make itself pass? Undo that
-  and ask the owner.
-- **Placement and organization.** For every function, class and module the diff adds or moves,
-  assume it is in the wrong place until you can argue otherwise. Would a newcomer look for it in
-  this file and package? Do the module's name and docstring describe everything in it, or is it a
-  grab-bag of unrelated concerns? Does it duplicate a helper that already exists elsewhere? Is it
-  in the layer and package that own the concept? Should the module be split, merged or renamed?
-  Do the tests mirror the new location? Fix a misplaced item by moving it in the same PR, not by
-  noting it.
-- **Names.** Every new or renamed function, argument, column, environment variable, and pytest
-  marker says what it is or does (`AGENTS.md` rule 18). After any rename, `git grep` the old
-  name across code, `README.md`, and `docs/`, and check the PR description and its linked issues'
-  bodies; fix every hit.
-- **Duplicates and private imports.** For every new helper, `git grep -n` for the concept (the
-  format it parses, the rule it applies), not only for its name. An import of another module's
-  private name (`from x import _helper`) is a sign the new code sits in the wrong module.
-- **Simplicity.** Assume a simpler design exists until you have looked for one. Look for a
-  workaround layer where a fix at the source would do, a second mechanism beside one that
-  already exists, an option or setting nobody asked for, a hybrid that keeps the problems of
-  both approaches, and a guard test or check that is brittle or only pins configuration text
-  instead of testing behavior. Fix the root cause where it lives, or report it.
-- **Explicit choices.** A parameter whose `None` selects a mode or a behavior (`convention=None`
-  meaning "the default convention") should take an explicit enum member as its default instead.
-  `None` means only a value that is genuinely absent.
-- **Generated data.** No hand-written schema, no edit to `spec/*.json`, `docs/datasets/`, or
-  `vendor/massive/`; hand input only in the refresh hand-input files, each entry with a reason.
-- **Vendor data.** Does the change fill, correct, filter out, re-stamp, replace, or otherwise
-  second-guess Massive's data beyond faithful conversion of units, types, column names, and
-  symbols (`AGENTS.md` rule 23)? That is a blocker unless the owner approved it. When Massive's
-  data is wrong, record the evidence and draft a report to Massive for the owner instead.
-- **One bad symbol or row.** Does any failure of one symbol or row fail a whole table, or skip
-  without logging, or lack an `OnError` setting (`AGENTS.md` rule 24)? If so, it is a blocker
-  (rule 24's exceptions aside: a `RAISE` setting, a `str` or list passed as `symbols` in code,
-  and problems that affect every row).
-- **Secrets.** No key, secret or proxy password can reach a message, `repr` or log record.
+Attack it as the reviewer who has to defend the codebase, with the PR's issue and `AGENTS.md`
+open. Start from `git diff --stat`: a deleted or weakened test is a finding unless the diff adds
+one that pins the same property. Then look for:
 
-## 2. Prove the tests would catch a regression
+- **Wrong behavior.** Empty, one, and many inputs; boundaries (midnight, day zones, nanosecond
+  limits); network and Deephaven errors. A failure swallowed, logged without failing what needs
+  it, or retried forever. State written before an operation that can still fail.
+- **Contract drift.** A user-visible change without a `decisions.md` entry and matching docs and
+  tests (rule 9), or behavior inconsistent with how a sibling call treats the same concept.
+- **Concurrency**, for anything off the caller's thread or inside a `with ...lock:` block.
+  Write down what now runs under each lock the diff touches (a constructor that reads files
+  counts as blocking) and check it against the Deephaven invariants. A lock change ships with a
+  test that races two threads through it; run it several times, and on the free-threaded build
+  (`PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <files> -q`).
+- **Design smells.** Assume a simpler design exists until you have looked: a workaround layer
+  where a fix at the source would do, a second mechanism beside an existing one, an option
+  nobody asked for, a helper that duplicates one elsewhere (`git grep` the concept, not only the
+  name), an import of another module's private name, a guard test that pins configuration text
+  instead of behavior, a standard file (the GitHub `.gitignore` template above its marked
+  project section, a tool's documented default) trimmed or rewritten without a stated purpose,
+  and a new generated output without one command that owns its whole directory and a test that
+  fails on a stale, missing, or orphaned file. Assume every new function and module is
+  misplaced until you can say why a newcomer would look for it there (rule 18); move it in this
+  PR rather than noting it.
+- **The `AGENTS.md` rules reviews most often catch**: a `None` that selects a mode (19), a
+  vendor value filled or corrected (23), one bad symbol or row that fails a table or skips
+  silently (24), a hand edit to generated files (17), a widened `tests/test_layout.py` (16), a
+  secret that can reach a message, `repr`, or log (22, 25), a new name that is an abbreviation
+  (18). After a rename, `git grep` the old name across code, docs, the PR body, and its issue;
+  past entries in the append-only `docs/dev/decisions.md` and `verification-items.md` keep it.
 
-For each behaviour the diff adds or fixes, break the code on purpose (invert a condition, drop a
-call, return early, swap an order) and confirm a test fails. Restore the code after each attempt.
-For a function that computes a value, also return a wrong value of the right type (off by one,
-two fields swapped): a test that only checks that something is returned, or that nothing
-raises, passes for wrong code. A change that no test catches needs a test, or it is dead code to
-delete. Run new concurrency tests several times, and on the free-threaded build when the code is
-threaded (its own environment, `.venv-314t`, so `.venv` survives):
+## 2. Prove the tests catch a regression
 
-```bash
-PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest <the new test files> -q
-```
+For each behavior the diff adds or fixes, break the code on purpose (invert a condition, drop a
+call, return a wrong value of the right type) and confirm a test fails; restore it after each
+try. A test that only checks that something returns, or that nothing raises, passes for wrong
+code. A change no test catches needs a test, or it is dead code to delete. Spend this on logic;
+a docs or config change has nothing to break.
 
 ## 3. Check the words
 
-- Docstrings meet the `writing-docstrings` skill: every argument, return, exception
-  and side effect, and examples that run. They describe the code as it is now: reread the
-  docstring and comments of every function whose body changed.
-- `README.md`, `docs/guide/`, `AGENTS.md`, the skills, and `docs/dev/` say exactly what the code
-  does. For each behavior the diff changes (a default, a limit, an error, a column), run
-  `git grep -n '<name or message>' -- README.md docs/guide docs/tester-guide.md` and update
-  every page that describes it.
-- A diff that touches a user page (`README.md`, `docs/guide/`, `docs/tester-guide.md`) passes
-  the checklist in section 3 of the `writing-user-docs` skill.
-- Every comment in a config file, pytest marker description, and CLI help text the diff adds or
-  changes reads as edited prose for a reader new to the project: what it means, when to use
-  it, and what each argument means, with no internal shorthand.
-- No decision or planning references in code, comments, tests or messages:
+- Docstrings and comments of every function whose body changed still describe it (the
+  `writing-docstrings` skill).
+- For each behavior the diff changes (a default, a limit, an error, a column), find every page
+  that describes it: `git grep -n '<name or message>' -- README.md docs/`. A diff that touches
+  a user page follows steps 5 and 6 of the `writing-user-docs` skill: the calibrated editor's
+  grade and the final fact check.
+- No decision or planning references in code (rule 21):
   `git diff origin/main...HEAD -- src tests scripts .github | grep -nE '^\+.*([Dd]ecision [0-9]|DESIGN|PLAN|§)'`.
-- The PR title and every commit subject on the branch (`git log origin/main..HEAD --format=%s`)
-  meet the Title section of `docs/dev/pull-requests.md`: a type, then one specific idea in the
-  imperative, at most 60 characters, the effect rather than the technique, and no internal
-  names or jargon. Count with `printf %s "<title>" | wc -c`. Fix the PR title with
-  `gh pr edit <n> --title`, and the last unpushed commit subject with `git commit --amend`.
-- **An open question in the description is a finding** ("should this return X?", "happy to
-  switch"). Answer it from `AGENTS.md`, `docs/dev/decisions.md`, and the code, and record the
-  choice and its reason under Decisions; if only the owner can decide, or you are unsure
-  whether you may decide (section 1 of the `writing-to-the-owner` skill), stop and ask before
-  the push, using that skill. Never answer one by overturning an `AGENTS.md` rule, such as
-  dates being ISO strings.
+- The PR title and every commit subject meet the Title section of `docs/dev/pull-requests.md`;
+  `uv run python scripts/check_pr_title.py "<title>"` checks the mechanical part. Retitle with
+  `gh pr edit <n> --title`.
 
-## 4. Edit the PR description
+## 4. The PR description
 
-This step must pass before the push. A description that is padded, narrated, hard to scan, or
-hides a fact in a paragraph is a finding like any bug. The owner's verdict on such text:
-"rambly", "agent slop". Length is not the test: a complex PR may need more words, and no fact
-the reader needs is ever cut.
+Write or rewrite it to the branch's final state with the `writing-a-pr-description` skill. An
+open question in it ("should this return X?") is a finding: answer it from `AGENTS.md`,
+`decisions.md`, and the code and record the answer under Decisions, or, if it is the owner's
+call, stop and ask with the `writing-to-the-owner` skill before pushing.
 
-1. Write the description to a file, or fetch the current one:
-   `gh pr view <n> --json body --jq .body > <file>`. Rewrite it to the branch's final state.
-2. Run the self-edit checklist in `docs/dev/pull-requests.md` on the file, every item, and
-   edit until each passes. Item 1 comes first: skim only the headings and the first words of
-   each bullet, and check that every fact is there. Item 2 next: read it as an O'Reilly
-   technical editor would, and fix what they'd mark.
-3. Grep for narration and hedges, as the checklist's banned-pattern item shows:
-   `grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>`.
-   Fix every hit that is narration, a hedge, or filler.
-4. Check that the body names the decision or verification-item number it takes, if
-   any.
-5. Apply it with `gh pr edit <n> --body-file <file>` in the same batch as the push, then check
-   `gh pr view <n> --json closingIssuesReferences`.
+## 5. Review threads
 
-## 5. Check the conversation
-
-On a PR that already has reviews, every comment has a reply: the commit that fixes it and a
-summary of the fix, or why nothing changes. Read the review bodies and the conversation comments
-(`gh pr view <n> --comments`), then list the inline threads with their comment counts and last
-authors:
+On a PR with reviews, read the reviews and conversation (`gh pr view <n> --comments`), then the
+inline threads:
 
 ```bash
 gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved comments(last:1){totalCount nodes{author{login} url}}}}}}}' \
@@ -168,25 +103,19 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$
   --jq '.data.repository.pullRequest.reviewThreads.nodes[] | .comments | "\(.totalCount) \(.nodes[0].author.login) \(.nodes[0].url)"'
 ```
 
-A thread with a single comment, or whose last comment is a bot's, still needs an answer, resolved
-or not. `gh` posts under the owner's account, so a last comment with the owner's login may be
-your reply or a new question from the owner: open it and check. Draft the replies now; section 7
-posts them.
+Every thread needs an answer, resolved or not, including a bot's. `gh` posts as the owner, so a
+last comment under the owner's login may be your reply or a new question: open it. Draft each
+reply now: the fix and the commit that makes it, or why nothing changes. A reply that cites a
+rule (a log level, a lock order, a decision) quotes it from its source after reading it.
 
-## 6. Fix, then push once
+## 6. Push once, then close the loop
 
-Fix every finding and push once; the pre-push hook runs `./scripts/check.sh` and must pass. Put
-anything you deliberately left alone, with its reason, in the PR description so the reviewer
-does not rediscover it.
-
-## 7. After the push: post the replies and prove they landed
-
-1. Post each drafted reply in its thread. A reply that claims a fix names the commit (short
-   SHA) that makes it; a reply that changes nothing says why.
-2. `git fetch`, then check that each commit a reply names is on the remote branch and fixes
-   what the reply claims: `git branch -r --contains <sha>` and `git show <sha>`. A merge of
-   `main` fixes nothing. For a reply that changes nothing, reread the code it cites and confirm
-   the reason still holds.
-3. When CI and the review bots have finished on the pushed commit, rerun the thread query from
-   section 5: every thread's last comment is your reply. Answer any new one the same way. Only
-   then report the PR as addressed or ready.
+1. Fix every finding. Anything deliberately left alone goes in the description with its reason.
+2. Push once, with the fixes, any merge of `main`, and the description
+   (`gh pr edit <n> --body-file <file>`). The pre-push hook runs `./scripts/check.sh`; don't run
+   it first.
+3. Post each reply. After `git fetch`, confirm that each commit a reply names is on the remote
+   branch and makes the claimed fix (`git branch -r --contains <sha>`, `git show <sha>`); a
+   merge of `main` fixes nothing.
+4. When CI and the bots finish, rerun the thread query and answer anything new. Only then call
+   the PR addressed.

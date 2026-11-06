@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: grade-a-known-good-first-screen
+expected_outcome: |
+  score-sheet.md, from agents/editor.md run on the first screen of HTTPX's README, scores it 8 or
+  more out of 10, has all four readers answer yes on simplicity, invents no fact faults for claims
+  it can't check, and lists at most three faults.
+context:
+  scaffold_script: place-files.sh

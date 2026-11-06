@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: grade-the-4-of-10-readme
+expected_outcome: |
+  score-sheet.md, from agents/editor.md run on the README the owner scored 4 out of 10 (commit
+  560bc91b), fails the page with a holistic score of 5 or less, has at least one reader answer no
+  on simplicity, and surfaces at least 15 of the owner's 19 complaints, each as its own grader.
+context:
+  scaffold_script: place-files.sh

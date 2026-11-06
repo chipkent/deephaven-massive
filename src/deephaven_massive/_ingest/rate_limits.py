@@ -600,10 +600,10 @@ def announce(
     requests only add time.
 
     A read made on a thread that holds the update graph's lock (`pauses_live_tables`), as every
-    Deephaven console command does, holds every live table of the worker still while it runs,
+    Deephaven console command does, holds every live table of the server still while it runs,
     so its paced line is a WARNING instead, which says so and names the remedy: "stocks.bars
     history: 250 requests; paced at 5 requests a minute (stocks); this command will pause every
-    live table in the worker for at least 49 min: pass wait=False to read in the background".
+    live table on the server for at least 49 min: pass wait=False to read in the background".
 
     Args:
         governor: The session's governor.
@@ -622,7 +622,7 @@ def announce(
             if seconds >= _MINUTE and pauses_live_tables:
                 logger.warning(
                     "%s: %s; paced at %d requests a minute (%s); this command will pause every "
-                    "live table in the worker for at least %d min: pass wait=False to read in "
+                    "live table on the server for at least %d min: pass wait=False to read in "
                     "the background",
                     read,
                     what,

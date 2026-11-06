@@ -360,7 +360,7 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # In a console command, which holds the update graph's lock, a paced read holds every live
-    # table of the worker still while it runs: the least duration becomes a WARNING.
+    # table of the server still while it runs: the least duration becomes a WARNING.
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     governor.declare({"stocks"})
     with caplog.at_level(logging.INFO, LOGGER):
@@ -372,7 +372,7 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
             logging.WARNING,
             (
                 "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
-                "command will pause every live table in the worker for at least 49 min: pass "
+                "command will pause every live table on the server for at least 49 min: pass "
                 "wait=False to read in the background"
             ),
         )

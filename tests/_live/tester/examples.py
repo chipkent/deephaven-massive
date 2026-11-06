@@ -2,13 +2,14 @@
 
 `docs/tester-guide.md` shows each exercise twice: as a code block to paste into the
 Deephaven web console, and as a file of `docs/tester-examples/`, such as
-`01_start_a_session.py`, holding the same code (`guide_blocks` reads the blocks, and a unit
-test checks that each matches its file). `run_examples` runs the files in order in one shared
-namespace, so a later example sees the variables of the earlier ones, exactly as the
-console keeps them. Each example runs under the update graph's exclusive lock, as every
-console command does, so the examples meet the library under the same constraint the tester
-does. Before each example it waits, without the lock, until no background download of an
-open session is still `LOADING`, as the guide tells the tester to.
+`01_start_a_session.py`, holding the same code (`guide_blocks` reads the blocks by the
+example's number, and a unit test checks that each matches its file). Each example opens its
+own session, so it runs as pasted into a fresh console. `run_examples` runs the files in order
+in one shared namespace, as the console keeps them, so the diagnostics example finds the
+session of the example before it in `m`. Each example runs under the update graph's exclusive
+lock, as every console command does, so the examples meet the library under the same
+constraint the tester does. Before each example it waits, without the lock, until no
+background download of an open session is still `LOADING`.
 
 For each example it writes, under the output folder:
 
@@ -26,9 +27,10 @@ other error, which is a finding to report. Every table the examples make belongs
 liveness scope; at the end the runner closes every session the examples left open, forgets
 their variables, and releases that scope, so nothing they started outlives the run.
 
-The first example opens its session with the free plan's line, `FREE_PLAN_SESSION`. On a
-key with paid plans, `run_examples` runs a copy whose line fits them (`session_line`), as the
-guide tells a tester with a paid plan to write it.
+Most examples open their session with the free plan's line, `FREE_PLAN_SESSION`, and the paid
+Stocks examples with a line that accepts delayed data. On a key with paid plans,
+`run_examples` runs a copy of each example whose session lines all fit the plans
+(`session_line`).
 
 This module imports Deephaven, so it is imported only once a Deephaven server runs.
 """
@@ -61,9 +63,13 @@ if TYPE_CHECKING:
 EXAMPLE_NAME: Final = re.compile(r"^\d\d_[a-z0-9_]+\.py$")
 """The name of an example file: two digits that give its order, then what it shows."""
 
-GUIDE_HEADING: Final = re.compile(r"^#{2,4} .*\(`(\d\d_[a-z0-9_]+\.py)`\)\s*$")
-"""A guide heading that names an example's file, such as `### 3. Daily bars
-(`03_daily_bars.py`)`; the next Python code block under it is the example."""
+GUIDE_HEADING: Final = re.compile(r"^#### (\d+)\. ")
+"""A guide heading that numbers an example, such as `#### 3. Download two weeks of daily
+bars`; the first Python code block under it, before the next heading, is the example whose
+file name starts with that number."""
+
+SESSION_LINE: Final = re.compile(r"^m = dm\.MassiveSession\(.*\)\n", re.MULTILINE)
+"""A line of an example that opens its session in `m`."""
 
 PASSED: Final = "passed"
 REFUSED: Final = "refused by your plan"
@@ -124,7 +130,7 @@ def session_line(tiers: Mapping[str, str]) -> str:
 
 
 def fitted(path: Path, session: str, folder: Path) -> Path:
-    """Return the example to run: the file itself, or a copy whose session line fits the plans.
+    """Return the example to run: the file itself, or a copy whose session lines fit the plans.
 
     Args:
         path: The example's file.
@@ -132,15 +138,15 @@ def fitted(path: Path, session: str, folder: Path) -> Path:
         folder: Where a changed copy goes, created if missing.
 
     Returns:
-        `path` when it has no free-plan session line or `session` is that line; otherwise a
-        copy in `folder` with the line replaced.
+        `path` when it opens no session or `session` is the free plan's line; otherwise a
+        copy in `folder` with every session line (`SESSION_LINE`) replaced by `session`.
     """
     code = path.read_text(encoding="utf-8")
-    if session == FREE_PLAN_SESSION or FREE_PLAN_SESSION not in code:
+    if session == FREE_PLAN_SESSION or not SESSION_LINE.search(code):
         return path
     folder.mkdir(parents=True, exist_ok=True)
     copy = folder / path.name
-    copy.write_text(code.replace(FREE_PLAN_SESSION, session), encoding="utf-8")
+    copy.write_text(SESSION_LINE.sub(lambda _: session, code), encoding="utf-8")
     return copy
 
 
@@ -174,29 +180,30 @@ def example_files(folder: Path) -> list[Path]:
     return sorted(p for p in folder.iterdir() if EXAMPLE_NAME.match(p.name))
 
 
-def guide_blocks(text: str) -> dict[str, str]:
-    """Read the guide's example blocks: each heading that names a file, and its code.
+def guide_blocks(text: str) -> dict[int, str]:
+    """Read the guide's example blocks: each numbered example heading, and its code.
 
     Args:
         text: The guide, `docs/tester-guide.md`.
 
     Returns:
-        Each named file and the code of the first Python block after its heading, ending
-        with a newline, as the file does.
+        Each example's number and the code of the first Python block under its heading,
+        before the next heading, ending with a newline, as the file does.
     """
-    blocks: dict[str, str] = {}
-    name = ""
+    blocks: dict[int, str] = {}
+    number = 0  # the example whose heading came last; 0 outside an example
     code: list[str] | None = None
     for line in text.splitlines():
         if code is not None:
             if line.rstrip() == "```":
-                blocks[name] = "\n".join(code) + "\n"
-                name, code = "", None
+                blocks[number] = "\n".join(code) + "\n"
+                number, code = 0, None
             else:
                 code.append(line)
-        elif heading := GUIDE_HEADING.match(line):
-            name = heading.group(1)
-        elif name and line.rstrip() == "```python":
+        elif line.startswith("#"):
+            heading = GUIDE_HEADING.match(line)
+            number = int(heading.group(1)) if heading else 0
+        elif number and line.rstrip() == "```python":
             code = []
     return blocks
 
@@ -398,8 +405,9 @@ def run_examples(
         lock: Makes the lock every console command holds.
         wait: Waits for the background downloads before each example; returns False when it
             gave up.
-        session: The session line the first example runs (`session_line`); an example that
-            holds `FREE_PLAN_SESSION` runs from a copy under `out/fitted/` with it replaced.
+        session: The session line the examples run (`session_line`); on a key with paid
+            plans, an example that opens a session runs from a copy under `out/fitted/` with
+            its session lines replaced (`fitted`).
 
     Returns:
         Each example's outcome.

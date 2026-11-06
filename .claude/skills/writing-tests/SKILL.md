@@ -5,9 +5,8 @@ description: "Use this skill whenever you write, change, or debug a test in this
 
 # Writing tests
 
-The rules that place and limit tests (the mirror layout, 100% coverage, fakes instead of
-Massive, `tests/test_layout.py` being the owner's) are hard rules in `AGENTS.md`. This skill
-holds the harness details that keep a test deterministic and keep the JVM alive.
+`AGENTS.md` sets where tests go and what they may touch (rules 10, 11, 13, and 16). This skill
+holds the harness details that keep a test deterministic and the JVM alive.
 
 ## The embedded JVM
 

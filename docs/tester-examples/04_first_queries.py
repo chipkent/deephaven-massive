@@ -1,8 +1,17 @@
-# Adds a column, keeps some rows, and summarizes by stock, with Deephaven's table operations.
-# You should see three new tables: ranges, nvda (NVDA's rows only), and per_symbol (one row
-# per stock).
+# Add a column, keep some rows, and summarize by stock, with Deephaven's table operations.
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from deephaven import agg
 
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig(rest_basic_subscriptions=set(dm.Subscription)))
+
+yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
+daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
+    yesterday - timedelta(days=13), yesterday
+)
 ranges = daily.update("Range = High - Low").view(["Symbol", "Date", "Close", "Range"])
 nvda = ranges.where("Symbol == `NVDA`")
 per_symbol = daily.agg_by(

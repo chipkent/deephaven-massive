@@ -550,30 +550,30 @@ def test_a_missing_verb_names_the_dataset_of_the_same_kind_that_has_it(
     m = massive_session
     assert not hasattr(m.stocks.trades("AAPL"), "fetch")
     assert _missing(m.stocks.trades("AAPL"), "fetch") == (
-        "stocks.trades has no fetch(); its verbs are blink(), append_only(), ring(), last_by(), "
+        "stocks.trades has no fetch(); its methods are blink(), append_only(), ring(), last_by(), "
         "history(); use m.stocks.last_trade(...).fetch()"
     )
     assert _missing(m.stocks.bars("AAPL", dm.Timespan.DAY), "poll") == (
-        "stocks.bars has no poll(); its verbs are history(); use "
+        "stocks.bars has no poll(); its methods are history(); use "
         "m.stocks.previous_day_bar(...).poll()"
     )
     # And back: the stream and the history of a one-row dataset are its kind's other datasets.
     assert _missing(m.stocks.last_quote("AAPL"), "last_by") == (
-        "stocks.last_quote has no last_by(); its verbs are fetch(), poll(); use "
+        "stocks.last_quote has no last_by(); its methods are fetch(), poll(); use "
         "m.stocks.quotes(...).last_by()"
     )
     # Intraday bars are read over a range: history() comes first, the previous day after it.
     assert _missing(m.stocks.bars("AAPL", dm.Timespan.MINUTE), "fetch") == (
-        "stocks.bars has no fetch(); its verbs are blink(), append_only(), ring(), last_by(), "
+        "stocks.bars has no fetch(); its methods are blink(), append_only(), ring(), last_by(), "
         "history(); use history(start, end) for these bars, or "
         "m.stocks.previous_day_bar(...).fetch() for each symbol's previous day"
     )
     assert _missing(m.futures.bars("ESZ5", dm.Timespan.HOUR), "poll") == (
-        "futures.bars has no poll(); its verbs are history(); use history(start, end) for these "
+        "futures.bars has no poll(); its methods are history(); use history(start, end) for these "
         "bars"
     )
     assert _missing(m.indices.previous_day_bar("I:SPX"), "history") == (
-        "indices.previous_day_bar has no history(); its verbs are fetch(), poll(); use "
+        "indices.previous_day_bar has no history(); its methods are fetch(), poll(); use "
         "m.indices.bars(...).history()"
     )
 
@@ -584,7 +584,7 @@ def test_a_missing_verb_without_a_sibling_names_what_else_serves(
     m = massive_session
     # No last-quote endpoint for options: the snapshot is each contract's current state.
     assert _missing(m.options.quotes("O:AAPL250117C00150000"), "fetch") == (
-        "options.quotes has no fetch(); its verbs are blink(), append_only(), ring(), "
+        "options.quotes has no fetch(); its methods are blink(), append_only(), ring(), "
         "last_by(), history(); for each symbol's current state use "
         "m.options.snapshots(...).fetch()"
     )
@@ -596,24 +596,24 @@ def test_a_missing_verb_without_a_sibling_names_what_else_serves(
         ("crypto", "X:BTCUSD"),
     ):
         assert _missing(getattr(m, asset_class).fmv(symbol), "fetch") == (
-            f"{asset_class}.fmv has no fetch(); its verbs are blink(), append_only(), ring(), "
+            f"{asset_class}.fmv has no fetch(); its methods are blink(), append_only(), ring(), "
             f"last_by(); for each symbol's current fair market value use "
             f"m.{asset_class}.snapshots(...).fetch(), its Fmv column"
         )
     assert _missing(m.stocks.dividends("AAPL"), "history") == (
-        "stocks.dividends has no history(); its verbs are fetch(), poll(); pass start= and end= "
+        "stocks.dividends has no history(); its methods are fetch(), poll(); pass start= and end= "
         "to m.stocks.dividends(...) instead"
     )
     assert _missing(m.stocks.bars("AAPL", dm.Timespan.HOUR), "blink") == (
-        "stocks.bars has no blink(); its verbs are history(); only bars of dm.Timespan.SECOND "
+        "stocks.bars has no blink(); its methods are history(); only bars of dm.Timespan.SECOND "
         "and dm.Timespan.MINUTE with multiplier=1 stream"
     )
     # Nothing else serves it: the message names the verbs the query has.
     assert _missing(m.stocks.luld("AAPL"), "history") == (
-        "stocks.luld has no history(); its verbs are blink(), append_only(), ring(), last_by()"
+        "stocks.luld has no history(); its methods are blink(), append_only(), ring(), last_by()"
     )
     assert _missing(make(m, HISTORY_SPEC), "fetch") == (
-        "economy.yields has no fetch(); its verbs are history()"
+        "economy.yields has no fetch(); its methods are history()"
     )
 
 
@@ -1477,7 +1477,7 @@ def test_columns_lists_the_schema_without_any_request(
     listed = dh_to_pylist(table)
     assert listed == expected_columns(massive_session, TRADES_SPEC)
     assert listed[0]["Name"] == "Symbol"
-    assert listed[0]["Description"].startswith("The instrument")
+    assert listed[0]["Description"].startswith("The row's instrument")
     assert listed[0]["SuppliedBy"] == "REST, WebSocket"
     # The arguments choose rows, never columns.
     assert dh_to_pylist(trades(massive_session, ["MSFT", "IBM"]).columns()) == listed

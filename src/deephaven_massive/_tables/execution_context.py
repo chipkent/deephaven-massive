@@ -56,11 +56,6 @@ _NANOSECONDS: Final = (
 """The unit of the timed lock wait in `wait_for_update_cycle`."""
 
 
-_SYMBOLS_GUIDE: Final = "https://github.com/chipkent/deephaven-massive/blob/main/README.md#symbols"
-"""The README section on symbol tables, schedules included, which the update-graph refusal
-names as the way to change a stream without a table listener."""
-
-
 # A thread with no execution context gets Deephaven's empty default context, whose update graph
 # is a PoisonedUpdateGraph: creating any refreshing table under it fails. That class is the
 # only signal Deephaven offers for "no context is active".
@@ -141,8 +136,7 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
             "deephaven_massive calls must not run on a Deephaven update-graph thread "
             "(for example inside a table listener). To change what a live table follows, pass "
             "a refreshing symbol table as symbols instead: the stream follows its rows as they "
-            "change, and the README shows one that follows the trading day: "
-            f"{_SYMBOLS_GUIDE}"
+            "change."
         )
 
 

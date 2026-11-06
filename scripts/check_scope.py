@@ -9,18 +9,20 @@ jobs on a test the hook skipped. CI also builds the package and tests other Pyth
 the lowest dependency versions, which the local check does not.
 
 The path rules are not copied here. The script reads them from the `Decide which jobs the
-change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `unread`, and
-`workflows` (`lint` and `build` too, which a path must match or be unread), and applies them
-exactly as that step does, one changed path at a time:
+change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `docs`,
+`unread`, and `workflows` (`lint` and `build` too, which a path must match or be unread), and
+applies them exactly as that step does, one changed path at a time:
 
 - A changed workflow or composite action runs everything.
 - A path that no rule covers runs everything, so a new kind of input fails closed.
 - A path the `test` pattern matches runs the whole suite.
-- Otherwise CI runs no tests, and the local check runs ruff, format, and mypy, plus
-  `tests/test_docs.py` when `README.md` or an image under `docs/` changed, since that test
-  runs the README's examples and checks that its links, images included, resolve. CI runs
-  ruff and mypy on every change it lints, and the local check runs them on every change, so
-  it never does less.
+- A path the `docs` pattern matches (the user pages `README.md`, `docs/configuration.md`, and
+  `docs/troubleshooting.md`, any image under `docs/`, the tester guide, and its examples) runs
+  the documentation tests, `tests/test_docs.py` and `tests/live/tester/test_examples.py`, as
+  CI's `docs` job does.
+- Otherwise CI runs no tests, and the local check runs ruff, format, and mypy. CI runs ruff
+  and mypy on every change it lints, and the local check runs them on every change, so it
+  never does less.
 
 The changed files are those `git diff --no-renames --name-only` lists between a base commit and
 the working tree (so staged and unstaged edits count), plus untracked files git does not ignore.
@@ -53,23 +55,26 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 ...     lint=r"^(src|tests|scripts)/|^pyproject\.toml$",
 ...     test=r"^(src|tests|scripts|vendor)/|^docs/datasets/|^pyproject\.toml$",
 ...     build=r"^(src|tests)/|^docs/datasets/|^README\.md$",
-...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)|^docs/.+\.png$",
+...     docs=r"^README\.md$|^docs/configuration\.md$|^docs/tester-guide\.md$|^docs/.+\.(png|webp)$",
+...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
 ...     workflows=r"^\.github/(workflows|actions)/",
 ... )
 >>> decide(["docs/dev/pull-requests.md", "AGENTS.md"], rules)
 Decision(scope='lint', reason='2 changed files, none of which the tests read')
 >>> decide(["AGENTS.md", "README.md"], rules)
-Decision(scope='docs', reason='2 changed files, none of which the tests read except README.md')
->>> decide(["docs/a.png"], rules)
-Decision(scope='docs', reason='1 changed file, none of which the tests read except docs/a.png')
+Decision(scope='docs', reason='2 changed files; README.md is documentation')
+>>> decide(["docs/dev/x.md", "docs/configuration.md"], rules)
+Decision(scope='docs', reason='2 changed files; docs/configuration.md is documentation')
+>>> decide(["docs/images/hero.webp"], rules)
+Decision(scope='docs', reason='1 changed file; docs/images/hero.webp is documentation')
 >>> decide(["AGENTS.md", "src/deephaven_massive/__init__.py", "tests/conftest.py"], rules)
 Decision(scope='full', reason='3 changed files; src/deephaven_massive/__init__.py is a test input')
 >>> decide(["docs/dev/x.md", "docs/datasets/stocks.trades.md"], rules)
 Decision(scope='full', reason='2 changed files; docs/datasets/stocks.trades.md is a test input')
 >>> decide(["docs/dev/x.md", ".github/workflows/ci.yml"], rules)
 Decision(scope='full', reason='2 changed files; .github/workflows/ci.yml is a workflow')
->>> decide(["docs/dev/x.md", "docs/tester-guide.md"], rules)
-Decision(scope='full', reason='2 changed files; no rule covers docs/tester-guide.md')
+>>> decide(["docs/dev/x.md", "docs/tester-examples/x.py"], rules)
+Decision(scope='full', reason='2 changed files; no rule covers docs/tester-examples/x.py')
 >>> decide(['"docs/dev/caf\\303\\251.md"'], rules)
 Decision(scope='full', reason='1 changed file; no rule covers "docs/dev/caf\\303\\251.md"')
 >>> decide([], rules)
@@ -117,11 +122,7 @@ WORKFLOW = pathlib.Path(".github/workflows/ci.yml")
 #: The branch CI compares a pull request with.
 BASE = "origin/main"
 
-#: The changed files outside the test pattern that a test still reads: `tests/test_docs.py` runs
-#: the README's examples and checks that its links resolve, images under `docs/` included.
-DOCS_TEST_INPUT = re.compile(r"^README\.md$|^docs/.+\.(png|jpe?g|gif|svg|webp)$")
-
-_ASSIGNMENT = re.compile(r"^\s*(lint|test|build|unread|workflows)='(.*)'\s*$", re.MULTILINE)
+_ASSIGNMENT = re.compile(r"^\s*(lint|test|build|docs|unread|workflows)='(.*)'\s*$", re.MULTILINE)
 
 
 class PathRules(NamedTuple):
@@ -130,6 +131,7 @@ class PathRules(NamedTuple):
     lint: str
     test: str
     build: str
+    docs: str
     unread: str
     workflows: str
 
@@ -155,7 +157,7 @@ def read_rules(workflow_text: str) -> PathRules:
         workflow_text: The contents of `.github/workflows/ci.yml`.
 
     Returns:
-        The five patterns, exactly as the step assigns them.
+        The six patterns, exactly as the step assigns them.
 
     Raises:
         ValueError: The text assigns one of the patterns not at all, or more than once, so the
@@ -189,14 +191,13 @@ def decide(paths: list[str], rules: PathRules) -> Decision:
 
     Returns:
         `full` when a path is a workflow, matches no rule, or is a test input; else `docs`
-        when `README.md` or an image under `docs/` changed; else `lint`. The reason names the
-        count of changed files and the first path, in the given order, that forced the full or
-        docs run.
+        when a path is documentation the tests read; else `lint`. The reason names the count
+        of changed files and the first path, in the given order, that forced the full run.
     """
     if not paths:
         return Decision("lint", "no changed files")
     count = _plural(len(paths))
-    covered = f"{rules.lint}|{rules.test}|{rules.build}|{rules.unread}"
+    covered = f"{rules.lint}|{rules.test}|{rules.build}|{rules.docs}|{rules.unread}"
     checks = (
         (rules.workflows, True, "is a workflow"),
         (covered, False, None),
@@ -208,8 +209,8 @@ def decide(paths: list[str], rules: PathRules) -> Decision:
                 reason = f"{path} {what}" if what else f"no rule covers {path}"
                 return Decision("full", f"{count}; {reason}")
     for path in paths:
-        if DOCS_TEST_INPUT.search(path):
-            return Decision("docs", f"{count}, none of which the tests read except {path}")
+        if re.search(rules.docs, path):
+            return Decision("docs", f"{count}; {path} is documentation")
     return Decision("lint", f"{count}, none of which the tests read")
 
 

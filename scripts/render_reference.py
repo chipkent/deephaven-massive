@@ -1,4 +1,4 @@
-"""Regenerate the dataset reference, `docs/datasets/`: the whole directory and nothing else.
+"""Regenerate the generated user docs: `docs/datasets/` and the settings of `docs/configuration.md`.
 
 Run it from a source checkout:
 
@@ -13,8 +13,13 @@ any other file or directory there, so no orphaned page survives a rename), and p
 columns each dataset gained or lost, then what it wrote and deleted. Run after a refresh of
 Massive's specifications, the column report is how the refresh shows what it does to each
 table.
-All the logic is in `deephaven_massive._datasets.column_reference`, where the unit tests and
-the coverage gate reach it; this script only wires it up.
+
+It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
+from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
+The rest of that page is written by hand and kept as it is.
+All the logic is in `deephaven_massive._datasets.column_reference` and
+`deephaven_massive._config`, where the unit tests and the coverage gate reach it; this script
+only wires it up.
 
 Exit status: 0 on success; 1 when rendering or syncing raises, after the interpreter has
 printed the traceback. The process leaves through `os._exit` once its output is flushed,
@@ -38,32 +43,37 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.column_reference import column_changes, render, sync
 
 if TYPE_CHECKING:
-    from deephaven_massive import _dataset_list, _session
+    from deephaven_massive import _config, _dataset_list, _session
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The dataset reference's directory, found from this script's place in the checkout."""
+
+_CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
+"""The settings page, whose generated part this script rewrites."""
 
 
 def main() -> None:
     """Start the server, render the pages, sync them into `docs/datasets/`, and report.
 
     Side effects: starts an embedded Deephaven server in this process, reads, deletes, and
-    writes files under `docs/datasets/`, and writes one line per dataset whose columns changed
-    and one per file changed to standard output.
+    writes files under `docs/datasets/`, rewrites `docs/configuration.md` when its settings
+    changed, and writes one line per dataset whose columns changed and one per file changed to
+    standard output.
     """
     # Registered first, so a server start that fails after the JVM loaded still exits safely.
     atexit.register(_exit)
     # Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
     Server(port=0, jvm_args=["-Xmx1g"]).start()
-    # The session module, which builds the catalog, and the dataset list, which reads each
-    # dataset's method, import Deephaven, so they are imported only once the server runs. The
-    # type checker reads the static import above instead, so a renamed module, `CATALOG`, or
-    # `dataset_calls` fails the type check.
+    # The session module, which builds the catalog, the dataset list, which reads each
+    # dataset's method, and the configuration import Deephaven, so they are imported only once
+    # the server runs. The type checker reads the static import above instead, so a renamed
+    # module, `CATALOG`, `dataset_calls`, or `with_settings_reference` fails the type check.
     if TYPE_CHECKING:
-        session, dataset_list = _session, _dataset_list
+        session, dataset_list, config = _session, _dataset_list, _config
     else:
         session = importlib.import_module("deephaven_massive._session")
         dataset_list = importlib.import_module("deephaven_massive._dataset_list")
+        config = importlib.import_module("deephaven_massive._config")
     pages = render(session.CATALOG, _massive.provenance(), dataset_list.dataset_calls())
     committed = {p.name: p.read_text() for p in sorted(_DIRECTORY.glob("*.md")) if p.is_file()}
     for line in column_changes(committed, pages):
@@ -76,6 +86,14 @@ def main() -> None:
         sys.stdout.write(f"deleted {shown / name}\n")
     if not result.written and not result.deleted:
         sys.stdout.write(f"{shown}/ is up to date\n")
+    page = _CONFIGURATION_PAGE.read_text(encoding="utf-8")
+    rendered = config.with_settings_reference(page)
+    shown_page = _CONFIGURATION_PAGE.relative_to(_DIRECTORY.parent.parent)
+    if rendered == page:
+        sys.stdout.write(f"{shown_page} is up to date\n")
+    else:
+        _CONFIGURATION_PAGE.write_text(rendered, encoding="utf-8")
+        sys.stdout.write(f"wrote {shown_page}\n")
 
 
 def _exit() -> None:

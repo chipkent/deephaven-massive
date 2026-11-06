@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Claude Code Stop hook.
 #
-# Before the agent ends its turn, run the fast check tier without rewriting files. On failure
-# the output goes to stderr and the hook exits 2, so the agent keeps working to fix it. When
-# the agent is already continuing because of this hook (stop_hook_active), it exits 0 to
-# avoid an endless loop.
+# Before the agent ends its turn, when the working tree has changed or new .py files, run the
+# fast check tier without rewriting files. On failure the output goes to stderr and the hook
+# exits 2, so the agent keeps working to fix it. When the agent is already continuing because
+# of this hook (stop_hook_active), it exits 0 to avoid an endless loop.
 set -euo pipefail
 
 # The hook payload is parsed with the system python3 in isolated mode (-I), not `uv run`:
@@ -22,6 +22,10 @@ root="$(git -C "${cwd:-.}" rev-parse --show-toplevel 2>/dev/null || echo "${CLAU
 [[ -n "$root" && -x "$root/scripts/check.sh" ]] || exit 0
 
 cd "$root"
+# Ruff and mypy check only Python, so a turn that leaves no changed or new .py file (docs,
+# review, or research work) skips the check instead of paying for a dependency sync and mypy.
+[[ -n "$(git status --porcelain --untracked-files=all -- '*.py')" ]] || exit 0
+
 if ! output="$(./scripts/check.sh fast --no-fix 2>&1)"; then
     echo "scripts/check.sh fast --no-fix failed; fix these problems before stopping:" >&2
     echo "$output" >&2

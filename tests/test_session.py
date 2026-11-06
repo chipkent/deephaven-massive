@@ -243,7 +243,7 @@ def test_construction_without_an_execution_context_fails_fast() -> None:
     thread.start()
     thread.join(TIMEOUT)
     assert len(errors) == 1
-    assert "must be created inside a Deephaven worker" in str(errors[0])
+    assert "must be created inside a Deephaven server" in str(errors[0])
     assert "ExecutionContext" in str(errors[0])
 
 
