@@ -261,7 +261,7 @@ followed by one or two plain sentences on how little it took. Code that shows no
 Everything else moves down the page: plan details, dataset counts, prerequisites, and
 definitions. The hook has no asides, no history ("formerly ..."), and no caveats. Link
 "Massive" and "Deephaven" instead of explaining them. The hero image goes after the title,
-with light and dark variants in a `<picture>` element and alt text that says what it shows.
+with alt text that says what it shows.
 
 <a id="headings"></a>
 
@@ -408,6 +408,26 @@ Reference, so it describes and doesn't narrate:
 - `MassiveConfig`, under its own name: what it is in one sentence, a table of the settings a
   new user needs (setting, set it when, what changes), one complete code block, and
   `help(dm.MassiveConfig)` for the rest.
+
+<a id="model-structure"></a>
+
+### File formats and data structures
+
+A page that documents a file format, a settings file, or a data structure shows its full shape:
+every level of nesting, which values are single words or numbers, lists, or mappings, and at
+least one example of each nested form in ordinary block syntax. Inline examples in table cells
+don't count: the reader must never infer the structure from them.
+
+Its reference also shows one complete example that sets every field, each with a one-line
+comment, generated from the code so that a new field can't be left out. Its tables name each
+nested key by its full path, such as `websocket_hosts.indices`. For each field, a reader can
+decide from the page alone: what it does for them, the values it takes, its default, when to
+change it, and what each choice does.
+
+The page must pass a sufficiency test. Give a fresh reader only the page and about eight
+realistic tasks, and ask for the file each task needs and for anything the page left them to
+guess. The page passes when every file is right and nothing is left to guess. The
+`configuration-page-sufficiency` eval case is the test for `docs/configuration.md`.
 
 <a id="model-teaching"></a>
 

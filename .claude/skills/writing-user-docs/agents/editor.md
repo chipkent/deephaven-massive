@@ -142,6 +142,13 @@ reader who returns later gets `command not found`.
 - Placement: is each setting documented with the object it belongs to? Does each environment
   variable or setting say what the reader gets, rather than how the library uses it? Does each
   configuration concept link to its reference page (`docs/configuration.md`)?
+- Structure: does a page that documents a file format, settings file, or data structure show
+  its full shape: every level of nesting, which values are scalars, lists, or mappings, and at
+  least one example of each nested form in ordinary block syntax? A structure the reader must
+  infer from inline examples in table cells is a fault. Does its reference show one complete
+  example that sets every field, each with a one-line comment, and name each nested key by its
+  full path? Could a reader with only this page write the file for a realistic task without
+  guessing? A field whose effect, values, default, or reason to change is missing is a fault.
 - Badges: does each badge render for the page's viewers and stay current? A static badge that
   can go stale is a fault.
 - Steps: is every step needed? Is anything the reader sets up once (keys, an environment) split
@@ -184,7 +191,7 @@ five), round to the nearest whole number, and score: 0 faults → 3, 1 → 2, 2 
 |---|---|---|
 | 1 | Hook | Pass 1: missing who/what/outcome, no job-level pain, asides, caveats, length, a sample with no visible result, a vague call to action |
 | 2 | Facts and commands | Pass 3: each FALSE or UNSOURCED claim, each command that FAILS |
-| 3 | Scope and placement | Pass 4: sections not asked for, content in the wrong place, settings away from their object, descriptions of mechanism instead of what the reader gets |
+| 3 | Scope and placement | Pass 4: sections not asked for, content in the wrong place, settings away from their object, a file format or data structure whose shape is left to inference, descriptions of mechanism instead of what the reader gets |
 | 4 | Needless steps | Pass 4: needless steps, variables, or choices; one-time setup split up; "A, digression, or B" |
 | 5 | Headings and titles | Pass 4: each bad heading or example title |
 | 6 | Teaching | Pass 5: each example that narrates, adds more than one idea, buries its goal, or carries unrelated material; a missing progression counts once |

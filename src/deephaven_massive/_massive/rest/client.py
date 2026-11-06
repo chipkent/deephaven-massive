@@ -41,7 +41,6 @@ This module imports only the standard library, `urllib3`, `net`, and `spec`.
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import random
 import re
@@ -54,6 +53,7 @@ from urllib.parse import urlsplit
 import urllib3
 
 from deephaven_massive._massive.net import USER_AGENT
+from deephaven_massive._massive.net.base_urls import check_rest_base_url
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
@@ -69,8 +69,7 @@ from deephaven_massive._massive.net.http import (
     proxy_credentials,
     trust_description,
 )
-from deephaven_massive._massive.net.origins import origin_of
-from deephaven_massive._massive.net.redaction import Redactor, without_userinfo
+from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import (
     MAX_RETRIES,
     TRANSIENT_STATUSES,
@@ -93,7 +92,6 @@ if TYPE_CHECKING:
 
     from urllib3 import BaseHTTPResponse
 
-    from deephaven_massive._massive.net.origins import Origin
     from deephaven_massive._massive.rest.governor import (
         Admission,
         Patience,
@@ -201,51 +199,6 @@ def _check_api_key(api_key: str) -> None:
             "api_key must be non-empty visible ASCII, with no whitespace or line break "
             "(check for a trailing newline)"
         )
-
-
-def _is_loopback(host: str) -> bool:
-    """Return whether a host name is this machine: `localhost` or a loopback address.
-
-    Args:
-        host: A lower-case host name or IP address, without brackets.
-
-    Returns:
-        True for `localhost`, `127.0.0.0/8`, and `::1`.
-    """
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _check_base_url(base_url: str) -> Origin:
-    """Check the REST base URL and return its origin.
-
-    Args:
-        base_url: The base URL given to the client.
-
-    Returns:
-        The URL's `(scheme, host, port)`.
-
-    Raises:
-        ValueError: If `base_url` is not an `http` or `https` URL of a host alone (with no
-            user information, path, query, or fragment), or is `http` for a host that is not
-            loopback, which would send the API key in clear text.
-    """
-    origin = origin_of(base_url)
-    parts = urlsplit(base_url)
-    if parts.path not in {"", "/"} or parts.query or parts.fragment or "@" in parts.netloc:
-        shown = without_userinfo(base_url)  # a user and password never reach a message
-        raise ValueError(f"base_url {shown!r} must name only a scheme, host, and port")
-    if origin[0] == "http" and not _is_loopback(origin[1]):
-        raise ValueError(
-            f"base_url {without_userinfo(base_url)!r} would send the API key in clear text; "
-            "use https "
-            "(http is allowed only for a loopback host, such as a local test server)"
-        )
-    return origin
 
 
 class RefusalHook(Protocol):
@@ -374,12 +327,13 @@ class RestClient:
 
         Raises:
             ValueError: If `max_concurrency` is less than 1. A bad `api_key` or `base_url`
-                raises `ValueError` too, from `_check_api_key` and `_check_base_url`: an empty
-                key or one with whitespace (never quoted), a base URL that is not an origin
-                alone, or an `http` base URL for a host that is not loopback.
+                raises `ValueError` too, from `_check_api_key` and
+                `net.base_urls.check_rest_base_url`: an empty key or one with whitespace (never
+                quoted), a base URL that is not an origin alone, or an `http` base URL for a
+                host that is not loopback.
         """
         _check_api_key(api_key)
-        origin = _check_base_url(base_url)
+        origin = check_rest_base_url(base_url, setting="base_url")
         if max_concurrency < 1:
             raise ValueError(f"max_concurrency must be at least 1, not {max_concurrency}")
         self._origin = origin

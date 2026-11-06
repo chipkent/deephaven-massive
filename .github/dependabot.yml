@@ -1,6 +1,8 @@
 version: 2
 # Dependabot's pull request titles must pass the title check, which allows only the project's
-# own types: the prefix below makes them `chore(deps): bump ...` instead of `build(deps): ...`.
+# own types: the prefix below makes them `chore(deps): ...` instead of `build(deps): ...`.
+# Whether the word after the prefix is "Bump" or "bump" is not a setting: Dependabot infers it
+# from recent commits on `main`, so the title check accepts either for Dependabot alone.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"

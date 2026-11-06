@@ -72,6 +72,8 @@ A brief says only what the agent cannot know:
 - the files other agents are changing at the same time, and any rename in flight;
 - the owner decisions it must follow, quoted or linked, and anything only this task has learned;
 - whether to stop at a local commit and report, or open the PR (and when to push).
+- that it writes its PR-body file inside its own worktree, never under a shared scratchpad name
+  such as `pr.md`, which another agent may overwrite.
 
 ## 6. Review and readiness
 

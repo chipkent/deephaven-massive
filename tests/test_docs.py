@@ -26,6 +26,7 @@ URL, that every cited page and anchor exists, and that every relative link of a 
 of the tester guide) resolves.
 """
 
+import dataclasses
 import json
 import os
 import re
@@ -686,22 +687,33 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     names.clear()
 
 
-def test_the_settings_pages_example_file_loads_as_its_comments_say(
+def test_the_settings_pages_shape_example_loads_each_form(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    [text] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
+    [text, _] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
     file = tmp_path / "settings.yaml"
     file.write_text(text, encoding="utf-8")
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     config = dm.MassiveConfig.from_file(file)
-    assert config.delayed_subscriptions == {dm.Subscription.STOCKS}
-    assert config.rest_basic_subscriptions == {
-        dm.Subscription.OPTIONS,
-        dm.Subscription.INDICES,
-        dm.Subscription.CURRENCIES,
-        dm.Subscription.FUTURES,
-    }
+    # A list, a single value, and the one mapping.
+    assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
     assert config.max_outage == 600
+    assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
+
+
+def test_the_settings_pages_complete_example_sets_every_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    [_, text] = _YAML.findall(CONFIGURATION.read_text(encoding="utf-8"))
+    file = tmp_path / "settings.yaml"
+    file.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    config = dm.MassiveConfig.from_file(file)
+    credentials = {"api_key", "s3_access_key_id", "s3_secret_access_key"}
+    settings = {f.name for f in dataclasses.fields(dm.MassiveConfig)} - credentials
+    assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == settings
+    assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
+    assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
     assert config.noncanonical_symbols is dm.OnError.RAISE
 
 

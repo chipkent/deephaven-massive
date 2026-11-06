@@ -460,12 +460,10 @@ def test_equal_backoffs_are_accepted() -> None:
 def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
     config = dm.MassiveConfig(
         api_key="k",
-        rest_base_url="https://u:hunter2@api.massive.com",
         s3_endpoint_url="https://reader:hunter2@files.massive.com",
     )
     shown = repr(config)
     assert "hunter2" not in shown
-    assert "rest_base_url='https://***@api.massive.com'" in shown
     assert "s3_endpoint_url='https://***@files.massive.com'" in shown
     assert shown.startswith("MassiveConfig(s3_access_key_id=")
     assert "api_key" not in shown
@@ -494,11 +492,44 @@ def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> N
 
 
 @pytest.mark.parametrize(
-    "url", ["http://127.0.0.1:8080", "https://api.massive.com/v1?x=1", "http://[::1]:9000"]
+    "url",
+    ["http://127.0.0.1:8080", "http://localhost", "https://api.massive.com/", "http://[::1]:9000"],
 )
 def test_an_http_url_with_a_host_is_accepted(url: str) -> None:
     config = MassiveConfig(api_key="k", rest_base_url=url, s3_endpoint_url=url)
     assert (config.rest_base_url, config.s3_endpoint_url) == (url, url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.massive.com/v1?x=1",
+        "https://reader:pw@files.massive.com",
+        "http://minio:9000",
+    ],
+)
+def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> None:
+    assert MassiveConfig(api_key="k", s3_endpoint_url=url).s3_endpoint_url == url
+
+
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [
+        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
+        ("https://api.massive.com?apiKey=1", "must name only a scheme, host, and port"),
+        ("https://api.massive.com#top", "must name only a scheme, host, and port"),
+        ("https://u:hunter2@api.massive.com", "must name only a scheme, host, and port"),
+        ("http://api.massive.com", "would send the API key in clear text; use https"),
+        ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
+        ("https://api.massive.com:99999", "is not an absolute http or https URL"),
+    ],
+)
+def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
+    url: str, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=f"^rest_base_url '.*' {reason}") as info:
+        MassiveConfig(api_key="k", rest_base_url=url)
+    assert "hunter2" not in str(info.value)
 
 
 def test_a_refused_url_never_shows_a_password() -> None:
@@ -1035,6 +1066,10 @@ def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path
     )
     message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
     assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
+    message = _refused(tmp_path, "max_outage: 600\nrest_base_url: https://api.massive.com/v3\n")
+    assert message.startswith(
+        ", line 2, column 1: rest_base_url 'https://api.massive.com/v3' must name only a scheme"
+    )
     message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")
     assert message.startswith(", line 2, column 1: s3_endpoint_url must be an http or https URL")
     message = _refused(tmp_path, "reconnect_backoff: 200\n")
@@ -1093,6 +1128,9 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
 
 CONFIGURATION_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
 
+HOST_PATHS = [f"websocket_hosts.{asset_class.value}" for asset_class in AssetClass]
+"""The full path of each `websocket_hosts` key, as the page's table names it."""
+
 
 def test_the_committed_settings_page_is_the_rendered_one() -> None:
     page = CONFIGURATION_PAGE.read_text(encoding="utf-8")
@@ -1101,10 +1139,38 @@ def test_the_committed_settings_page_is_the_rendered_one() -> None:
     )
 
 
-def test_the_reference_is_one_row_per_file_setting_in_order() -> None:
+@pytest.mark.usefixtures("key")
+def test_the_example_file_sets_every_setting_to_its_example_value(tmp_path: Path) -> None:
+    text = _config._example_file()
+    config = MassiveConfig.from_file(_settings(tmp_path, text))
+    # Every setting a file may hold is written, so a new setting can't be left out of the page.
+    assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == set(_config._CONVERTERS)
+    assert {name: getattr(config, name) for name in _config._EXAMPLE} == {
+        name: example.value for name, example in _config._EXAMPLE.items()
+    }
+
+
+def test_the_example_file_comments_each_setting_and_marks_its_defaults() -> None:
+    text = _config._example_file()
+    assert text.startswith(
+        "# Plans that stream 15 minutes late: Stocks Starter and Options Developer.\n"
+        "delayed_subscriptions: [options, stocks]\n\n"
+    )
+    assert "\nmax_outage: 600\n" in text
+    assert "\nmax_concurrency: 8  # the default\n" in text
+    assert "\nwebsocket_hosts:\n  indices: business.massive.com\n" in text
+    settings = re.findall(r"^\w+:", text, re.MULTILINE)
+    assert len(re.findall(r"^# ", text, re.MULTILINE)) == len(settings)
+    assert all(len(line) <= 100 for line in text.splitlines())
+
+
+def test_the_table_is_one_row_per_setting_and_websocket_hosts_key_in_order() -> None:
     reference = _config.settings_reference()
-    rows = [line for line in reference.splitlines() if line.startswith("| `")]
-    assert [row.split("`")[1] for row in rows] == list(_config._SETTING_ORDER)
+    rows = [line.split("`")[1] for line in reference.splitlines() if line.startswith("| `")]
+    expected: list[str] = []
+    for name in _config._EXAMPLE:
+        expected += HOST_PATHS if name == "websocket_hosts" else [name]
+    assert rows == expected
     outage = "A number of seconds, `0` or more, such as `600`"
     texts = _config._setting_texts()
     assert f"| `max_outage` | {texts['max_outage']} | {outage} | `300` |" in reference
@@ -1112,18 +1178,55 @@ def test_the_reference_is_one_row_per_file_setting_in_order() -> None:
     assert "`0.05` |" in reference
     assert "| `log`, `ignore`, or `raise` | `log` |" in reference
     assert "api_key" not in reference
-    assert reference.startswith("`help(dm.MassiveConfig)` gives each setting's full behavior.")
+
+
+def test_each_websocket_hosts_row_gives_its_rule_and_the_host_used_without_a_pin() -> None:
+    reference = _config.settings_reference()
+    assert (
+        "| `websocket_hosts.forex` | Sets the WebSocket host forex streams come from. | A "
+        "lower-case hostname, such as `socket.massive.com`; never a `delayed.` host | "
+        "`socket.massive.com` |"
+    ) in reference
+    assert (
+        "| `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A "
+        "lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when "
+        "`delayed_subscriptions` lists `stocks` | `delayed.massive.com` when "
+        "`delayed_subscriptions` lists `stocks`, else `socket.massive.com` |"
+    ) in reference
+    assert (
+        "| `websocket_hosts.indices` | Sets the WebSocket host indices streams come from. | A "
+        "lower-case hostname, such as `business.massive.com`;"
+    ) in reference
+
+
+def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
+    reference = _config.settings_reference()
+    details = reference[reference.index('<a id="setting-details"></a>') :]
+    headings = [line[5:] for line in details.splitlines() if line.startswith("#### ")]
+    assert headings == list(_config._EXAMPLE)
+    # A list in the docstring stays a list, its members spelled as a file writes them.
+    assert "\n- `raise` raises `ValueError` for a bad row at the call, and fails a live\n" in (
+        details
+    )
+    assert "Never list\n`currencies`, the one subscription for forex and crypto" in details
+    # A full link to another page under docs/ becomes a relative link.
+    assert "see\n[Report a bug](troubleshooting.md#report-a-bug)." in details
+    assert "https://github.com" not in details
+    assert "dm.OnError" not in reference
+    assert "dm.Subscription" not in reference
 
 
 @pytest.mark.usefixtures("key")
 def test_every_value_forms_example_is_accepted_by_a_settings_file(tmp_path: Path) -> None:
     forms = _config._value_forms()
-    assert set(forms) == set(_config._CONVERTERS)
+    assert set(forms) == set(_config._CONVERTERS) - {"websocket_hosts"} | set(HOST_PATHS)
     for name, form in forms.items():
         example = re.search(r"such as `([^`]+)`", form) or re.search(r"`([^`]+)`$", form)
         assert example is not None, form
+        setting, _, key = name.partition(".")
+        line = f"{setting}:\n  {key}: {example[1]}\n" if key else f"{name}: {example[1]}\n"
         # Raises if the settings file refuses the example.
-        MassiveConfig.from_file(_settings(tmp_path, f"{name}: {example[1]}\n"))
+        MassiveConfig.from_file(_settings(tmp_path, line))
 
 
 def test_delayed_subscriptions_offers_only_what_it_accepts() -> None:
@@ -1136,14 +1239,20 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     texts = _config._setting_texts()
     assert set(texts) == {f.name for f in dataclasses.fields(MassiveConfig)}
     # The default comes from the code, so the entry's last sentence giving it is left out, and
-    # the paragraphs after the first are detail for help(), not for the page.
+    # the paragraphs after the first are the setting's detail.
     assert texts["s3_bucket"] == "Sets the S3 bucket flat files are read from."
     assert "Defaults to" not in texts["reconnect_backoff"]
-    assert "EntitlementError" in (MassiveConfig.__doc__ or "")
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["unavailable_symbols"] == (
         "Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't "
         "request with the arguments you gave it."
+    )
+    details = _config._setting_details()
+    assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
+    assert "EntitlementError" in details["delayed_subscriptions"][1]
+    assert details["noncanonical_symbols"][1].startswith(
+        "- `dm.OnError.LOG` skips the row and logs a warning naming the value.\n"
+        "- `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.\n"
     )
 
 
@@ -1161,18 +1270,19 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
         ("flatfiles", "flatfiles"),
     ],
 )
-def test_a_default_is_written_as_a_settings_file_writes_it(value: object, written: str) -> None:
+def test_a_value_is_written_as_a_settings_file_writes_it(value: object, written: str) -> None:
     assert _config._file_value(value) == written
 
 
-def test_the_reference_refuses_an_order_that_misses_or_repeats_a_setting(
+def test_the_reference_refuses_an_example_that_misses_or_adds_a_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    order = _config._SETTING_ORDER
-    monkeypatch.setattr(_config, "_SETTING_ORDER", order[1:])
+    example = dict(_config._EXAMPLE)
+    first = next(iter(example))
+    monkeypatch.setattr(_config, "_EXAMPLE", {k: v for k, v in example.items() if k != first})
     with pytest.raises(ValueError, match="not every file setting once"):
         _config.settings_reference()
-    monkeypatch.setattr(_config, "_SETTING_ORDER", (*order, order[0]))
+    monkeypatch.setattr(_config, "_EXAMPLE", {**example, "api_key": example[first]})
     with pytest.raises(ValueError, match="not every file setting once"):
         _config.settings_reference()
 
@@ -1181,7 +1291,7 @@ def test_only_the_generated_part_of_the_page_is_rewritten() -> None:
     start, end = _config.SETTINGS_REFERENCE_START, _config.SETTINGS_REFERENCE_END
     page = f"# Hand\n\nIntro.\n\n{start}\nstale\n{end}\nAfter.\n"
     rewritten = _config.with_settings_reference(page)
-    assert rewritten.startswith(f"# Hand\n\nIntro.\n\n{start}\n\n`help(dm.MassiveConfig)`")
+    assert rewritten.startswith(f'# Hand\n\nIntro.\n\n{start}\n\n<a id="example-settings-file">')
     assert rewritten.endswith(f"\n{end}\nAfter.\n")
     assert "stale" not in rewritten
     assert _config.with_settings_reference(rewritten) == rewritten

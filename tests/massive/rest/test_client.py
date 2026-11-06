@@ -196,45 +196,20 @@ def test_each_connection_has_a_pool_that_never_retries_with_the_timeouts(
 
 
 @pytest.mark.parametrize(
-    "base_url",
+    ("base_url", "reason"),
     [
-        "https://api.massive.com/v3",
-        "https://api.massive.com?x=1",
-        "https://u@api.massive.com",
-        "https://:pw@api.massive.com",
-        "https://api.massive.com#f",
+        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
+        ("http://api.massive.com", "would send the API key in clear text"),
+        ("ftp://api.massive.com", "is not an absolute http or https URL"),
     ],
 )
-def test_the_base_url_names_only_an_origin(base_url: str) -> None:
-    with pytest.raises(ValueError, match="must name only a scheme, host, and port"):
+def test_the_client_refuses_a_base_url_the_shared_rule_refuses(base_url: str, reason: str) -> None:
+    with pytest.raises(ValueError, match=f"^base_url '.*' {reason}"):
         RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
 
 
-@pytest.mark.parametrize(
-    "base_url", ["https://u:hunter2@api.massive.com", "ftp://u:hunter2@api.massive.com"]
-)
-def test_a_refused_base_url_never_shows_its_password(base_url: str) -> None:
-    with pytest.raises(ValueError, match=r"\*\*\*@api\.massive\.com") as info:
-        RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
-    assert "hunter2" not in str(info.value)
-
-
-def test_the_base_url_is_http_or_https() -> None:
-    with pytest.raises(ValueError, match="is not an absolute http or https URL"):
-        RestClient(_KEY, base_url="ftp://api.massive.com", max_concurrency=1, governor=_governor())
-
-
-@pytest.mark.parametrize("base_url", ["http://api.massive.com", "http://10.0.0.1:8080"])
-def test_plain_http_is_refused_except_for_loopback(base_url: str) -> None:
-    with pytest.raises(ValueError, match="would send the API key in clear text; use https"):
-        RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
-
-
-@pytest.mark.parametrize(
-    "base_url", ["http://localhost:8080", "http://127.0.0.2", "http://[::1]:8080"]
-)
-def test_plain_http_is_allowed_for_loopback(base_url: str) -> None:
-    RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor()).close()
+def test_plain_http_is_allowed_for_loopback() -> None:
+    RestClient(_KEY, base_url="http://[::1]:8080", max_concurrency=1, governor=_governor()).close()
 
 
 @pytest.mark.parametrize(
