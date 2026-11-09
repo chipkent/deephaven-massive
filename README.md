@@ -1,6 +1,6 @@
 # deephaven-massive
 
-![A Deephaven dashboard: type a symbol into the focus table, and its live trades, today's news, and a chart of minute closes with a moving average and bands switch to that symbol.](docs/images/hero.webp)
+![A Deephaven dashboard: type a symbol, and its last price, live trades, today's news, a 90-minute chart, and a by-the-second chart switch to it.](docs/images/hero.webp)
 
 [![CI](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml/badge.svg)](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml)
 
