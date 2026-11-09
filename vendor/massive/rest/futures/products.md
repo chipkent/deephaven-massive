@@ -53,6 +53,11 @@ Use Cases: Product specification, historical product checks, risk management, tr
 | `type.any_of` | string | No | Filter equal to any of the values. Multiple values can be specified by using a comma separated list. |
 | `limit` | integer | No | Limit the maximum number of results returned. Defaults to '100' if not specified. The maximum allowed limit is '50000'. |
 | `sort` | string | No | A comma separated list of sort columns. For each column, append '.asc' or '.desc' to specify the sort direction. The sort column defaults to 'date' if not specified. The sort order defaults to 'asc' if not specified. |
+| `fields` | string | No | A comma-separated list of fields to return for each result (e.g. `asset_class,asset_sub_class,clearing_symbol`). If omitted, all fields are returned. When set, each result contains only the fields you list; every other field is dropped, even fields a full response always includes. Nested fields can be specified using dot notation (for example, `parent.child`). |
+
+## Response Formats
+
+This endpoint returns JSON by default, and Apache Arrow when the request sends `Accept: application/vnd.apache.arrow.file`. The Arrow body has no `next_url`; to page through results, read the next page's URL from the `Link` response header (`rel="next"`).
 
 ## Response Attributes
 
@@ -64,7 +69,7 @@ Use Cases: Product specification, historical product checks, risk management, tr
 | `results[].asset_class` | string | The asset class to which the product belongs. |
 | `results[].asset_sub_class` | string | The asset sub-class to which the product belongs. |
 | `results[].clearing_symbol` | string | The clearing symbol assigned to this product by the exchange's clearing house. |
-| `results[].clearing_venue` | string | The trading venue (MIC) for the clearing house that clears this product's contracts. |
+| `results[].clearing_venue` | string | The exchange identifier for the clearing house that clears this product's contracts. |
 | `results[].date` | string | A date string in the format YYYY-MM-DD. This parameter will return point-in-time information about products for the specified day. |
 | `results[].last_updated` | string | The date and time at which this product was last updated. |
 | `results[].name` | string | The full name of the product. |
@@ -75,7 +80,7 @@ Use Cases: Product specification, historical product checks, risk management, tr
 | `results[].settlement_currency_code` | string | The currency in which this product settles. |
 | `results[].settlement_method` | string | The method of settlement for this product (Financially Settled or Deliverable). |
 | `results[].settlement_type` | string | The type of settlement for this product. |
-| `results[].strategy_type` | string | The strategy type for combo products (e.g. spread, strip, pack). Null for single products. |
+| `results[].strategy_type` | string | The strategy type for combo products (e.g. calendar, butterfly, strip). Null for single products. |
 | `results[].sub_sector` | string | The sub-sector to which the product belongs. |
 | `results[].trade_currency_code` | string | The currency in which this product's contracts trade. |
 | `results[].trading_venue` | string | The trading venue (MIC) for the exchange on which this product's contracts trade. |
@@ -94,8 +99,8 @@ Use Cases: Product specification, historical product checks, risk management, tr
     {
       "asset_class": "commodity",
       "asset_sub_class": "energy",
-      "clearing_symbol": "EBE",
-      "clearing_venue": "XCME",
+      "clearing_symbol": "EBF",
+      "clearing_venue": "NYMEX",
       "date": "2025-07-07",
       "last_updated": "2025-02-22",
       "name": "1% Fuel Oil Barges FOB Rdam (Platts) vs. 1% Fuel Oil Cargoes FOB NWE (Platts) BALMO Futures",

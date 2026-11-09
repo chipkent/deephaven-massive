@@ -25,6 +25,11 @@ Use Cases: Tracking inflation trends, evaluating purchasing power, supporting mo
 | `date.lte` | string | No | Filter less than or equal to the value. |
 | `limit` | integer | No | Limit the maximum number of results returned. Defaults to '100' if not specified. The maximum allowed limit is '50000'. |
 | `sort` | string | No | A comma separated list of sort columns. For each column, append '.asc' or '.desc' to specify the sort direction. The sort column defaults to 'date' if not specified. The sort order defaults to 'asc' if not specified. |
+| `fields` | string | No | A comma-separated list of fields to return for each result (e.g. `cpi,cpi_core,cpi_year_over_year`). If omitted, all fields are returned. When set, each result contains only the fields you list; every other field is dropped, even fields a full response always includes. Nested fields can be specified using dot notation (for example, `parent.child`). |
+
+## Response Formats
+
+This endpoint returns JSON by default, and Apache Arrow when the request sends `Accept: application/vnd.apache.arrow.file`. The Arrow body has no `next_url`; to page through results, read the next page's URL from the `Link` response header (`rel="next"`).
 
 ## Response Attributes
 

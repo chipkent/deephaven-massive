@@ -32,8 +32,8 @@ The channel prefix for this feed is `AM`. To subscribe, send `AM.` followed by a
 {"action":"subscribe","params":"AM.*"}
 ```
 
-Separate more than one subscription with commas, for example `AM.<ticker1>,AM.<ticker2>`.
-The `AM.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `AM.<value1>,AM.<value2>`.
+The `AM.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -45,7 +45,7 @@ Use Cases: Real-time monitoring, dynamic charting, intraday trend analysis, mark
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify an index ticker using "I:" prefix or use * to subscribe to all index tickers. You can also use a comma separated list to subscribe to multiple index tickers. You can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify an index ticker using "I:" prefix or use * to subscribe to all index tickers. To subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`. You can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).  |
 
 ## Response Attributes
 

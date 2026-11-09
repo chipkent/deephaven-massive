@@ -31,8 +31,8 @@ The channel prefix for this feed is `V`. To subscribe, send `V.` followed by a v
 {"action":"subscribe","params":"V.I:SPX"}
 ```
 
-Separate more than one subscription with commas, for example `V.<ticker1>,V.<ticker2>`.
-The `V.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `V.<value1>,V.<value2>`.
+The `V.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -44,7 +44,7 @@ Use Cases: Market analysis, trend detection, portfolio benchmarking, trading str
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify an index ticker using "I:" prefix or use * to subscribe to all index tickers. You can also use a comma separated list to subscribe to multiple index tickers. You can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify an index ticker using "I:" prefix or use * to subscribe to all index tickers. To subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`. You can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).  |
 
 ## Response Attributes
 

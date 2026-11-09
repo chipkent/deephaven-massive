@@ -31,8 +31,8 @@ The channel prefix for this feed is `XAS`. To subscribe, send `XAS.` followed by
 {"action":"subscribe","params":"XAS.*"}
 ```
 
-Separate more than one subscription with commas, for example `XAS.<ticker1>,XAS.<ticker2>`.
-The `XAS.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `XAS.<value1>,XAS.<value2>`.
+The `XAS.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -44,7 +44,7 @@ Use Cases: Real-time monitoring, dynamic charting, intraday strategy development
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs. You can also use a comma separated list to subscribe to multiple crypto pairs. You can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs. To subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`. You can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).  |
 
 ## Response Attributes
 

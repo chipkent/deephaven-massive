@@ -31,7 +31,7 @@ The channel prefix for this feed is `FMV`. To subscribe, send `FMV.` followed by
 {"action":"subscribe","params":"FMV.O:SPY251219C00650000"}
 ```
 
-Separate more than one subscription with commas, for example `FMV.<ticker1>,FMV.<ticker2>`.
+Separate more than one subscription with commas, for example `FMV.<value1>,FMV.<value2>`.
 
 **Description:**
 
@@ -43,7 +43,7 @@ Use Cases: Pricing strategies, algorithmic modeling, risk assessment, investor d
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection. You can also use a comma separated list to subscribe to multiple option contracts. You can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).  |
+| `ticker` | string | Yes | Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection. To subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`. You can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).  |
 
 ## Response Attributes
 

@@ -41,7 +41,7 @@ Use Cases: Cross-market analysis, diversified portfolio monitoring, global marke
 | `results[].market_status` | string | The market status for the market that trades this ticker. Possible values for stocks, options, crypto, and forex snapshots are open, closed, early_trading, or late_trading. Possible values for indices snapshots are regular_trading, closed, early_trading, and late_trading. |
 | `results[].message` | string | The error message while looking for this ticker. |
 | `results[].name` | string | The name of this contract. |
-| `results[].session` | object | Comprehensive trading session metrics, detailing price changes, trading volume, and key price points (open, close, high, low) for the asset within the current trading day. Includes specific changes during early, regular, and late trading periods to enable detailed performance analysis and trend tracking.  Values describe the current trading session only; nothing carries over from the previous session apart from `previous_close`. For stocks snapshots, an asset that has not traded yet this session reports `volume: 0` with the price and change fields omitted rather than reported as 0.  During early trading on stocks snapshots, `volume` and `price` track the session as it happens, but `open`, `high`, `low`, `close` and `vwap` are omitted until the regular session opens, as those report official session prices. They appear from the open and remain through late trading. |
+| `results[].session` | object | Comprehensive trading session metrics, detailing price changes, trading volume, and key price points (open, close, high, low) for the asset within the current trading day. Includes specific changes during early, regular, and late trading periods to enable detailed performance analysis and trend tracking.  Values describe the current trading session only; nothing carries over from the previous session apart from `previous_close`. For stocks snapshots, an asset that has not traded yet this session reports `volume: 0` with the price and change fields omitted rather than reported as 0.  During early trading on stocks snapshots, `volume` and `price` track the session as it happens, but `open`, `high`, `low`, `close` and `vwap` are omitted until the regular session opens, as those report official session prices. They appear from the open and remain through late trading.  For options snapshots, the early, regular and late trading changes use these sessions: early trading from 7:30 to 9:30 AM ET, the regular session from 9:30 AM to 4:00 PM ET (4:15 PM ET for some products, such as SPY and SPX options), and late trading from the end of the regular session to 5:00 PM ET. Only trades marked with the extended hours condition (EXHT, 248) count as early or late trading. Cboe's extended trading hours program covers selected equity options, so other contracts do not get an early or late trading change. Index options, such as SPX, SPXW and XSP, get the regular trading change only. A change field is omitted when the contract has no trade in that session on the current trading day, or when the price it is measured against is missing. A change of 0 is returned as 0. |
 | `results[].ticker` | string | The ticker symbol for the asset. |
 | `results[].timeframe` | enum: DELAYED, REAL-TIME | The time relevance of the data. |
 | `results[].type` | enum: stocks, options, fx, crypto, indices | The asset class for this ticker. |
@@ -98,20 +98,20 @@ Use Cases: Cross-market analysis, diversified portfolio monitoring, global marke
       "name": "NCLH $5 Call",
       "open_interest": 8921,
       "session": {
-        "change": -0.05,
-        "change_percent": -1.07,
+        "change": -0.06,
+        "change_percent": -0.894,
         "close": 6.65,
         "decimal_volume": "67.0",
         "early_trading_change": -0.01,
-        "early_trading_change_percent": -0.03,
+        "early_trading_change_percent": -0.149,
         "high": 7.01,
-        "late_trading_change": -0.4,
-        "late_trading_change_percent": -0.02,
+        "late_trading_change": 0.05,
+        "late_trading_change_percent": 0.752,
         "low": 5.42,
         "open": 6.7,
         "previous_close": 6.71,
-        "regular_trading_change": -0.6,
-        "regular_trading_change_percent": -0.5,
+        "regular_trading_change": -0.06,
+        "regular_trading_change_percent": -0.894,
         "volume": 67
       },
       "ticker": "O:NCLH221014C00005000",

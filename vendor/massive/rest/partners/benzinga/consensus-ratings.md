@@ -25,6 +25,11 @@ Use Cases: Sentiment aggregation, investment research, peer comparison.
 | `date.lte` | string | No | Filter less than or equal to the value. |
 | `limit` | integer | No | Limit the maximum number of results returned. Defaults to '100' if not specified. The maximum allowed limit is '50000'. |
 | `ticker` | string | Yes | The requested ticker. |
+| `fields` | string | No | A comma-separated list of fields to return for each result (e.g. `buy_ratings,consensus_price_target,consensus_rating`). If omitted, all fields are returned. When set, each result contains only the fields you list; every other field is dropped, even fields a full response always includes. Nested fields can be specified using dot notation (for example, `parent.child`). |
+
+## Response Formats
+
+This endpoint returns JSON by default, and Apache Arrow when the request sends `Accept: application/vnd.apache.arrow.file`. The Arrow body has no `next_url`; to page through results, read the next page's URL from the `Link` response header (`rel="next"`).
 
 ## Response Attributes
 

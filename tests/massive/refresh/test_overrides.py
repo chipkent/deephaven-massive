@@ -93,7 +93,8 @@ def test_every_tag_conflict_has_a_unit() -> None:
 
 def test_names_hold_only_keys_massive_names_nowhere() -> None:
     # The stocks snapshot's minute-bar accumulated volumes, the WebSocket aggregates' running
-    # figures and window end, and the limit-up-limit-down and imbalance events' own fields.
+    # figures and window end, and the limit-up-limit-down, imbalance, and options admin
+    # messages' own fields.
     assert {key for _, key in overrides.NAMES} == {
         "min.av",
         "min.dav",
@@ -111,6 +112,7 @@ def test_names_hold_only_keys_massive_names_nowhere() -> None:
         "o",
         "p",
         "b",
+        "m",
     }
     for entry in overrides.NAMES.values():
         assert entry.long_name == entry.long_name.lower()
@@ -261,9 +263,8 @@ def test_the_venues_are_the_library_s_futures_venues() -> None:
 
 
 def test_every_kind_lists_each_source_once_per_group() -> None:
-    assert {"trades", "quotes", "bars", "values", "luld", "imbalances", "fmv"} == set(
-        overrides.KINDS
-    )
+    kinds = {"trades", "quotes", "bars", "values", "luld", "imbalances", "fmv", "admin_messages"}
+    assert kinds == set(overrides.KINDS)
     for groups in overrides.KINDS.values():
         for sources in groups.values():
             assert len(sources) == len(set(sources))

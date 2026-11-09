@@ -73,6 +73,21 @@ Bulk historical market data, delivered as daily files over S3.
 - [Quotes](https://massive.com/docs/flat-files/stocks/quotes.md): Top of book quotes with nanosecond timestamps from all major U.S. exchanges and darkpools, including NYSE, Nasdaq, Cboe, Finra, and more, made available as a daily downloadable S3 file
 - [Trades](https://massive.com/docs/flat-files/stocks/trades.md): Tick level nanosecond timestamped trade data from all major U.S. exchanges and darkpools including NYSE, Nasdaq, Cboe, Finra, and more, made available as a daily downloadable S3 file
 
+## Migration Guides
+
+Guides for moving an app from another market data API to Massive.
+
+- [Migrate from Alpaca](https://massive.com/docs/migration/guides/alpaca.md): Move an app from Alpaca market data to Massive
+- [Migrate from Alpha Vantage](https://massive.com/docs/migration/guides/alpha-vantage.md): Move an app from Alpha Vantage to Massive
+- [Migrate from Databento](https://massive.com/docs/migration/guides/databento.md): Move an app from Databento to Massive
+- [Migrate from EODHD](https://massive.com/docs/migration/guides/eodhd.md): Move an app from EODHD to Massive
+- [Migrate from Finnhub](https://massive.com/docs/migration/guides/finnhub.md): Move an app from Finnhub to Massive
+- [Migrate from Intrinio](https://massive.com/docs/migration/guides/intrinio.md): Move an app from Intrinio to Massive
+- [Migrate from Tiingo](https://massive.com/docs/migration/guides/tiingo.md): Move an app from Tiingo to Massive
+- [Migrate from Twelve Data](https://massive.com/docs/migration/guides/twelve-data.md): Move an app from Twelve Data to Massive
+- [Migrate from yfinance](https://massive.com/docs/migration/guides/yfinance.md): Move a Python project from yfinance to Massive
+- [Migration Guides](https://massive.com/docs/migration/overview.md): Move an app from another market data API to Massive
+
 ## REST API
 
 REST endpoints for market data, reference data and other financial data sets.
@@ -265,6 +280,7 @@ Streaming market data over WebSocket, pushed to the client as events arrive.
 - [Aggregates (Per Second)](https://massive.com/docs/websocket/indices/aggregates-per-second.md): Stream second-by-second aggregated OHLC (Open, High, Low, Close) for a specified index via WebSocket
 - [Indices Overview](https://massive.com/docs/websocket/indices/overview.md): At Massive, we provide real-time streaming access to index values and aggregates through WebSockets, enabling your applications to receive continuous updates directly as market conditions evolve
 - [Value](https://massive.com/docs/websocket/indices/value.md): Stream real-time index value updates for specified index tickers via WebSocket
+- [Admin & FLEX Options](https://massive.com/docs/websocket/options/admins.md): Stream real-time administrative (admin) messages for options via WebSocket, including OPRA FLEX trade notifications
 - [Aggregates (Per Minute)](https://massive.com/docs/websocket/options/aggregates-per-minute.md): Stream minute-by-minute aggregated OHLC (Open, High, Low, Close) and volume data for a specified options contract via WebSocket
 - [Aggregates (Per Second)](https://massive.com/docs/websocket/options/aggregates-per-second.md): Stream second-by-second aggregated OHLC (Open, High, Low, Close) and volume data for a specified options contract via WebSocket
 - [Fair Market Value](https://massive.com/docs/websocket/options/fair-market-value.md): Stream real-time Fair Market Value (FMV) data for a specified options contract via WebSocket

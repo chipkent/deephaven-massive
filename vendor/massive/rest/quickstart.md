@@ -95,6 +95,14 @@ This pattern is consistent across our REST endpoints. Once you understand how to
 
 Now that you know how to authenticate and issue requests, you have the basic skills to use any of the Massive REST endpoints.
 
+## Apache Arrow Responses
+
+Some endpoints can also return the same data as an [Apache Arrow](https://arrow.apache.org/) file instead of JSON, a compact binary columnar format that is faster to transfer and parse for large result sets. To request it, send an `Accept: application/vnd.apache.arrow.file` header. Where an endpoint supports this, its reference page shows a JSON/Arrow toggle.
+
+The response is a binary Arrow file, not text, so decode it with an Arrow library for your language rather than a JSON parser. The [Apache Arrow libraries](https://arrow.apache.org/install/) are available for most languages and return a table you can iterate row by row or read column by column, then use the same way you would the JSON `results`.
+
+To paginate, note that the binary body does not carry the `next_url` field that a JSON response includes. Instead, the next page's URL is returned in the `Link` response header with `rel="next"` (for example, `Link: <https://api.massive.com/fed/v1/treasury-yields?cursor=...>; rel="next"`). Read that header, request the URL for the next page, and stop once no `rel="next"` link is returned.
+
 ## Explore Client Libraries
 While understanding the manual workflow is valuable, integrating directly with our client libraries is the recommended approach for production use. These libraries handle:
 
