@@ -466,6 +466,20 @@ NAMES: Mapping[tuple[str, str], Name] = MappingProxyType(
         **_named(("stocks/NOI",), "o", _name("imbalance_quantity", "The imbalance quantity.")),
         **_named(("stocks/NOI",), "p", _name("paired_quantity", "The paired quantity.")),
         **_named(("stocks/NOI",), "b", _name("book_clearing_price", "The book clearing price.")),
+        **_named(
+            ("options/AD",),
+            "i",
+            _name(
+                "message_id",
+                "The unique identifier for this admin message, composed of the SIP timestamp "
+                'and the sequence number (e.g., "1793911442930568079-4043826282").',
+            ),
+        ),
+        **_named(
+            ("options/AD",),
+            "m",
+            _name("message", "The administrative message text as distributed by OPRA."),
+        ),
         **{
             (path, "min.av"): Name(
                 long_name="accumulated_volume", description="The accumulated volume."
@@ -654,14 +668,25 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             ),
             _NS_TICKS,
         ),
+        ("/v3/snapshot", "session.last_updated"): Unit(
+            unit=WireUnit.NS,
+            reason="Documented as a nanosecond timestamp and tagged INanoseconds; the live run "
+            "of 2026-11-02 received 19 digits, 1793633547860533354.",
+        ),
+        ("/v3/snapshot", "last_minute.last_updated"): Unit(
+            unit=WireUnit.NS,
+            reason="An undeclared field (`UNDECLARED_FIELDS`) that the live run of 2026-11-02 "
+            "received with 19 digits, 1793633535088572302, like the snapshot's documented "
+            "nanosecond `last_updated` times.",
+        ),
         **_for(
-            ("/v3/snapshot",),
-            ("session.last_updated", "last_minute.last_updated"),
+            ("/v3/reference/options/contracts", "/v3/reference/options/contracts/{options_ticker}"),
+            ("report_time",),
             Unit(
-                unit=WireUnit.NS,
-                reason="Undeclared fields (`UNDECLARED_FIELDS`) that the live run of 2026-11-02 "
-                "received with 19 digits, 1793633547860533354 and 1793633535088572302, like "
-                "the snapshot's documented nanosecond `last_updated` times.",
+                unit=None,
+                reason="Not a time: the specification declares it as the enum `AM` or `PM`, "
+                "whether the company reports before the market opens or after it closes. Its "
+                "name ends in `_time`, which alone makes it look like a timestamp.",
             ),
         ),
         **_for(("/v3/snapshot/indices",), ("last_updated",), _NS_TICKS),
@@ -693,6 +718,7 @@ UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
             "unit would drop every row of the other, and fail the stream.",
             verified=False,
         ),
+        ("options/AD", "t"): _NS_TICKS,
         ("stocks/NOI", "t"): Unit(
             unit=WireUnit.NS,
             reason="Documented as Unix nanoseconds; the documentation sample has 19 digits.",
@@ -931,18 +957,6 @@ UNDECLARED_FIELDS: Mapping[tuple[str, str], UndeclaredField] = MappingProxyType(
                 "1.1199 and `min.vw` 1.1203 on the full-market one, as the stocks and crypto "
                 "snapshots declare it; the text is theirs.",
             ),
-        ),
-        ("/v3/snapshot", "session.vwap"): UndeclaredField(
-            json_type="number",
-            description="The trading volume weighted average price for the session.",
-            reason=f"{_LIVE_RUN} on the unified snapshot, `session.vwap` 341.4434 for a stock; "
-            "the text follows the snapshot's own `last_minute.vwap`.",
-        ),
-        ("/v3/snapshot", "session.last_updated"): UndeclaredField(
-            json_type="integer",
-            description="The nanosecond timestamp of when this information was updated.",
-            reason=f"{_LIVE_RUN} on the unified snapshot, `session.last_updated` "
-            "1793633547860533354; the text is the snapshot's own `last_quote.last_updated`.",
         ),
         ("/v3/snapshot", "last_minute.last_updated"): UndeclaredField(
             json_type="integer",
@@ -1532,6 +1546,9 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
         },
         "luld": {"stocks": ["stocks/LULD"]},
         "imbalances": {"stocks": ["stocks/NOI"]},
+        # No dataset reads the options admin messages yet: the coverage test defers the channel
+        # until one is designed. The kind only gives the generated channel its column order.
+        "admin_messages": {"options": ["options/AD"]},
         "fmv": {
             "stocks": ["stocks/FMV"],
             "options": ["options/FMV"],

@@ -316,6 +316,16 @@ _LEXICONS = (
         },
     ),
     Lexicon(
+        name="options_admin",
+        reason="An options administrative message from the WebSocket, such as a FLEX trade notice.",
+        entries=_from(
+            "/v3/trades/{optionsTicker}",
+            q="sequence_number",
+            t="sip_timestamp",
+            x="exchange",
+        ),
+    ),
+    Lexicon(
         name="snapshot",
         reason="A full-market or movers snapshot row.",
         entries=_from(
@@ -474,6 +484,7 @@ SHAPES: Mapping[tuple[str, str], str] = MappingProxyType(
         ),
         **_shapes(("stocks/LULD",), {"": "luld"}),
         **_shapes(("stocks/NOI",), {"": "imbalance"}),
+        **_shapes(("options/AD",), {"": "options_admin"}),
     }
 )
 """`(source, object prefix)` to the lexicon of that object's keys."""

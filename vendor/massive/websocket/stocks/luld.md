@@ -31,8 +31,8 @@ The channel prefix for this feed is `LULD`. To subscribe, send `LULD.` followed 
 {"action":"subscribe","params":"LULD.*"}
 ```
 
-Separate more than one subscription with commas, for example `LULD.<ticker1>,LULD.<ticker2>`.
-The `LULD.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `LULD.<value1>,LULD.<value2>`.
+The `LULD.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -44,7 +44,7 @@ Use Cases: Volatility monitoring, risk management, compliance tracking, trading 
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify a stock ticker or use * to subscribe to all stock tickers. You can also use a comma separated list to subscribe to multiple stock tickers. You can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify a stock ticker or use * to subscribe to all stock tickers. To subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`. You can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).  |
 
 ## Response Attributes
 

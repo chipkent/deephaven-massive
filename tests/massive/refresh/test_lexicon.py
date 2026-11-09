@@ -98,7 +98,7 @@ def test_a_lexicon_copies_and_freezes_its_entries() -> None:
 
 def test_every_websocket_channel_has_one_message_shape() -> None:
     channels = {source for source, _ in lexicon.SHAPES if not source.startswith("/")}
-    assert len(channels) == 28
+    assert len(channels) == 29
     assert all(lexicon.SHAPES.get((c, "")) for c in channels)
     bars = {c for c in channels if lexicon.SHAPES[c, ""].endswith(("aggregate", "_bar"))}
     assert len(bars) == 12

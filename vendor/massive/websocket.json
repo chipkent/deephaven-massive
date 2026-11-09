@@ -91,6 +91,11 @@
     },
     {
      "paths": [
+      "/options/AD"
+     ]
+    },
+    {
+     "paths": [
       "/business/options/FMV"
      ]
     },
@@ -243,7 +248,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -385,7 +390,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -521,7 +526,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -676,7 +681,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -831,7 +836,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -929,7 +934,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1031,7 +1036,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1108,7 +1113,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1237,7 +1242,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+      "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1310,7 +1315,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract or use * to subscribe to all option contracts.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract or use * to subscribe to all option contracts.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1412,7 +1417,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1515,7 +1520,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract or use * to subscribe to all option contracts.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract or use * to subscribe to all option contracts.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1658,7 +1663,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract or use * to subscribe to all option contracts.\nFor business plans, the wildcard option is only available on the Full Market and Full Market Delayed expansions.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract or use * to subscribe to all option contracts.\nFor business plans, the wildcard option is only available on the Full Market and Full Market Delayed expansions.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1793,6 +1798,87 @@
     ]
    }
   },
+  "/options/AD": {
+   "get": {
+    "summary": "Admin & FLEX Options",
+    "description": "Stream real-time administrative (admin) messages for options, such as OPRA FLEX trade notifications. Subscribe with `AD.*` to receive admin messages from all exchanges, or `AD.{exchange_id}` for a specific exchange.\n\nFLEX (FLexible EXchange) options are customized, exchange-traded options contracts that let counterparties negotiate non-standard terms — such as the strike price, expiration date, exercise style, and settlement type — beyond what standard listed options offer. FLEX trades are disseminated by OPRA as administrative messages and surfaced through this feed.\n",
+    "parameters": [
+     {
+      "name": "exchange_id",
+      "in": "query",
+      "description": "Specify an exchange ID or use * to subscribe to admin messages from all exchanges.\nTo subscribe to more than one exchange, send a comma separated list with the channel prefix on each entry, for example `AD.302,AD.323`.\nSee <a target=\"_blank\" href=\"https://massive.com/docs/rest/options/market-operations/exchanges\" alt=\"Exchanges\">Exchanges</a> for Massive's mapping of exchange IDs.\n",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "pattern": "/^([0-9]+)$/"
+      },
+      "example": "*"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "The WebSocket message for an admin event.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "ev": {
+           "enum": [
+            "AD"
+           ],
+           "description": "The event type."
+          },
+          "i": {
+           "type": "string",
+           "description": "The unique identifier for this admin message, composed of the SIP timestamp and the sequence number (e.g., \"1793911442930568079-4043826282\")."
+          },
+          "x": {
+           "type": "integer",
+           "description": "The exchange ID. See <a target=\"_blank\" href=\"https://massive.com/docs/rest/options/market-operations/exchanges\" alt=\"Exchanges\">Exchanges</a> for Massive's mapping of exchange IDs."
+          },
+          "m": {
+           "type": "string",
+           "description": "The administrative message text as distributed by OPRA."
+          },
+          "t": {
+           "type": "integer",
+           "description": "The SIP timestamp in Unix nanoseconds."
+          },
+          "q": {
+           "type": "integer",
+           "description": "The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+          }
+         }
+        },
+        "example": {
+         "ev": "AD",
+         "i": "1793911442930568079-4043826282",
+         "t": 1793911442930568200,
+         "q": 4043826282,
+         "x": 302,
+         "m": "TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36"
+        }
+       }
+      }
+     }
+    },
+    "x-polygon-entitlement-data-type": {
+     "name": "flex-trades",
+     "description": "FLEX trades and admin messages"
+    },
+    "x-polygon-entitlement-market-type": {
+     "name": "options",
+     "description": "Options data"
+    },
+    "x-polygon-entitlement-allowed-timeframes": [
+     {
+      "name": "realtime",
+      "description": "Real Time Data"
+     }
+    ]
+   }
+  },
   "/business/options/FMV": {
    "get": {
     "summary": "Fair Market Value",
@@ -1801,7 +1887,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -1878,7 +1964,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2007,7 +2093,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+      "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2080,7 +2166,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2175,7 +2261,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2275,7 +2361,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2375,7 +2461,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2452,7 +2538,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2581,7 +2667,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+      "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2654,7 +2740,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2759,7 +2845,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2860,7 +2946,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -2984,7 +3070,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3096,7 +3182,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3208,7 +3294,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3285,7 +3371,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3414,7 +3500,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+      "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3487,7 +3573,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nYou can also use a comma separated list to subscribe to multiple index tickers.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
+      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nTo subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3603,7 +3689,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nYou can also use a comma separated list to subscribe to multiple index tickers.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
+      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nTo subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3719,7 +3805,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nYou can also use a comma separated list to subscribe to multiple index tickers.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
+      "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nTo subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3796,7 +3882,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nYou can also use a comma separated list to subscribe to multiple future tickers.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
+      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3883,7 +3969,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nYou can also use a comma separated list to subscribe to multiple future tickers.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
+      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -3985,7 +4071,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nYou can also use a comma separated list to subscribe to multiple future tickers.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
+      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -4113,7 +4199,7 @@
      {
       "name": "ticker",
       "in": "query",
-      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nYou can also use a comma separated list to subscribe to multiple future tickers.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
+      "description": "Specify a future ticker or use * to subscribe to all future tickers.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
       "required": true,
       "schema": {
        "type": "string",
@@ -5313,6 +5399,37 @@
      }
     ]
    },
+   "OptionAdminEvent": {
+    "type": "object",
+    "properties": {
+     "ev": {
+      "enum": [
+       "AD"
+      ],
+      "description": "The event type."
+     },
+     "i": {
+      "type": "string",
+      "description": "The unique identifier for this admin message, composed of the SIP timestamp and the sequence number (e.g., \"1793911442930568079-4043826282\")."
+     },
+     "x": {
+      "type": "integer",
+      "description": "The exchange ID. See <a target=\"_blank\" href=\"https://massive.com/docs/rest/options/market-operations/exchanges\" alt=\"Exchanges\">Exchanges</a> for Massive's mapping of exchange IDs."
+     },
+     "m": {
+      "type": "string",
+      "description": "The administrative message text as distributed by OPRA."
+     },
+     "t": {
+      "type": "integer",
+      "description": "The SIP timestamp in Unix nanoseconds."
+     },
+     "q": {
+      "type": "integer",
+      "description": "The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+     }
+    }
+   },
    "OptionSymbol": {
     "type": "string",
     "description": "The ticker symbol for the given option contract."
@@ -6345,7 +6462,7 @@
    "StocksTickerParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nYou can also use a comma separated list to subscribe to multiple stock tickers.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
+    "description": "Specify a stock ticker or use * to subscribe to all stock tickers.\nTo subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`.\nYou can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6356,7 +6473,7 @@
    "OptionsTickerParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify an option contract or use * to subscribe to all option contracts.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+    "description": "Specify an option contract or use * to subscribe to all option contracts.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6367,7 +6484,7 @@
    "OptionsTickerParamWithExceptions": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify an option contract or use * to subscribe to all option contracts.\nFor business plans, the wildcard option is only available on the Full Market and Full Market Delayed expansions.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+    "description": "Specify an option contract or use * to subscribe to all option contracts.\nFor business plans, the wildcard option is only available on the Full Market and Full Market Delayed expansions.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6378,7 +6495,7 @@
    "OptionsTickerWithoutWildcardParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nYou can also use a comma separated list to subscribe to multiple option contracts.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
+    "description": "Specify an option contract. You're only allowed to subscribe to 1,000 option contracts per connection.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`.\nYou can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6386,10 +6503,21 @@
     },
     "example": "O:SPY241220P00720000"
    },
+   "OptionsAdminExchangeParam": {
+    "name": "exchange_id",
+    "in": "query",
+    "description": "Specify an exchange ID or use * to subscribe to admin messages from all exchanges.\nTo subscribe to more than one exchange, send a comma separated list with the channel prefix on each entry, for example `AD.302,AD.323`.\nSee <a target=\"_blank\" href=\"https://massive.com/docs/rest/options/market-operations/exchanges\" alt=\"Exchanges\">Exchanges</a> for Massive's mapping of exchange IDs.\n",
+    "required": true,
+    "schema": {
+     "type": "string",
+     "pattern": "/^([0-9]+)$/"
+    },
+    "example": "*"
+   },
    "ForexTickerParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nYou can also use a comma separated list to subscribe to multiple forex pairs.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
+    "description": "Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`.\nYou can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6400,7 +6528,7 @@
    "CryptoTickerParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nYou can also use a comma separated list to subscribe to multiple crypto pairs.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
+    "description": "Specify a crypto pair in the format {from}-{to} or use * to subscribe to all crypto pairs.\nTo subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `XT.BTC-USD,XT.ETH-USD`.\nYou can retrieve active crypto tickers from our [Crypto Tickers API](https://massive.com/docs/rest/crypto/tickers/all-tickers).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6411,7 +6539,7 @@
    "IndicesIndexParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nYou can also use a comma separated list to subscribe to multiple index tickers.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
+    "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nTo subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6422,7 +6550,7 @@
    "IndicesIndexParamWithoutWildcard": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nYou can also use a comma separated list to subscribe to multiple index tickers.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
+    "description": "Specify an index ticker using \"I:\" prefix or use * to subscribe to all index tickers.\nTo subscribe to more than one index, send a comma separated list with the channel prefix on each entry, for example `A.I:SPX,A.I:NDX`.\nYou can retrieve available index tickers from our [Index Tickers API](https://massive.com/docs/rest/indices/tickers/all-tickers).\n",
     "required": true,
     "schema": {
      "type": "string",
@@ -6433,7 +6561,7 @@
    "FuturesTickerParam": {
     "name": "ticker",
     "in": "query",
-    "description": "Specify a future ticker or use * to subscribe to all future tickers.\nYou can also use a comma separated list to subscribe to multiple future tickers.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
+    "description": "Specify a future ticker or use * to subscribe to all future tickers.\nTo subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`.\nYou can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).\n",
     "required": true,
     "schema": {
      "type": "string",

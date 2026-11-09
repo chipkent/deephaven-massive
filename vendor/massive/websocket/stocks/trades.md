@@ -32,8 +32,8 @@ The channel prefix for this feed is `T`. To subscribe, send `T.` followed by a v
 {"action":"subscribe","params":"T.*"}
 ```
 
-Separate more than one subscription with commas, for example `T.<ticker1>,T.<ticker2>`.
-The `T.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `T.<value1>,T.<value2>`.
+The `T.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -45,7 +45,7 @@ Use Cases: Live monitoring, algorithmic trading, market analysis, data visualiza
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify a stock ticker or use * to subscribe to all stock tickers. You can also use a comma separated list to subscribe to multiple stock tickers. You can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify a stock ticker or use * to subscribe to all stock tickers. To subscribe to more than one ticker, send a comma separated list with the channel prefix on each entry, for example `T.AAPL,T.MSFT`. You can retrieve available stock tickers from our [Stock Tickers API](https://massive.com/docs/rest/stocks/tickers/all-tickers).  |
 
 ## Response Attributes
 

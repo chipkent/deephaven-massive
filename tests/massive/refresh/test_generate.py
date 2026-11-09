@@ -153,9 +153,9 @@ def test_a_reworded_description_changes_only_the_descriptions_file(tmp_path: Pat
 
 
 def test_every_channel_is_accounted_for_exactly_once(real: generate.Generated) -> None:
-    # The specification's 37 channels: generated, excluded (Launchpad), or deprecated (`XL2`).
+    # The specification's 38 channels: generated, excluded (Launchpad), or deprecated (`XL2`).
     coverage = real.ws_coverage
-    assert len(coverage.specified) == 37
+    assert len(coverage.specified) == 38
     generated = {f"/{key}" for key in coverage.generated} | {
         f"/business/{key}" for key in coverage.generated if key.endswith("/FMV")
     }
@@ -163,7 +163,7 @@ def test_every_channel_is_accounted_for_exactly_once(real: generate.Generated) -
     assert sum(len(part) for part in parts) == len(coverage.specified)
     assert frozenset().union(*parts) == coverage.specified
     assert coverage.deprecated == {"/crypto/XL2"}
-    assert len(coverage.generated) == 28
+    assert len(coverage.generated) == 29
 
 
 def test_every_documented_prefix_is_accounted_for_exactly_once(

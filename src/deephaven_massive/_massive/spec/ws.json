@@ -209,6 +209,19 @@
    ]
   },
   {
+   "key": "options/AD",
+   "fields": [
+    {"column": "MessageId", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "i"},
+    {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "x"},
+    {"column": "Message", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "m"},
+    {"column": "SipTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"},
+    {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "q"}
+   ],
+   "memberships": [
+    {"group": "options", "kind": "admin_messages", "position": 0, "projection": null}
+   ]
+  },
+  {
    "key": "options/FMV",
    "fields": [
     {"column": "Fmv", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "fmv"},

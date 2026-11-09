@@ -53,14 +53,21 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. The column holds Massive's value as JSON text. |
 | `Cfi` | String | The 6 letter CFI code of the contract (defined in ISO 10962 (https://en.wikipedia.org/wiki/ISO_10962)) |
+| `CompanyTicker` | String | KPI binary options only. The ticker of the company the KPI belongs to, like NFLX. |
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". |
 | `Correction` | long | The correction number for this option contract. |
 | `ExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. |
 | `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. |
+| `Metric` | String | KPI binary options only. The KPI the contract settles on, like "Earnings Per Share ($/share)". |
 | `PrimaryExchange` | String | The MIC code of the primary exchange that this contract is listed on. |
+| `ReportTime` | String | KPI binary options only. AM if the company reports before the market opens, PM if after it closes. |
+| `ReportingPeriod` | String | KPI binary options only. The fiscal period the KPI is for, like 2026Q3. |
+| `Scale` | long | KPI binary options only. The KPI value divided by scale gives the strike price, like 1000000000 for a KPI in billions. A negative scale means an inverted KPI, like Loss Per Share. |
 | `SharesPerContract` | double | The number of shares per contract for this contract. |
 | `StrikePrice` | double | The strike price of the option contract. |
+| `Type` | String | The type of option contract: standard or binary. It can be missing, for example on contracts listed before this field was added, so a missing type says nothing about the contract. |
 | `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." |
+| `UnderlyingType` | String | What the contract is based on. For now only set on KPI binary options, as kpi. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
@@ -76,14 +83,21 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `RawSymbol` | `ticker` |
 | `AdditionalUnderlyings` | `additional_underlyings` |
 | `Cfi` | `cfi` |
+| `CompanyTicker` | `company_ticker` |
 | `ContractType` | `contract_type` |
 | `Correction` | `correction` |
 | `ExerciseStyle` | `exercise_style` |
 | `ExpirationDate` | `expiration_date` |
+| `Metric` | `metric` |
 | `PrimaryExchange` | `primary_exchange` |
+| `ReportTime` | `report_time` |
+| `ReportingPeriod` | `reporting_period` |
+| `Scale` | `scale` |
 | `SharesPerContract` | `shares_per_contract` |
 | `StrikePrice` | `strike_price` |
+| `Type` | `type` |
 | `Underlying` | `underlying_ticker` |
+| `UnderlyingType` | `underlying_type` |
 | `TimestampInsert` |  |
 
 </details>
@@ -95,4 +109,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-10-30, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

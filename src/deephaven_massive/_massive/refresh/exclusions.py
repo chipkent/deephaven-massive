@@ -170,6 +170,8 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     _rest("/v1/reference/ipos", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/dev/trades/{ticker}", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/10-K/vX_0/sections", _UNDOCUMENTED, undocumented=True),
+    _rest("/options/vX/open-interest", _UNDOCUMENTED, undocumented=True),
+    _rest("/options/vX/open-interest/underlying", _UNDOCUMENTED, undocumented=True),
     _rest(
         "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}",
         "Covered by the stocks snapshots dataset, which sends the `tickers` filter to the "

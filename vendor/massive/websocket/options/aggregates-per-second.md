@@ -32,8 +32,8 @@ The channel prefix for this feed is `A`. To subscribe, send `A.` followed by a v
 {"action":"subscribe","params":"A.O:SPY251219C00650000"}
 ```
 
-Separate more than one subscription with commas, for example `A.<ticker1>,A.<ticker2>`.
-The `A.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `A.<value1>,A.<value2>`.
+The `A.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -45,7 +45,7 @@ Use Cases: Real-time monitoring, dynamic charting, intraday strategy development
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify an option contract or use * to subscribe to all option contracts. You can also use a comma separated list to subscribe to multiple option contracts. You can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).  |
+| `ticker` | string | Yes | Specify an option contract or use * to subscribe to all option contracts. To subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.O:SPY251219C00650000,T.O:SPY251219C00660000`. You can retrieve active options contracts from our [Options Contracts API](https://massive.com/docs/rest/options/contracts/all-contracts).  |
 
 ## Response Attributes
 

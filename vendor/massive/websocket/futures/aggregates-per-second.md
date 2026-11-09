@@ -32,8 +32,8 @@ The channel prefix for this feed is `A`. To subscribe, send `A.` followed by a v
 {"action":"subscribe","params":"A.*"}
 ```
 
-Separate more than one subscription with commas, for example `A.<ticker1>,A.<ticker2>`.
-The `A.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `A.<value1>,A.<value2>`.
+The `A.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -45,7 +45,7 @@ Use Cases: Real-time monitoring, dynamic charting, intraday strategy development
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify a future ticker or use * to subscribe to all future tickers. You can also use a comma separated list to subscribe to multiple future tickers. You can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).  |
+| `ticker` | string | Yes | Specify a future ticker or use * to subscribe to all future tickers. To subscribe to more than one contract, send a comma separated list with the channel prefix on each entry, for example `T.ESZ4,T.NQZ4`. You can retrieve available future tickers from our [Futures Contracts API](https://massive.com/docs/rest/futures/contracts/contract-overview).  |
 
 ## Response Attributes
 

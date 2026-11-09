@@ -1294,7 +1294,13 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
+    (Transport.WS, "options/AD"): Deferral(
+        "OPRA administrative messages, mainly FLEX trade notices: market data, so serving it "
+        "is a new public dataset, keyed by exchange rather than by symbol.",
+        539,
+    ),
+}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket

@@ -31,8 +31,8 @@ The channel prefix for this feed is `C`. To subscribe, send `C.` followed by a v
 {"action":"subscribe","params":"C.*"}
 ```
 
-Separate more than one subscription with commas, for example `C.<ticker1>,C.<ticker2>`.
-The `C.*` value subscribes to all tickers.
+Separate more than one subscription with commas, for example `C.<value1>,C.<value2>`.
+The `C.*` value subscribes to all `ticker` values.
 
 **Description:**
 
@@ -44,7 +44,7 @@ Use Cases: Live monitoring, market analysis, trading decision support, dynamic i
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ticker` | string | Yes | Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs. You can also use a comma separated list to subscribe to multiple forex pairs. You can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).  |
+| `ticker` | string | Yes | Specify a forex pair in the format {from}-{to} or use * to subscribe to all forex pairs. To subscribe to more than one pair, send a comma separated list with the channel prefix on each entry, for example `C.EUR-USD,C.GBP-USD`. You can retrieve active forex tickers from our [Forex Tickers API](https://massive.com/docs/rest/forex/tickers/all-tickers).  |
 
 ## Response Attributes
 
