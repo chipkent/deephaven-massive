@@ -1546,8 +1546,7 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
         },
         "luld": {"stocks": ["stocks/LULD"]},
         "imbalances": {"stocks": ["stocks/NOI"]},
-        # No dataset reads the options admin messages yet: the coverage test defers the channel
-        # until one is designed. The kind only gives the generated channel its column order.
+        # OPRA's administrative messages, one channel alone: `options.admin_messages`.
         "admin_messages": {"options": ["options/AD"]},
         "fmv": {
             "stocks": ["stocks/FMV"],

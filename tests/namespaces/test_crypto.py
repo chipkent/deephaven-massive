@@ -48,7 +48,7 @@ from deephaven_massive._query import (
     Query,
     QueryBase,
     StreamHistoryQuery,
-    StreamQuery,
+    SymbolStreamQuery,
     query_class,
 )
 from deephaven_massive._session import CATALOG
@@ -105,10 +105,10 @@ def test_the_namespace_declares_every_crypto_dataset() -> None:
     [
         (crypto.TRADES, StreamHistoryQuery),
         (crypto.LAST_TRADE, Query),
-        (crypto.QUOTES, StreamQuery),
+        (crypto.QUOTES, SymbolStreamQuery),
         (crypto.BARS, HistoryQuery),
         (crypto.PREVIOUS_DAY_BAR, Query),
-        (crypto.FMV, StreamQuery),
+        (crypto.FMV, SymbolStreamQuery),
         (crypto.SNAPSHOTS, Query),
         (crypto.MOVERS, Query),
         (crypto.DAILY_OPEN_CLOSE, Query),
@@ -316,7 +316,8 @@ def test_the_streams_and_snapshots_accept_all(
 
 
 @pytest.mark.parametrize(
-    ("method", "expected"), [("quotes", StreamQuery), ("fmv", StreamQuery), ("snapshots", Query)]
+    ("method", "expected"),
+    [("quotes", SymbolStreamQuery), ("fmv", SymbolStreamQuery), ("snapshots", Query)],
 )
 def test_the_single_class_factories(
     massive_session: dm.MassiveSession, method: str, expected: type
@@ -941,9 +942,9 @@ def test_a_documented_frame_lands_in_blink(
     symbol = str(dm.canonical_symbol_crypto(topic.split(".", 1)[1]))
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
-        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
+        query = cast("SymbolStreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
     elif dataset == "bars":
-        query = cast("StreamQuery", namespace.bars(symbol, dm.Timespan.MINUTE))
+        query = cast("SymbolStreamQuery", namespace.bars(symbol, dm.Timespan.MINUTE))
     else:
         query = getattr(namespace, dataset)(symbol)
     blink = query.blink()

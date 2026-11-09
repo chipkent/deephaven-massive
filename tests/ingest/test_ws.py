@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
-    from deephaven_massive._query import StreamQuery
+    from deephaven_massive._query import SymbolStreamQuery
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
@@ -1220,6 +1220,21 @@ def test_contracts_of_opening_streams_count_against_the_cap(
         connection.cap_pending[99] = frozenset({"T.O:SPY251219C00610000"})  # still opening
         with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
             ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
+        del connection.cap_pending[99]
+    ws_session.session.release(first)
+
+
+def test_a_wildcard_of_an_opening_stream_counts_as_no_contract(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `dm.ALL` stream still opening, or the admin messages' `AD.*`, takes no room under the cap.
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
+    monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 2)
+    first = ws_session.query(OPTIONS, ["O:SPY251219C00600000"]).blink()
+    connection = ws_session.connection("wss://socket.test/options")
+    with ws_session.connections.group.lock:
+        connection.cap_pending[99] = frozenset({"T.*", "AD.*"})  # still opening
+        ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
         del connection.cap_pending[99]
     ws_session.session.release(first)
 
@@ -2853,14 +2868,14 @@ def symbol_watchlist(dh_input_table: Callable[..., InputTable]) -> InputTable:
     return watchlist
 
 
-def static_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
+def static_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
     def open_result(ws_session: WsSession, upstream: list[Table], _: InputTable | None) -> Live:
         return Live(verb(ws_session.query(TRADES, [WATCHED])), upstream)
 
     return open_result
 
 
-def watchlist_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
+def watchlist_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
     def open_result(
         ws_session: WsSession, upstream: list[Table], watchlist: InputTable | None
     ) -> Live:

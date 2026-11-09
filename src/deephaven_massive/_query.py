@@ -1,4 +1,4 @@
-"""The four query classes, their verbs, and the choice of a dataset's class.
+"""The five query classes, their verbs, and the choice of a dataset's class.
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
@@ -7,9 +7,14 @@ and each verb returns a Deephaven `Table` of a particular shape:
 | Class                | Verbs                                                     |
 |----------------------|-----------------------------------------------------------|
 | `Query`              | `fetch()`, `poll(interval)`                               |
-| `StreamQuery`        | `blink()`, `append_only()`, `ring(capacity)`, `last_by()` |
+| `StreamQuery`        | `blink()`, `append_only()`, `ring(capacity)`              |
+| `SymbolStreamQuery`  | the `StreamQuery` verbs and `last_by()`                   |
 | `HistoryQuery`       | `history(start, end=None)`                                |
-| `StreamHistoryQuery` | the stream verbs and `history()`                          |
+| `StreamHistoryQuery` | the `SymbolStreamQuery` verbs and `history()`             |
+
+`StreamQuery` is the type of every live stream. A stream whose rows name no symbol, such as the
+options admin messages, is a plain `StreamQuery`: it has no `last_by()`, whose default key is
+`Symbol`. Every stream whose rows name their symbol is a `SymbolStreamQuery`.
 
 A verb that cannot work for a dataset does not exist on its query class, so tab completion and
 `hasattr` are the contract; calling one raises an `AttributeError` that names the verbs the
@@ -55,9 +60,10 @@ class and the dataset layer never refers to the query classes.
 Users import the classes for type annotations from the public module
 `deephaven_massive.queries`, and never construct them.
 
-The module is one subject although it runs past 1,000 lines: the four classes build on one
-base and on each other (`StreamHistoryQuery` is a `StreamQuery` and a `HistoryQuery`), so a
-verb, and the choice of the class that offers it, read whole only beside all four.
+The module is one subject although it runs past 1,000 lines: the five classes build on one
+base and on each other (`StreamHistoryQuery` is a `SymbolStreamQuery`, itself a `StreamQuery`,
+and a `HistoryQuery`), so a
+verb, and the choice of the class that offers it, read whole only beside all five.
 """
 
 from __future__ import annotations
@@ -156,6 +162,7 @@ __all__ = [
     "QueryCall",
     "StreamHistoryQuery",
     "StreamQuery",
+    "SymbolStreamQuery",
     "bar_query_class",
     "query_class",
     "verbs",
@@ -182,7 +189,8 @@ _VERBS: Final = ("fetch", "poll", "blink", "append_only", "ring", "last_by", "hi
 """Every verb's name, in the order a missing verb's message lists the verbs a query has."""
 
 _STREAM_VERBS: Final = frozenset({"blink", "append_only", "ring", "last_by"})
-"""The verbs a dataset with WebSocket channels serves."""
+"""The verbs a dataset with WebSocket channels serves; `last_by` only where its rows name their
+symbol (`DatasetSpec.names_symbols`)."""
 
 _Q = TypeVar("_Q", bound="QueryBase")
 _P = ParamSpec("_P")
@@ -272,9 +280,9 @@ def _serves(spec: DatasetSpec, verb: str) -> bool:
     """Tell whether a dataset's query has a verb, from the transports its spec declares.
 
     The query classes follow from the same transports (`query_class`, below): a fetch path
-    gives `fetch()` and `poll()`, channels the stream verbs, and a history source `history()`. A
-    `bars` dataset streams at some timespans only, which is enough to name it as the dataset that
-    streams.
+    gives `fetch()` and `poll()`, channels the stream verbs (`last_by()` only where the rows name
+    their symbol), and a history source `history()`. A `bars` dataset streams at some timespans
+    only, which is enough to name it as the dataset that streams.
 
     Args:
         spec: The dataset.
@@ -283,6 +291,8 @@ def _serves(spec: DatasetSpec, verb: str) -> bool:
     Returns:
         True when the dataset serves the verb.
     """
+    if verb == "last_by":
+        return spec.has_channels and spec.names_symbols
     if verb in _STREAM_VERBS:
         return spec.has_channels
     if verb == "history":
@@ -717,7 +727,8 @@ class QueryBase:
         In order: for `fetch()` or `poll()` of intraday bars, `history(start, end)`, then the
         previous day's bar; the other datasets of the same kind and asset class that serve the
         verb (a stream's one-row dataset, such as `stocks.last_trade` for `fetch()` of
-        `stocks.trades`, and back); for `fetch()` or `poll()`, the class's `snapshots` dataset,
+        `stocks.trades`, and back); for `fetch()` or `poll()` of a dataset whose rows name their
+        symbol, the class's `snapshots` dataset,
         the current state on a paid plan, with its `Fmv` column named for a fair market value
         dataset, since Massive's REST serves fair market value only there; for `history()` of
         a dataset with a time axis, its `start=` and `end=` arguments; for a stream verb of bars
@@ -749,7 +760,7 @@ class QueryBase:
         if siblings:
             return f"use {siblings}"
         snapshots = by_name.get(f"{spec.name.partition('.')[0]}.snapshots")
-        if verb in ("fetch", "poll") and snapshots is not None:
+        if verb in ("fetch", "poll") and snapshots is not None and spec.names_symbols:
             # Massive's REST serves fair market value only as a column of the snapshot.
             fair_value = (
                 spec.kind == "fmv"
@@ -1290,31 +1301,24 @@ class Query(QueryBase):
 
 
 class StreamQuery(QueryBase):
-    """A streaming query: `blink()`, `append_only()`, `ring()`, and `last_by()`.
+    """A streaming query: `blink()`, `append_only()`, and `ring()`.
 
-    You get the query from a dataset method, such as `m.stocks.luld(...)`, and you can reuse it. Its
-    four methods return the same stream as four Deephaven table types. Identical queries share one
-    stream, and each call returns its own table. The stream stays subscribed while any of its
-    tables, or a table made from one, is in use.
+    Every live stream's query is a `StreamQuery`. When the stream's rows have a `Symbol` column, as
+    `m.stocks.luld(...)`'s do, its query is a `SymbolStreamQuery`, which adds `last_by()`.
+    `m.options.admin_messages()` has no `Symbol` column, so its query has only these three methods.
+    You can reuse a query. Its methods return the same stream as different Deephaven table types.
+    Identical queries share one stream, and each call returns its own table. The stream stays
+    subscribed while any of its tables, or a table made from one, is in use.
 
     A method returns once its table exists, without waiting for Massive to confirm the subscription.
     Later failures fail the table and show in `m.streams()`. A refused subscription and a rejected
     key are two such failures. The next call on an identical query then opens a new stream.
 
-    A static table of symbols is read once, when you call. A watchlist is followed: the stream
-    subscribes and unsubscribes as you add and delete rows. A row that isn't Massive's exact ticker
-    is skipped and listed in `m.streams()`.
-
-    Massive allows 1,000 option contracts on one connection, and the library counts a contract's
-    trades and quotes as two. Passing more contracts than that as a list or a static table raises
-    `ValueError`. A watchlist's extra contracts wait for room, and `Deferred` in `m.streams()`
-    counts them.
-
     Example:
         ::
 
-            bands = m.stocks.luld(dm.ALL).last_by()  # the latest band of every ticker
             recent = m.stocks.imbalances(["AAPL", "MSFT"]).ring(1000)
+            notices = m.options.admin_messages().append_only()
     """
 
     __slots__ = ()
@@ -1331,7 +1335,9 @@ class StreamQuery(QueryBase):
     def _stream_request(self) -> Request:
         """Return the request the stream is opened for, with a static symbol table read once.
 
-        A static table cannot be listened to, so it is read now, like `fetch()` reads one
+        The request of a stream whose rows name no symbol (`DatasetSpec.names_symbols` False),
+        which has none, gets `ALL`: the stream subscribes its channel's every topic. A static
+        table cannot be listened to, so it is read now, like `fetch()` reads one
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
@@ -1344,6 +1350,10 @@ class StreamQuery(QueryBase):
         """
         request = self._request
         symbols = request.symbols
+        if not self._spec.names_symbols:
+            # A stream whose rows name no symbol subscribes its channel's every topic, so its
+            # stream is keyed as dm.ALL's would be.
+            return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
             read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
             if self._spec.asset_class is AssetClass.CRYPTO:
@@ -1421,13 +1431,15 @@ class StreamQuery(QueryBase):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - it opens a fair market value stream of a subscription in
-                  `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
+                - the dataset streams only in real time (fair market value, the options admin
+                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change.
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
@@ -1463,13 +1475,15 @@ class StreamQuery(QueryBase):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - it opens a fair market value stream of a subscription in
-                  `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
+                - the dataset streams only in real time (fair market value, the options admin
+                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change.
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
@@ -1509,13 +1523,15 @@ class StreamQuery(QueryBase):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - it opens a fair market value stream of a subscription in
-                  `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
+                - the dataset streams only in real time (fair market value, the options admin
+                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change.
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
@@ -1529,6 +1545,32 @@ class StreamQuery(QueryBase):
         return self._stream(
             lambda blink: ring_table(blink, rows), self._stream_request(), verb="ring"
         )
+
+
+class SymbolStreamQuery(StreamQuery):
+    """A streaming query with a `Symbol` column: the `StreamQuery` methods and `last_by()`.
+
+    You get the query from a dataset method, such as `m.stocks.luld(...)`, and you can reuse it. Its
+    four methods return the same stream as four Deephaven table types; `help(StreamQuery)` covers
+    what every stream method shares.
+
+    A static table of symbols is read once, when you call. A watchlist is followed: the stream
+    subscribes and unsubscribes as you add and delete rows. A row that isn't Massive's exact ticker
+    is skipped and listed in `m.streams()`.
+
+    Massive allows 1,000 option contracts on one connection, and the library counts a contract's
+    trades and quotes as two. Passing more contracts than that as a list or a static table raises
+    `ValueError`. A watchlist's extra contracts wait for room, and `Deferred` in `m.streams()`
+    counts them.
+
+    Example:
+        ::
+
+            bands = m.stocks.luld(dm.ALL).last_by()  # the latest band of every ticker
+            recent = m.stocks.imbalances(["AAPL", "MSFT"]).ring(1000)
+    """
+
+    __slots__ = ()
 
     def _last_by_keys(self, by: object) -> tuple[str, ...]:
         """Validate the `by` argument of `last_by`.
@@ -1600,8 +1642,8 @@ class StreamQuery(QueryBase):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - it opens a fair market value stream of a subscription in
-                  `MassiveConfig.delayed_subscriptions`, since fair market value is real-time only.
+                - the dataset is fair market value, which streams only in real time, and
+                  `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
@@ -2068,12 +2110,13 @@ class HistoryQuery(QueryBase):
             return dh_arrow.to_table(schema.arrow_schema().empty_table())
 
 
-class StreamHistoryQuery(StreamQuery, HistoryQuery):
+class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     """A streaming query that also has history: the four stream methods and `history()`.
 
     You get the query from a dataset method, such as `m.stocks.bars(...)` with a one-second or
     one-minute timespan, and you can reuse it. `help(StreamQuery)` covers what every stream method
-    shares. Import it with `from deephaven_massive.queries import StreamQuery`.
+    shares, and `help(SymbolStreamQuery)` covers the symbols and watchlists it takes. Import it with
+    `from deephaven_massive.queries import StreamHistoryQuery`.
 
     Example:
         ::
@@ -2097,9 +2140,12 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
     | Channels | History | Fetch | Class                |
     |----------|---------|-------|----------------------|
     | no       | no      | yes   | `Query`              |
-    | yes      | no      | no    | `StreamQuery`        |
+    | yes      | no      | no    | `SymbolStreamQuery`  |
     | no       | yes     | no    | `HistoryQuery`       |
     | yes      | yes     | no    | `StreamHistoryQuery` |
+
+    A stream whose rows name no symbol (`DatasetSpec.names_symbols` False) has channels alone and
+    gives `StreamQuery`, which has no `last_by()`.
 
     `DatasetSpec` rejects every other combination when it is created: a fetch path is a
     dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset gives
@@ -2116,7 +2162,9 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
         return HistoryQuery
     if not spec.has_channels:
         return Query if spec.has_fetch else HistoryQuery
-    return StreamHistoryQuery if spec.has_history else StreamQuery
+    if not spec.names_symbols:
+        return StreamQuery
+    return StreamHistoryQuery if spec.has_history else SymbolStreamQuery
 
 
 def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:

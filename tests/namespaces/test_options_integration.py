@@ -65,6 +65,8 @@ PeriodBarReport: TypeAlias = (
     "Callable[[str, Mapping[str, tuple[date, date]], Mapping[str, tuple[int, int]]], bool]"
 )
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
+StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
+WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -803,3 +805,48 @@ def test_the_chain_follows_a_live_table_of_underlyings(
         evidence(f"after deleting QQQ: {sorted(left)}, {result.size} rows")
     finally:
         m.release(result)
+
+
+_ADMIN_WAIT = 60.0
+"""Seconds the admin messages test waits for Massive's acknowledgement, and then for a row."""
+
+
+@pytest.mark.needs("options:advanced")
+@pytest.mark.verifies("82")
+@pytest.mark.timeout(150)
+def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
+    live_session: dm.MassiveSession,
+    *,
+    wait_acked: WaitAcked,
+    table_rows: TableRows,
+    stream_report: StreamReport,
+    evidence: Evidence,
+) -> None:
+    """Whether Massive acknowledges `AD.*` on the real-time options feed, and what rows carry.
+
+    With Options Advanced held, streams `m.options.admin_messages()`, which subscribes every
+    exchange (`AD.*`) on `socket.massive.com`, and records the connection, the stream, and up
+    to five rows: each one's exchange, sequence number, SIP timestamp, and text as OPRA sent it.
+    Passes when Massive acknowledged the topic, which it does whether or not the market is open,
+    and every row that arrived has its `Timestamp` and `Message`. Messages come only with FLEX
+    activity or an exchange's notice, so no row is required; a refusal fails the test, since
+    Options Advanced includes the channel.
+    """
+    table = live_session.options.admin_messages().append_only()
+    acked = wait_acked(live_session, 1, time.monotonic() + _ADMIN_WAIT)
+    deadline = time.monotonic() + _ADMIN_WAIT
+    pause = threading.Event()  # never set; only paces the wait for a row
+    while acked and not table_rows(table) and time.monotonic() < deadline:
+        pause.wait(1.0)
+    rows = table_rows(table)
+    for line in stream_report(live_session):
+        evidence(line)
+    live_session.release(table)
+    evidence(f"AD.* acknowledged topics {acked}; rows received: {len(rows)}")
+    for row in rows[:5]:
+        evidence(
+            f"    exchange {row['Exchange']} sequence {row['SequenceNumber']} at "
+            f"{row['Timestamp']}: {row['Message']!r}"
+        )
+    assert acked, "Massive acknowledged no AD.* topic on the real-time options feed"
+    assert all(row["Timestamp"] is not None and row["Message"] is not None for row in rows)

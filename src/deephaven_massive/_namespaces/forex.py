@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         HistoryQuery,
         Query,
         StreamHistoryQuery,
-        StreamQuery,
+        SymbolStreamQuery,
     )
     from deephaven_massive._types import StreamSpan, Symbols
 
@@ -161,6 +161,7 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
+    real_time_only=True,
 )
 """`m.forex.fmv`: the `FMV` stream of the Business feed."""
 
@@ -439,7 +440,7 @@ class _Forex(Namespace):
         return cast("Query", query)
 
     @raises_through(build_query)
-    def fmv(self, symbols: Symbols) -> StreamQuery:
+    def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
         Each row holds one update of Massive's own real-time price estimate. Only Currencies
@@ -464,7 +465,7 @@ class _Forex(Namespace):
 
                 fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
-        return cast("StreamQuery", build_query(self._core, FMV, symbols=symbols))
+        return cast("SymbolStreamQuery", build_query(self._core, FMV, symbols=symbols))
 
     @raises_through(build_query)
     def snapshots(self, symbols: Symbols) -> Query:

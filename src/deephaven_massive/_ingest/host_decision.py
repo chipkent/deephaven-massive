@@ -8,8 +8,7 @@ behind, 10 for futures); and `business.massive.com` for the Business plans' fair
 between feeds. This module decides the host once per (asset class, channel family), before the
 first connection, and never by opening a connection to try:
 
-- the FMV family is always `business.massive.com`, real-time only, so a subscription listed as
-  delayed refuses it;
+- the FMV family is always `business.massive.com`;
 - a TICK host pinned in `MassiveConfig.websocket_hosts` is used as is (the configuration has checked
   it against `delayed_subscriptions`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
@@ -22,6 +21,13 @@ first connection, and never by opening a connection to try:
   the exact fix rather than open a connection Massive would refuse. Without a delayed label
   nothing is guessed: a refused snapshot, an undocumented label, or no label at all streams
   from the real-time host, and a refusal from Massive fails the refused streams.
+
+A dataset Massive streams only in real time (`DatasetSpec.real_time_only`: fair market value,
+the options admin messages) has no delayed feed, yet it shares its class's decision, which is
+cached per class and family. So `require_real_time` checks each such stream when it opens: a
+session whose `delayed_subscriptions` lists its subscription is refused with `ValueError`, and a
+key whose data Massive labels delayed with an `EntitlementError` saying that the plan does not
+include the dataset.
 
 Recency follows the host (`recency_of`): the real-time and Business hosts serve real-time
 data, the delayed host delayed data, and any other pinned host `UNKNOWN`, which is never shown
@@ -39,9 +45,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
+from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -50,7 +57,12 @@ from deephaven_massive._enums import (
     subscription_of,
 )
 from deephaven_massive._errors import EntitlementError
-from deephaven_massive._ingest.recency_labels import RecencyLabels, delayed_refusal, read_labels
+from deephaven_massive._ingest.recency_labels import (
+    DelayedDataError,
+    RecencyLabels,
+    delayed_refusal,
+    read_labels,
+)
 from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._tables.transports import HostDecision
 
@@ -58,14 +70,18 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
+    from deephaven_massive._datasets.catalog import DatasetSpec
+
 __all__ = [
     "FUTURES_PROBE_CONTRACTS",
     "SNAPSHOT_PROBES",
     "SnapshotAnswer",
     "SnapshotProbe",
     "decide",
+    "real_time_note",
     "recency_of",
     "refused_snapshot",
+    "require_real_time",
     "unlabelled",
 ]
 
@@ -278,7 +294,8 @@ def decide(
 ) -> HostDecision:
     """Decide the WebSocket host of an asset class and channel family.
 
-    The rules, in order: the FMV family is `business.massive.com`; a TICK host pinned in
+    The rules, in order: the FMV family is `business.massive.com` (a real-time-only stream's
+    own check is `require_real_time`); a TICK host pinned in
     `websocket_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
     uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
@@ -304,23 +321,15 @@ def decide(
         The decision.
 
     Raises:
-        ValueError: If the family is FMV and the class's subscription is in
-            `delayed_subscriptions`: FMV is real-time only.
-        EntitlementError: If the subscription is not in `delayed_subscriptions` and Massive
-            labels its snapshot delayed; the message names the label and the fix.
+        DelayedDataError: If the subscription is not in `delayed_subscriptions` and Massive
+            labels its snapshot delayed; the message names the label and the fix. It is an
+            `EntitlementError`.
         AuthenticationError: If `fetch` raises it (a rejected key).
         MassiveError: If `fetch` fails otherwise (a transport failure, a server error).
     """
     subscription = subscription_of(asset_class)
     listed = subscription in delayed_subscriptions
     if family is ChannelFamily.FMV:
-        if listed:
-            raise ValueError(
-                f"{asset_class} fair-market-value (FMV) streams are real-time only: Massive "
-                f"serves them from {BUSINESS_HOST} and has no delayed FMV feed, but "
-                f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}; "
-                "stream FMV from a session whose delayed_subscriptions does not list it"
-            )
         return HostDecision(
             BUSINESS_HOST, Recency.REALTIME, "FMV is Business-only; fixed host (docs)"
         )
@@ -375,3 +384,79 @@ def _from_snapshot(
         return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, refusal))
     labels = read_labels(answer.status, entitled)
     return _from_labels(asset_class, subscription=subscription, labels=labels)
+
+
+def require_real_time(
+    spec: DatasetSpec,
+    resolve: Callable[[], HostDecision],
+    *,
+    delayed_subscriptions: AbstractSet[Subscription],
+) -> HostDecision:
+    """Decide a stream's host, refusing delayed data for a dataset that streams only in real time.
+
+    A real-time-only dataset (`DatasetSpec.real_time_only`) has no delayed feed. Its class's
+    decision is shared with the class's other streams and cached, so the refusal is made here,
+    for the one stream, and never cached: the next call checks again. Any other dataset gets the
+    decision, or the error, of `resolve` unchanged. Runs on the verb's thread; the only I/O is
+    `resolve`'s.
+
+    Args:
+        spec: The stream's dataset.
+        resolve: Decides the host of the dataset's class and family (the REST transport's
+            `resolve_host`, cached per session).
+        delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
+
+    Returns:
+        The decision.
+
+    Raises:
+        ValueError: If the dataset is real-time only and `delayed_subscriptions` lists its
+            subscription, the one way a session reads it from Massive's delayed feed.
+        EntitlementError: If the dataset is real-time only and Massive labels the key's data of
+            its subscription delayed: the plan does not include the dataset. The message says
+            where its plans are listed.
+
+    `resolve` raises the `AuthenticationError`, `EntitlementError`, or `MassiveError` of the
+    host decision.
+    """
+    if not spec.real_time_only:
+        return resolve()
+    asset_class = cast("AssetClass", spec.asset_class)
+    subscription = subscription_of(asset_class)
+    try:
+        decision = resolve()
+    except DelayedDataError as error:
+        logger.debug("%s refused, real-time only: %s", spec.name, error)
+        raise EntitlementError(
+            f"{spec.name} streams only in real time, and Massive labels this key's "
+            f"{subscription} data delayed, so its plan does not include it; "
+            f"{real_time_note(spec)}"
+        ) from error
+    # The configuration pins a delayed host only for a listed subscription, so the list alone
+    # says whether the session reads the subscription from the delayed feed.
+    if subscription not in delayed_subscriptions:
+        return decision
+    # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+    logger.debug("%s refused, real-time only: %s is delayed", spec.name, subscription)
+    raise ValueError(
+        f"{spec.name} streams only in real time, and Massive has no delayed feed of it, but "
+        f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}; "
+        "stream it from a session whose delayed_subscriptions does not list it"
+    )
+
+
+def real_time_note(spec: DatasetSpec) -> str:
+    """Say that a dataset streams only in real time, and where its plans are listed.
+
+    A refusal of a real-time-only stream adds it, whether the library refuses the stream at the
+    call (`require_real_time`) or Massive refuses its subscription, so the user learns which
+    plans include the dataset rather than a fix of the feed that cannot apply.
+
+    Args:
+        spec: A real-time-only dataset.
+
+    Returns:
+        For example `"options.admin_messages streams only in real time, on the plans listed at
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"`.
+    """
+    return f"{spec.name} streams only in real time, on the plans listed at {page_url(spec)}"

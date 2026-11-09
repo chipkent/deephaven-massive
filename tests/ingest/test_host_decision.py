@@ -9,6 +9,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _log_limits
 from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, REALTIME_HOST
+from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
 from deephaven_massive._ingest.host_decision import (
     FUTURES_PROBE_CONTRACTS,
@@ -16,11 +17,17 @@ from deephaven_massive._ingest.host_decision import (
     SnapshotAnswer,
     SnapshotProbe,
     decide,
+    real_time_note,
     recency_of,
     refused_snapshot,
+    require_real_time,
     unlabelled,
 )
+from deephaven_massive._ingest.recency_labels import DelayedDataError
 from deephaven_massive._massive import Transport, source
+from deephaven_massive._namespaces.options import ADMIN_MESSAGES as ADMIN
+from deephaven_massive._namespaces.options import TRADES as OPTION_TRADES
+from deephaven_massive._namespaces.stocks import FMV as STOCK_FMV
 from deephaven_massive._tables.transports import HostDecision
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
@@ -99,18 +106,76 @@ def test_fmv_is_always_the_business_host() -> None:
     assert fetch.probes == []  # no request, and the pin does not apply to FMV
 
 
-def test_fmv_of_a_delayed_subscription_is_refused() -> None:
+def test_fmv_of_a_delayed_subscription_is_refused_by_the_real_time_check() -> None:
+    # The FMV host is fixed whatever the setting; the refusal is the stream's own check.
+    delayed = frozenset({Subscription.STOCKS})
     fetch = Snapshot()
-    with pytest.raises(ValueError, match="real-time only") as info:
-        decide(
-            AssetClass.STOCKS,
-            FMV,
-            websocket_hosts={},
-            delayed_subscriptions=frozenset({Subscription.STOCKS}),
-            fetch=fetch,
+
+    def resolve() -> HostDecision:
+        return decide(
+            AssetClass.STOCKS, FMV, websocket_hosts={}, delayed_subscriptions=delayed, fetch=fetch
         )
-    assert "dm.Subscription.STOCKS" in str(info.value)
+
+    assert resolve().host == BUSINESS_HOST
+    with pytest.raises(ValueError, match="streams only in real time") as info:
+        require_real_time(STOCK_FMV, resolve, delayed_subscriptions=delayed)
+    assert "lists dm.Subscription.STOCKS" in str(info.value)
     assert fetch.probes == []
+
+
+def test_a_stream_that_is_not_real_time_only_gets_the_decision_unchanged() -> None:
+    def refused() -> HostDecision:
+        raise DelayedDataError("options streams would be delayed")
+
+    with pytest.raises(DelayedDataError, match="options streams would be delayed"):
+        require_real_time(OPTION_TRADES, refused, delayed_subscriptions=frozenset())
+    delayed = HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
+    chosen = require_real_time(
+        OPTION_TRADES, lambda: delayed, delayed_subscriptions=frozenset({Subscription.OPTIONS})
+    )
+    assert chosen is delayed
+
+
+def test_a_real_time_only_stream_streams_from_the_real_time_feed() -> None:
+    real_time = HostDecision(REALTIME_HOST, Recency.REALTIME, "last_trade.timeframe=REAL-TIME")
+    chosen = require_real_time(ADMIN, lambda: real_time, delayed_subscriptions=frozenset())
+    assert chosen is real_time
+
+
+def test_a_real_time_only_stream_of_a_delayed_subscription_is_refused() -> None:
+    delayed = HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
+    with pytest.raises(ValueError, match=r"options\.admin_messages streams only in real time") as e:
+        require_real_time(
+            ADMIN, lambda: delayed, delayed_subscriptions=frozenset({Subscription.OPTIONS})
+        )
+    assert "MassiveConfig.delayed_subscriptions lists dm.Subscription.OPTIONS" in str(e.value)
+
+
+def test_a_real_time_only_stream_of_a_delayed_plan_names_where_its_plans_are(
+    snapshot: Callable[[str], Snapshot],
+) -> None:
+    # Massive labels the key's options data delayed: the plan cannot include the dataset, so
+    # the error says where its plans are listed, not how to read the delayed feed.
+    fetch = snapshot("stocks_delayed.json")  # the unified snapshot, as the options probe reads
+    with pytest.raises(dm.EntitlementError) as e:
+        require_real_time(
+            ADMIN, lambda: run(AssetClass.OPTIONS, fetch), delayed_subscriptions=frozenset()
+        )
+    text = str(e.value)
+    assert not isinstance(e.value, DelayedDataError)
+    assert isinstance(e.value.__cause__, DelayedDataError)
+    assert "options.admin_messages streams only in real time" in text
+    assert "its plan does not include it" in text
+    assert text.endswith(f"on the plans listed at {page_url(ADMIN)}")
+    assert "delayed_subscriptions" not in text
+
+
+def test_the_real_time_note_names_the_dataset_page() -> None:
+    assert real_time_note(ADMIN) == (
+        "options.admin_messages streams only in real time, on the plans listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+        "options.admin_messages.md"
+    )
 
 
 def test_a_pinned_tick_host_needs_no_request() -> None:

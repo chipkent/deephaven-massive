@@ -39,7 +39,7 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import QueryCall, StreamQuery
+from deephaven_massive._query import QueryCall, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import transports as _transports
 from deephaven_massive._tables.columns import describe
@@ -92,9 +92,9 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamQuery:
+def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, StreamQuery)
+    assert isinstance(q, SymbolStreamQuery)
     return q
 
 

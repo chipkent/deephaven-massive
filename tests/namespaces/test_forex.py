@@ -43,7 +43,7 @@ from deephaven_massive._query import (
     Query,
     QueryBase,
     StreamHistoryQuery,
-    StreamQuery,
+    SymbolStreamQuery,
     query_class,
 )
 from deephaven_massive._session import CATALOG
@@ -120,7 +120,7 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
         (forex.LAST_QUOTE, Query),
         (forex.BARS, HistoryQuery),
         (forex.PREVIOUS_DAY_BAR, Query),
-        (forex.FMV, StreamQuery),
+        (forex.FMV, SymbolStreamQuery),
         (forex.SNAPSHOTS, Query),
         (forex.MOVERS, Query),
         (forex.CONVERSION, Query),
@@ -297,7 +297,7 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
 
 def test_fmv(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.fmv(dm.ALL)
-    assert type(query) is StreamQuery
+    assert type(query) is SymbolStreamQuery
     assert query._request == Request(symbols=dm.ALL)
 
 

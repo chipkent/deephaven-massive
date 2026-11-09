@@ -32,6 +32,7 @@ from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, sources
+from deephaven_massive._namespaces.options import ADMIN_MESSAGES
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
@@ -158,6 +159,57 @@ def test_a_plan_needs_a_symbol_key(massive_session: dm.MassiveSession) -> None:
         ChannelPlan.build(
             massive_session._core.catalog, keyless, "T", unreadable_symbols=OnError.RAISE
         )
+
+
+def test_a_plan_of_rows_without_symbols_reads_none(massive_session: dm.MassiveSession) -> None:
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, ADMIN_MESSAGES, "AD", unreadable_symbols=OnError.LOG
+    )
+    assert plan.symbol_field is None
+    assert plan.required == frozenset({"SipTimestamp"})
+    assert [c[1] for c in plan.columns] == [
+        "Date",
+        "Timestamp",
+        "MessageId",
+        "Exchange",
+        "Message",
+        "SequenceNumber",
+        "TimestampInsert",
+    ]
+
+
+def notice(**changes: object) -> dict[str, object]:
+    # One admin message as the decoder's columns name its fields.
+    row: dict[str, object] = {
+        "MessageId": "1793911442930568079-4043826282",
+        "Exchange": 302,
+        "Message": "TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36",
+        "SipTimestamp": 1_793_911_442_930_568_200,
+        "SequenceNumber": 4_043_826_282,
+    }
+    return {**row, **changes}
+
+
+def test_rows_without_symbols_convert_whole_and_drop_only_a_bad_time(
+    massive_session: dm.MassiveSession,
+) -> None:
+    plan = ChannelPlan.build(
+        massive_session._core.catalog, ADMIN_MESSAGES, "AD", unreadable_symbols=OnError.LOG
+    )
+    rows = [notice(), notice(Exchange=323, SipTimestamp=5), notice(Exchange=None)]
+    converted = plan.convert(frame(rows, "options/AD"), {}, arrived=arrivals(rows))
+    batch = converted.batch
+    # The row whose time fails is dropped and counted; a missing exchange is only null.
+    assert batch.column("Exchange").to_pylist() == [302, None]
+    assert batch.column("Message").to_pylist() == [notice()["Message"]] * 2  # the text, as sent
+    assert batch.column("Date").to_pylist() == ["2026-11-05"] * 2
+    assert "Symbol" not in batch.column_names
+    assert (converted.symbols, converted.null_symbols, converted.dropped_symbols) == (
+        frozenset(),
+        False,
+        {},
+    )
+    assert converted.drift.dropped_rows == 1
 
 
 FOREX_ROWS = [

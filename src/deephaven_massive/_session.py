@@ -502,8 +502,9 @@ class MassiveSession:
               watchlist.
             - `Dataset`: the dataset's name, such as `stocks.trades`.
             - `Query`: the call that built the query, such as `m.stocks.trades('AAPL')`.
-            - `Symbols`: the symbols it reads now.
-            - `SymbolCount`: how many symbols it reads; null for `dm.ALL`.
+            - `Symbols`: the symbols it reads now; empty for a dataset that takes none.
+            - `SymbolCount`: how many symbols it reads; null for `dm.ALL` and for a dataset that
+              takes none.
             - `HeldResults`: how many of the stream's tables are still in use.
             - `Deferred`: how many option contracts wait for room on the options connection.
             - `Transport`: `WebSocket`, `REST`, `flat files`, or `flat files and REST`.

@@ -1294,13 +1294,7 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
-    (Transport.WS, "options/AD"): Deferral(
-        "OPRA administrative messages, mainly FLEX trade notices: market data, so serving it "
-        "is a new public dataset, keyed by exchange rather than by symbol.",
-        539,
-    ),
-}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket
@@ -1651,3 +1645,68 @@ def test_each_refused_alternative_is_a_dataset_that_fetches() -> None:
         "stocks.last_trade": "stocks.snapshots",
     }
     assert all(CATALOG.by_name[name].has_fetch for name in alternatives.values())
+
+
+# --- Streams whose rows name no symbol --------------------------------------------------------
+
+ADMIN = DatasetSpec(
+    name="options.admin_messages",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.OPTIONS,
+    kind="admin_messages",
+    channels={NotBars.ANY: "AD"},
+    keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+    names_symbols=False,
+    real_time_only=True,
+)
+
+
+def test_a_stream_without_symbols_takes_none_and_passes_the_gates() -> None:
+    catalog = Catalog((ADMIN,))
+    assert catalog.takes_symbols(ADMIN) is False
+    assert catalog.problems() == ()  # its default poll key is never read: it has no poll()
+    assert "Symbol" not in catalog.dataset_schema(ADMIN).column_names
+
+
+def test_a_stream_without_symbols_needs_its_time_key() -> None:
+    assert problems(change(ADMIN, keys={})) == (
+        "declared keys: options.admin_messages: WS options/AD declares no time key",
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {
+            "channels": {},
+            "fetch_path": "/v3/snapshot",
+            "kind": None,
+            "keys": {},
+            "real_time_only": False,
+        },
+        {"flat_file_prefixes": {NotBars.ANY: "us_options_opra/trades_v1"}},
+        {"history_path": "/v3/trades/{optionsTicker}"},
+    ],
+)
+def test_a_dataset_without_symbols_is_a_stream_alone(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="no symbol is a stream alone"):
+        change(ADMIN, **changes)
+
+
+def test_a_stream_without_symbols_declares_no_symbol_key() -> None:
+    with pytest.raises(ValueError, match="rows name no symbol has no symbol key"):
+        change(ADMIN, keys={(W, "options/AD"): keys("MessageId", "SipTimestamp")})
+
+
+def test_only_a_stream_is_real_time_only() -> None:
+    with pytest.raises(ValueError, match="only a stream"):
+        change(DIVIDENDS, real_time_only=True)
+
+
+def test_the_poll_keys_gate_reads_only_a_dataset_with_poll() -> None:
+    # A stream's default `Symbol` poll key is never read; a fetch dataset's must be a column.
+    stream = change(ADMIN, poll_keys=("Nope",))
+    assert problems(stream) == ()
+    assert problems(change(EXCHANGES, poll_keys=("Nope",))) == (
+        "poll keys: reference.exchanges: ['Nope'] are not columns",
+    )

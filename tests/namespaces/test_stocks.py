@@ -52,7 +52,7 @@ from deephaven_massive._query import (
     Query,
     QueryBase,
     StreamHistoryQuery,
-    StreamQuery,
+    SymbolStreamQuery,
     query_class,
 )
 from deephaven_massive._session import CATALOG
@@ -417,9 +417,9 @@ def test_replaced_polls_key_one_row_each(name: str, keys: tuple[str, ...]) -> No
     [
         ("trades", StreamHistoryQuery),
         ("quotes", StreamHistoryQuery),
-        ("luld", StreamQuery),
-        ("imbalances", StreamQuery),
-        ("fmv", StreamQuery),
+        ("luld", SymbolStreamQuery),
+        ("imbalances", SymbolStreamQuery),
+        ("fmv", SymbolStreamQuery),
     ],
 )
 def test_streams_take_symbols_and_all(
@@ -1344,7 +1344,7 @@ def _rows_when(table: Table, count: int) -> list[dict[str, Any]]:
 # message for the channel (FMV documents none; its frame follows the generated fields), and the
 # values one row of the stream must carry, with `Timestamp` in epoch nanoseconds.
 STREAM_CASES: list[
-    tuple[str, Callable[[Any], StreamQuery], str, dict[str, object], dict[str, object]]
+    tuple[str, Callable[[Any], SymbolStreamQuery], str, dict[str, object], dict[str, object]]
 ] = [
     (
         "trades",
@@ -1517,7 +1517,7 @@ STREAM_CASES: list[
 def test_a_frame_lands_in_blink(
     *,
     ws_session: WsSession,
-    case: tuple[str, Callable[[Any], StreamQuery], str, dict[str, object], dict[str, object]],
+    case: tuple[str, Callable[[Any], SymbolStreamQuery], str, dict[str, object], dict[str, object]],
 ) -> None:
     _, make, topic, frame, expected = case
     result = make(ws_session.session.stocks).blink()

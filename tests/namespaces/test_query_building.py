@@ -776,7 +776,7 @@ class _Bad(Namespace):
     ) -> QueryBase:
         raise NotImplementedError
 
-    def trades(self) -> Query:  # the trades dataset streams, so this must be a StreamQuery
+    def trades(self) -> Query:  # the trades dataset streams, so this must be a SymbolStreamQuery
         raise NotImplementedError
 
     def news(self) -> Query:  # no dataset is named options.news
@@ -849,7 +849,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
             "options.bars: an overload returns StreamHistoryQuery, but its timespans give "
             "['HistoryQuery']"
         ),
-        "options.trades: the factory must return StreamQuery",
+        "options.trades: the factory must return SymbolStreamQuery",
         "options.minute_bars: a bars factory needs its overloads",
         "options.splits: a dataset with no factory",
     ]

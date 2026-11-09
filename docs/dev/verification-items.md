@@ -126,6 +126,11 @@ settles it.
   whether a grid moves with an odd `{from}`, clipping at `{from}`, and weekend sessions. Item 40's
   rule stands until read. Settled by `tests/namespaces/test_futures_integration.py` (Futures
   Starter).
+- **82.** Whether Massive acknowledges `AD.*` on `socket.massive.com` for Options Advanced, what
+  its admin messages carry, and what it answers a plan without them. The channel is read as
+  documented: real-time only, every exchange at once, the text as sent. Verified by
+  `tests/namespaces/test_options_integration.py` (Options Advanced); the other plans by hand, as
+  `docs/live-tests.md` says.
 
 ## Settled
 
