@@ -828,9 +828,9 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     exchange (`AD.*`) on `socket.massive.com`, and records the connection, the stream, and up
     to five rows: each one's exchange, sequence number, SIP timestamp, and text as OPRA sent it.
     Passes when Massive acknowledged the topic, which it does whether or not the market is open,
-    and every row that arrived has its `Timestamp` and `Message`. Messages come only with FLEX
-    activity or an exchange's notice, so no row is required; a refusal fails the test, since
-    Options Advanced includes the channel.
+    the stream still runs, and every row that arrived has its `Timestamp` and `Message`.
+    Messages come only with FLEX activity or an exchange's notice, so no row is required; a
+    refusal fails the test, since Options Advanced includes the channel.
     """
     table = live_session.options.admin_messages().append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _ADMIN_WAIT)
@@ -841,12 +841,18 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     rows = table_rows(table)
     for line in stream_report(live_session):
         evidence(line)
+    states = [
+        r["State"]
+        for r in table_rows(live_session.streams())
+        if r["Dataset"] == "options.admin_messages"
+    ]
     live_session.release(table)
-    evidence(f"AD.* acknowledged topics {acked}; rows received: {len(rows)}")
+    evidence(f"AD.* acknowledged topics {acked}; stream {states}; rows received: {len(rows)}")
     for row in rows[:5]:
         evidence(
             f"    exchange {row['Exchange']} sequence {row['SequenceNumber']} at "
             f"{row['Timestamp']}: {row['Message']!r}"
         )
     assert acked, "Massive acknowledged no AD.* topic on the real-time options feed"
+    assert states == ["RUNNING"], f"the admin messages stream is {states}"
     assert all(row["Timestamp"] is not None and row["Message"] is not None for row in rows)
