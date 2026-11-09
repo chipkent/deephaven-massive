@@ -55,6 +55,8 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
    Rewrite the description to the final state on every push, and end it with `Closes #<issue>`
    on its own line. Issue bodies and agents' reports meet the same bar.
 8. **Dependency declarations** in `pyproject.toml` change only in dedicated `chore(deps):` PRs.
+   Every dependency and tool version is a `>=` floor, never an exact pin: `uv.lock` is not
+   committed, and `check.sh` upgrades to the newest releases on every run.
 9. **Contract changes are the owner's.** A change to a public signature, default, column, or
    failure behavior needs an owner decision: a new `docs/dev/decisions.md` entry, with the user
    docs, docstrings, and tests updated in the same PR. A change that keeps the documented
@@ -125,14 +127,15 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
 Several agents work at once, and every collision costs a full check and a paid CI run.
 
 - **Before starting**, check `gh pr list` and `gh pr diff <n> --name-only` for open PRs that
-  change your files. If an open PR touches the same files as yours, or yours builds on it,
-  stack on it with GitHub's native stacked PRs: branch from its branch, open your PR with
-  `gh pr create --base <its branch>`, and link them with `gh stack link <PRs bottom to top>`
-  (`gh extension install github/gh-stack` once). Stacking avoids the rebases and CI reruns of
-  contention at merge time, so prefer it, and name the merge order in your PR body.
+  change your files. Stack on an open PR only when yours needs its content: branch from its
+  branch, open your PR with `gh pr create --base <its branch>`, link them with
+  `gh stack link <PRs bottom to top>` (`gh extension install github/gh-stack` once), and name
+  the merge order in your PR body. A PR that only shares files with yours is not a reason to
+  stack.
 - **Never rewrite a pushed branch**: no force-push, no rebase, and no `gh stack submit`,
   `push`, `sync`, or `rebase`. GitHub's own stack rebases are fine; after one, `git pull
-  --rebase`.
+  --rebase`. That rebase can still leave a conflict with `main`, even after a squash merge:
+  budget one merge of `main` per stacked PR.
 - **Merge `main` (or your base branch) only to resolve a conflict**, never to stay current.
   Read both sides of every conflict, never take one wholesale (regenerate a generated file
   instead of merging it), and say in the PR body how you resolved it. When an open PR renames a
