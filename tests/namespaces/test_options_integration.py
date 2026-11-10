@@ -1006,7 +1006,9 @@ def _risk_free_rate(
     """Return the newest 3-month Treasury yield as a fraction, and a line that names it."""
     start = (today - timedelta(days=14)).isoformat()
     yields = table_rows(live_session.economy.treasury_yields(start=start).fetch())
-    newest = max((row for row in yields if row["Yield3Month"] is not None), key=lambda r: r["Date"])
+    dated = [row for row in yields if row["Yield3Month"] is not None]
+    assert dated, f"no 3-month Treasury yield since {start}"
+    newest = max(dated, key=lambda r: r["Date"])
     named = f"3-month yield {newest['Yield3Month']}% of {newest['Date']}"
     return float(newest["Yield3Month"]) / 100, named
 
@@ -1027,8 +1029,10 @@ def _calls_near_the_money(
     first = table_rows(calls(limit=1, filters=window).fetch())
     spot = first[0]["UnderlyingAssetPrice"] if first else None
     if spot is None:
-        [bar] = table_rows(live_session.stocks.previous_day_bar("SPY").fetch())
-        spot = bar["Close"]
+        bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch())
+        assert len(bars) == 1, f"SPY has {len(bars)} previous-day bars, not one"
+        spot = bars[0]["Close"]
+        assert spot is not None, "SPY's previous-day bar has no close"
     near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
     chain = table_rows(calls(filters={**window, **near}).fetch())
     priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]

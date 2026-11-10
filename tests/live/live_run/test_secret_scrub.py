@@ -36,6 +36,11 @@ def test_the_filter_reads_only_set_variables_longest_first() -> None:
     assert secrets.values == (KEY, S3)
 
 
+def test_the_filter_hides_the_basic_key() -> None:
+    secrets = SecretFilter.from_environment({"MASSIVE_BASIC_API_KEY": "PLANTED-basic-key"})
+    assert secrets.clean("key=PLANTED-basic-key") == f"key={REDACTED}"
+
+
 def test_clean_replaces_secrets_plain_and_url_encoded() -> None:
     secrets = SecretFilter((KEY,))
     encoded = urllib.parse.quote(KEY, safe="")

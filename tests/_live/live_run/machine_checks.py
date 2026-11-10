@@ -24,7 +24,7 @@ from importlib import metadata
 from typing import TYPE_CHECKING, Final
 
 from tests._live.live_run.children import run_command
-from tests._live.live_run.secret_scrub import SECRET_VARIABLES
+from tests._live.live_run.secret_scrub import S3_VARIABLES, SECRET_VARIABLES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -95,7 +95,7 @@ def secrets_item(environ: Mapping[str, str]) -> Item:
     shown = ", ".join(present) or "none"
     if "MASSIVE_API_KEY" not in present:
         return Item("secrets", FAIL, f"MASSIVE_API_KEY is not set in this terminal; set: {shown}")
-    pair = [name for name in SECRET_VARIABLES[2:] if name in present]
+    pair = [name for name in S3_VARIABLES if name in present]
     if len(pair) == 1:
         return Item("secrets", FAIL, f"set both S3 variables or neither; set: {shown}")
     return Item("secrets", OK, f"set: {shown}")
