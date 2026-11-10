@@ -206,7 +206,7 @@ class RowTimes(StrEnum):
 
     TICK = "tick"
     """An event at one instant: `Date` and `Timestamp`. The trades, quotes, index values,
-    FMV, LULD, and imbalances."""
+    FMV, LULD, imbalances, and options admin messages."""
     BAR = "bar"
     """A window of the query's timespan and multiplier: `Date`, `TimestampStart`, and
     `TimestampEnd`. The bars and the indicators, one value per bar."""

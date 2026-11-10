@@ -11,7 +11,7 @@ Two callers use them. The WebSocket host decision (`host_decision.py`) reads its
 labels to tell whether a subscription's plan is delayed, and the REST transport (`rest.py`)
 reads every page of a `fetch()` or `poll()` of a subscription's current data, so neither
 serves delayed data to a user who did not ask for it in `MassiveConfig.delayed_subscriptions`.
-`delayed_refusal` builds the `EntitlementError` both raise, with the evidence and the exact
+`delayed_refusal` builds the `DelayedDataError` both raise, with the evidence and the exact
 configuration that asks for the delayed data. Pure functions: nothing here logs, waits, or
 calls Deephaven.
 """
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TIMEFRAME_FIELDS",
+    "DelayedDataError",
     "RecencyLabels",
     "delayed_refusal",
     "read_labels",
@@ -134,9 +135,18 @@ def shows_real_time(evidence: str) -> bool:
     return any(evidence == f"{field}={REAL_TIME}" for field in TIMEFRAME_FIELDS)
 
 
+class DelayedDataError(EntitlementError):
+    """Massive labels a subscription's data delayed, and the session did not ask for delayed data.
+
+    Internal, raised as the public `EntitlementError` it is: its own class lets a caller tell
+    this refusal from Massive's other refusals, as the stream of a real-time-only dataset does
+    (`host_decision.require_real_time`), whose plan then does not include it at all.
+    """
+
+
 def delayed_refusal(
     subscription: Subscription, what: str, evidence: str, *, streams: bool
-) -> EntitlementError:
+) -> DelayedDataError:
     """Return the error of delayed data for a subscription not listed as delayed.
 
     Args:
@@ -161,7 +171,7 @@ def delayed_refusal(
         else f"To accept delayed {subscription} data (its streams then use Massive's delayed "
         "feed too)"
     )
-    return EntitlementError(
+    return DelayedDataError(
         f"{what} would be delayed (Massive reports {evidence}), and "
         f"dm.Subscription.{subscription.name} is not in MassiveConfig.delayed_subscriptions, "
         f"so the library serves only real-time {subscription} data. {remedy}: "

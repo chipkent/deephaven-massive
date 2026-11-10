@@ -91,6 +91,7 @@ from deephaven_massive._errors import (
     failure_text,
     library_bug,
 )
+from deephaven_massive._ingest.host_decision import real_time_note, require_real_time
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -382,7 +383,9 @@ class WsConnections:
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
         `/options` connection (counting every session's topics on it) raise the `ValueError`
         of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
-        resolution raises the `AuthenticationError` or `MassiveError` of `resolve_host`; a
+        resolution raises the `AuthenticationError` or `MassiveError` of `resolve_host`, and
+        for a real-time-only stream the `ValueError` or `EntitlementError` of
+        `require_real_time`; a
         crypto ticker of a list that Massive's crypto ticker list does not split raises the
         `MassiveError` of `resolve_pairs`, and a reactive table's pairs raise as
         `tradable_pairs` says.
@@ -400,7 +403,11 @@ class WsConnections:
             elif isinstance(symbols, tuple):  # a list in code, or a table read and checked
                 self.resolve_pairs(symbols)
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
-        decision = self._resolve(asset_class, spec.channel_family)
+        decision = require_real_time(
+            spec,
+            functools.partial(self._resolve, asset_class, spec.channel_family),
+            delayed_subscriptions=core.config.delayed_subscriptions,
+        )
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
             # Started before the schedule wait, so a failure or interrupt during that wait
@@ -434,7 +441,16 @@ class WsConnections:
             raise
         try:
             static = not isinstance(symbols, SymbolTable)
-            stream = ConnectionStream(stream_id, channel, plan, opened.sink, wanted, topics, static)
+            stream = ConnectionStream(
+                stream_id,
+                channel,
+                plan,
+                opened.sink,
+                wanted,
+                topics,
+                static,
+                refusal_note=real_time_note(spec) if spec.real_time_only else "",
+            )
             self._attach(stream)
             if opened.watch is not None:
                 opened.watch.start()
@@ -616,7 +632,7 @@ class WsConnections:
         if connection is not None:
             in_use.update(connection.cap_admitted)
             for pending in connection.cap_pending.values():
-                in_use.update(pending)
+                in_use.update(t for t in pending if not is_wildcard(t))  # a wildcard is no contract
         new = {t for t in topics if not is_wildcard(t)} - in_use
         if len(new) + len(in_use) > OPTIONS_CAP:
             raise ValueError(

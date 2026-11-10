@@ -16,10 +16,12 @@ def test_the_module_exports_the_query_classes_and_argument_types() -> None:
         "Query",
         "StreamHistoryQuery",
         "StreamQuery",
+        "SymbolStreamQuery",
         "Symbols",
     ]
     assert queries.Query is _query.Query
     assert queries.StreamQuery is _query.StreamQuery
+    assert queries.SymbolStreamQuery is _query.SymbolStreamQuery
     assert queries.HistoryQuery is _query.HistoryQuery
     assert queries.StreamHistoryQuery is _query.StreamHistoryQuery
     assert queries.Symbols is _types.Symbols
@@ -30,8 +32,15 @@ def test_the_module_exports_the_query_classes_and_argument_types() -> None:
 def test_a_dataset_method_returns_one_of_its_classes(massive_session: MassiveSession) -> None:
     query = massive_session.stocks.trades("AAPL")
     assert isinstance(query, queries.StreamHistoryQuery)
+    assert isinstance(query, queries.SymbolStreamQuery)
     assert isinstance(query, queries.StreamQuery)
     assert isinstance(query, queries.HistoryQuery)
+
+
+def test_a_stream_without_symbols_is_a_plain_stream_query(massive_session: MassiveSession) -> None:
+    query = massive_session.options.admin_messages()
+    assert type(query) is queries.StreamQuery
+    assert not isinstance(query, queries.SymbolStreamQuery)
 
 
 def test_importing_the_package_does_not_import_it() -> None:

@@ -443,7 +443,9 @@ class ChannelPlan:
         arrow_schema: The dataset's Arrow schema.
         date_columns: The dataset's calendar-date columns, stored one shared string per date
             (`columns.dataset_table`).
-        symbol_field: The long-form column of the rows that holds the raw symbol.
+        symbol_field: The long-form column of the rows that holds the raw symbol; None for a
+            stream whose rows name no symbol (`DatasetSpec.names_symbols` False), whose
+            batches have no `Symbol` and go whole to its streams.
         required: The long-form columns a row must carry: the dataset's keys for the channel's
             source, excluding keys filled from a request (`set_required`).
         times: How the rows' time columns are filled: the dataset's row times, its class,
@@ -463,7 +465,7 @@ class ChannelPlan:
     columns: tuple[tuple[ColumnType, str, str | None, TimeUnit | None], ...]
     arrow_schema: pa.Schema
     date_columns: tuple[str, ...]
-    symbol_field: str
+    symbol_field: str | None
     required: frozenset[str]
     times: TimeRule
     time_name: str
@@ -491,8 +493,9 @@ class ChannelPlan:
             The plan.
 
         Raises:
-            ValueError: If the dataset declares no symbol key for the channel's source: a
-                stream routes rows by symbol, so it cannot read such a channel.
+            ValueError: If a dataset whose rows name their symbol declares no symbol key for
+                the channel's source: a stream routes such rows by symbol, so it cannot read
+                the channel.
 
         An unknown source raises the `KeyError` of `Catalog.source`, and a bad key declaration
         the `ValueError` of `source_columns.rename`.
@@ -502,14 +505,14 @@ class ChannelPlan:
         source = catalog.source(Transport.WS, key)
         renamed = rename(spec, source)
         symbol = spec.keys_for(Transport.WS, key).symbol
-        if symbol is None or symbol.from_request:
+        if spec.names_symbols and (symbol is None or symbol.from_request):
             raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         # A decoded row holds its values in the order of the source's fields.
         position = {f.wire_key: i for i, f in enumerate(source.fields)}
         schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
-        _, symbol_field = fields[key_column(spec, "symbol", symbol)]
+        symbol_field = None if symbol is None else fields[key_column(spec, "symbol", symbol)][1]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
         span = next(span for span, name in spec.channels.items() if name == channel)
         timespan = None if span is NotBars.ANY else span
@@ -532,7 +535,7 @@ class ChannelPlan:
             ),
             arrow_schema=schema.arrow_schema(),
             date_columns=schema.date_columns,
-            symbol_field=symbol_field.column,
+            symbol_field=None if symbol_field is None else symbol_field.column,
             required=frozenset(f.column for f in required_fields(spec, source)),
             times=TimeRule(spec.name, spec.times, asset_class, timespan),
             time_name=time_column(spec.times),
@@ -624,6 +627,9 @@ class ChannelPlan:
         )
         if dropped is not None:
             batch = batch.filter(pc.call_function("invert", [dropped]))
+        if self.symbol_field is None:  # rows that name no symbol go whole to every stream
+            drift = functools.reduce(DriftReport.merge, found, DriftReport())
+            return Converted(batch, drift, unreadable)
         distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
         return Converted(
             batch,

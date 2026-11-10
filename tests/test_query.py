@@ -54,6 +54,7 @@ from deephaven_massive._query import (
     QueryCall,
     StreamHistoryQuery,
     StreamQuery,
+    SymbolStreamQuery,
     _shown,
     _symbols_per_read,
     bar_query_class,
@@ -527,10 +528,12 @@ def test_query_repr_falls_back_to_the_symbols_passed() -> None:
 
 
 def test_class_hierarchy() -> None:
-    assert issubclass(StreamHistoryQuery, StreamQuery)
+    assert issubclass(StreamHistoryQuery, SymbolStreamQuery)
+    assert issubclass(SymbolStreamQuery, StreamQuery)
     assert issubclass(StreamHistoryQuery, HistoryQuery)
     assert not hasattr(StreamQuery, "fetch")
     assert not hasattr(StreamQuery, "poll")
+    assert not hasattr(StreamQuery, "last_by")
     assert not hasattr(HistoryQuery, "fetch")
     assert not hasattr(StreamHistoryQuery, "fetch")
     assert not hasattr(Query, "history")
@@ -1552,7 +1555,7 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["C:EURUSD", "C:GBPUSD"])]))
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
-    assert isinstance(q, StreamQuery)
+    assert isinstance(q, SymbolStreamQuery)
     current = q.last_by()
     schema = massive_session._core.catalog.dataset_schema(FOREX_SPEC)
     # Received now: a row received before its symbol joined the watchlist is hidden.
@@ -1573,7 +1576,7 @@ def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_rais
     strict(massive_session, monkeypatch)
     watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
-    assert isinstance(q, StreamQuery)
+    assert isinstance(q, SymbolStreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
         with pytest.raises(
             ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"
@@ -1724,6 +1727,7 @@ def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str
         yield "blink()", query.blink()
         yield "append_only()", query.append_only()
         yield "ring(5)", query.ring(5)
+    if isinstance(query, SymbolStreamQuery):
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
     if isinstance(query, Query):
@@ -2125,7 +2129,7 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
     ("changes", "expected"),
     [
         ({**_FETCH}, Query),
-        ({**_CHANNELS}, StreamQuery),
+        ({**_CHANNELS}, SymbolStreamQuery),
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),

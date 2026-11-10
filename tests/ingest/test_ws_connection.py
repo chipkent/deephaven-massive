@@ -1975,3 +1975,23 @@ def test_a_refused_fmv_topic_needs_a_business_plan(ws_session: WsSession) -> Non
     )
     connection.close()
     assert connection.join(TIMEOUT)
+
+
+def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # One status may refuse several topics; only the admin messages' table names its plans.
+    m = ws_session.session
+    notices = m.options.admin_messages().blink()
+    trades = m.options.trades(dm.ALL).blink()
+    ws_session.subscribed("AD.*", "T.*")
+    connection = ws_session.connection("wss://socket.test/options")
+    ws_session.on_loop(connection, lambda: connection._refused(("AD.*", "T.*"), "no"))
+    ws_session.flush()
+    errors = {r["Dataset"]: r["Error"] for r in streams_of(ws_session, dh_to_pylist)}
+    note = "options.admin_messages streams only in real time, on the plans listed at "
+    assert note in errors["options.admin_messages"]
+    assert "refused the subscription to AD.*, T.*" in errors["options.trades"]
+    assert "streams only in real time" not in errors["options.trades"]
+    m.release(notices)
+    m.release(trades)

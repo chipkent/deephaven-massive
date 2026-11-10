@@ -342,6 +342,7 @@ _RAISE_NOTHING = frozenset(
     {
         "deephaven_massive._dataset_list.datasets",
         "deephaven_massive._debug_log.disable_debug_logging",
+        "deephaven_massive._namespaces.options.options.admin_messages",
         "deephaven_massive._namespaces.reference.reference.market_holidays",
         "deephaven_massive._namespaces.reference.reference.market_status",
     }

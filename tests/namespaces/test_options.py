@@ -31,7 +31,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ChannelFamily, HistorySource
+from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._namespaces import options
@@ -42,9 +42,11 @@ from deephaven_massive._query import (
     QueryBase,
     StreamHistoryQuery,
     StreamQuery,
+    SymbolStreamQuery,
     query_class,
 )
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -70,6 +72,7 @@ NAMES = (
     "bars",
     "previous_day_bar",
     "fmv",
+    "admin_messages",
     "chain",
     "snapshots",
     "contracts",
@@ -106,8 +109,11 @@ def test_the_options_datasets_pass_every_catalog_gate() -> None:
     assert Catalog(options.DATASETS).problems() == ()
 
 
-def test_every_options_dataset_has_an_option_root() -> None:
+def test_every_options_dataset_whose_rows_name_a_contract_has_an_option_root() -> None:
     for spec in options.DATASETS:
+        if not spec.names_symbols:
+            assert "OptionRoot" not in CATALOG.dataset_schema(spec).column_names
+            continue
         schema = CATALOG.dataset_schema(spec)
         names = schema.column_names
         # It follows the leading key and time columns, wherever the dataset has them.
@@ -138,14 +144,17 @@ def test_each_dataset_reads_its_sources() -> None:
         "options.bars": "bars",
         "options.previous_day_bar": "bars",
         "options.fmv": "fmv",
+        "options.admin_messages": "admin_messages",
         "options.chain": None,
         "options.snapshots": None,
         "options.contracts": None,
         "options.daily_open_close": None,
     }
-    # Every dataset but the chain, which takes its underlying instead, takes contracts.
+    # Every dataset but the chain, which takes its underlying instead, and the admin messages,
+    # whose rows name no contract, takes contracts.
     takes = {spec.name for spec in options.DATASETS if CATALOG.takes_symbols(spec)}
-    assert takes == {spec.name for spec in options.DATASETS} - {"options.chain"}
+    no_contracts = {"options.chain", "options.admin_messages"}
+    assert takes == {spec.name for spec in options.DATASETS} - no_contracts
     assert options.LAST_TRADE.sources == ((R, "/v2/last/trade/{optionsTicker}"),)
     assert options.PREVIOUS_DAY_BAR.sources == ((R, "/v2/aggs/ticker/{optionsTicker}/prev"),)
     assert options.TRADES.sources == (
@@ -167,6 +176,7 @@ def test_each_dataset_reads_its_sources() -> None:
     )
     assert options.FMV.sources == ((Transport.WS, "options/FMV"),)
     assert options.FMV.channel_family is dm._enums.ChannelFamily.FMV
+    assert options.ADMIN_MESSAGES.sources == ((Transport.WS, "options/AD"),)
     assert options.CHAIN.sources == ((R, "/v3/snapshot/options/{underlyingAsset}"),)
     assert options.SNAPSHOTS.sources == ((R, "/v3/snapshot"),)
     assert options.CONTRACTS.sources == (
@@ -184,7 +194,8 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.QUOTES, StreamHistoryQuery),
         (options.BARS, HistoryQuery),
         (options.PREVIOUS_DAY_BAR, Query),
-        (options.FMV, StreamQuery),
+        (options.FMV, SymbolStreamQuery),
+        (options.ADMIN_MESSAGES, StreamQuery),
         (options.CHAIN, Query),
         (options.SNAPSHOTS, Query),
         (options.CONTRACTS, Query),
@@ -210,6 +221,7 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
         "options.bars": 50_000,
         "options.previous_day_bar": None,
         "options.fmv": None,
+        "options.admin_messages": None,
         "options.chain": 250,
         "options.snapshots": 250,
         "options.contracts": 1_000,
@@ -380,7 +392,7 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
     for factory, cls in (
         (m.options.trades, StreamHistoryQuery),
         (m.options.quotes, StreamHistoryQuery),
-        (m.options.fmv, StreamQuery),
+        (m.options.fmv, SymbolStreamQuery),
     ):
         q = factory(["O:AAPL250117P00150000", "O:AAPL250117C00150000"])
         assert type(q) is cls
@@ -1323,6 +1335,179 @@ def test_a_frame_of_each_channel_lands_in_blink(
     family = ChannelFamily.FMV if topic == "FMV" else ChannelFamily.TICK
     assert ws_session.decisions == [(dm.AssetClass.OPTIONS, family)]
     m.release(blink)
+
+
+# --- End to end: the admin messages, a stream whose rows name no symbol -----------------------
+
+
+def admin_message(exchange: int, sequence: int, text: str) -> dict[str, object]:
+    # One `AD` message as Massive's documentation shows it; the id is the time and the sequence.
+    sent = 1_793_911_442_930_568_200 + sequence
+    return {
+        "ev": "AD",
+        "i": f"{sent}-{sequence}",
+        "t": sent,
+        "q": sequence,
+        "x": exchange,
+        "m": text,
+    }
+
+
+FLEX = "TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36"
+
+
+def shown_streams(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> list[dict[str, Any]]:
+    # The session's `m.streams()` once every queued row write has run and been shown.
+    with ws_session.connections.group.lock:
+        connections = list(ws_session.connections.group.connections.values())
+    for connection in connections:
+        ws_session.on_loop(connection, lambda: None)
+    assert ws_session.session._core.diagnostics.wait_until_shown(15.0)
+    return dh_to_pylist(ws_session.session.streams())
+
+
+def test_admin_messages_take_no_symbols_and_have_no_last_by(
+    massive_session: dm.MassiveSession,
+) -> None:
+    query = massive_session.options.admin_messages()
+    assert type(query) is StreamQuery
+    assert query._request.symbols is None
+    assert repr(query) == "m.options.admin_messages()"
+    with pytest.raises(TypeError):
+        massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
+    methods = "its methods are blink(), append_only(), ring()"
+    with pytest.raises(AttributeError) as last_by:
+        query.last_by  # noqa: B018  # the attribute lookup is the test
+    assert str(last_by.value) == f"options.admin_messages has no last_by(); {methods}"
+    with pytest.raises(AttributeError) as fetch:
+        query.fetch  # noqa: B018  # the attribute lookup is the test
+    # No snapshot serves the messages, so none is offered.
+    assert str(fetch.value) == f"options.admin_messages has no fetch(); {methods}"
+
+
+def test_admin_messages_of_every_exchange_arrive_in_each_shape(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    m = ws_session.session
+    query = m.options.admin_messages()
+    blink = query.blink()
+    seen = blink_to_append_only(blink)
+    kept = query.append_only()
+    latest = query.ring(2)
+    ws_session.subscribed("AD.*")
+    ws_session.publish(
+        admin_message(302, 1, FLEX), admin_message(323, 2, "ALERT"), admin_message(302, 3, "X")
+    )
+    for table in (seen, kept):
+        rows_when(table, lambda arrived: len(arrived) == 3)
+    rows_when(latest, lambda arrived: [r["SequenceNumber"] for r in arrived] == [2, 3])
+    first, *_ = got = rows(kept)
+    assert [(r["Exchange"], r["Message"]) for r in got] == [(302, FLEX), (323, "ALERT"), (302, "X")]
+    assert first["Timestamp"] == 1_793_911_442_930_568_201
+    assert first["MessageId"] == "1793911442930568201-1"
+    assert first["Date"] == "2026-11-05"
+    assert "Symbol" not in first
+    assert "OptionRoot" not in first
+    # One stream serves the three shapes; its row names no symbol.
+    (row,) = shown_streams(ws_session, dh_to_pylist)
+    assert (row["Dataset"], row["State"], row["Symbols"], row["SymbolCount"]) == (
+        "options.admin_messages",
+        "RUNNING",
+        "",
+        None,
+    )
+    for table in (blink, kept, latest):
+        m.release(table)
+
+
+def test_releasing_the_admin_messages_unsubscribes_every_exchange(ws_session: WsSession) -> None:
+    query = ws_session.session.options.admin_messages()
+    kept = query.append_only()
+    latest = query.ring(5)
+    ws_session.subscribed("AD.*")
+    ws_session.session.release(kept)
+    ws_session.session.release(latest)
+    ws_session.unsubscribed("AD.*")
+    assert ws_session.connection("wss://socket.test/options").leases == 0
+
+
+def test_admin_messages_resubscribe_after_a_reconnect(
+    ws_session: WsSession,
+    *,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    kept = ws_session.session.options.admin_messages().append_only()
+    ws_session.subscribed("AD.*")
+    ws_session.publish(admin_message(302, 1, FLEX))
+    rows_when(kept, lambda arrived: len(arrived) == 1)
+    ws_session.server.close(1011)
+    ws_session.server.wait_for(lambda s: len(s.connections) == 2)
+    ws_session.subscribed("AD.*")  # on the new socket
+    ws_session.publish(admin_message(323, 2, "ALERT"))
+    assert [r["SequenceNumber"] for r in rows_when(kept, lambda arrived: len(arrived) == 2)] == [
+        1,
+        2,
+    ]
+    ws_session.session.release(kept)
+
+
+def test_one_unreadable_admin_message_never_fails_the_table(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    kept = ws_session.session.options.admin_messages().append_only()
+    ws_session.subscribed("AD.*")
+    unreadable = {**admin_message(302, 1, FLEX), "t": "soon"}  # its time cannot be read
+    odd = {**admin_message(323, 2, "ALERT"), "x": "PHLX"}  # its exchange cannot be read
+    ws_session.publish(unreadable, odd, admin_message(302, 3, "X"))
+    got = rows_when(kept, lambda arrived: len(arrived) == 2)
+    assert [(r["SequenceNumber"], r["Exchange"]) for r in got] == [(2, None), (3, 302)]
+    (row,) = shown_streams(ws_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+    ws_session.session.release(kept)
+
+
+def test_a_refused_admin_subscription_fails_its_table_and_names_its_plans(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    ws_session.server.refuse["AD.*"] = "not authorized to access AD.*"
+    notices = ws_session.session.options.admin_messages().blink()
+    trades = ws_session.session.options.trades(dm.ALL).blink()
+    ws_session.wait(
+        lambda s: any(status.kind is _massive.StatusKind.REFUSED for status in s.statuses)
+    )
+    ws_session.flush()
+    rows_by = {r["Dataset"]: r for r in shown_streams(ws_session, dh_to_pylist)}
+    refused, running = rows_by["options.admin_messages"], rows_by["options.trades"]
+    assert refused["State"] == "FAILED"
+    assert "refused the subscription to AD.*; Massive said: not authorized" in refused["Error"]
+    assert refused["Error"].endswith(
+        "options.admin_messages streams only in real time, on the plans listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+        "options.admin_messages.md"
+    )
+    assert running["State"] == "RUNNING"
+    ws_session.session.release(notices)
+    ws_session.session.release(trades)
+
+
+def test_admin_messages_refuse_the_delayed_feed_at_the_call(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    delayed = HostDecision("delayed.test", Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
+    session = make_ws_session(
+        decide=lambda *_: delayed, delayed_subscriptions={dm.Subscription.OPTIONS}
+    )
+    with pytest.raises(ValueError, match=r"lists dm\.Subscription\.OPTIONS"):
+        session.session.options.admin_messages().append_only()
+    assert session.urls == []  # no connection was opened
 
 
 # --- End to end: flat files ------------------------------------------------------------------

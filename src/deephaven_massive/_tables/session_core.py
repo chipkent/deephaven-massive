@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.request import Request, StreamKey
     from deephaven_massive._datasets.schema import Schema
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.transports import (
         FlatFileTransport,
@@ -232,6 +233,25 @@ def _next_stream_id() -> int:
     """
     with _stream_id_lock:
         return next(_stream_numbers)
+
+
+def _shown_symbols(spec: DatasetSpec, symbols: NormalizedSymbols) -> tuple[int | None, str, str]:
+    """Show a stream's symbols in its `m.streams()` row and in its open's log line.
+
+    Args:
+        spec: The stream's dataset.
+        symbols: Its stream key's symbols.
+
+    Returns:
+        `(count, text, logged)`: the row's `SymbolCount` and `Symbols` (`describe_symbols`),
+        and the log's words, the first symbols of a list (`bounded_list`) or the row's text.
+        A stream whose rows name no symbol, whose key holds `ALL` only to subscribe every
+        topic, shows none, as a read without symbols does: `(None, "", "none")`.
+    """
+    if not spec.names_symbols:
+        return None, "", "none"
+    count, text = describe_symbols(symbols)
+    return count, text, bounded_list(symbols) if isinstance(symbols, tuple) else text
 
 
 def _call(core_ref: weakref.ref[SessionCore], release: Callable[..., None], *args: object) -> None:
@@ -976,12 +996,7 @@ class SessionCore:
                     claim = opened_handle = self._open(
                         spec, request, channel=channel, stream_id=claim
                     )
-                    symbols = request.symbol_key()
-                    shown = (
-                        bounded_list(symbols)
-                        if isinstance(symbols, tuple)
-                        else describe_symbols(symbols)[1]
-                    )
+                    shown = _shown_symbols(spec, request.symbol_key())[2]
                     logger.debug(
                         "%s: stream %d opened: %s.%s -> channel %s on %s%s (%s); symbols %s",
                         self.label,
@@ -1086,7 +1101,7 @@ class SessionCore:
                 # Opening on another thread, which may need the UG lock this caller holds to
                 # finish: take the key over below rather than wait.
             stream_id = _next_stream_id()
-            count, text = describe_symbols(request.symbol_key())
+            count, text, _ = _shown_symbols(spec, request.symbol_key())
             row = StreamRow(
                 stream_id=stream_id,
                 kind=StreamKind.STREAM,

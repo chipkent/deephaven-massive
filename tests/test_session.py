@@ -43,7 +43,7 @@ from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable
 from deephaven_massive._namespaces.query_building import build_query
 from deephaven_massive._namespaces.reference import _Reference
 from deephaven_massive._namespaces.stocks import _Stocks
-from deephaven_massive._query import Query, StreamQuery
+from deephaven_massive._query import Query, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope
@@ -78,9 +78,9 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamQuery:
+def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
     q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, StreamQuery)
+    assert isinstance(q, SymbolStreamQuery)
     return q
 
 
@@ -637,7 +637,7 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(dm.MassiveError, match=message):
         q.append_only()
     # Building queries and reaching namespaces never fail.
-    assert isinstance(stream_query(massive_session), StreamQuery)
+    assert isinstance(stream_query(massive_session), SymbolStreamQuery)
     assert isinstance(massive_session.stocks, _Stocks)
 
 

@@ -24,7 +24,7 @@ from deephaven_massive._enums import Recency
 from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
 from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import StreamQuery
+from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._types import override
 
@@ -341,7 +341,7 @@ class WsSession:
 
     def query(
         self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
-    ) -> StreamQuery:
+    ) -> SymbolStreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
 
         Args:
@@ -354,7 +354,7 @@ class WsSession:
         """
         core = (session or self.session)._core
         q = build_query(core, spec, symbols=cast("list[str]", symbols))
-        assert isinstance(q, StreamQuery)
+        assert isinstance(q, SymbolStreamQuery)
         return q
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:

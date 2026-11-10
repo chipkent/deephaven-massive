@@ -299,6 +299,9 @@ class ConnectionStream:
         topics: Its topics now.
         static: True for `dm.ALL` and a symbol list, False for a reactive symbol table, whose
             topics the options cap may defer.
+        refusal_note: What the error of a refused subscription adds for this stream: for a
+            real-time-only dataset, where its plans are listed (`host_decision.real_time_note`);
+            `""` for any other.
     """
 
     stream_id: int
@@ -308,6 +311,7 @@ class ConnectionStream:
     symbols: frozenset[str] | None
     topics: frozenset[str]
     static: bool
+    refusal_note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1066,19 +1070,27 @@ class Connection:
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
+        A real-time-only dataset's streams add where its plans are listed
+        (`ConnectionStream.refusal_note`), and only theirs.
+
         Args:
             topics: The refused topics.
             message: The server's message, verbatim.
         """
         refused = set(topics)
-        error = EntitlementError(
+        text = (
             f"the WebSocket server {self.decision.host}{self.path} refused the subscription to "
             f"{', '.join(sorted(refused))}; Massive said: {message}; "
             f"{self._refusal_hint(refused)}"
         )
-        self._last_error = str(error)
-        ids = [s.stream_id for s in self._streams.values() if s.topics & refused]
-        self.flusher.fail(ids, error)
+        self._last_error = text
+        # One error per note, so a note reaches only the streams that carry it.
+        by_note: dict[str, list[int]] = {}
+        for stream in self._streams.values():
+            if stream.topics & refused:
+                by_note.setdefault(stream.refusal_note, []).append(stream.stream_id)
+        for note, ids in by_note.items():
+            self.flusher.fail(ids, EntitlementError(f"{text}; {note}" if note else text))
 
     def _refusal_hint(self, refused: set[str]) -> str:
         """Return what a refusal's message says to do, by the connection's feed.
