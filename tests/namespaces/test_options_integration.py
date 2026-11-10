@@ -366,6 +366,10 @@ _SPX_SPELLINGS = ("SPX", "I:SPX", "SPXW")
 """The `underlying_ticker` spellings tried for SPXW contracts, which the reference may file
 under any of them."""
 
+_PREV_TRIES = 5
+"""How many listed calls of a root `/prev` is asked for, in turn, until one has a bar: a
+listed contract that did not trade on the previous day has none."""
+
 
 _DAY_STAMPS = frozenset({(0, 0), (13, 0), (13, 15), (16, 0), (16, 15)})
 """The New York times of day (hour, minute) at which the library expects an option's 1-day bar
@@ -437,26 +441,25 @@ def _stamp_candidates(range_bars: RangeBars, days: tuple[date, date]) -> dict[st
 
 def _listed_calls(
     live_rest: RestClient, rest_rows: RestRows, evidence: Evidence
-) -> dict[str, str | None]:
-    """Return a SPY and an SPXW call listed today, at or just above the money, for `/prev`.
+) -> dict[str, list[str]]:
+    """Return SPY and SPXW calls listed today, from the money upward, for `/prev`.
 
     `/prev` serves only the most recent completed trading day, so its stamp is checked on
-    contracts listed now. Each is the lowest-strike call at or above the money (SPY's `/prev`
-    close, ten times it for SPXW) expiring 14 to 45 days from today, from one page of the
-    contracts reference; SPXW is looked up under each spelling of its underlying in turn, and
-    the spelling that answered is recorded.
+    contracts listed now. Each root's candidates are its `_PREV_TRIES` lowest-strike calls at
+    or above the money (SPY's `/prev` close, ten times it for SPXW) expiring on the third
+    Friday of next month, the most traded expiry, from one page of the contracts reference.
+    SPXW is looked up under each spelling of its underlying in turn, and the spelling that
+    answered is recorded.
 
     Returns:
-        The ticker by root, or None for a root with no such contract.
+        The tickers by root, lowest strike first; empty for a root with no such contract.
     """
     prevs = rest_rows(_SPY_PREV, {"stocksTicker": "SPY"}, {})
     assert len(prevs) == 1, f"SPY /prev returned {prevs}"
     close = float(prevs[0]["c"])
-    today = datetime.now(UTC).date()
     query = {
         "contract_type": "call",
-        "expiration_date.gte": today + timedelta(days=14),
-        "expiration_date.lte": today + timedelta(days=45),
+        "expiration_date": _monthly_expiry_after(datetime.now(UTC).date()),
         "sort": "strike_price",
         "order": "asc",
     }
@@ -464,10 +467,10 @@ def _listed_calls(
     spy = live_rest.get(
         contracts,
         {},
-        query | {"underlying_ticker": "SPY", "strike_price.gte": close, "limit": 1},
+        query | {"underlying_ticker": "SPY", "strike_price.gte": close, "limit": _PREV_TRIES},
         bucket="options",
     ).rows
-    found: dict[str, str | None] = {"SPY": str(spy[0]["ticker"]) if spy else None, "SPXW": None}
+    found: dict[str, list[str]] = {"SPY": [str(r["ticker"]) for r in spy], "SPXW": []}
     for spelling in _SPX_SPELLINGS:
         rows = live_rest.get(
             contracts,
@@ -482,10 +485,11 @@ def _listed_calls(
         ).rows
         spxw = [str(r["ticker"]) for r in rows if str(r["ticker"]).startswith("O:SPXW")]
         evidence(
-            f"contracts reference underlying_ticker={spelling}: {len(rows)} calls, SPXW {spxw[:1]}"
+            f"contracts reference underlying_ticker={spelling}: {len(rows)} calls, "
+            f"SPXW {spxw[:_PREV_TRIES]}"
         )
         if spxw:
-            found["SPXW"] = spxw[0]
+            found["SPXW"] = spxw[:_PREV_TRIES]
             break
     return found
 
@@ -552,7 +556,7 @@ def _prev_bars(
 @pytest.mark.needs("options:starter", "stocks:basic")
 @pytest.mark.verifies("51")
 @pytest.mark.requests(2)
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(130)
 def test_option_day_and_week_bar_stamps_from_rest(
     live_session: dm.MassiveSession,
     live_rest: RestClient,
@@ -575,15 +579,18 @@ def test_option_day_and_week_bar_stamps_from_rest(
     strike with a range bar on both days), it records each stamp in UTC and New York time:
     the range endpoint's 1-day bars around both days, the first and last minute bar of each
     day, and the week bars of the half day's week and the week before. `/prev` serves only the
-    most recent completed trading day, so it is read for a SPY and an SPXW call listed now
-    (from the contracts reference), beside the range bars of that day, with whether it is a
-    half day and which day's bar it matches. The library's windows for the same requests
+    most recent completed trading day, so it is read for a SPY and an SPXW call listed now,
+    from the contracts reference: per root, the first of up to five strikes from the money
+    upward that has a `/prev` bar, as a contract that did not trade that day has none. Each is
+    read beside the range bars of that day, with whether it is a half day and which day's bar
+    it matches. The library's windows for the same requests
     follow. Reading it: range stamps at 00:00 New York time, a last minute bar at 12:59 (13:14
     for SPXW) on the half day, and a `/prev` stamp at 16:00 (16:15 for SPXW; 13:00 or 13:15
     after a half day) confirm the library's day label; a bar at any other stamp is served,
     labelled by the New York day its stamp falls on, with a WARNING in the log. Fails when a
     range 1-day bar or a `/prev` bar is stamped at a time other than one the library expects
-    for its day: 00:00, 13:00, 13:15, 16:00, or 16:15 New York time.
+    for its day: 00:00, 13:00, 13:15, 16:00, or 16:15 New York time, and when no listed call of
+    a root has a `/prev` bar.
     """
     days = stamp_days["day"]
     candidates = _stamp_candidates(range_bars, days)
@@ -612,17 +619,25 @@ def test_option_day_and_week_bar_stamps_from_rest(
             )
             break
     listed = _listed_calls(live_rest, rest_rows, evidence)
-    prevs = {
-        ticker: _prev_bars(
-            live_session,
-            ticker,
-            report=prev_bar_report,
-            library_stamps=library_stamps,
-            evidence=evidence,
-        )
-        for ticker in filter(None, listed.values())
-    }
-    answered = [ticker for ticker, bars in prevs.items() if bars]
+    prevs: dict[str, list[StampedBar]] = {}
+    for root, tickers in listed.items():
+        missed: list[str] = []
+        for ticker in tickers:
+            bars = _prev_bars(
+                live_session,
+                ticker,
+                report=prev_bar_report,
+                library_stamps=library_stamps,
+                evidence=evidence,
+            )
+            if bars:
+                prevs[ticker] = bars
+                evidence(f"{root} /prev answered for {ticker}; no bar before it for {missed}")
+                break
+            missed.append(ticker)
+        else:
+            evidence(f"{root} /prev: no listed call has a bar; tried {missed}")
+    answered = [_root(ticker) for ticker in prevs]
     odd += [
         ("/prev", ticker, _new_york_day(bar[0]), bar[0])
         for ticker, bars in prevs.items()
@@ -632,8 +647,8 @@ def test_option_day_and_week_bar_stamps_from_rest(
     unpriced = [root for root in candidates if root not in complete]
     assert not unpriced, f"no {unpriced} candidate has a range bar on both days: {candidates}"
     assert all(complete.values()), f"a stamp contract lacks a week bar of one week: {complete}"
-    assert len(answered) == len(listed), (
-        f"/prev answered for {answered}; listed calls by root (None: none found): {listed}"
+    assert sorted(answered) == sorted(listed), (
+        f"/prev answered for {list(prevs)}; listed calls by root, all tried: {listed}"
     )
     assert not odd, f"(source, ticker, day, stamp ms) the library does not expect: {odd}"
 

@@ -78,7 +78,8 @@ def test_index_values_stream_on_the_resolved_host(
     (host, state, acknowledgement, error) and asserts that Massive acknowledged the topic, whatever
     the hour. Values are required only once the S&P indices have been open longer than the plan's
     feed delay, counted from 09:30 New York time (15 minutes on Indices Starter, none on real-time
-    plans); before that, and while they are closed, the test skips after the acknowledgement.
+    plans), and before the 16:00 close (13:00 on a half trading day), whatever Massive's status
+    says after it; at any other time the test skips after the acknowledgement.
     Passes when the class's own host acknowledges the topic and, once values are due, sends
     them; a refusal names the host to use instead.
     """
@@ -94,7 +95,8 @@ def test_index_values_stream_on_the_resolved_host(
     assert acked, "Massive acknowledged no index value topic (see the connection above)"
     if not due:
         pytest.skip(
-            f"no index value is due: the S&P indices are {status}, or within the feed delay"
+            f"no index value is due: the S&P indices are {status}, past the close, "
+            "or within the feed delay"
         )
     assert rows, f"no index value arrived in {_STREAM_WAIT:.0f} s, though one was due"
 
