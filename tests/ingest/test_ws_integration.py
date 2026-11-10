@@ -4,10 +4,10 @@ Each test records the session's diagnostics and Massive's messages (`evidence`).
 subscribe to one symbol and are released at once. The reconnect check closes the session's
 socket from under it, through the wire client's private `_run_generation`, which receives each
 authenticated socket: the library has no public way to drop a connection, and needs none. The
-slot test opens a second connection to a
-cluster on purpose: it is marked `integration_limits`, runs only with `-m integration_limits`,
-and should run alone and last, with no other client of the key. How to run these tests is in
-`docs/live-tests.md`.
+slot test opens a second connection to a cluster on purpose and records a timeline of both
+(`tests/_live/slot_timeline.py`): it is marked `integration_limits`, runs only with
+`-m integration_limits`, and should run alone and last, with no other client of the key. How
+to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
-from tests._live import streams
+from tests._live import slot_timeline, streams
 
 if TYPE_CHECKING:
     import asyncio
@@ -52,6 +52,17 @@ _WAIT = 45.0
 _FIRST_WAIT = 20.0
 """Seconds the slot test waits for the first session's trades; crypto trades all the time."""
 
+_SLOT_WINDOW = 90.0
+"""Seconds the slot test samples both sessions after the second opens: long enough for each
+to reconnect more than once if every reconnect evicts the other."""
+
+_SLOT_SAMPLE = 2.0
+"""Seconds between the slot test's samples."""
+
+_WS_CLIENT_LOGGER = WsClient.__module__
+"""The wire WebSocket client's logger, named for its module, which logs each status message,
+refusal, authentication, and close at DEBUG or INFO."""
+
 _DELAYED_FEED_LAG = timedelta(minutes=15)
 """How far Massive's delayed stocks feed lags the market: its first trade of a session comes
 this long after the session opens."""
@@ -71,23 +82,6 @@ class _Socket(Protocol):
     def transport(self) -> asyncio.Transport:
         """The socket's asyncio transport, whose `abort()` drops the connection at once."""
         ...
-
-
-def _wait_for_state(
-    session: dm.MassiveSession, table_rows: TableRows, *, states: set[str]
-) -> list[dict[str, Any]]:
-    """Wait until one of a session's WebSocket connections is in one of `states`, or time out.
-
-    Returns:
-        The session's connection rows when the wait ended.
-    """
-    pause = threading.Event()  # never set; only paces the polling
-    deadline = time.monotonic() + _WAIT
-    while True:
-        rows = table_rows(session.connections())
-        if any(r["State"] in states for r in rows) or time.monotonic() >= deadline:
-            return rows
-        pause.wait(0.5)
 
 
 def _wait_until(
@@ -299,7 +293,7 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
 @pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("12")
 @pytest.mark.integration_limits
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(200)
 def test_a_second_connection_with_one_key_waits_for_a_slot(
     live_session: dm.MassiveSession,
     *,
@@ -314,47 +308,92 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
 
     Deliberately takes a second connection slot (marked `integration_limits`; run it alone and
     last, with no other client of the key). Streams `X:BTCUSD` trades in one session, opens a
-    second session on the same cluster, and records both sessions' connection states and
-    errors while both are open and after the second closes. Sessions of one process whose key
-    and connection settings are all equal share their WebSocket connections, so the second
-    session's `max_outage` is one second longer than the first's: that alone gives it a socket
-    of its own. Fails when the library's WARNING that the two sessions cannot share connections
-    is missing, since then no second socket competed and the run shows nothing. Reading it:
-    the second waiting (`WAITING_SLOT`, a `max_connections` message) while the first keeps
-    running confirms the library's slot handling; the first being dropped instead means
-    Massive keeps the newer connection, and the slot rule needs revisiting.
+    second session on the same cluster that streams them too, and samples both sessions every
+    2 s for 90 s: each one's crypto WebSocket `State`, `Reconnects`, and acked topics, and its
+    stream's published rows. Sessions of one process whose key and connection settings are all
+    equal share their WebSocket connections, so the second session's `max_outage` is one second
+    longer than the first's: that alone gives it a socket of its own. Fails only when the
+    library's WARNING that the two sessions cannot share connections is missing, since then no
+    second socket competed and the run shows nothing.
+
+    The evidence holds the samples that changed (a `+` marks rows that grew), every status
+    message, `max_connections` refusal, authentication, and close of both wire clients with its
+    time and connection group (the first session's group authenticates first), and a verdict.
+
+    Reading it, by the verdict:
+
+    - `first held, second waited`: the first never reconnected and kept getting rows, and the
+      second never got one. Massive refuses the newer connection, as the library assumes.
+    - `newer evicted older`: the first reconnected while the second got rows. Massive keeps the
+      newer connection and drops the older one, and the slot rule needs revisiting.
+    - `ping-pong`: both reconnected at least twice. Each one's reconnect evicts the other, so
+      two clients of one key take turns for as long as both run.
+    - `unclear`: none of these; read the timeline.
     """
-    first = live_session.crypto.trades("X:BTCUSD").append_only()
-    first_rows = wait_rows(live_session, first, time.monotonic() + _FIRST_WAIT)
-    evidence(f"first session: {len(first_rows)} trades before the second connects")
-    if not first_rows:
+    with caplog.at_level(logging.DEBUG, logger=_WS_CLIENT_LOGGER):
+        first = live_session.crypto.trades("X:BTCUSD").append_only()
+        first_rows = wait_rows(live_session, first, time.monotonic() + _FIRST_WAIT)
+        evidence(f"first session: {len(first_rows)} trades before the second connects")
+        if not first_rows:
+            for line in stream_report(live_session):
+                evidence(line)
+            pytest.skip("the first session received no trade, so it holds no slot to compete for")
+        # A different connection setting keeps the second session out of the first's connections.
+        config = dataclasses.replace(live_config, max_outage=live_config.max_outage + 1)
+        with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+            second_session = dm.MassiveSession(config)
+        apart = any("cannot share WebSocket connections" in r.getMessage() for r in caplog.records)
+        evidence(f"second session opens its own connections: {apart}")
+        try:
+            assert apart, "the second session shares the first's connections, so none competes"
+            second = second_session.crypto.trades("X:BTCUSD").append_only()
+            samples = _sample_slot_window(live_session, second_session, table_rows)
+            evidence(f"timeline over {_SLOT_WINDOW:.0f} s after the second session opened:")
+            for line in slot_timeline.changes(samples):
+                evidence(f"    {line}")
+            evidence("second session at the end of the window:")
+            for line in stream_report(second_session):
+                evidence(f"    {line}")
+            evidence("first session at the end of the window:")
+            for line in stream_report(live_session):
+                evidence(f"    {line}")
+            second_session.release(second)
+        finally:
+            second_session.close()
+        evidence("first session after the second closed:")
         for line in stream_report(live_session):
-            evidence(line)
-        pytest.skip("the first session received no trade, so it may hold no slot to compete for")
-    # A different connection setting keeps the second session out of the first's connections.
-    config = dataclasses.replace(live_config, max_outage=live_config.max_outage + 1)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
-        second_session = dm.MassiveSession(config)
-    apart = any("cannot share WebSocket connections" in r.getMessage() for r in caplog.records)
-    evidence(f"second session opens its own connections: {apart}")
-    try:
-        assert apart, "the second session shares the first's connections, so none competes"
-        second = second_session.crypto.trades("X:BTCUSD").append_only()
-        started = time.monotonic()
-        _wait_for_state(second_session, table_rows, states={"WAITING_SLOT", "FAILED"})
-        evidence(f"second session after {time.monotonic() - started:.1f} s:")
-        for line in stream_report(second_session):
             evidence(f"    {line}")
-        evidence("first session while the second is open:")
-        for line in stream_report(live_session):
-            evidence(f"    {line}")
-        second_session.release(second)
-    finally:
-        second_session.close()
-    evidence("first session after the second closed:")
-    for line in stream_report(live_session):
+        live_session.release(first)
+        client_records = [r for r in caplog.records if r.name == _WS_CLIENT_LOGGER]
+    evidence("wire client events:")
+    for line in slot_timeline.wire_events(client_records):
         evidence(f"    {line}")
-    live_session.release(first)
+    evidence(f"verdict: {slot_timeline.verdict(samples)}")
+
+
+def _sample_slot_window(
+    first: dm.MassiveSession, second: dm.MassiveSession, table_rows: TableRows
+) -> list[slot_timeline.Sample]:
+    """Sample both sessions every `_SLOT_SAMPLE` seconds for `_SLOT_WINDOW` seconds.
+
+    Returns:
+        The samples in order, the first taken at once.
+    """
+    pause = threading.Event()  # never set; only paces the polling
+    started = time.monotonic()
+    samples = []
+    while True:
+        elapsed = time.monotonic() - started
+        samples.append(
+            slot_timeline.Sample(
+                elapsed,
+                slot_timeline.side(table_rows(first.connections()), table_rows(first.streams())),
+                slot_timeline.side(table_rows(second.connections()), table_rows(second.streams())),
+            )
+        )
+        if elapsed >= _SLOT_WINDOW:
+            return samples
+        pause.wait(_SLOT_SAMPLE)
 
 
 @pytest.mark.needs("currencies:starter")
