@@ -52,6 +52,9 @@ The connection-limit tests run last and alone, because they disturb the key's co
    A weekday run in market hours covers more, because a stream test checks rows only while its
    market is open. The rate-limit tests run only while one asset class is still on Basic.
 
+   The command also runs every README example as written and checks it against its text. Its
+   streaming examples check the most from 09:50 to 15:55 New York time.
+
 3. Run the connection-limit tests, one command after the other:
 
    ```bash
@@ -60,27 +63,6 @@ The connection-limit tests run last and alone, because they disturb the key's co
    ```
 
 Every command adds its output to `live-checks.log`, the file to attach to an issue.
-
-<a id="readme-examples"></a>
-
-### Run the README's examples alone
-
-`tests/live/test_doc_examples_integration.py` runs every README example as written, back to
-back as the README orders them, and checks each table, chart, and panel against the text after
-the example. The `-m integration` command above includes it. To run it alone:
-
-```bash
-uv run pytest -m integration tests/live/test_doc_examples_integration.py 2>&1 | tee -a live-checks.log
-```
-
-It needs Stocks Starter or higher, and Currencies Starter adds the streaming example's crypto
-line. On Stocks Advanced or higher, set `MASSIVE_DELAYED_API_KEY` for the settings example
-without its setting. On any paid Stocks plan, set `MASSIVE_BASIC_API_KEY` for the tester
-guide's example 10.
-
-The streaming examples are checked against the stock session of the moment. Run the file in the
-regular session, from 09:50 to 15:55 New York time, after a delayed plan's 15 minutes. A run
-overnight checks that their tables stay empty.
 
 <a id="plans"></a>
 
