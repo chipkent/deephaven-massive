@@ -133,8 +133,9 @@ settles it.
   channel).
 - **83.** The unit of the options snapshot's `greeks.gamma`: per $0.01 move of the underlying, as
   Massive's description and the dataset page say, or per $1, the textbook unit. Passed through as
-  sent. Verified by `tests/namespaces/test_options_integration.py` (Options Starter), against
-  Black-Scholes gamma from each contract's own inputs.
+  sent, with Massive's description. Settled by `tests/namespaces/test_options_integration.py`
+  (Options Starter), which records each contract's ratio to Black-Scholes gamma from its own
+  inputs.
 
 ## Settled
 

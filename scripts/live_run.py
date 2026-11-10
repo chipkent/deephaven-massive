@@ -11,8 +11,8 @@ without another live run. Run it from a source checkout, from the repository roo
     uv run python scripts/live_run.py upgrade-check stocks --out ~/massive-live
 
 The secrets come only from the environment (`MASSIVE_API_KEY`, and optionally
-`MASSIVE_DELAYED_API_KEY`, `MASSIVE_BASIC_API_KEY`, and the S3 pair `MASSIVE_S3_ACCESS_KEY_ID`
-and `MASSIVE_S3_SECRET_ACCESS_KEY`) and are never written: every printed line and written file is
+`MASSIVE_DELAYED_API_KEY` and the S3 pair `MASSIVE_S3_ACCESS_KEY_ID` and
+`MASSIVE_S3_SECRET_ACCESS_KEY`) and are never written: every printed line and written file is
 cleaned of them, and `pack` refuses to zip a folder in which its scan finds one.
 
 All the logic is in `tests/_live/live_run/` (`cli`, `commands`, and the modules they name),

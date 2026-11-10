@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -11,7 +12,7 @@ from deephaven import empty_table, ui
 
 import deephaven_massive as dm
 from tests._live import doc_examples
-from tests.live import test_doc_examples_integration as live
+from tests._live.calendar import NEW_YORK
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -112,14 +113,12 @@ def test_blocks_run_in_order_each_continuing_block_in_the_names_before_it(
     tmp_path: Path,
 ) -> None:
     blocks = [
+        doc_examples.Block("a = 1\n", continues=True),
         doc_examples.Block("b = a + 1\n", continues=True),
-        doc_examples.Block("c = b + 1\n", continues=True),
-        doc_examples.Block("d = 'fresh'\n", continues=False),
+        doc_examples.Block("c = 'fresh'\n", continues=False),
     ]
-    ran = doc_examples.run_blocks(
-        blocks, tmp_path, "steps", console_command=_direct, start={"a": 1}
-    )
-    assert [ran[0]["b"], ran[1]["c"], ran[2]["d"]] == [2, 3, "fresh"]
+    ran = doc_examples.run_blocks(blocks, tmp_path, "steps", console_command=_direct)
+    assert [ran[0]["a"], ran[1]["b"], ran[2]["c"]] == [1, 2, "fresh"]
     assert "a" not in ran[2]
     assert sorted(path.name for path in tmp_path.glob("steps_*.py")) == [
         "steps_0.py",
@@ -127,17 +126,21 @@ def test_blocks_run_in_order_each_continuing_block_in_the_names_before_it(
         "steps_2.py",
     ]
     names = doc_examples.merged(ran)
-    assert {key: names[key] for key in "abcd"} == {"a": 1, "b": 2, "c": 3, "d": "fresh"}
+    assert {key: names[key] for key in "abc"} == {"a": 1, "b": 2, "c": "fresh"}
 
 
-def test_a_first_continuing_block_without_a_start_runs_alone(tmp_path: Path) -> None:
-    [ran] = doc_examples.run_blocks(
-        [doc_examples.Block("alone = 1\n", continues=True)],
-        tmp_path,
-        "alone",
-        console_command=_direct,
-    )
-    assert ran["alone"] == 1
+def test_a_console_keeps_every_name_and_a_later_block_rebinds_it(tmp_path: Path) -> None:
+    console = doc_examples.Console(tmp_path, _direct)
+    first = doc_examples.Block("m = 'first'\nkept = m\n", continues=False)
+    second = doc_examples.Block("m = 'second'\nboth = kept + m\n", continues=False)
+    assert console.run([first], "m") == {"m": "first"}
+    assert console.run([second], "m", "kept", "both") == {
+        "m": "second",
+        "kept": "first",
+        "both": "firstsecond",
+    }
+    console.close()
+    assert console.run([]) == {}
 
 
 def test_forget_clears_the_globals_of_the_scripts_functions(tmp_path: Path) -> None:
@@ -159,15 +162,12 @@ def test_recorded_sessions_close_every_session_the_examples_open(
     fake_rest: FakeRestServer,
 ) -> None:
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
-    with doc_examples.recorded_sessions() as opened:
+    with doc_examples.recorded_sessions():
         first = dm.MassiveSession(config)
-        second = dm.MassiveSession(config)
-        assert opened == [first, second]
+        dm.MassiveSession(config)  # unreachable at once, as a console's replaced `m` is
         assert "open" in repr(first)
     assert "closed" in repr(first)
-    assert "closed" in repr(second)
     assert "MassiveSession" not in vars(dm)
-    opened.clear()
 
 
 def test_dashboard_panels_read_each_panels_title_and_content() -> None:
@@ -194,5 +194,41 @@ def test_the_live_run_covers_every_readme_example() -> None:
         if doc_examples.section_blocks(_README, anchor)
     }
     assert doc_examples.intro_blocks(_README)  # the hook, which the free examples' test runs
-    covered = {*live.FREE_SECTIONS, *live.PAID_SECTIONS, *live.UNRUN_SECTIONS}
+    covered = {
+        *doc_examples.FREE_SECTIONS,
+        *doc_examples.PAID_SECTIONS,
+        *doc_examples.UNRUN_SECTIONS,
+    }
     assert with_code == covered
+
+
+def _new_york(hour: int, minute: int) -> datetime:
+    return datetime(2026, 11, 10, hour, minute, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize(
+    ("now", "delay", "cleared"),
+    [
+        (_new_york(3, 29), timedelta(0), False),
+        (_new_york(3, 30), timedelta(0), True),
+        (_new_york(3, 59), timedelta(0), True),
+        (_new_york(4, 0), timedelta(0), False),
+        (_new_york(4, 10), timedelta(minutes=15), True),  # a delayed feed is at 03:55
+        (_new_york(4, 15), timedelta(minutes=15), False),
+    ],
+)
+def test_snapshots_are_cleared_from_half_past_three_to_four(
+    now: datetime, delay: timedelta, *, cleared: bool
+) -> None:
+    assert doc_examples.snapshots_cleared(now.astimezone(UTC), delay) is cleared
+
+
+def test_the_seam_compares_the_minutes_through_the_last_live_one() -> None:
+    spy = [1, 2, 4, 5, 9]
+    live = [4, 5]
+    rest = [1, 2, 3, 4, 6, 7]
+    # REST's 3 is missing from the table, its 5 only in the table; 6, 7, and 9 are past the
+    # last live minute, so they are left out.
+    assert doc_examples.seam_gaps(spy, live, rest) == ([3], [5])
+    assert doc_examples.seam_gaps([1, 5], [5], [1]) == ([], [5])
+    assert doc_examples.seam_gaps(spy, [], rest) == ([], [])

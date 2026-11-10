@@ -202,7 +202,6 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
     assert environment["set"] == {
         "MASSIVE_API_KEY": True,
         "MASSIVE_DELAYED_API_KEY": False,
-        "MASSIVE_BASIC_API_KEY": False,
         "MASSIVE_S3_ACCESS_KEY_ID": False,
         "MASSIVE_S3_SECRET_ACCESS_KEY": False,
         "HTTPS_PROXY": False,

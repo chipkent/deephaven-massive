@@ -34,13 +34,15 @@ import re
 import runpy
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import deephaven
 import pytest
-from deephaven import update_graph
+from deephaven import table_listener, update_graph
 from deephaven.execution_context import ExecutionContext
 from deephaven.table import Table, TableDefinitionLike
 from deephaven.table_factory import InputTable
@@ -54,7 +56,9 @@ from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
 from tests._live.doc_examples import (
+    Console,
     blocks,
+    dashboard_panels,
     fences,
     forget,
     merged,
@@ -636,3 +640,217 @@ def test_the_change_example_compares_each_minute_with_yesterday(
     assert changes["AAPL"]["ChangePct"] == pytest.approx(5.0)
     assert changes["MSFT"]["ChangePct"] == pytest.approx(-5.0)
     names.clear()
+
+
+# --- What the library does with each example's data ------------------------------------------
+
+
+def _new_york_ms(day: str) -> int:
+    """Return midnight New York time of a day, as epoch milliseconds."""
+    midnight = datetime.combine(date.fromisoformat(day), dt_time(0), ZoneInfo("America/New_York"))
+    return int(midnight.timestamp() * 1000)
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_returns_example_gives_each_stock_its_return(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    span = f"{_new_york_ms('2025-11-03')}/{_new_york_ms('2026-10-31') - 1}"
+    for symbol, first, last in (
+        ("AAPL", 200.0, 250.0),
+        ("MSFT", 400.0, 380.0),
+        ("NVDA", 100.0, 200.0),
+    ):
+        bars = [
+            _bar("2025-11-03", first, 1_000) | {"t": _new_york_ms("2025-11-03")},
+            _bar("2026-10-30", last, 1_000) | {"t": _new_york_ms("2026-10-30")},
+        ]
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/range/1/day/{span}",
+            Reply(envelope(bars, adjusted=True, ticker=symbol)),
+        )
+    [block] = section_blocks(README, "compare-stocks")
+    [names] = run_blocks([block], tmp_path, "returns", console_command=console_command)
+    # One row per stock, its first and last close, and the percent return between them.
+    returns = {r["Symbol"]: r for r in dh_to_pylist(names["returns"])}
+    assert {s: (r["Start"], r["End"]) for s, r in returns.items()} == {
+        "AAPL": (200.0, 250.0),
+        "MSFT": (400.0, 380.0),
+        "NVDA": (100.0, 200.0),
+    }
+    assert {s: r["ReturnPct"] for s, r in returns.items()} == pytest.approx(
+        {"AAPL": 25.0, "MSFT": -5.0, "NVDA": 100.0}
+    )
+    names.clear()
+
+
+_NEWS_STOCKS = ["AAPL", "NVDA", "TSLA"]
+
+
+def _articles() -> list[dict[str, Any]]:
+    """Return three articles that list every stock of the news example, oldest in the middle."""
+    fixture = Path(__file__).parent / "data" / "namespaces" / "reference" / "news.json"
+    [template] = json.loads(fixture.read_text(encoding="utf-8"))["results"]
+    stamps = ("2026-10-30T15:00:00Z", "2026-10-30T09:00:00Z", "2026-10-30T18:00:00Z")
+    return [
+        template
+        | {"id": f"article-{n}", "published_utc": stamp, "tickers": ["AAPL", "NVDA", "TSLA"]}
+        for n, stamp in enumerate(stamps)
+    ]
+
+
+class _Failure:
+    """The text of the failure a table's listener heard, written on an update-graph thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._text: str | None = None
+
+    def heard(self, error: Exception) -> None:
+        """Keep the failure's text."""
+        with self._lock:
+            self._text = str(error)
+
+    def text(self) -> str | None:
+        """Return the failure's text, or None before the table fails."""
+        with self._lock:
+            return self._text
+
+
+@pytest.fixture
+def failure_text() -> Iterator[Callable[[Table], _Failure]]:
+    """Return a function that listens for a live table's failure and keeps its text.
+
+    Every listener is stopped when the test ends, before its leak check.
+
+    Yields:
+        A function mapping a table to the record of its failure.
+    """
+    handles = []
+
+    def watch(table: Table) -> _Failure:
+        failure = _Failure()
+        # A wrapper of its own: the JVM holds the listener, and through it the wrapper.
+        own = Table(j_table=table.j_table)
+        handles.append(
+            table_listener.listen(own, lambda _update, _replay: None, on_error=failure.heard)
+        )
+        return failure
+
+    yield watch
+    for handle in handles:
+        handle.stop()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    failure_text: Callable[[Table], _Failure],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    readme_server.reply("/v2/reference/news", Reply(envelope(_articles())))
+    console = Console(tmp_path, console_command)
+    news = console.run(section_blocks(README, "follow-the-news"), "headlines", "latest")
+    # Each stock's articles, newest first.
+    rows = _wait_for_rows(news["latest"], lambda rows: len(rows) == 9, dh_to_pylist)
+    published = [r["PublishedUtc"] for r in rows]
+    assert published == sorted(published, reverse=True)
+    assert {r["Symbol"] for r in rows} == {"AAPL", "NVDA", "TSLA"}
+    failures = {name: failure_text(news[name]) for name in ("headlines", "latest")}
+    # Example 6, in the same console: the session closes, and the tables keep their rows.
+    stopped = console.run(section_blocks(README, "stop-live-tables"), "kept")
+    pace = threading.Event()  # never set; only paces the wait for the failures
+    for _ in range(500):
+        if all(failure.text() is not None for failure in failures.values()):
+            break
+        pace.wait(0.02)
+    for failure in failures.values():
+        assert "was closed; this table no longer updates" in str(failure.text())
+    assert dh_to_pylist(news["latest"]) == rows
+    assert dh_to_pylist(stopped["kept"]) == rows
+    news.clear()
+    stopped.clear()
+    console.close()
+
+
+def _minute_bar(symbol: str, minute: int, close: float) -> dict[str, Any]:
+    """Return a stock's minute bar of the fake stream, `minute` minutes after 15:00 UTC."""
+    start = _ms("2026-10-30T15:00:00") + minute * 60_000
+    bar = {"ev": "AM", "sym": symbol, "o": close, "h": close, "l": close, "c": close, "v": 100}
+    return bar | {"s": start, "e": start + 60_000}
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+@pytest.mark.usefixtures("settings_home")
+def test_the_table_types_example_keeps_the_newest_the_last_30_and_every_bar(
+    *,
+    readme_server: FakeRestServer,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    readme_server.reply_default(Reply(envelope([])))
+    console = Console(tmp_path, console_command)
+    names = console.run(section_blocks(README, "table-shapes"), "newest", "last_30", "since_start")
+    _wait_for_subscription(fake_ws_server, "AM.SPY")
+    fake_ws_server.send(json.dumps([_minute_bar("SPY", n, 500.0 + n) for n in range(32)]))
+    every = _wait_for_rows(names["since_start"], lambda rows: len(rows) == 32, dh_to_pylist)
+    assert [r["Close"] for r in every] == [500.0 + n for n in range(32)]
+    # The newest bar, and the newest 30.
+    assert [r["Close"] for r in dh_to_pylist(names["newest"])] == [531.0]
+    assert [r["Close"] for r in dh_to_pylist(names["last_30"])] == [502.0 + n for n in range(30)]
+    names.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+@pytest.mark.usefixtures("settings_home")
+def test_the_dashboard_example_shows_its_chart_and_table_and_the_chart_grows(
+    *,
+    readme_server: FakeRestServer,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for symbol in ("AAPL", "MSFT", "NVDA"):
+        previous = _bar("2026-10-29", 100.0, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    console = Console(tmp_path, console_command)
+    names = console.run(section_blocks(README, "dashboard"), "dashboard", "chart", "changes", "m")
+    # Two panels side by side: the chart, then the change table.
+    panels = dashboard_panels(names["dashboard"])
+    assert [title for title, _ in panels] == ["Closes", "Change"]
+    assert panels[0][1] is names["chart"]
+    assert panels[1][1] is names["changes"]
+
+    def published() -> int:
+        rows = dh_to_pylist(names["m"].streams())
+        return sum(int(r["RowsPublished"] or 0) for r in rows if r["Dataset"] == "stocks.bars")
+
+    # The chart's stream publishes each minute's bars, so its line grows each minute.
+    _wait_for_subscription(fake_ws_server, "AM.NVDA")
+    counts = []
+    for minute in range(2):
+        fake_ws_server.send(
+            json.dumps([_minute_bar(s, minute, 101.0) for s in ("AAPL", "MSFT", "NVDA")])
+        )
+        pace = threading.Event()  # never set; only paces the wait for the bars
+        for _ in range(500):
+            if published() == 3 * (minute + 1):
+                break
+            pace.wait(0.02)
+        counts.append(published())
+    assert counts == [3, 6]
+    names.clear()
+    console.close()

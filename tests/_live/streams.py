@@ -3,14 +3,15 @@
 A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires
 rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
 on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
-the first values of a session fifteen minutes after its open. Stock trades and quotes flow in
-the extended hours too, from 04:00 New York time; every other stock stream, and every option and
-index stream, needs the regular session, from 09:30 to its close at 16:00 (13:00 on a half
-trading day), whatever Massive's status says after the close. The futures session opens at the
-time of Massive's futures market status, and forex and crypto at no time this module knows, so
-their rows are due as soon as their market is open. The delays are those of the vendored WebSocket
-"Plan Recency" tables (`FEED_DELAYS`). Before the rows are due, the test skips after the
-acknowledgement, and a pass always means that rows reached the table.
+the first values of a session fifteen minutes after its open. Stock trades, quotes, and bars,
+which Massive builds from trades, flow in the extended hours too, from 04:00 New York time.
+Every other stock stream, and every option and index stream, needs the regular session, from
+09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says after
+the close. The futures session opens at the time of Massive's futures market status, and forex
+and crypto at no time this module knows, so their rows are due as soon as their market is open.
+The delays are those of the vendored WebSocket "Plan Recency" tables (`FEED_DELAYS`). Before
+the rows are due, the test skips after the acknowledgement, and a pass always means that rows
+reached the table.
 
 A minute bar arrives only after its minute has ended, so a test that streams minute bars waits
 until a little past the next minute boundary (`minute_bar_deadline`).
@@ -68,10 +69,11 @@ HALF_DAY_CLOSE: Final = time(13, 0)
 EXTENDED_OPEN: Final = time(4, 0)
 """When the stock market's extended hours open each trading day, in New York time."""
 
-EXTENDED_HOURS_FAMILIES: Final = frozenset({"trades", "quotes"})
+EXTENDED_HOURS_FAMILIES: Final = frozenset({"trades", "quotes", "bars"})
 """The stream families whose stock rows flow in the extended hours (Massive's status
-`extended-hours`): trades and quotes. A stream's family is the last part of its dataset's
-name, such as `"trades"` for `stocks.trades`."""
+`extended-hours`): trades, quotes, and the bars built from trades, which the README's streaming
+example promises in pre-market and after-hours trading. A stream's family is the last part of
+its dataset's name, such as `"trades"` for `stocks.trades`."""
 
 MINUTE_BAR_LAG: Final = timedelta(seconds=15)
 """How long after its minute ends a test waits for a minute bar: Massive sends the bar once the
@@ -120,7 +122,7 @@ def opened_at(
             `timestamp`); None when it does not.
 
     Returns:
-        For stock trades and quotes while the market is `open` or `extended-hours`, 04:00 New
+        For stock trades, quotes, and bars while the market is `open` or `extended-hours`, 04:00 New
         York time of `now`'s day; for every other stock, option, or index stream while it is
         `open` and before the regular session's close (`regular_close`), 09:30; for another
         market that is `open`, `since`, or `now` when it is None; None in every other case.

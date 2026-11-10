@@ -1,16 +1,25 @@
-"""Live runs of the user docs' examples, each as written, checked against what its text says.
+"""Live runs of the user docs' examples, each as written, checked for what depends on Massive.
 
 Every example is read from its page when the test runs (`tests/_live/doc_examples.py`), so the
-code that runs is the code a reader pastes, and it runs as the Deephaven console runs it: one
-command per block, under the update graph's exclusive lock. The tests follow the README's own
-flow, one console per group of examples:
+code that runs is the code a reader pastes. The examples of a group run one after the other in
+one console (`doc_examples.Console`), as a reader pastes them: one command per block, under the
+update graph's exclusive lock, each later example rebinding the names of the one before, such
+as `m` and `latest`. The test keeps only the tables it checks, so a live table must keep
+running after the session that made it is no longer reachable.
 
-- the hook and Examples 1 to 7, back to back at Stocks Basic's pace of 5 requests a minute;
+These tests assert what only Massive can show: that the tables fill with real data, with
+plausible counts; that Basic's rate limit and a delayed plan behave as the README says; and
+what each stock session sends. What the library does with the data, such as Example 2's ranking
+or Example 6's closed-session error, `tests/test_docs.py` checks against the fake servers. The
+groups follow the README:
+
+- the hook and Examples 1 to 7, on a main key on Stocks Basic, or paced at Basic's rate on a
+  paid one;
 - Examples 8 to 13, which load the settings file Example 8 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
 - Example 8 without its setting, on a delayed Stocks plan;
 - the streaming example's crypto line, on Currencies Starter;
-- the tester guide's example 10, on a Stocks Basic key.
+- the tester guide's example 10, on a main key on Stocks Basic.
 
 A claim that needs another stock session than the current one goes unchecked, and the evidence
 names the session. Each test records what it saw (`evidence`). How to run these tests is in
@@ -21,31 +30,31 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import gc
 import itertools
-import math
 import re
 import runpy
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from deephaven import table_listener, update_graph
-from deephaven.plot.express.deephaven_figure.DeephavenFigure import DeephavenFigure
-from deephaven.table import Table
+from deephaven import update_graph
 
 import deephaven_massive as dm
+from deephaven_massive._ingest import rate_limits
 from tests._live import doc_examples, plans, streams
 from tests._live.calendar import NEW_YORK, is_trading_day
 from tests._live.tester.examples import guide_blocks
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
     from typing import TypeAlias
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.table import Table
 
 pytestmark = pytest.mark.integration
 
@@ -55,38 +64,12 @@ Evidence: TypeAlias = "Callable[[str], None]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 ConsoleCommand: TypeAlias = "Callable[..., None]"
-Namespace: TypeAlias = "dict[str, Any]"
+Names: TypeAlias = "dict[str, Any]"
 Rows: TypeAlias = "list[dict[str, Any]]"
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 README = _ROOT / "README.md"
 TESTER_GUIDE = _ROOT / "docs" / "tester-guide.md"
-
-FREE_SECTIONS: Final = (
-    "read-daily-bars",
-    "whole-market-day",
-    "compare-stocks",
-    "chart-closes",
-    "follow-the-news",
-    "stop-live-tables",
-    "drive-with-a-watchlist",
-)
-"""The README's Stocks Basic examples, 1 to 7, which follow its hook; run in this order."""
-
-PAID_SECTIONS: Final = (
-    "what-your-plan-allows",
-    "stream-minute-bars",
-    "change-since-close",
-    "table-shapes",
-    "backfill-then-live",
-    "dashboard",
-)
-"""The README's Stocks Starter examples, 8 to 13; run in this order."""
-
-UNRUN_SECTIONS: Final = {
-    "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
-}
-"""The README sections with Python blocks that no live test runs, and why."""
 
 _CONSOLE_WAIT: Final = 120.0
 """Seconds one console command may take: a read paced at Basic's rate waits up to 90 s under
@@ -94,13 +77,6 @@ the console's lock before it gives up."""
 
 _FILL_WAIT: Final = 90.0
 """Seconds a poll's first rows may take, a paced request's wait for its minute included."""
-
-_NEXT_POLL_WAIT: Final = 150.0
-"""Seconds a once-a-minute poll may take to show a watchlist edit: the minute, then the wait of
-its paced requests."""
-
-_CLOSE_WAIT: Final = 30.0
-"""Seconds a closed session's tables may take to fail."""
 
 _ACK_WAIT: Final = 30.0
 """Seconds a stream may take to be acknowledged."""
@@ -116,8 +92,13 @@ _BAR_COLUMNS: Final = ("Date", "Open", "High", "Low", "Close", "Volume")
 _CRYPTO_LINE: Final = re.compile(r"`(m\.crypto\.bars\([^`]*\)\.last_by\(\))`")
 """The streaming example's line for crypto, inline in its text."""
 
+_DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
+"""What the library's refusal of delayed data says about the setting that would accept it."""
+
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})
-"""The stocks Examples 8, 9, 10, and 13 read."""
+"""The stocks Examples 3, 8, 9, 10, and 13 read."""
+
+_ON_BASIC: Final = "needs the main key on Stocks Basic, as a free tester's is"
 
 
 def _wait(check: Callable[[], bool], seconds: float) -> bool:
@@ -151,106 +132,102 @@ def _sleep_until(moment: datetime) -> None:
 
 
 def _symbols(rows: Sequence[dict[str, Any]]) -> set[str]:
-    """Return the `Symbol` of each row."""
+    """Return the `Symbol` of each row.
+
+    Returns:
+        The symbols.
+    """
     return {str(row["Symbol"]) for row in rows}
 
 
 @dataclasses.dataclass
-class _Console:
-    """One console the examples run in, one command per block, and the names they define.
+class _Run:
+    """One group's console, and where its progress goes.
 
     Attributes:
-        tmp_path: Where the blocks' scripts are written.
-        command: Runs one block as the console runs a command (`console_command`).
+        console: The console the group's examples run in.
         evidence: Records when each example ran.
-        namespaces: The names each block defined, in order, for `doc_examples.forget`.
-        started: When the console opened, by `time.monotonic()`.
+        started: When the group started, by `time.monotonic()`.
     """
 
-    tmp_path: Path
-    command: ConsoleCommand
+    console: doc_examples.Console
     evidence: Evidence
-    namespaces: list[Namespace] = dataclasses.field(default_factory=list)
     started: float = dataclasses.field(default_factory=time.monotonic)
 
-    def run(
-        self, blocks: Sequence[doc_examples.Block], name: str, *, start: Namespace | None = None
-    ) -> Namespace:
-        """Run blocks in order, and return the names the last one defined.
+    def paste(self, blocks: Sequence[doc_examples.Block], name: str, *keep: str) -> Names:
+        """Run blocks in the console, and return the names asked for.
 
         Args:
             blocks: The blocks.
-            name: The example, for the evidence and the scripts' names.
-            start: The names a first block that continues an earlier example starts from.
+            name: The example, for the evidence.
+            keep: The names to return.
 
         Returns:
-            The last block's names.
+            Each kept name's value.
         """
-        file_name = re.sub(r"\W", "_", name)
-        ran = doc_examples.run_blocks(
-            blocks, self.tmp_path, file_name, console_command=self.command, start=start
-        )
-        self.namespaces.extend(ran)
+        kept = self.console.run(blocks, *keep)
         self.evidence(f"{name}: ran by {time.monotonic() - self.started:.0f} s")
-        return ran[-1]
+        return kept
 
-    def section(self, anchor: str, *, start: Namespace | None = None) -> Namespace:
-        """Run the Python blocks of one README section, and return the last one's names.
+    def section(self, anchor: str, *keep: str) -> Names:
+        """Run the Python blocks of one README section, and return the names asked for.
 
         Args:
             anchor: The section's `<a id>`.
-            start: The names a first block that continues an earlier example starts from.
+            keep: The names to return.
 
         Returns:
-            The last block's names.
+            Each kept name's value.
         """
-        return self.run(doc_examples.section_blocks(README, anchor), anchor, start=start)
+        return self.paste(doc_examples.section_blocks(README, anchor), anchor, *keep)
 
 
-class _Failure:
-    """The text of the failure a table's listener heard, written on an update-graph thread."""
+def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence) -> _Run:
+    """Open one console whose commands may wait out Basic's pace.
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._text: str | None = None
-
-    def heard(self, error: Exception) -> None:
-        """Keep the failure's text."""
-        with self._lock:
-            self._text = str(error)
-
-    def text(self) -> str | None:
-        """Return the failure's text, or None before the table fails."""
-        with self._lock:
-            return self._text
-
-
-@pytest.fixture
-def failure_text() -> Iterator[Callable[[Table], _Failure]]:
-    """Return a function that listens for a live table's failure and keeps its text.
-
-    Every listener is stopped when the test ends, before its leak check.
-
-    Yields:
-        A function mapping a table to the record of its failure.
+    Returns:
+        The console.
     """
-    handles = []
-
-    def watch(table: Table) -> _Failure:
-        failure = _Failure()
-        # A wrapper of its own: the JVM holds the listener, and through it the wrapper.
-        own = Table(j_table=table.j_table)
-        handles.append(
-            table_listener.listen(own, lambda _update, _replay: None, on_error=failure.heard)
-        )
-        return failure
-
-    yield watch
-    for handle in handles:
-        handle.stop()
+    command = functools.partial(console_command, timeout=_CONSOLE_WAIT)
+    return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 7, on Basic's pace ---------------------------------------------
+# --- The hook and Examples 1 to 7 ---------------------------------------------------------------
+
+
+@pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
+@pytest.mark.timeout(1200)
+def test_the_free_examples_fill_on_stocks_basic(
+    live_plans: plans.LivePlans,
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: ConsoleCommand,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether the hook and Examples 1 to 7 fill on Stocks Basic, by a free reader's path.
+
+    Runs them back to back in one console with the main key on Stocks Basic and no setting, as
+    a free reader does. Their sessions get a rate governor of their own, as in a new server,
+    not the run's, which paces Basic from the first request: so Massive refuses the first
+    request past 5 in a minute, and each session pauses and resumes inside the console's
+    patience. The examples send about 15 stock requests, past the 5 a live test may send a
+    class on Basic, so the test declares no Basic plan, and the run's pacing rule, which would
+    skip it, leaves it alone. Skips unless the main key is on Stocks Basic.
+
+    Asserts what `_run_free_examples` checks.
+    """
+    if live_plans.tiers["stocks"] != "basic":
+        pytest.skip(_ON_BASIC)
+    monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry())
+    evidence("Basic key with a governor of its own: Basic's limit is learned from Massive")
+    run = _console(tmp_path, console_command, evidence)
+    try:
+        with doc_examples.recorded_sessions():
+            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
+    finally:
+        run.console.close()
 
 
 @pytest.mark.needs("stocks:starter")
@@ -261,154 +238,106 @@ def test_the_free_examples_fill_back_to_back_at_basics_pace(
     *,
     tmp_path: Path,
     console_command: ConsoleCommand,
-    failure_text: Callable[[Table], _Failure],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 7 fill as their text says, run back to back on Basic.
+    """Whether the hook and Examples 1 to 7 fill with real data, at Basic's pace.
 
-    Runs the README's hook and its Stocks Basic examples in one console, in order, Example 6
-    continuing Example 5 and Example 7's edit continuing Example 7, while a session that
-    declares Stocks Basic (`rest_basic_subscriptions`) holds the key's rate governor, so every
-    session's stock requests keep to Basic's 5 a minute: the examples send about 15 in their
-    first minutes. A paid Stocks plan stands in for Basic, whose own pacing of a whole live
-    run would make this one test take a quarter hour; Massive's refusal of a sixth request,
-    which the setting avoids, is the rate-limit tier's to check.
+    A check of their content on a paid Stocks key. Runs them back to back in one console while
+    a session that declares Stocks Basic (`rest_basic_subscriptions`) holds the key's rate
+    governor, so every session's stock requests keep to Basic's 5 a minute. The setting paces
+    from the first request, so this test never exercises a Basic reader's path, Massive's
+    refusal of a sixth request and the pause after it;
+    `test_the_free_examples_fill_on_stocks_basic` does, on a Basic key.
 
-    Asserts: the hook's year of Apple's bars and its chart; Example 1's five daily bars with
-    their columns; Example 2's whole-market day without OTC stocks and its top 20 by dollar
-    volume; Example 3's three returns; Example 4's year of Nvidia's bars and its chart;
-    Example 5's headlines, up to ten per stock and newest first; Example 6's closed-session
-    error on `headlines` and `latest`, their rows kept, and `kept` the same rows; Example 7's
-    four previous closes, then Nvidia's row in and Microsoft's out at the next poll, the other
-    rows unchanged.
+    Asserts what `_run_free_examples` checks.
     """
+    evidence("paced as Basic by the setting: Massive's refusal of a sixth request is not exercised")
     stocks_basic = live_config.rest_basic_subscriptions | {dm.Subscription.STOCKS}
     pacer = dm.MassiveSession(
         dataclasses.replace(live_config, rest_basic_subscriptions=stocks_basic)
     )
-    console = _Console(
-        tmp_path, functools.partial(console_command, timeout=_CONSOLE_WAIT), evidence
-    )
+    run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            ran = {"hook": console.run(doc_examples.intro_blocks(README), "hook")}
-            for anchor in FREE_SECTIONS[:5]:
-                ran[anchor] = console.section(anchor)
-            _check_history_examples(ran, table_rows=table_rows, evidence=evidence)
-            news = ran["follow-the-news"]
-            _check_news(news, table_rows=table_rows, evidence=evidence)
-            failures = {name: failure_text(news[name]) for name in ("headlines", "latest")}
-            before_close = table_rows(news["latest"])
-            stopped = console.section("stop-live-tables", start=news)
-            _check_stopped(
-                stopped, before_close, failures=failures, table_rows=table_rows, evidence=evidence
-            )
-            _check_watchlist(console, table_rows=table_rows, evidence=evidence)
+            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
     finally:
-        doc_examples.forget(console.namespaces)
+        run.console.close()
         pacer.close()
 
 
-def _check_history_examples(
-    ran: dict[str, Namespace], *, table_rows: TableRows, evidence: Evidence
-) -> None:
-    """Check the hook and Examples 1 to 4, which read history once."""
-    hook = ran["hook"]
-    year = table_rows(hook["apple"])
-    evidence(f"hook: {len(year)} daily bars of AAPL, chart {type(hook['chart']).__name__}")
-    assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
-    assert isinstance(hook["chart"], DeephavenFigure)
+def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) -> None:
+    """Run the hook and Examples 1 to 7 in one console, and check what Massive sent.
 
-    first = ran["read-daily-bars"]
-    week = table_rows(first["apple"])
+    Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
+    Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
+    Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
+    each of its stocks, at most ten each, the limit Massive applies per ticker; Example 7's
+    four previous closes. Example 6 and Example 7's edit run as written; what they do is the
+    library's, which `tests/test_docs.py` checks.
+    """
+    ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
+    keep = {
+        "read-daily-bars": ("apple",),
+        "whole-market-day": ("day", "busiest"),
+        "compare-stocks": ("returns",),
+        "chart-closes": ("nvda",),
+    }
+    for anchor, names in keep.items():
+        ran[anchor] = run.section(anchor, *names)
+    _check_history_examples(ran, table_rows=table_rows, evidence=evidence)
+    news = run.section("follow-the-news", "headlines")
+    _check_news(news["headlines"], table_rows=table_rows, evidence=evidence)
+    run.section("stop-live-tables")
+    opening, edit = doc_examples.section_blocks(README, "drive-with-a-watchlist")
+    closes = run.paste([opening], "drive-with-a-watchlist", "closes")["closes"]
+    first = {"AAPL", "MSFT", "AMZN", "GOOGL"}
+    filled = _wait(lambda: _symbols(table_rows(closes)) == first, _FILL_WAIT)
+    evidence(f"example 7: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
+    assert filled, f"Example 7's closes did not fill within {_FILL_WAIT:.0f} s"
+    run.paste([edit], "drive-with-a-watchlist edit")
+
+
+def _check_history_examples(
+    ran: dict[str, Names], *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Check the hook and Examples 1 to 4: real bars, in plausible numbers."""
+    year = table_rows(ran["hook"]["apple"])
+    evidence(f"hook: {len(year)} daily bars of AAPL")
+    assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
+
+    first = ran["read-daily-bars"]["apple"]
+    week = table_rows(first)
     evidence(f"example 1: {len(week)} bars, dates {[row['Date'] for row in week]}")
     assert len(week) == 5, "Example 1 reads five trading days"
-    assert set(_BAR_COLUMNS) <= set(first["apple"].column_names)
+    assert set(_BAR_COLUMNS) <= set(first.column_names)
 
     market = ran["whole-market-day"]
     day = table_rows(market["day"])
-    busiest = table_rows(market["busiest"])
     otc = [row["Symbol"] for row in day if row.get("Otc")]
-    volumes = [row["DollarVolume"] for row in busiest]
-    evidence(f"example 2: {len(day)} stocks, {len(otc)} OTC, top {[r['Symbol'] for r in busiest]}")
+    evidence(f"example 2: {len(day)} stocks, {len(otc)} over the counter")
     assert len(day) > 1000, "Example 2's day holds every listed US stock"
-    assert not otc, f"Example 2 leaves OTC stocks out, but has {otc[:5]}"
-    assert len(busiest) == 20
-    assert volumes == sorted(volumes, reverse=True)
+    assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
+    assert len(table_rows(market["busiest"])) == 20
 
     returns = table_rows(ran["compare-stocks"]["returns"])
     evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}")
     assert _symbols(returns) == _STOCKS
-    assert all(row["ReturnPct"] is not None for row in returns)
 
-    charted = ran["chart-closes"]
-    nvda = table_rows(charted["nvda"])
-    evidence(f"example 4: {len(nvda)} daily bars of NVDA, chart {type(charted['closes']).__name__}")
+    nvda = table_rows(ran["chart-closes"]["nvda"])
+    evidence(f"example 4: {len(nvda)} daily bars of NVDA")
     assert len(nvda) >= 240, "Example 4's year of Nvidia's daily bars is short"
-    assert isinstance(charted["closes"], DeephavenFigure)
 
 
-def _check_news(news: Namespace, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Check Example 5: up to ten articles per stock, newest first."""
+def _check_news(headlines: Table, *, table_rows: TableRows, evidence: Evidence) -> None:
+    """Check Example 5: headlines for each stock, at most ten each."""
     asked = {"AAPL", "NVDA", "TSLA"}
-    filled = _wait(lambda: _symbols(table_rows(news["headlines"])) == asked, _FILL_WAIT)
-    rows = table_rows(news["latest"])
+    filled = _wait(lambda: _symbols(table_rows(headlines)) == asked, _FILL_WAIT)
+    rows = table_rows(headlines)
     counts = {symbol: sum(row["Symbol"] == symbol for row in rows) for symbol in sorted(asked)}
-    published = [row["PublishedUtc"] for row in rows]
     evidence(f"example 5: articles per stock {counts}, every stock in by the wait: {filled}")
     assert filled, f"Example 5's headlines hold {counts} after {_FILL_WAIT:.0f} s"
     assert all(count <= 10 for count in counts.values()), f"more than ten for a stock: {counts}"
-    assert published == sorted(published, reverse=True), "Example 5's latest is not newest first"
-
-
-def _check_stopped(
-    stopped: Namespace,
-    before_close: Rows,
-    *,
-    failures: dict[str, _Failure],
-    table_rows: TableRows,
-    evidence: Evidence,
-) -> None:
-    """Check Example 6: the closed-session error, the rows kept, and `kept` the same."""
-    failed = _wait(lambda: all(f.text() is not None for f in failures.values()), _CLOSE_WAIT)
-    texts = {name: failure.text() for name, failure in failures.items()}
-    kept = table_rows(stopped["kept"])
-    latest = table_rows(stopped["latest"])
-    evidence(f"example 6: errors {texts}; latest {len(latest)} rows, kept {len(kept)} rows")
-    assert failed, f"a closed session's tables did not fail within {_CLOSE_WAIT:.0f} s: {texts}"
-    for name, text in texts.items():
-        assert "was closed" in str(text), f"{name}'s error does not say the session was closed"
-    assert latest == before_close, "latest lost or changed rows when the session closed"
-    assert kept == latest, "kept does not hold latest's rows"
-    assert kept, "Example 6 kept no rows"
-
-
-def _check_watchlist(console: _Console, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Run and check Example 7: four previous closes, then Nvidia in and Microsoft out."""
-    opening, edit = doc_examples.section_blocks(README, "drive-with-a-watchlist")
-    followed = console.run([opening], "drive-with-a-watchlist")
-    closes = followed["closes"]
-    filled = _wait(
-        lambda: _symbols(table_rows(closes)) == {"AAPL", "MSFT", "AMZN", "GOOGL"}, _FILL_WAIT
-    )
-    before = {row["Symbol"]: row for row in table_rows(closes)}
-    evidence(f"example 7: {sorted(before)}, filled: {filled}")
-    assert filled, f"Example 7's closes hold {sorted(before)} after {_FILL_WAIT:.0f} s"
-    edited = time.monotonic()
-    console.run([edit], "drive-with-a-watchlist edit", start=followed)
-    changed = _wait(
-        lambda: _symbols(table_rows(closes)) == {"AAPL", "AMZN", "GOOGL", "NVDA"}, _NEXT_POLL_WAIT
-    )
-    after = {row["Symbol"]: row for row in table_rows(closes)}
-    evidence(
-        f"example 7: after the edit {sorted(after)} in {time.monotonic() - edited:.0f} s; "
-        f"changed: {changed}"
-    )
-    assert changed, f"Example 7's closes hold {sorted(after)} after the edit"
-    for symbol in ("AAPL", "AMZN", "GOOGL"):
-        kept = [after[symbol][column] for column in _BAR_COLUMNS]
-        assert kept == [before[symbol][column] for column in _BAR_COLUMNS], symbol
 
 
 # --- Examples 8 to 13, on a Stocks plan that streams --------------------------------------------
@@ -430,24 +359,27 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     stream_report: StreamReport,
     evidence: Evidence,
 ) -> None:
-    """Whether Examples 8 to 13 fill as their text says in the stock session of the moment.
+    """Whether Examples 8 to 13 fill with what the stock session of the moment sends.
 
     Saves the settings file with the README's commands for the key's Stocks plan (delayed on
-    Starter and Developer), in a stand-in home folder, and runs Examples 8 to 13 in one
-    console, in order. Then watches the streams across three minute boundaries.
+    Starter and Developer), in a stand-in home folder, runs Examples 8 to 13 in one console,
+    in order, and collects whatever the console no longer reaches, such as the sessions each
+    later example's `m` replaced. Then watches the streams across three minute boundaries.
 
-    Asserts at any hour: Example 8's snapshot of three stocks with its columns; every stream
-    acknowledged and none failed; Example 10's rows each with a `PrevClose`, and a `Close` only
-    for a stock with a bar; Example 13's dashboard with the chart and the change table in its
-    two panels. Then, by the session the plan's feed is in (`streams.stock_session`):
+    Asserts at any hour: Example 8's snapshot of three stocks with its columns, except while
+    Massive's snapshots are empty (`doc_examples.snapshots_cleared`); Example 13's three topics
+    acknowledged and none of its streams failed. Then, by the session the plan's feed is in
+    (`streams.stock_session`):
 
-    - pre-market, regular, or after hours: Example 9's minute bars; Example 10's `Close` and
-      `ChangePct` from them; Example 11's three shapes of SPY's bars; Example 12's `spy` with
-      every minute REST has of the day so far, none twice, across the seam with the stream;
-      the dashboard's stream growing. In the regular session, every stock has its bar, Example
-      9's rows change each minute, and the dashboard's stream grows each minute.
+    - pre-market, regular, or after hours: Example 9's minute bars; Example 11's bars of SPY;
+      bars reaching Example 13's chart. In the regular session, also: every stock has its
+      bar, Example 9's rows change each minute, the chart's stream grows each minute, and
+      Example 12's `spy` holds every minute REST has of the day so far across the seam with
+      the stream (`doc_examples.seam_gaps`). Outside it, REST may hold minutes made only of
+      trades reported late, which no live bar had, so those minutes are recorded but not
+      required.
     - overnight: Example 9's `latest` and the other live tables stay empty, and `spy` holds
-      the day's bars only from history, or none on a day the market is closed.
+      the bars REST has of the day Example 12 read, or none on a day the market is closed.
 
     A run whose feed crosses from one session to another while it watches is skipped after
     the checks that hold at any hour.
@@ -457,94 +389,74 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     doc_examples.write_settings_file(README, tmp_path, delayed=delayed)
     delay = streams.FEED_DELAYS.get(("stocks", live_plans.tiers["stocks"]), timedelta(0))
     evidence(f"settings file for a {'delayed' if delayed else 'real-time'} plan; delay {delay}")
-    console = _Console(
-        tmp_path, functools.partial(console_command, timeout=_CONSOLE_WAIT), evidence
-    )
+    run = _console(tmp_path, console_command, evidence)
 
     def locked_rows(*tables: Table) -> list[Rows]:
         with update_graph.shared_lock(dh_exec_ctx.update_graph):
             return [table_rows(table) for table in tables]
 
     try:
-        with doc_examples.recorded_sessions() as opened:
-            ran = {"what-your-plan-allows": console.section("what-your-plan-allows")}
-            _check_snapshot(ran["what-your-plan-allows"], table_rows=table_rows, evidence=evidence)
+        with doc_examples.recorded_sessions():
+            snapshot = run.section("what-your-plan-allows", "snapshot")["snapshot"]
+            _check_snapshot(snapshot, delay, table_rows=table_rows, evidence=evidence)
             first_session = streams.stock_session(datetime.now(UTC), delay)
-            for anchor in ("stream-minute-bars", "change-since-close"):
-                ran[anchor] = console.section(anchor)
-            change = ran["change-since-close"]
-            _check_before_bars(*locked_rows(change["changes"], change["latest"]), evidence=evidence)
-            for anchor in ("table-shapes", "backfill-then-live", "dashboard"):
-                ran[anchor] = console.section(anchor)
-            _check_dashboard(ran["dashboard"], evidence=evidence)
-            for session in opened[1:]:
-                acked = wait_acked(session, 1, time.monotonic() + _ACK_WAIT)
-                for line in stream_report(session):
-                    evidence(line)
-                assert acked, "a streaming example's topics were not acknowledged"
+            ran = {"stream-minute-bars": run.section("stream-minute-bars", "latest")}
+            ran["change-since-close"] = run.section("change-since-close", "changes")
+            ran["table-shapes"] = run.section("table-shapes", "since_start")
+            backfill_day = datetime.now(NEW_YORK).date()  # the day the example's dh_today reads
+            ran["backfill-then-live"] = run.section("backfill-then-live", "spy", "live")
+            ran["dashboard"] = run.section("dashboard", "m")
+            gc.collect()  # what the console no longer reaches, such as the replaced sessions
+            board = ran["dashboard"]["m"]
+            acked = wait_acked(board, len(_STOCKS), time.monotonic() + _ACK_WAIT)
+            for line in stream_report(board):
+                evidence(line)
+            assert acked >= len(_STOCKS), "Example 13's topics were not all acknowledged"
             seen = [
                 _watch_minute(
                     ran, locked_rows=locked_rows, table_rows=table_rows, evidence=evidence
                 )
                 for _ in range(_MINUTES_WATCHED)
             ]
-            failed = [
-                row["Error"]
-                for session in opened[1:]
-                for row in table_rows(session.streams())
-                if row["State"] == "FAILED"
-            ]
-            assert not failed, f"a streaming example's stream failed: {failed}"
+            failed = [r["Error"] for r in table_rows(board.streams()) if r["State"] == "FAILED"]
+            assert not failed, f"Example 13's stream failed: {failed}"
             last_session = streams.stock_session(datetime.now(UTC), delay)
             evidence(f"stock session of the feed: {first_session}, then {last_session}")
             if first_session != last_session:
                 pytest.skip(f"the feed moved from {first_session} to {last_session} meanwhile")
             if first_session == streams.OVERNIGHT:
-                _check_overnight(seen[-1], live_session, table_rows=table_rows, evidence=evidence)
+                _check_overnight(
+                    seen[-1], backfill_day, live_session, table_rows=table_rows, evidence=evidence
+                )
             else:
                 _check_streaming(seen, first_session, evidence=evidence)
                 _check_seam(
                     ran["backfill-then-live"],
+                    backfill_day,
                     live_session,
+                    strict=first_session == streams.REGULAR,
                     table_rows=table_rows,
                     evidence=evidence,
                 )
     finally:
-        doc_examples.forget(console.namespaces)
+        run.console.close()
 
 
-def _check_snapshot(snapshot: Namespace, *, table_rows: TableRows, evidence: Evidence) -> None:
+def _check_snapshot(
+    snapshot: Table, delay: timedelta, *, table_rows: TableRows, evidence: Evidence
+) -> None:
     """Check Example 8: a snapshot of three stocks, with the columns its text names."""
-    rows = table_rows(snapshot["snapshot"])
+    assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
+    rows = table_rows(snapshot)
     evidence(f"example 8: {[(r['Symbol'], r['DayClose']) for r in rows]}")
+    if doc_examples.snapshots_cleared(datetime.now(UTC), delay):
+        evidence("example 8's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
+        return
     assert _symbols(rows) == _STOCKS
-    assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(
-        snapshot["snapshot"].column_names
-    )
-
-
-def _check_before_bars(changes: Rows, latest: Rows, *, evidence: Evidence) -> None:
-    """Check Example 10 as it starts: a `PrevClose` for each stock, a `Close` only with a bar."""
-    barred = _symbols(latest)
-    evidence(f"example 10 at the start: {changes}; stocks with a bar {sorted(barred)}")
-    assert _symbols(changes) == _STOCKS
-    for row in changes:
-        assert row["PrevClose"] is not None, row
-        assert (row["Close"] is not None) == (row["Symbol"] in barred), row
-
-
-def _check_dashboard(board: Namespace, *, evidence: Evidence) -> None:
-    """Check Example 13's dashboard: the chart and the change table, each in its panel."""
-    panels = doc_examples.dashboard_panels(board["dashboard"])
-    evidence(f"example 13: panels {[(title, type(content).__name__) for title, content in panels]}")
-    assert [title for title, _ in panels] == ["Closes", "Change"]
-    assert panels[0][1] is board["chart"]
-    assert isinstance(board["chart"], DeephavenFigure)
-    assert panels[1][1] is board["changes"]
 
 
 def _watch_minute(
-    ran: dict[str, Namespace],
+    ran: dict[str, Names],
     *,
     locked_rows: Callable[..., list[Rows]],
     table_rows: TableRows,
@@ -553,7 +465,7 @@ def _watch_minute(
     """Wait past the next minute boundary, then read every streaming example's tables.
 
     Args:
-        ran: The names of each example, by its README anchor.
+        ran: The tables each example made, by its README anchor.
         locked_rows: Reads tables together, under the update graph's shared lock.
         table_rows: Reads one table.
         evidence: Records the counts.
@@ -562,14 +474,11 @@ def _watch_minute(
         Each table's rows, by name, and `published`, the rows the dashboard's stream published.
     """
     _sleep_until(streams.minute_bar_deadline(datetime.now(UTC)))
-    shapes = ran["table-shapes"]
-    names = ("latest", "changes", "newest", "last_30", "since_start", "spy")
+    names = ("latest", "changes", "since_start", "spy")
     tables = (
         ran["stream-minute-bars"]["latest"],
         ran["change-since-close"]["changes"],
-        shapes["newest"],
-        shapes["last_30"],
-        shapes["since_start"],
+        ran["table-shapes"]["since_start"],
         ran["backfill-then-live"]["spy"],
     )
     seen: dict[str, Any] = dict(zip(names, locked_rows(*tables), strict=True))
@@ -589,20 +498,12 @@ def _watch_minute(
 def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evidence) -> None:
     """Check Examples 9 to 13 while the stock market trades."""
     last = seen[-1]
-    regular = session == streams.REGULAR
     evidence(f"checked in the {session} session")
     assert last["latest"], f"no minute bar of Example 9 arrived in the {session} session"
-    assert _symbols(last["latest"]) <= _STOCKS
-    for row in last["changes"]:
-        if row["Close"] is not None:
-            expected = 100 * (row["Close"] / row["PrevClose"] - 1)
-            assert math.isclose(row["ChangePct"], expected, rel_tol=1e-9), row
     assert last["since_start"], "Example 11's since_start holds no bar"
-    assert len(last["newest"]) == 1
-    assert len(last["last_30"]) == min(30, len(last["since_start"]))
     published = [minute["published"] for minute in seen]
     assert published[-1] > 0, "Example 13's chart got no bar"
-    if not regular:
+    if session != streams.REGULAR:
         return
     assert _symbols(last["latest"]) == _STOCKS
     ends = {row["Symbol"]: row["TimestampEnd"] for row in seen[0]["latest"]}
@@ -613,39 +514,52 @@ def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evid
     assert grew, f"Example 13's chart did not grow each minute: {published}"
 
 
+def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: date) -> set[int]:
+    """Return the start of every minute bar REST has of SPY on a day, as epoch nanoseconds.
+
+    Returns:
+        The starts.
+    """
+    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(day.isoformat())
+    return {int(row["TimestampStart"]) for row in table_rows(history)}
+
+
 def _check_seam(
-    backfill: Namespace,
+    backfill: Names,
+    day: date,
     live_session: dm.MassiveSession,
     *,
+    strict: bool,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Example 12: every minute REST has of the day so far, none twice, across the seam."""
-    spy = [row["TimestampStart"] for row in table_rows(backfill["spy"])]
-    live = [row["TimestampStart"] for row in table_rows(backfill["live"])]
+    """Check Example 12: every minute REST has of the day so far, none twice, across the seam.
+
+    Args:
+        backfill: Example 12's `spy` and `live`.
+        day: The day Example 12 read.
+        live_session: The session that reads REST's minutes again.
+        strict: Whether every REST minute must be in `spy`: in the regular session only, since
+            outside it REST may hold minutes made only of trades reported late.
+        table_rows: Reads one table.
+        evidence: Records the comparison.
+    """
+    spy = [int(row["TimestampStart"]) for row in table_rows(backfill["spy"])]
+    live = [int(row["TimestampStart"]) for row in table_rows(backfill["live"])]
     assert len(spy) == len(set(spy)), "Example 12's spy holds a minute twice"
     assert live, "no live bar reached Example 12"
-    rest = _rest_minutes(live_session, table_rows)
-    rest = {start for start in rest if start <= max(live)}
-    held = {start for start in spy if start <= max(live)}
-    missing = sorted(rest - held)
+    missing, extra = doc_examples.seam_gaps(spy, live, _rest_minutes(live_session, table_rows, day))
     evidence(
-        f"example 12: {len(held)} minutes through the last live bar, {len(live)} live; "
-        f"REST has {len(rest)}; missing {missing[:5]} ({len(missing)}); "
-        f"only in spy {sorted(held - rest)[:5]}"
+        f"example 12: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
+        f"({len(missing)}); only in spy {extra[:5]}; required: {strict}"
     )
-    assert not missing, f"Example 12's spy lacks {len(missing)} minutes that REST has"
-
-
-def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows) -> set[int]:
-    """Return the start of every minute bar REST has of SPY today, in New York, as epoch ns."""
-    today = datetime.now(NEW_YORK).date().isoformat()
-    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(today)
-    return {int(row["TimestampStart"]) for row in table_rows(history)}
+    if strict:
+        assert not missing, f"Example 12's spy lacks {len(missing)} minutes that REST has"
 
 
 def _check_overnight(
     last: dict[str, Any],
+    day: date,
     live_session: dm.MassiveSession,
     *,
     table_rows: TableRows,
@@ -656,13 +570,13 @@ def _check_overnight(
     assert not last["latest"], "Example 9's latest filled overnight"
     assert not last["since_start"], "Example 11's since_start filled overnight"
     assert all(row["Close"] is None for row in last["changes"]), last["changes"]
-    spy = {row["TimestampStart"] for row in last["spy"]}
-    if not is_trading_day(datetime.now(NEW_YORK).date()):
-        evidence(f"example 12 on a closed day: {len(spy)} rows")
+    spy = {int(row["TimestampStart"]) for row in last["spy"]}
+    if not is_trading_day(day):
+        evidence(f"example 12 on {day}, a closed day: {len(spy)} rows")
         assert not spy, "Example 12's spy holds bars on a day the market is closed"
         return
-    rest = _rest_minutes(live_session, table_rows)
-    evidence(f"example 12 overnight: spy {len(spy)} minutes, REST {len(rest)}")
+    rest = _rest_minutes(live_session, table_rows, day)
+    evidence(f"example 12 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
     assert spy == rest, "Example 12's spy does not hold the day's minutes from history"
 
 
@@ -670,7 +584,7 @@ def _check_overnight(
 
 
 @pytest.mark.needs("stocks:starter")
-@pytest.mark.timeout(100)
+@pytest.mark.timeout(200)
 def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     delayed_key: str,
     *,
@@ -684,7 +598,8 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     Saves the real-time plans' settings file, `delayed_subscriptions: []`, with the README's
     own commands, then runs Example 8 with a delayed Stocks key (`MASSIVE_DELAYED_API_KEY`, or
     the main key on Starter or Developer). Passes when the snapshot raises
-    `dm.EntitlementError`; the evidence quotes its message.
+    `dm.EntitlementError` and its message says stocks are not in `delayed_subscriptions`, which
+    sets this refusal apart from one of a plan without snapshots, such as a Basic key's.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("MASSIVE_API_KEY", delayed_key)
@@ -692,19 +607,21 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     [block] = doc_examples.section_blocks(README, "what-your-plan-allows")
     script = tmp_path / "settings_example.py"
     script.write_text(block.code, encoding="utf-8")
-    raised: list[tuple[str, str]] = []
+    raised: list[tuple[bool, str]] = []
 
     def example() -> None:
         try:
             runpy.run_path(str(script))
         except dm.MassiveError as error:
-            raised.append((type(error).__name__, str(error)))
+            raised.append((isinstance(error, dm.EntitlementError), str(error)))
 
     with doc_examples.recorded_sessions():
-        console_command(example)
+        console_command(example, timeout=_CONSOLE_WAIT)
     evidence(f"example 8 without the setting: {raised or 'no error'}")
     assert raised, "Example 8 read the snapshot without its setting"
-    assert raised[0][0] == "EntitlementError", raised[0]
+    entitlement, message = raised[0]
+    assert entitlement, message
+    assert _DELAYED_REFUSAL in message, "the refusal does not name delayed_subscriptions"
 
 
 @pytest.mark.needs("currencies:starter")
@@ -727,61 +644,89 @@ def test_the_streaming_examples_crypto_line_streams_now(
     found = _CRYPTO_LINE.search(doc_examples.section(README, "stream-minute-bars"))
     assert found, "the streaming example's text has no crypto line"
     code = f"import deephaven_massive as dm\n\nm = dm.MassiveSession()\nlatest = {found.group(1)}\n"
-    console = _Console(tmp_path, console_command, evidence)
+    run = _console(tmp_path, console_command, evidence)
     try:
-        with doc_examples.recorded_sessions() as opened:
-            names = console.run([doc_examples.Block(code, continues=False)], "crypto line")
-            acked = wait_acked(opened[0], 1, time.monotonic() + _ACK_WAIT)
+        with doc_examples.recorded_sessions():
+            names = run.paste([doc_examples.Block(code, continues=False)], "crypto", "m", "latest")
+            acked = wait_acked(names["m"], 1, time.monotonic() + _ACK_WAIT)
             deadline = streams.minute_bar_deadline(datetime.now(UTC)) + timedelta(seconds=60)
             filled = _wait(
                 lambda: bool(table_rows(names["latest"])),
                 (deadline - datetime.now(UTC)).total_seconds(),
             )
-            for line in stream_report(opened[0]):
+            for line in stream_report(names["m"]):
                 evidence(line)
             evidence(f"{found.group(1)}: acknowledged {acked}, rows {table_rows(names['latest'])}")
+            names.clear()
     finally:
-        doc_examples.forget(console.namespaces)
+        run.console.close()
     assert acked, "Massive did not acknowledge the crypto line's topic"
     assert filled, "the crypto line's latest stayed empty"
 
 
-@pytest.mark.timeout(150)
+_TESTER_LINES: Final = (
+    "the latest trade: EntitlementError: ",
+    "live minute bars: opened; ",
+    "bars from 2015: EntitlementError: ",
+)
+"""The starts of the three lines the tester guide's example 10 prints on Basic, as it says."""
+
+_REFUSED_TOPIC: Final = "AM.AAPL"
+_REJECTED_KEY: Final = "not only a bad key"
+"""How a failed stream's error quotes Massive's refusal of the topic, and how it says Massive
+rejected the key, the guide's two outcomes."""
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(240)
 def test_tester_example_10_fails_the_live_minute_bars_on_basic(
-    basic_key: str,
+    live_plans: plans.LivePlans,
     *,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
     table_rows: TableRows,
     capsys: pytest.CaptureFixture[str],
     evidence: Evidence,
 ) -> None:
-    """Whether the tester guide's example 10 fails its live minute bars with Massive's refusal.
+    """Whether the tester guide's example 10 prints its three lines and fails its live bars.
 
-    Runs the example as the guide gives it with a Stocks Basic key (`MASSIVE_BASIC_API_KEY`,
-    or the main key on Stocks Basic), which no plan setting of a paid key can stand in for,
-    and records the three lines it prints. Passes when the `stocks.bars` row of `streams` reads
-    `FAILED` with an error that names `AM.AAPL`, the topic Massive refused.
+    Runs the example as the guide gives it with the main key on Stocks Basic, which no plan
+    setting of a paid key can stand in for; skips on any other Stocks plan. It sends the key's
+    stocks two requests, each of which may wait out Basic's pace inside the console's
+    patience. Passes when it prints the guide's three lines (the latest trade and the bars
+    from 2015 refused with `EntitlementError`, the live bars opened), and the `stocks.bars`
+    row of `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
+    `AM.AAPL`, or Massive's rejection of the key.
     """
-    monkeypatch.setenv("MASSIVE_API_KEY", basic_key)
+    if live_plans.tiers["stocks"] != "basic":
+        pytest.skip(_ON_BASIC)
     code = guide_blocks(TESTER_GUIDE.read_text(encoding="utf-8"))[10]
-    console = _Console(tmp_path, console_command, evidence)
+    run = _console(tmp_path, console_command, evidence)
 
-    def bars(names: Namespace) -> Rows:
-        return [r for r in table_rows(names["streams"]) if r["Dataset"] == "stocks.bars"]
+    def bars(streams_table: Table) -> Rows:
+        return [r for r in table_rows(streams_table) if r["Dataset"] == "stocks.bars"]
 
     try:
         with doc_examples.recorded_sessions():
-            names = console.run([doc_examples.Block(code, continues=False)], "tester example 10")
-            for line in capsys.readouterr().out.splitlines():
+            names = run.paste(
+                [doc_examples.Block(code, continues=False)], "tester 10", "streams", "connections"
+            )
+            printed = capsys.readouterr().out.splitlines()
+            for line in printed:
                 evidence(f"printed: {line}")
-            _wait(lambda: any(row["State"] == "FAILED" for row in bars(names)), _REFUSAL_WAIT)
-            rows = bars(names)
+            _wait(
+                lambda: any(r["State"] == "FAILED" for r in bars(names["streams"])), _REFUSAL_WAIT
+            )
+            rows = bars(names["streams"])
             for row in table_rows(names["connections"]):
                 evidence(f"connection {row['AssetClass']} {row['State']} {row['LastError']!r}")
+            names.clear()
     finally:
-        doc_examples.forget(console.namespaces)
+        run.console.close()
     evidence(f"stocks.bars: {[(row['State'], row['Error']) for row in rows]}")
+    for start in _TESTER_LINES:
+        assert any(line.startswith(start) for line in printed), f"no line starts {start!r}"
     assert [row["State"] for row in rows] == ["FAILED"]
-    assert "AM.AAPL" in str(rows[0]["Error"])
+    error = str(rows[0]["Error"])
+    assert _REFUSED_TOPIC in error or _REJECTED_KEY in error, error

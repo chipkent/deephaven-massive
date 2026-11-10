@@ -41,14 +41,10 @@ if TYPE_CHECKING:
 SECRET_VARIABLES: Final = (
     "MASSIVE_API_KEY",
     "MASSIVE_DELAYED_API_KEY",
-    "MASSIVE_BASIC_API_KEY",
     "MASSIVE_S3_ACCESS_KEY_ID",
     "MASSIVE_S3_SECRET_ACCESS_KEY",
 )
 """The environment variables whose values are secrets."""
-
-S3_VARIABLES: Final = ("MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY")
-"""The two S3 credentials, which are set together or not at all."""
 
 PROXY_VARIABLES: Final = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 """The proxy variables, whose URL may carry a password."""

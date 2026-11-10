@@ -11,9 +11,14 @@ could drift from what a reader pastes:
 - `settings_commands` reads the README's shell commands that save the settings file, one block
   for the delayed plans and one for the real-time plans, and `write_settings_file` runs them.
 - `run_blocks` runs blocks as scripts, each as one console command, and `merged` and `forget`
-  read and then drop the names they defined.
-- `recorded_sessions` records every session the examples open, and closes them afterwards.
+  read and then drop the names they defined; `Console` runs them in one reader's console,
+  where a later example rebinds the names of an earlier one.
+- `recorded_sessions` closes every session the examples opened, once they are done.
+- `FREE_SECTIONS`, `PAID_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
+  runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
+- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 8's
+  snapshot and Example 12's backfill.
 
 This module imports the library, so it is imported only once a Deephaven server runs.
 """
@@ -27,19 +32,51 @@ import runpy
 import shutil
 import subprocess
 import types
+import weakref
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import deephaven_massive as dm
+from tests._live.calendar import NEW_YORK
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from pathlib import Path
+
+    from deephaven_massive._tables.session_core import SessionCore
 
 _FENCE: Final = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _BASH: Final = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
 
 SETTINGS_ANCHOR: Final = "what-your-plan-allows"
 """The README section whose shell commands save the settings file the paid examples load."""
+
+FREE_SECTIONS: Final = (
+    "read-daily-bars",
+    "whole-market-day",
+    "compare-stocks",
+    "chart-closes",
+    "follow-the-news",
+    "stop-live-tables",
+    "drive-with-a-watchlist",
+)
+"""The README's Stocks Basic examples, 1 to 7, which follow its hook, in the README's order."""
+
+PAID_SECTIONS: Final = (
+    "what-your-plan-allows",
+    "stream-minute-bars",
+    "change-since-close",
+    "table-shapes",
+    "backfill-then-live",
+    "dashboard",
+)
+"""The README's Stocks Starter examples, 8 to 13, in the README's order."""
+
+UNRUN_SECTIONS: Final = {
+    "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
+}
+"""The README sections with Python blocks that the live run of the examples leaves out, and why."""
 
 _DASHBOARD: Final = "deephaven.ui.components.Dashboard"
 _PANEL: Final = "deephaven.ui.components.Panel"
@@ -163,7 +200,6 @@ def run_blocks(
     name: str,
     *,
     console_command: Callable[[Callable[[], None]], None],
-    start: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Run code blocks as scripts, in order, as a reader pastes them into the console.
 
@@ -180,8 +216,6 @@ def run_blocks(
         tmp_path: Where to write the scripts.
         name: The scripts' file name prefix.
         console_command: Runs one block the way the console runs a command.
-        start: The names a first block that continues an earlier one starts from, such as the
-            namespace of an example run by an earlier call; None for none.
 
     Returns:
         The names each block defined, one namespace per block, in order; a continuing block's
@@ -191,7 +225,7 @@ def run_blocks(
     for number, block in enumerate(code_blocks):
         script = tmp_path / f"{name}_{number}.py"
         script.write_text(block.code, encoding="utf-8")
-        before = (namespaces[-1] if namespaces else start) if block.continues else None
+        before = namespaces[-1] if block.continues and namespaces else None
 
         def run(script: Path = script, before: dict[str, Any] | None = before) -> None:
             namespaces.append(runpy.run_path(str(script), init_globals=before))
@@ -232,31 +266,79 @@ def forget(namespaces: Sequence[dict[str, Any]]) -> None:
 
 
 @contextlib.contextmanager
-def recorded_sessions() -> Iterator[list[dm.MassiveSession]]:
-    """Record every session `dm.MassiveSession(...)` opens, and close each one at the end.
+def recorded_sessions() -> Iterator[None]:
+    """Close every session `dm.MassiveSession(...)` opens inside the block, at its end.
 
     The examples open their sessions as a reader does, through `dm.MassiveSession`; inside the
-    block, that name makes a real session and records it. The package resolves the name
-    lazily, so the stand-in is bound in the package only for the block, then removed.
+    block, that name makes a real session and remembers it weakly, so a session the examples
+    no longer reach can still be collected, as in a reader's console. The package resolves
+    the name lazily, so the stand-in is bound in the package only for the block, then removed.
 
     Yields:
-        The sessions opened so far, in order; the list grows as the examples open more.
+        Nothing; the examples run in between.
     """
     real = dm.MassiveSession
-    opened: list[dm.MassiveSession] = []
+    opened: list[weakref.ref[SessionCore]] = []
 
     def session(config: dm.MassiveConfig | None = None) -> dm.MassiveSession:
         made = real(config)
-        opened.append(made)
+        opened.append(weakref.ref(made._core))
         return made
 
     vars(dm)["MassiveSession"] = session
     try:
-        yield opened
+        yield
     finally:
         vars(dm).pop("MassiveSession", None)
-        for made in opened:
-            made.close()
+        for core in (ref() for ref in opened):
+            if core is not None:
+                core.close()
+
+
+class Console:
+    """One reader's console: every block runs in its names, so a later example rebinds `m`.
+
+    Each block runs as one console command (the `console_command` fixture), under the update
+    graph's exclusive lock, as the Deephaven console runs a paste. The names a block binds
+    replace the console's, as a paste's do; a name no later block rebinds stays.
+    """
+
+    def __init__(self, tmp_path: Path, command: Callable[[Callable[[], None]], None]) -> None:
+        """Open an empty console.
+
+        Args:
+            tmp_path: Where to write each block's script.
+            command: Runs one block the way the console runs a command.
+        """
+        self._tmp_path = tmp_path
+        self._command = command
+        self._names: dict[str, Any] = {}
+        self._count = 0
+
+    def run(self, code_blocks: Sequence[Block], *keep: str) -> dict[str, Any]:
+        """Run blocks in order, as pasted one after the other, and return the names asked for.
+
+        Args:
+            code_blocks: The blocks.
+            keep: The names to return, as the last block left them.
+
+        Returns:
+            Each name in `keep`, bound to its value.
+        """
+        for block in code_blocks:
+            script = self._tmp_path / f"console_{self._count}.py"
+            self._count += 1
+            script.write_text(block.code, encoding="utf-8")
+
+            def paste(script: Path = script) -> None:
+                self._names.update(runpy.run_path(str(script), init_globals=self._names))
+
+            self._command(paste)
+        return {name: self._names[name] for name in keep}
+
+    def close(self) -> None:
+        """Forget every name, as closing the console does."""
+        forget([self._names])
 
 
 def dashboard_panels(dashboard: object) -> list[tuple[str, object]]:
@@ -287,3 +369,49 @@ def dashboard_panels(dashboard: object) -> list[tuple[str, object]]:
 
     visit(dashboard)
     return found
+
+
+SNAPSHOTS_CLEARED: Final = (dt_time(3, 30), dt_time(4, 0))
+"""When Massive's stock snapshots are empty each day, in New York time: cleared at 03:30 and
+refilled from about 04:00 (`vendor/massive/rest/stocks/snapshots/`)."""
+
+
+def snapshots_cleared(now: datetime, delay: timedelta) -> bool:
+    """Tell whether a plan's stock snapshots are in their daily empty window.
+
+    Args:
+        now: An aware instant.
+        delay: The plan's feed delay, zero on a real-time plan.
+
+    Returns:
+        True when the feed's own time, `now` less the delay, is from 03:30 to 04:00 New York
+        time (`SNAPSHOTS_CLEARED`).
+    """
+    clock = (now - delay).astimezone(NEW_YORK).time()
+    return SNAPSHOTS_CLEARED[0] <= clock < SNAPSHOTS_CLEARED[1]
+
+
+def seam_gaps(
+    spy: Iterable[int], live: Iterable[int], rest: Iterable[int]
+) -> tuple[list[int], list[int]]:
+    """Compare a backfilled table's minutes with REST's, through its last live minute.
+
+    The README's backfill example merges the day's history with the live bars; where the two
+    meet, a minute could go missing. Only minutes up to the last live one are compared, since
+    REST may already hold a later minute the stream has not sent yet.
+
+    Args:
+        spy: The start of each minute the merged table holds, as epoch nanoseconds.
+        live: The start of each minute the stream delivered.
+        rest: The start of each minute REST holds of the day.
+
+    Returns:
+        The minutes REST holds that the table lacks, then those the table holds that REST
+        lacks, each sorted; both empty when no live minute arrived.
+    """
+    last = max(live, default=None)
+    if last is None:
+        return [], []
+    held = {start for start in spy if start <= last}
+    known = {start for start in rest if start <= last}
+    return sorted(known - held), sorted(held - known)

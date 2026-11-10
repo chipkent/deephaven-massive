@@ -118,7 +118,6 @@ def test_the_machine_check_names_secrets_only_as_set(tmp_path: Path) -> None:
     assert environment["set"] == {
         "MASSIVE_API_KEY": True,
         "MASSIVE_DELAYED_API_KEY": False,
-        "MASSIVE_BASIC_API_KEY": False,
         "MASSIVE_S3_ACCESS_KEY_ID": False,
         "MASSIVE_S3_SECRET_ACCESS_KEY": False,
         "HTTPS_PROXY": True,
