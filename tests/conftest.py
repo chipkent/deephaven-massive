@@ -520,11 +520,13 @@ def console_command(
     daemon, so it cannot keep the process alive.
 
     Returns:
-        The function; it takes the command and returns once the command has returned.
+        The function; it takes the command and returns once the command has returned. Its
+        keyword `timeout` replaces the 30 seconds for a command that may wait longer by
+        design, such as a live read paced at Basic's 5 requests a minute.
     """
     execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
 
-    def run(command: Callable[[], None]) -> None:
+    def run(command: Callable[[], None], *, timeout: float = _CONSOLE_COMMAND_TIMEOUT) -> None:
         returned = threading.Event()
 
         def body() -> None:
@@ -539,11 +541,11 @@ def console_command(
 
         thread = threading.Thread(target=body, name="console command", daemon=True)
         thread.start()
-        thread.join(_CONSOLE_COMMAND_TIMEOUT)
+        thread.join(timeout)
         if thread.is_alive():
             deadlock = (
                 f"a console command deadlocked: it did not return within "
-                f"{_CONSOLE_COMMAND_TIMEOUT:.0f} s, waiting for something that needs the update "
+                f"{timeout:.0f} s, waiting for something that needs the update "
                 "graph's lock, which it holds; no update cycle can run in this process again"
             )
             request.session.shouldstop = deadlock
@@ -2462,6 +2464,27 @@ def delayed_key(live_config: MassiveConfig, live_plans: plans.LivePlans) -> str:
         return key
     if live_plans.tiers["stocks"] not in {"starter", "developer"}:
         pytest.skip("needs a delayed Stocks key: MASSIVE_DELAYED_API_KEY, or Stocks Starter")
+    return live_config.api_key
+
+
+@pytest.fixture
+def basic_key(live_config: MassiveConfig, live_plans: plans.LivePlans) -> str:
+    """Return a key on Stocks Basic: `MASSIVE_BASIC_API_KEY`, or the main key on Stocks Basic.
+
+    For a check of what Massive refuses the free plan, which no setting of a paid key can show.
+
+    Args:
+        live_config: The live configuration, for the main key.
+        live_plans: The run's plans.
+
+    Returns:
+        The key; the test is skipped when there is none.
+    """
+    key = os.environ.get("MASSIVE_BASIC_API_KEY", "").strip()
+    if key:
+        return key
+    if live_plans.tiers["stocks"] != "basic":
+        pytest.skip("needs a Stocks Basic key: MASSIVE_BASIC_API_KEY, or the main key on Basic")
     return live_config.api_key
 
 

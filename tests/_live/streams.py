@@ -15,6 +15,11 @@ acknowledgement, and a pass always means that rows reached the table.
 A minute bar arrives only after its minute has ended, so a test that streams minute bars waits
 until a little past the next minute boundary (`minute_bar_deadline`).
 
+Stock minute bars come from trades, so they flow in every stock session: pre-market from 04:00,
+the regular session from 09:30, and after hours from its close to 20:00 (17:00 on a half trading
+day). `stock_session` names the session a plan's feed is in, so a test can check what each one
+sends, an empty table overnight included.
+
 Every function is pure; `tests/conftest.py`'s `rows_due` fixture reads the market status and
 calls them.
 """
@@ -24,7 +29,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
 
-from tests._live.calendar import NEW_YORK, is_half_day
+from tests._live.calendar import NEW_YORK, is_half_day, is_trading_day
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -160,3 +165,43 @@ def rows_due(plans: LivePlans, name: str, *, opened: datetime | None, now: datet
         return False
     delay = FEED_DELAYS.get((name, plans.tiers[name]), timedelta(0))
     return now >= opened + delay
+
+
+EXTENDED_CLOSE: Final = time(20, 0)
+"""When after-hours stock trading ends on a full trading day, in New York time."""
+
+HALF_DAY_EXTENDED_CLOSE: Final = time(17, 0)
+"""When after-hours stock trading ends on a half trading day, in New York time."""
+
+PRE_MARKET: Final = "pre-market"
+REGULAR: Final = "regular"
+AFTER_HOURS: Final = "after-hours"
+OVERNIGHT: Final = "overnight"
+"""The stock sessions `stock_session` names; `OVERNIGHT` is any time with no session, a day the
+market is closed included."""
+
+
+def stock_session(now: datetime, delay: timedelta) -> str:
+    """Name the stock session a feed delayed by `delay` is sending at `now`.
+
+    Args:
+        now: An aware instant.
+        delay: The plan's feed delay (`FEED_DELAYS`), zero on a real-time plan.
+
+    Returns:
+        `PRE_MARKET` from 04:00 to 09:30 New York time, `REGULAR` until the close
+        (`regular_close`), `AFTER_HOURS` until 20:00 (17:00 on a half trading day), and
+        `OVERNIGHT` at any other time and on a day the market is closed, each of the feed's
+        own time, `now` less the delay.
+    """
+    feed = (now - delay).astimezone(NEW_YORK)
+    day = feed.date()
+    if not is_trading_day(day):
+        return OVERNIGHT
+    clock = feed.time()
+    late = HALF_DAY_EXTENDED_CLOSE if is_half_day(day) else EXTENDED_CLOSE
+    if clock < EXTENDED_OPEN or clock >= late:
+        return OVERNIGHT
+    if clock < INDEX_OPEN:
+        return PRE_MARKET
+    return REGULAR if feed < regular_close(feed) else AFTER_HOURS

@@ -15,7 +15,9 @@ folder, and the settings page's example file loads as the page says. Five README
 run alone against scripted replies, and the tests check that
 their tables hold what the README says they hold: the whole-market day, the watchlist that
 adds and removes stocks, the settings file, the change since yesterday's close, and the
-backfill of today's minutes.
+backfill of today's minutes. The helpers that read a page's blocks and run them are shared with
+the live run of the README's examples, `tests/live/test_doc_examples_integration.py`, from
+`tests/_live/doc_examples.py`.
 
 The docstrings link instead of repeating. A docstring cites a page, or a section of a user page,
 by its full GitHub URL, `DOCS_URL` followed by the page's path from the repository root and,
@@ -28,17 +30,13 @@ of the tester guide) resolves.
 
 import dataclasses
 import json
-import os
 import re
 import runpy
-import shutil
-import subprocess
 import threading
-import types
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, cast
 
 import deephaven
 import pytest
@@ -55,6 +53,15 @@ from deephaven_massive._massive import Source, WsClient
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
+from tests._live.doc_examples import (
+    blocks,
+    fences,
+    forget,
+    merged,
+    run_blocks,
+    section_blocks,
+    write_settings_file,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
@@ -71,8 +78,6 @@ A block belongs here only when it cannot run in the test process, such as one th
 own Deephaven server, or one that reads flat files, which needs S3 keys the fake session lacks.
 """
 
-_FENCE = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
-_BASH = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _YAML = re.compile(r"^```yaml\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _ANCHOR = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 DOCS_URL = "https://github.com/chipkent/deephaven-massive/blob/main/"
@@ -89,67 +94,6 @@ _LINK = re.compile(r"\]\(([^)\s]+)\)")
 def _name(page: Path) -> str:
     """Return a page's path from the repository root, such as `docs/troubleshooting.md`."""
     return page.relative_to(ROOT).as_posix()
-
-
-class Block(NamedTuple):
-    """One Python block of a user page that runs."""
-
-    code: str
-    """The block's code."""
-    continues: bool
-    """Whether it runs in the namespace of the block before it (a `python continues` fence)."""
-
-
-def _fences(text: str) -> list[tuple[str, str]]:
-    """Return the info string after `python` and the code of each Python block, in order."""
-    return [(info.strip(), code) for info, code in _FENCE.findall(text)]
-
-
-def _blocks(text: str) -> list[Block]:
-    """Return each Python block of a Markdown text that runs, in order."""
-    return [Block(code, info == "continues") for info, code in _fences(text) if info != "skip-test"]
-
-
-def _section(page: Path, anchor: str) -> str:
-    """Return the text of one section of a page, from its anchor to the next anchor.
-
-    Args:
-        page: The user page.
-        anchor: The section's `<a id>`, such as `"whole-market-day"`.
-
-    Returns:
-        The section's Markdown.
-    """
-    text = page.read_text(encoding="utf-8")
-    start = text.index(f'<a id="{anchor}"></a>')
-    end = text.find("<a id=", start + 1)
-    return text[start : end if end >= 0 else len(text)]
-
-
-def _section_blocks(page: Path, anchor: str) -> list[Block]:
-    """Return the Python blocks of one section of a page, in order (see `_section`)."""
-    return _blocks(_section(page, anchor))
-
-
-def _write_settings_file(home: Path) -> None:
-    """Run the README's commands that write the delayed plans' settings file, with `HOME` at `home`.
-
-    The section has one block of commands per kind of plan: first Starter and Developer's, which
-    accept the delayed feed, then Advanced and Business's, which are real-time. The first runs,
-    so the examples that load the file accept the delayed feed.
-
-    Args:
-        home: The folder that stands in for the reader's home folder.
-    """
-    commands, real_time = _BASH.findall(_section(README, "what-your-plan-allows"))
-    assert "delayed_subscriptions: []" in real_time
-    bash = shutil.which("bash")
-    assert bash is not None, "the README's shell commands need bash"
-    subprocess.run(  # noqa: S603 - bash running the README's own commands, no shell string
-        [bash, "-c", commands],
-        check=True,
-        env={**os.environ, "HOME": str(home)},
-    )
 
 
 def _ms(text: str) -> int:
@@ -261,77 +205,6 @@ def readme_server(
     vars(dm).pop("MassiveSession", None)
 
 
-def _run_blocks(
-    blocks: Sequence[Block],
-    tmp_path: Path,
-    name: str,
-    *,
-    console_command: Callable[[Callable[[], None]], None],
-) -> list[dict[str, Any]]:
-    """Run code blocks as scripts, in order, as a reader pastes them into the console.
-
-    A block runs on its own, as in a fresh console, unless it continues the block before it:
-    then it starts from that block's names, as in the same console. Each block runs as one
-    console command (the `console_command` fixture): under the update graph's exclusive lock,
-    as a reader pasting it into the Deephaven console runs it. A block that creates an input
-    table and adds a row at once, as the watchlist examples do, is then never interrupted by an
-    update cycle; without the lock, a cycle running while the table is created can refresh it
-    in the step it was stamped with, and Deephaven exits the process.
-
-    Args:
-        blocks: The blocks, in order.
-        tmp_path: Where to write the scripts.
-        name: The scripts' file name prefix.
-        console_command: Runs one block the way the console runs a command.
-
-    Returns:
-        The names each block defined, one namespace per block, in order; a continuing block's
-        namespace holds the names it started from too.
-    """
-    namespaces: list[dict[str, Any]] = []
-    for number, block in enumerate(blocks):
-        script = tmp_path / f"{name}_{number}.py"
-        script.write_text(block.code, encoding="utf-8")
-        start = namespaces[-1] if block.continues else None
-
-        def run(script: Path = script, start: dict[str, Any] | None = start) -> None:
-            namespaces.append(runpy.run_path(str(script), init_globals=start))
-
-        console_command(run)
-    return namespaces
-
-
-def _merged(namespaces: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Return the names of several blocks as one mapping, a later block's name winning.
-
-    Args:
-        namespaces: The names each block defined, as `_run_blocks` returns them.
-
-    Returns:
-        Every name, bound to the value its last defining block gave it.
-    """
-    merged: dict[str, Any] = {}
-    for names in namespaces:
-        merged.update(names)
-    return merged
-
-
-def _forget(namespaces: Sequence[dict[str, Any]]) -> None:
-    """Break the cycle between the scripts' functions and their globals, then drop the names.
-
-    A function a script defined holds its module globals, which hold the function and the
-    session, so the session goes with the test only once those globals are cleared.
-
-    Args:
-        namespaces: The names each script defined.
-    """
-    for names in namespaces:
-        for value in names.values():
-            if isinstance(value, types.FunctionType) and value.__module__ == "<run_path>":
-                value.__globals__.clear()
-        names.clear()
-
-
 # --- Every example runs ------------------------------------------------------------------------
 
 
@@ -381,30 +254,30 @@ def test_every_user_page_example_runs_alone(
     monkeypatch.setattr(deephaven, "input_table", recording)
     # The README's settings file, written by its own commands in a stand-in home folder.
     monkeypatch.setenv("HOME", str(tmp_path))
-    _write_settings_file(tmp_path)
+    write_settings_file(README, tmp_path, delayed=True)
     # Every path the examples read answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
-    blocks = _blocks(page.read_text(encoding="utf-8"))
-    namespaces = _run_blocks(blocks, tmp_path, page.stem, console_command=console_command)
-    names = _merged(namespaces)
+    page_blocks = blocks(page.read_text(encoding="utf-8"))
+    namespaces = run_blocks(page_blocks, tmp_path, page.stem, console_command=console_command)
+    names = merged(namespaces)
     for name in _PROMISED.get(_name(page), ()):
         assert isinstance(names[name], Table), name
-    if any("input_table(" in block.code for block in blocks):
+    if any("input_table(" in block.code for block in page_blocks):
         assert locked  # the watchlist examples made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
     names.clear()
-    _forget(namespaces)
+    forget(namespaces)
 
 
 def test_the_readme_has_its_examples() -> None:
     # A guard on the block pattern: a typo in it would find no block, and every page would pass.
-    assert len(_blocks(README.read_text(encoding="utf-8"))) >= 10
+    assert len(blocks(README.read_text(encoding="utf-8"))) >= 10
 
 
 def test_only_allowed_blocks_skip_the_test() -> None:
     skipped = set()
     for page in USER_PAGES:
-        for info, code in _fences(page.read_text(encoding="utf-8")):
+        for info, code in fences(page.read_text(encoding="utf-8")):
             assert info in {"", "continues", "skip-test"}, f"{_name(page)}: python {info}"
             if info == "skip-test":
                 skipped.add((_name(page), code.split("\n", 1)[0]))
@@ -556,7 +429,7 @@ def settings_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    _write_settings_file(home)
+    write_settings_file(README, home, delayed=True)
     return home
 
 
@@ -584,8 +457,8 @@ def test_the_backfill_example_merges_history_with_live_bars(
     )
     minute = {**_bar("2024-06-14", 541.0, 1_000), "t": opened}
     readme_server.reply(path, Reply(envelope([minute], adjusted=True, ticker="SPY")))
-    [block] = _section_blocks(README, "backfill-then-live")
-    [names] = _run_blocks([block], tmp_path, "backfill", console_command=console_command)
+    [block] = section_blocks(README, "backfill-then-live")
+    [names] = run_blocks([block], tmp_path, "backfill", console_command=console_command)
     _wait_for_subscription(fake_ws_server, "AM.SPY")
     live = {"ev": "AM", "sym": "SPY", "v": 5, "o": 542.0, "c": 542.0, "h": 542.0, "l": 542.0}
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
@@ -618,8 +491,8 @@ def test_the_whole_market_example_ranks_the_day(
         "/v2/aggs/grouped/locale/us/market/stocks/2026-10-30",
         Reply(envelope(day, adjusted=True, resultsCount=len(day))),
     )
-    [block] = _section_blocks(README, "whole-market-day")
-    [names] = _run_blocks([block], tmp_path, "whole_market", console_command=console_command)
+    [block] = section_blocks(README, "whole-market-day")
+    [names] = run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
     # One row per stock, ranked by dollars traded, largest first.
     assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
@@ -644,12 +517,12 @@ def test_the_watchlist_example_adds_and_removes_stocks(
         readme_server.reply(
             f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
         )
-    first, edit = _section_blocks(README, "drive-with-a-watchlist")
+    first, edit = section_blocks(README, "drive-with-a-watchlist")
     assert edit.continues
     # The README polls once a minute; a one-second poll shows the same edit within seconds.
     assert "poll(60)" in first.code
     fast = first._replace(code=first.code.replace("poll(60)", "poll(1)"))
-    [names] = _run_blocks([fast], tmp_path, "watchlist", console_command=console_command)
+    [names] = run_blocks([fast], tmp_path, "watchlist", console_command=console_command)
 
     def symbols(rows: list[dict[str, Any]]) -> set[str]:
         return {r["Symbol"] for r in rows}
@@ -679,8 +552,8 @@ def test_the_settings_example_reads_the_file_its_commands_write(
 ) -> None:
     assert (settings_home / "massive" / "settings.yaml").is_file()
     readme_server.reply_default(Reply(envelope([])))
-    [block] = _section_blocks(README, "what-your-plan-allows")
-    [names] = _run_blocks([block], tmp_path, "settings", console_command=console_command)
+    [block] = section_blocks(README, "what-your-plan-allows")
+    [names] = run_blocks([block], tmp_path, "settings", console_command=console_command)
     # The file accepts the delayed Stocks feed, the setting Starter and Developer need.
     assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
     assert isinstance(names["snapshot"], Table)
@@ -734,8 +607,8 @@ def test_the_change_example_compares_each_minute_with_yesterday(
         )
     # The watchlist's other stock had no bar yesterday.
     readme_server.reply_default(Reply(envelope([])))
-    [block] = _section_blocks(README, "change-since-close")
-    [names] = _run_blocks([block], tmp_path, "change", console_command=console_command)
+    [block] = section_blocks(README, "change-since-close")
+    [names] = run_blocks([block], tmp_path, "change", console_command=console_command)
     # Each stock with a previous close has its row before its first minute bar, with no close.
     rows = _wait_for_rows(names["changes"], lambda rows: len(rows) == 2, dh_to_pylist)
     assert {r["Symbol"]: (r["Close"], r["PrevClose"]) for r in rows} == {

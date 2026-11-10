@@ -10,9 +10,11 @@ tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -29,7 +31,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import calendar
+from tests._live import calendar, greeks
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._query import Query
+    from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration
 
@@ -875,3 +878,159 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     assert acked, "Massive acknowledged no AD.* topic on the real-time options feed"
     assert states == ["RUNNING"], f"the admin messages stream is {states}"
     assert all(row["Timestamp"] is not None and row["Message"] is not None for row in rows)
+
+
+_ADMIN_PAGE = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"
+"""The dataset page of the admin messages, whose plan table every refusal of them links."""
+
+_ADMIN_PLANS = frozenset({"advanced", "business_expansion"})
+"""The Options plans that include the admin messages: Advanced, and Business with the expansion,
+which covers it."""
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.verifies("82")
+@pytest.mark.timeout(150)
+def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
+    live_config: dm.MassiveConfig,
+    live_plans: LivePlans,
+    *,
+    table_rows: TableRows,
+    stream_report: StreamReport,
+    evidence: Evidence,
+) -> None:
+    """What an Options plan without the admin messages answers, and whether it links their plans.
+
+    On Options Starter, Developer, or Business, streams `m.options.admin_messages()` from a
+    session whose `delayed_subscriptions` leaves options out, as the dataset requires. On a
+    plan Massive labels delayed the call raises `dm.EntitlementError`; on base Business the
+    stream's row turns `FAILED` with Massive's refusal of `AD.*`. Passes when one of the two
+    happens and its message ends with the link to the dataset's page of plans. Skips on a plan
+    that includes the channel, which the real-time test checks.
+    """
+    if live_plans.tiers["options"] in _ADMIN_PLANS:
+        pytest.skip("the key's Options plan includes the admin messages; the real-time test runs")
+    config = dataclasses.replace(
+        live_config,
+        delayed_subscriptions=live_config.delayed_subscriptions - {dm.Subscription.OPTIONS},
+    )
+    session = dm.MassiveSession(config)
+    try:
+        try:
+            table = session.options.admin_messages().append_only()
+        except dm.EntitlementError as error:
+            outcome, message = "refused at the call", str(error)
+        else:
+            deadline = time.monotonic() + _ADMIN_WAIT
+            pause = threading.Event()  # never set; only paces the wait for the refusal
+            rows: list[dict[str, Any]] = []
+            while time.monotonic() < deadline:
+                rows = [
+                    r
+                    for r in table_rows(session.streams())
+                    if r["Dataset"] == "options.admin_messages"
+                ]
+                if any(r["State"] == "FAILED" for r in rows):
+                    break
+                pause.wait(0.5)
+            for line in stream_report(session):
+                evidence(line)
+            outcome = str(rows[0]["State"]) if rows else "no stream row"
+            message = str(rows[0]["Error"]) if rows else ""
+            session.release(table)
+    finally:
+        session.close()
+    evidence(f"options {live_plans.tiers['options']}: {outcome}: {message}")
+    assert outcome in {"refused at the call", "FAILED"}, f"the admin messages stream is {outcome}"
+    assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
+
+
+_GAMMA_CONTRACTS = 5
+"""How many calls near the money the gamma check reads."""
+
+_GAMMA_DAYS = (20, 50)
+"""The days to expiry of the calls the gamma check reads: far enough that gamma is smooth."""
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.verifies("83")
+@pytest.mark.timeout(120)
+def test_snapshot_gamma_is_per_cent_of_the_underlying_as_massive_describes(
+    live_session: dm.MassiveSession,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether `GreeksGamma` of the options snapshot is per $0.01 of the underlying, or per $1.
+
+    Massive's description, which the dataset page quotes, says per $0.01. Reads SPY's price
+    from its option chain (or its previous close, when the chain carries none), up to five
+    calls near the money that expire in 20 to 50 days, their snapshots, and the latest
+    3-month Treasury yield as the risk-free rate, with no dividend yield. For each call it
+    records `GreeksGamma`, the Black-Scholes gamma per $1 from the call's strike, its time to
+    expiry, and its `ImpliedVolatility` (`tests/_live/greeks.py`), their ratio, and the unit
+    the ratio matches. Passes when every call's gamma matches per $0.01.
+    """
+    today = calendar.today()
+    rate, rate_text = _risk_free_rate(live_session, table_rows, today)
+    spot, symbols = _calls_near_the_money(live_session, table_rows, today)
+    evidence(f"SPY {spot}, {rate_text}")
+    if not symbols:
+        pytest.skip(f"no call near SPY's {spot} carries greeks now")
+    now = datetime.now(UTC)
+    units = []
+    for row in table_rows(live_session.options.snapshots(symbols).fetch()):
+        expiry = datetime.combine(
+            date.fromisoformat(row["DetailsExpirationDate"]), dt_time(16, 0), _NEW_YORK
+        )
+        textbook = greeks.black_scholes_gamma(
+            spot=spot,
+            strike=row["DetailsStrikePrice"],
+            years=(expiry - now).total_seconds() / (365 * 24 * 3600),
+            volatility=row["ImpliedVolatility"],
+            rate=rate,
+        )
+        unit = greeks.gamma_unit(row["GreeksGamma"], textbook)
+        units.append(unit)
+        evidence(
+            f"{row['Symbol']}: GreeksGamma {row['GreeksGamma']}, Black-Scholes per $1 "
+            f"{textbook:.6g}, ratio {row['GreeksGamma'] / textbook:.4g}: {unit}"
+        )
+    assert units, "the snapshots returned no row"
+    assert set(units) == {greeks.PER_CENT}, f"GreeksGamma matches {units}, not per $0.01"
+
+
+def _risk_free_rate(
+    live_session: dm.MassiveSession, table_rows: TableRows, today: date
+) -> tuple[float, str]:
+    """Return the newest 3-month Treasury yield as a fraction, and a line that names it."""
+    start = (today - timedelta(days=14)).isoformat()
+    yields = table_rows(live_session.economy.treasury_yields(start=start).fetch())
+    newest = max((row for row in yields if row["Yield3Month"] is not None), key=lambda r: r["Date"])
+    named = f"3-month yield {newest['Yield3Month']}% of {newest['Date']}"
+    return float(newest["Yield3Month"]) / 100, named
+
+
+def _calls_near_the_money(
+    live_session: dm.MassiveSession, table_rows: TableRows, today: date
+) -> tuple[float, list[str]]:
+    """Return SPY's price and up to `_GAMMA_CONTRACTS` calls nearest it that carry greeks.
+
+    The price is the chain's `UnderlyingAssetPrice`, or SPY's previous close when the chain
+    carries none, as on a plan without Stocks data.
+    """
+    window = {
+        "expiration_date_gte": (today + timedelta(days=_GAMMA_DAYS[0])).isoformat(),
+        "expiration_date_lte": (today + timedelta(days=_GAMMA_DAYS[1])).isoformat(),
+    }
+    calls = partial(live_session.options.chain, "SPY", contract_type=dm.ContractType.CALL)
+    first = table_rows(calls(limit=1, filters=window).fetch())
+    spot = first[0]["UnderlyingAssetPrice"] if first else None
+    if spot is None:
+        [bar] = table_rows(live_session.stocks.previous_day_bar("SPY").fetch())
+        spot = bar["Close"]
+    near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
+    chain = table_rows(calls(filters={**window, **near}).fetch())
+    priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
+    priced.sort(key=lambda r: abs(r["DetailsStrikePrice"] - spot))
+    return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
