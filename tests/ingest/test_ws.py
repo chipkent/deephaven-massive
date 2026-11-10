@@ -2007,6 +2007,34 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     ws_session.session.release(result)
 
 
+def test_a_futures_watchlist_change_whose_schedule_wait_a_close_ends_is_dropped(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The session closes while the worker waits for the added contract's schedule: the close
+    # ends the wait, and the change is dropped quietly rather than posted to a closed stream.
+    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    (stream_id,) = ws_session.connections.group.streams
+    waits: list[frozenset[str]] = []
+
+    def closed_during(
+        _calendar: object, contracts: Iterable[str], _timeout: float, *, stop: threading.Event
+    ) -> bool:
+        waits.append(frozenset(contracts))
+        ws_session.connections.close()
+        assert stop.is_set()
+        return False
+
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", closed_during)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+        ws_session.connections._change_contracts(stream_id, frozenset({"NQZ5"}), frozenset())
+    assert waits == [frozenset({"NQZ5"})]
+    assert (
+        f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
+        f"is closing ({ws_session.session._core.label} is closed)"
+    ) in caplog.text
+    ws_session.session.release(result)
+
+
 def lookups(session: WsSession) -> list[tuple[str, str]]:
     # Each crypto ticker the transport looked up, with the thread it ran on.
     return [
