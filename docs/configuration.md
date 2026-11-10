@@ -353,9 +353,9 @@ Massive allows your account one WebSocket connection per asset class, and keeps 
 newest. When another program, or a session with different streaming settings,
 connects with the same key, Massive closes this session's connection.
 
-- `dm.ConnectionTaken.FAIL` fails the live tables at once, with an error that names
+- `fail` fails the live tables at once, with an error that names
   the time and the fix.
-- `dm.ConnectionTaken.RECONNECT` reconnects after the reconnect backoff, which takes
+- `reconnect` reconnects after the reconnect backoff, which takes
   the connection back. If the other program does the same, the two take turns, and
   each loses data while the other holds the connection.
 

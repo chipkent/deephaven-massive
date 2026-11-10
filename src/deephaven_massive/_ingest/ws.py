@@ -651,7 +651,9 @@ class WsConnections:
         The stream goes to the connection that holds its lease. Routing and the check for the
         connection's failure happen in one section of the group's lock, the one the connection's
         `_failed` takes, so a connection that failed meanwhile never leaves the stream running:
-        the stream fails here, on the caller thread.
+        the stream fails here, on the caller thread. So does a stream of a
+        `connection_taken=FAIL` session whose connection was taken while it opened
+        (`Connection.pending_failures`).
         A stream whose lease is gone (the session closed) is left as it is.
 
         Args:
@@ -659,7 +661,10 @@ class WsConnections:
         """
         with self._lock:
             connection = self.group.streams.get(stream.stream_id)
-            failure = None if connection is None else connection.failure
+            failure = None
+            if connection is not None:
+                pending = connection.pending_failures.pop(stream.stream_id, None)
+                failure = connection.failure or pending
             if connection is not None and failure is None:
                 connection.flusher.routes.add(stream.channel, stream.sink)
                 connection.post(connection.add_stream, stream)
@@ -701,6 +706,7 @@ class WsConnections:
         self._mine.discard(stream_id)
         self._skipped_pairs.pop(stream_id, None)
         current.cap_pending.pop(stream_id, None)
+        current.pending_failures.pop(stream_id, None)
         current.give(self)
         return current
 

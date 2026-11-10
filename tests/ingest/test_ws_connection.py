@@ -2143,3 +2143,60 @@ def test_a_shared_connection_taken_fails_only_the_tables_of_fail_sessions(
     )
     other.release(theirs)
     other.close()
+
+
+def test_a_reconnect_session_that_lets_go_during_the_wait_closes_the_connection(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # With no table left to take the connection back, a reconnect would only evict the other
+    # program, so the connection closes instead.
+    session = make_ws_session(backoff=60.0, connection_taken=dm.ConnectionTaken.RECONNECT)
+    result = session.query(TRADES, ["AAPL"]).blink()
+    session.subscribed("T.AAPL")
+    fake_ws_server.evict()
+    session.wait(lambda s: WsState.TAKEN in s.states)
+    session.session.release(result)
+    session.wait(lambda s: WsState.CLOSED in s.states)
+    assert len(fake_ws_server.connections) == 1
+    [row] = connections_of(session, dh_to_pylist)
+    assert row["State"] == "CLOSED"
+
+
+def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it_attaches(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = join(ws_session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    theirs = ws_session.query(TRADES, ["AAPL"], other).blink()  # it keeps the connection
+    ws_session.subscribed("T.AAPL")
+    entered, go = threading.Event(), threading.Event()
+    attach = ws.WsConnections._attach
+
+    def held_attach(self: ws.WsConnections, stream: ws_connection.ConnectionStream) -> None:
+        if self is ws_session.connections:  # leased, not yet routed, until the test says go
+            entered.set()
+            assert go.wait(TIMEOUT)
+        attach(self, stream)
+
+    monkeypatch.setattr(ws.WsConnections, "_attach", held_attach)
+    with ThreadPoolExecutor(1) as pool:
+        opening = pool.submit(lambda: ws_session.query(TRADES, ["MSFT"]).blink())
+        assert entered.wait(TIMEOUT)
+        fake_ws_server.evict()
+        ws_session.wait(lambda s: WsState.TAKEN in s.states)
+        go.set()
+        try:  # the verb names the failure its stream met while it opened
+            with pytest.raises(dm.MassiveError, match=r"stream \d+ failed: another connection"):
+                opening.result(TIMEOUT)
+            [stream] = streams_of(ws_session, dh_to_pylist)
+            assert re.fullmatch(_TAKEN_ERROR, stream["Error"])
+            assert not theirs.j_table.isFailed()
+            other.release(theirs)
+        finally:
+            other.close()

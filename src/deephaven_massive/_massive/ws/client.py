@@ -138,17 +138,16 @@ class _Ended:
     Attributes:
         uptime: Seconds the generation stayed authenticated; `None` when the attempt never
             authenticated.
-        waiting_slot: Whether the server answered the key with `max_connections`.
-        taken: Whether the server sent a `max_connections` status on the authenticated socket
-            before it closed it: a newer connection with the key took this one's place.
+        state: The state the client reports while it waits: `WAITING_SLOT` when the server
+            answered the key with `max_connections`, `TAKEN` when it sent a `max_connections`
+            status on the authenticated socket before closing it, `RECONNECTING` otherwise.
         least_wait: The least wait before the next attempt that the failure demands (an HTTP
             429's `Retry-After`); the backoff may be longer, and the client caps it at
             `max_reconnect_backoff`.
     """
 
     uptime: float | None = None
-    waiting_slot: bool = False
-    taken: bool = False
+    state: WsState = WsState.RECONNECTING
     least_wait: float = 0.0
 
 
@@ -523,12 +522,7 @@ class WsClient:
             least = min(ended.least_wait, self._max_wait)
             wait = self._clamped(max(self._backoff.next_wait(ended.uptime), least), least)
             logger.debug("reconnecting to %s in %.1f s", self._url, wait)
-            state = WsState.RECONNECTING
-            if ended.waiting_slot:
-                state = WsState.WAITING_SLOT
-            elif ended.taken:
-                state = WsState.TAKEN
-            self._on_state(state, self._clock.time() + wait)
+            self._on_state(ended.state, self._clock.time() + wait)
             await self._sleep(wait)
 
     def _clamped(self, wait: float, least: float) -> float:
@@ -627,7 +621,7 @@ class WsClient:
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout_at(deadline):
                     await websocket.wait_closed()
-            return _Ended(waiting_slot=True)
+            return _Ended(state=WsState.WAITING_SLOT)
         return await self._run_generation(websocket)
 
     async def _handshake(self, websocket: ClientConnection) -> WireError | str | None:
@@ -715,7 +709,7 @@ class WsClient:
                 "(a max_connections status, then the close)",
                 self._url,
             )
-        return _Ended(uptime=uptime, taken=taken)
+        return _Ended(uptime=uptime, state=WsState.TAKEN if taken else WsState.RECONNECTING)
 
     def _clean(self, frame: str | bytes) -> str | bytes:
         """Return a received frame with the API key replaced, should the server echo it.

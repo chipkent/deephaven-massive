@@ -1627,7 +1627,9 @@ _DEFAULT_SENTENCE: Final = re.compile(r" ?Defaults to [^.]*(?:\.[^ ][^.]*)*\.$")
 A period followed by a character other than a space (`0.05`, `api.massive.com`) does not end
 the sentence."""
 
-_ENUM_IN_CODE: Final = re.compile(r"`dm\.(OnError|Subscription|AssetClass)\.([A-Z]+)`")
+_ENUM_IN_CODE: Final = re.compile(
+    r"`dm\.(OnError|Subscription|AssetClass|ConnectionTaken)\.([A-Z]+)`"
+)
 """An enum member as code spells it, such as `dm.OnError.RAISE`, which a settings file spells
 `raise`."""
 
@@ -1707,6 +1709,7 @@ def _as_file_words(text: str) -> str:
         "OnError": OnError,
         "Subscription": Subscription,
         "AssetClass": AssetClass,
+        "ConnectionTaken": ConnectionTaken,
     }
     return _ENUM_IN_CODE.sub(lambda match: f"`{enums[match[1]][match[2]].value}`", text)
 

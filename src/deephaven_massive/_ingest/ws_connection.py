@@ -396,8 +396,8 @@ class Connection:
     The sessions of the group share it: `users` counts each session's leases, and each stream
     carries its own session. Its loop-thread state (the `Subscriptions`, the streams, the
     diagnostics row) is touched only by the client's loop thread, which runs the callbacks below
-    and the work other threads `post`. `families`, `leases`, `users`, `failure`, and the
-    options-cap fields are guarded by the group's lock. `close()` and
+    and the work other threads `post`. `families`, `leases`, `users`, `failure`,
+    `pending_failures`, and the options-cap fields are guarded by the group's lock. `close()` and
     `join()` may be called from any thread.
 
     It writes its diagnostics row (and one per further family it serves) into the
@@ -447,6 +447,9 @@ class Connection:
         self.failure: MassiveError | None = None
         self.cap_admitted: frozenset[str] = frozenset()
         self.cap_pending: dict[int, frozenset[str]] = {}
+        # The failure of each stream of a `FAIL` session that was still opening when the
+        # connection was taken, which it fails with when it attaches.
+        self.pending_failures: dict[int, MassiveError] = {}
         # The row last written for each family, for `show_closed`.
         self._rows: dict[ChannelFamily, ConnectionRow] = {}
         # Start and close bookkeeping, under its own leaf lock.
@@ -502,6 +505,8 @@ class Connection:
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
         self._ended = False
         self._episodes = _Episodes()
+        # When another connection with the key took this one, until the next socket opens.
+        self._taken_at: float | None = None
         self._backlog_timer: Timer | None = None
         self._change_scheduled = False
 
@@ -769,6 +774,8 @@ class Connection:
         """
         if self._ended:  # the client has ended: nothing to reconcile or to close
             return
+        if self._taken_at is not None and self._settle_taken(None):
+            return  # the last stream of a RECONNECT session left during the reconnect wait
         self.subscriptions.reconcile()
         self._show_notes(opened=opened)
         if not self._streams and self._idle is None:
@@ -804,6 +811,7 @@ class Connection:
             self._summary = self._client.loop.call_later(SUMMARY_INTERVAL, self._summarize)
         self._state = ConnectionState.CONNECTED
         self._next_reconnect_at = None
+        self._taken_at = None
         episodes.data_since_open = False
         self.subscriptions.opened(generation)
         self._check_recovered()  # with nothing to confirm, the outage ends now
@@ -1047,20 +1055,47 @@ class Connection:
     def _taken(self, next_at: float) -> None:
         """Apply `connection_taken` after another connection with the key took this one.
 
-        Under the group's lock, which every lease and route holds, the streams leased on the
-        connection are split by their session's setting. While one of a `RECONNECT` session
-        remains, the streams of `FAIL` sessions fail, and the rest ride an outage as for a
-        reconnect: the row shows `RECONNECTING`, and their `Error` says when the connection was
-        taken and when the client takes it back. Otherwise every routed stream fails, the
-        connection leaves the registry with the failure recorded, so a stream attaching at that
-        moment fails too (`WsConnections._attach`), and it closes: the client reports `CLOSED`
-        instead of reconnecting, which would take the connection back.
+        The connection remembers when it was taken until its next socket opens, so a change
+        of its streams during the reconnect wait applies the setting again (`_settle_taken`).
 
         Args:
             next_at: When the client's next attempt is due, seconds since the epoch.
         """
-        at = time.time()
+        self._taken_at = time.time()
+        self._settle_taken(next_at)
+
+    def _settle_taken(self, next_at: float | None) -> bool:
+        """Fail the streams of `FAIL` sessions, and close unless a `RECONNECT` stream remains.
+
+        Under the group's lock, which every lease and route holds, the streams leased on the
+        connection are split by their session's setting. While one of a `RECONNECT` session
+        remains, the streams of `FAIL` sessions fail: a routed one through the flush thread,
+        and one still opening when it attaches (`pending_failures`, which
+        `WsConnections._attach` reads). The rest ride an outage as for a reconnect: the row
+        shows `RECONNECTING`, and their `Error` says when the connection was taken and when the
+        client takes it back. Otherwise every routed stream fails, the connection leaves the
+        registry with the failure recorded, so a stream attaching at that moment fails too, and
+        it closes: the client reports `CLOSED` instead of reconnecting, which would take the
+        connection back from the other program.
+
+        Args:
+            next_at: When the client's next attempt is due, seconds since the epoch, when the
+                client has just reported `TAKEN`; None when a stream left during the wait, which
+                changes nothing while a `RECONNECT` stream remains.
+
+        Returns:
+            True when the connection closed.
+        """
+        at = cast("float", self._taken_at)
         group = self._group
+        error = MassiveError(
+            f"another connection with this API key took the WebSocket connection to "
+            f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped; stop "
+            "the other program that uses the key and call the method again, or set "
+            "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
+            f"connection back; see {_TAKEN_HELP}",
+            cause=ErrorCause.EXPECTED,
+        )
         with self._lock:
             leased = [sid for sid, connection in group.streams.items() if connection is self]
             keepers = {
@@ -1068,48 +1103,19 @@ class Connection:
                 for sid in leased
                 if group.owners[sid].connection_taken is ConnectionTaken.RECONNECT
             }
-            failing = [
-                sink.stream_id
-                for sink in self.flusher.routes.sinks()
-                if sink.stream_id not in keepers
-            ]
-            error = MassiveError(
-                f"another connection with this API key took the WebSocket connection to "
-                f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped; stop "
-                "the other program that uses the key and call the method again, or set "
-                "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
-                f"connection back; see {_TAKEN_HELP}",
-                cause=ErrorCause.EXPECTED,
-            )
-            if not keepers:  # one section: no verb leases the connection once it has failed
+            routed = {sink.stream_id for sink in self.flusher.routes.sinks()}
+            if keepers:
+                failing = [sid for sid in leased if sid not in keepers]
+                self.pending_failures.update((sid, error) for sid in failing if sid not in routed)
+                failing = [sid for sid in failing if sid in routed]
+            else:  # one section: no verb leases the connection once it has failed
+                failing = sorted(routed)
                 self.failure = error
                 group.retire(self, idle=False)
         if keepers:
-            logger.warning(
-                "%s: another connection with this API key took the connection at %s "
-                "(max_connections); %d live tables of sessions with connection_taken=RECONNECT "
-                "remain, so it reconnects at %s and takes the connection back; %d live tables of "
-                "sessions with connection_taken=FAIL fail",
-                self.url,
-                utc_text(at),
-                len(keepers),
-                utc_text(next_at),
-                len(failing),
-            )
-            self._last_error = (
-                f"another connection with this API key took the connection at {utc_text(at)}"
-            )
-            self._episodes.expired.update(failing)  # no outage holds a failing stream down
-            if failing:
-                self.flusher.fail(failing, error)
-            self._next_reconnect_at = int(next_at * 1e9)
-            self._outage(
-                detail=f"another connection with this API key took it at {utc_text(at)}; "
-                f"reconnecting at {utc_text(next_at)} takes it back (connection_taken=RECONNECT)"
-            )
-            self._state = ConnectionState.RECONNECTING
-            self._write_row()
-            return
+            if next_at is not None:
+                self._ride_taken(at, next_at, keepers=len(keepers), failing=failing, error=error)
+            return False
         logger.warning(
             "%s: another connection with this API key took the connection at %s "
             "(max_connections); no live table of a session with connection_taken=RECONNECT "
@@ -1121,6 +1127,44 @@ class Connection:
         self._last_error = str(error)
         self.flusher.fail(failing, error)
         self.close(final_flush=True)  # the client reports CLOSED; the failures go first
+        return True
+
+    def _ride_taken(
+        self, at: float, next_at: float, *, keepers: int, failing: list[int], error: MassiveError
+    ) -> None:
+        """Fail the routed streams of `FAIL` sessions and hold the rest down until the reconnect.
+
+        Args:
+            at: When the connection was taken, seconds since the epoch.
+            next_at: When the client's next attempt is due, seconds since the epoch.
+            keepers: How many streams of `RECONNECT` sessions remain.
+            failing: The routed streams of `FAIL` sessions.
+            error: The error they fail with.
+        """
+        logger.warning(
+            "%s: another connection with this API key took the connection at %s "
+            "(max_connections); %d live tables of sessions with connection_taken=RECONNECT "
+            "remain, so it reconnects at %s and takes the connection back; %d live tables of "
+            "sessions with connection_taken=FAIL fail",
+            self.url,
+            utc_text(at),
+            keepers,
+            utc_text(next_at),
+            len(failing),
+        )
+        self._last_error = (
+            f"another connection with this API key took the connection at {utc_text(at)}"
+        )
+        self._episodes.expired.update(failing)  # no outage holds a failing stream down
+        if failing:
+            self.flusher.fail(failing, error)
+        self._next_reconnect_at = int(next_at * 1e9)
+        self._outage(
+            detail=f"another connection with this API key took it at {utc_text(at)}; "
+            f"reconnecting at {utc_text(next_at)} takes it back (connection_taken=RECONNECT)"
+        )
+        self._state = ConnectionState.RECONNECTING
+        self._write_row()
 
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
@@ -1155,7 +1199,7 @@ class Connection:
         log_failure(logger, public, "%s")
         with self._lock:  # one section: no verb leases the connection once it has failed
             self.failure = public
-            routed = [sink.stream_id for sink in self.flusher.routes.sinks()]
+            routed = {sink.stream_id for sink in self.flusher.routes.sinks()}
             self._group.retire(self, idle=False)
         self.flusher.fail(routed, public)
         self.flusher.stop(final=True)  # the failures above are applied before it ends
