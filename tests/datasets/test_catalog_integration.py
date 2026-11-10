@@ -161,6 +161,10 @@ a row to arrive in a test's time, while some band of the market's changes every 
 
 _RARE: Final = {
     "stocks.imbalances": "imbalances arrive only around the opening and closing auctions",
+    "options.admin_messages": (
+        "OPRA sends admin messages only with FLEX activity or an exchange's notice, "
+        "not on a schedule"
+    ),
 }
 """The streams whose rows no test can wait for, with why: they pass only by skipping after
 the acknowledgement."""
@@ -663,8 +667,9 @@ def _stream_case(
 ) -> tuple[list[str], list[str]]:
     """Run a stream case: Massive must acknowledge it, and rows must arrive when they are due.
 
-    Rows are due while the stream's market is open for its kind of rows and has been open
-    longer than the plan's feed delay (`rows_due`), unless the stream is one of `_RARE`. A
+    Rows are due while the stream's market is open for its kind of rows, before the regular
+    session's close for a stream that needs it, and has been open longer than the plan's feed
+    delay (`rows_due`), unless the stream is one of `_RARE`. A
     minute bar stream waits until just past the next minute boundary, any other for
     `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement.
 
@@ -704,7 +709,7 @@ def _stream_case(
     assert failure is None, f"{case.name} stream failed: {failure}"
     assert acked >= 1, f"{case.name}: Massive acknowledged no topic"
     if not due:
-        why = _RARE.get(case.name, f"market {status}, or within the feed delay")
+        why = _RARE.get(case.name, f"market {status}, past the close, or in the feed delay")
         pytest.skip(f"not exercised: {why} (acknowledged)")
     assert rows or not taken, f"{case.name}: {_SLOT_TAKEN}"
     assert rows, f"{case.name}: no row arrived in {wait:.0f} s, though rows were due"
@@ -736,8 +741,9 @@ def test_every_dataset_and_verb_returns_its_columns(
     exactly the dataset's columns, in the order `columns()` lists them, an empty result
     included. The poll passes when two cycles published rows. A stream passes only when
     Massive acknowledged its topic and rows reached its table; it skips after the
-    acknowledgement when rows need not flow (a closed market, the feed delay of a delayed plan,
-    a stream of rare events). "Not entitled: needs <plan>" is a skip, and so is a history the
+    acknowledgement when rows need not flow (a closed market, a stock, option, or index stream
+    after the regular session's close, the feed delay of a delayed plan, a stream of rare
+    events). "Not entitled: needs <plan>" is a skip, and so is a history the
     request cannot be served without S3 credentials; anything else fails. Every library
     WARNING and every `SchemaDrift` the case saw is recorded, and counted in the coverage.
     """

@@ -13,6 +13,7 @@ and should run alone and last, with no other client of the key. How to run these
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -306,6 +307,7 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     wait_rows: WaitRows,
     table_rows: TableRows,
     stream_report: Report,
+    caplog: pytest.LogCaptureFixture,
     evidence: Evidence,
 ) -> None:
     """What happens when a second session with the same key connects to a busy cluster.
@@ -313,10 +315,14 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     Deliberately takes a second connection slot (marked `integration_limits`; run it alone and
     last, with no other client of the key). Streams `X:BTCUSD` trades in one session, opens a
     second session on the same cluster, and records both sessions' connection states and
-    errors while both are open and after the second closes. Reading it: the second waiting
-    (`WAITING_SLOT`, a `max_connections` message) while the first keeps running confirms the
-    library's slot handling; the first being dropped instead means Massive keeps the newer
-    connection, and the slot rule needs revisiting.
+    errors while both are open and after the second closes. Sessions of one process whose key
+    and connection settings are all equal share their WebSocket connections, so the second
+    session's `max_outage` is one second longer than the first's: that alone gives it a socket
+    of its own. Fails when the library's WARNING that the two sessions cannot share connections
+    is missing, since then no second socket competed and the run shows nothing. Reading it:
+    the second waiting (`WAITING_SLOT`, a `max_connections` message) while the first keeps
+    running confirms the library's slot handling; the first being dropped instead means
+    Massive keeps the newer connection, and the slot rule needs revisiting.
     """
     first = live_session.crypto.trades("X:BTCUSD").append_only()
     first_rows = wait_rows(live_session, first, time.monotonic() + _FIRST_WAIT)
@@ -325,8 +331,14 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
         for line in stream_report(live_session):
             evidence(line)
         pytest.skip("the first session received no trade, so it may hold no slot to compete for")
-    second_session = dm.MassiveSession(live_config)
+    # A different connection setting keeps the second session out of the first's connections.
+    config = dataclasses.replace(live_config, max_outage=live_config.max_outage + 1)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        second_session = dm.MassiveSession(config)
+    apart = any("cannot share WebSocket connections" in r.getMessage() for r in caplog.records)
+    evidence(f"second session opens its own connections: {apart}")
     try:
+        assert apart, "the second session shares the first's connections, so none competes"
         second = second_session.crypto.trades("X:BTCUSD").append_only()
         started = time.monotonic()
         _wait_for_state(second_session, table_rows, states={"WAITING_SLOT", "FAILED"})

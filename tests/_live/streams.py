@@ -1,13 +1,14 @@
-"""When a live stream must deliver rows: an open market whose delayed feed has caught up.
+"""When a live stream must deliver rows: an open session whose delayed feed has caught up.
 
 A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires
 rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
 on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
 the first values of a session fifteen minutes after its open. Stock trades and quotes flow in
 the extended hours too, from 04:00 New York time; every other stock stream, and every option and
-index stream, needs the regular session, from 09:30; the futures session opens at the time of
-Massive's futures market status, and forex and crypto at no time this module knows, so their
-rows are due as soon as their market is open. The delays are those of the vendored WebSocket
+index stream, needs the regular session, from 09:30 to its close at 16:00 (13:00 on a half
+trading day), whatever Massive's status says after the close. The futures session opens at the
+time of Massive's futures market status, and forex and crypto at no time this module knows, so
+their rows are due as soon as their market is open. The delays are those of the vendored WebSocket
 "Plan Recency" tables (`FEED_DELAYS`). Before the rows are due, the test skips after the
 acknowledgement, and a pass always means that rows reached the table.
 
@@ -23,7 +24,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Final
 
-from tests._live.calendar import NEW_YORK
+from tests._live.calendar import NEW_YORK, is_half_day
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -44,6 +45,20 @@ FEED_DELAYS: Final[Mapping[tuple[str, str], timedelta]] = {
 INDEX_OPEN: Final = time(9, 30)
 """When the regular session opens each trading day, in New York time: the S&P indices start
 computing, and stocks and options open."""
+
+REGULAR_CLOSE: Final = time(16, 0)
+"""When the regular session closes on a full trading day, in New York time, for stocks,
+options, and indices alike.
+
+A stream that needs the regular session has no rows due from then on, even while Massive's
+market status still says `open`: on 2026-11-09 `indicesGroups.s_and_p` read `open` at 17:53,
+though I:SPX's last value came at 16:05. The S&P indices send their closing values for a few
+minutes past 16:00, so a stream that starts before the close still gets values during its wait;
+one that starts later is skipped, even on a delayed plan whose feed still lags behind the
+close, because no value after the close is certain to come."""
+
+HALF_DAY_CLOSE: Final = time(13, 0)
+"""When the regular session closes on a half trading day, in New York time."""
 
 EXTENDED_OPEN: Final = time(4, 0)
 """When the stock market's extended hours open each trading day, in New York time."""
@@ -70,6 +85,20 @@ def index_session_open(now: datetime) -> datetime:
     return datetime.combine(now.astimezone(NEW_YORK).date(), INDEX_OPEN, NEW_YORK)
 
 
+def regular_close(now: datetime) -> datetime:
+    """Return when the regular session of the day of an instant closes, in New York time.
+
+    Args:
+        now: An aware instant.
+
+    Returns:
+        13:00 New York time of that day on a half trading day (`calendar.is_half_day`), 16:00
+        on any other.
+    """
+    day = now.astimezone(NEW_YORK).date()
+    return datetime.combine(day, HALF_DAY_CLOSE if is_half_day(day) else REGULAR_CLOSE, NEW_YORK)
+
+
 def opened_at(
     market: str, status: str, *, family: str, now: datetime, since: datetime | None = None
 ) -> datetime | None:
@@ -88,8 +117,8 @@ def opened_at(
     Returns:
         For stock trades and quotes while the market is `open` or `extended-hours`, 04:00 New
         York time of `now`'s day; for every other stock, option, or index stream while it is
-        `open`, 09:30; for another market that is `open`, `since`, or `now` when it is None;
-        None in every other case.
+        `open` and before the regular session's close (`regular_close`), 09:30; for another
+        market that is `open`, `since`, or `now` when it is None; None in every other case.
     """
     if market == "stocks" and family in EXTENDED_HOURS_FAMILIES:
         if status in {"open", "extended-hours"}:
@@ -98,7 +127,7 @@ def opened_at(
     if status != "open":
         return None
     if market in {"stocks", "options", "indices"}:
-        return index_session_open(now)
+        return index_session_open(now) if now < regular_close(now) else None
     return now if since is None else since
 
 

@@ -66,6 +66,50 @@ def test_a_stream_waits_for_the_session_its_rows_come_from(
     assert streams.opened_at(market, status, family=family, now=_DAY) == opened
 
 
+_AFTER_CLOSE = datetime(2026, 11, 9, 17, 53, tzinfo=NEW_YORK)
+_MORNING = datetime(2026, 11, 9, 10, 0, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize("market", ["stocks", "options", "indices"])
+def test_no_regular_session_rows_are_due_after_the_close_whatever_the_status(market: str) -> None:
+    held = plans.declared_plans(f"{market}=advanced")
+    opened = streams.opened_at(market, "open", family="values", now=_AFTER_CLOSE)
+    assert opened is None
+    assert not streams.rows_due(held, market, opened=opened, now=_AFTER_CLOSE)
+
+
+def test_regular_session_rows_are_due_before_the_close() -> None:
+    held = plans.declared_plans("indices=starter")
+    opened = streams.opened_at("indices", "open", family="values", now=_MORNING)
+    assert opened == datetime(2026, 11, 9, 9, 30, tzinfo=NEW_YORK)
+    assert streams.rows_due(held, "indices", opened=opened, now=_MORNING)
+
+
+def test_stock_trades_stay_due_in_the_evening_extended_hours() -> None:
+    opened = streams.opened_at("stocks", "extended-hours", family="trades", now=_AFTER_CLOSE)
+    assert opened == datetime(2026, 11, 9, 4, 0, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize(
+    ("now", "close"),
+    [
+        (_MORNING, datetime(2026, 11, 9, 16, 0, tzinfo=NEW_YORK)),
+        (
+            datetime(2026, 11, 27, 15, 0, tzinfo=UTC),
+            datetime(2026, 11, 27, 13, 0, tzinfo=NEW_YORK),
+        ),
+    ],
+)
+def test_the_regular_session_closes_at_four_or_at_one_on_a_half_day(
+    now: datetime, close: datetime
+) -> None:
+    assert streams.regular_close(now) == close
+    assert streams.opened_at("indices", "open", family="values", now=close) is None
+    assert streams.opened_at(
+        "indices", "open", family="values", now=close - timedelta(seconds=1)
+    ) == streams.index_session_open(now)
+
+
 def test_a_futures_session_opens_when_its_status_says() -> None:
     since = datetime(2026, 10, 28, 18, 0, tzinfo=NEW_YORK)
     assert streams.opened_at("futures", "open", family="bars", now=_DAY, since=since) == since
