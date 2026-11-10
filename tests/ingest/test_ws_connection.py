@@ -2200,3 +2200,44 @@ def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it
             other.release(theirs)
         finally:
             other.close()
+
+
+def test_a_stream_that_opens_during_the_reconnect_wait_rides_the_reconnect(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It was never taken, so a FAIL session's stream that opens during the wait runs on, even
+    # when another stream's release re-applies the setting while it opens.
+    session = make_ws_session(backoff=60.0)
+    other = join(session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    kept = session.query(TRADES, ["AAPL"], other).blink()
+    leaving = session.query(TRADES, ["IBM"], other).blink()
+    session.subscribed("T.AAPL", "T.IBM")
+    fake_ws_server.evict()
+    session.wait(lambda s: WsState.TAKEN in s.states)
+    entered, go = threading.Event(), threading.Event()
+    attach = ws.WsConnections._attach
+
+    def held_attach(self: ws.WsConnections, stream: ws_connection.ConnectionStream) -> None:
+        if self is session.connections:
+            entered.set()
+            assert go.wait(TIMEOUT)
+        attach(self, stream)
+
+    monkeypatch.setattr(ws.WsConnections, "_attach", held_attach)
+    connection = session.connection()
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            opening = pool.submit(lambda: session.query(TRADES, ["MSFT"]).blink())
+            assert entered.wait(TIMEOUT)
+            other.release(leaving)  # the connection re-applies the setting while it opens
+            wait_for(lambda: session.on_loop(connection, lambda: len(connection._streams)) == 1)
+            go.set()
+            mine = opening.result(TIMEOUT)
+        session.flush()
+        assert not mine.j_table.isFailed()
+        other.release(kept)
+    finally:
+        other.close()

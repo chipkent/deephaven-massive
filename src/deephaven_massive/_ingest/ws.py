@@ -661,10 +661,9 @@ class WsConnections:
         """
         with self._lock:
             connection = self.group.streams.get(stream.stream_id)
-            failure = None
-            if connection is not None:
-                pending = connection.pending_failures.pop(stream.stream_id, None)
-                failure = connection.failure or pending
+            failure = None if connection is None else connection.failure
+            if failure is None and connection is not None:
+                failure = connection.pending_failures.pop(stream.stream_id, None)
             if connection is not None and failure is None:
                 connection.flusher.routes.add(stream.channel, stream.sink)
                 connection.post(connection.add_stream, stream)

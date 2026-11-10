@@ -1080,8 +1080,9 @@ class Connection:
 
         Args:
             next_at: When the client's next attempt is due, seconds since the epoch, when the
-                client has just reported `TAKEN`; None when a stream left during the wait, which
-                changes nothing while a `RECONNECT` stream remains.
+                client has just reported `TAKEN`; None when the connection's streams changed
+                during the wait, which changes nothing while a `RECONNECT` stream remains: a
+                stream that opens during the wait was never taken, so it rides the reconnect.
 
         Returns:
             True when the connection closed.
@@ -1106,7 +1107,9 @@ class Connection:
             routed = {sink.stream_id for sink in self.flusher.routes.sinks()}
             if keepers:
                 failing = [sid for sid in leased if sid not in keepers]
-                self.pending_failures.update((sid, error) for sid in failing if sid not in routed)
+                if next_at is not None:  # only a stream leased before the eviction was taken
+                    opening = {sid: error for sid in failing if sid not in routed}
+                    self.pending_failures.update(opening)
                 failing = [sid for sid in failing if sid in routed]
             else:  # one section: no verb leases the connection once it has failed
                 failing = sorted(routed)
