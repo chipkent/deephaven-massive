@@ -129,8 +129,13 @@ settles it.
 - **82.** Whether Massive acknowledges `AD.*` on `socket.massive.com` for Options Advanced, what
   its admin messages carry, and what it answers a plan without them. The channel is read as
   documented: real-time only, every exchange at once, the text as sent. Verified by
-  `tests/namespaces/test_options_integration.py` (Options Advanced); the other plans by hand, as
-  `docs/live-tests.md` says.
+  `tests/namespaces/test_options_integration.py` (Options Advanced, and a plan without the
+  channel).
+- **83.** The unit of the options snapshot's `greeks.gamma`: per $0.01 move of the underlying, as
+  Massive's description and the dataset page say, or per $1, the textbook unit. Passed through as
+  sent, with Massive's description. Settled by `tests/namespaces/test_options_integration.py`
+  (Options Starter), which records each contract's ratio to Black-Scholes gamma from its own
+  inputs.
 
 ## Settled
 

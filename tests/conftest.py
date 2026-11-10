@@ -520,11 +520,13 @@ def console_command(
     daemon, so it cannot keep the process alive.
 
     Returns:
-        The function; it takes the command and returns once the command has returned.
+        The function; it takes the command and returns once the command has returned. Its
+        keyword `timeout` replaces the 30 seconds for a command that may wait longer by
+        design, such as a live read paced at Basic's 5 requests a minute.
     """
     execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
 
-    def run(command: Callable[[], None]) -> None:
+    def run(command: Callable[[], None], *, timeout: float = _CONSOLE_COMMAND_TIMEOUT) -> None:
         returned = threading.Event()
 
         def body() -> None:
@@ -539,11 +541,11 @@ def console_command(
 
         thread = threading.Thread(target=body, name="console command", daemon=True)
         thread.start()
-        thread.join(_CONSOLE_COMMAND_TIMEOUT)
+        thread.join(timeout)
         if thread.is_alive():
             deadlock = (
                 f"a console command deadlocked: it did not return within "
-                f"{_CONSOLE_COMMAND_TIMEOUT:.0f} s, waiting for something that needs the update "
+                f"{timeout:.0f} s, waiting for something that needs the update "
                 "graph's lock, which it holds; no update cycle can run in this process again"
             )
             request.session.shouldstop = deadlock

@@ -137,3 +137,37 @@ def test_a_delayed_stock_plan_waits_out_its_delay() -> None:
 )
 def test_a_minute_bar_is_due_just_past_the_next_minute(now: datetime, deadline: datetime) -> None:
     assert streams.minute_bar_deadline(now) == deadline
+
+
+def _new_york(day: int, hour: int, minute: int) -> datetime:
+    return datetime(2026, 11, day, hour, minute, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize(
+    ("now", "session"),
+    [
+        (_new_york(10, 3, 59), streams.OVERNIGHT),
+        (_new_york(10, 4, 0), streams.PRE_MARKET),
+        (_new_york(10, 9, 29), streams.PRE_MARKET),
+        (_new_york(10, 9, 30), streams.REGULAR),
+        (_new_york(10, 15, 59), streams.REGULAR),
+        (_new_york(10, 16, 0), streams.AFTER_HOURS),
+        (_new_york(10, 19, 59), streams.AFTER_HOURS),
+        (_new_york(10, 20, 0), streams.OVERNIGHT),
+        (_new_york(27, 12, 59), streams.REGULAR),  # the day after Thanksgiving closes at 13:00
+        (_new_york(27, 13, 0), streams.AFTER_HOURS),
+        (_new_york(27, 16, 59), streams.AFTER_HOURS),
+        (_new_york(27, 17, 0), streams.OVERNIGHT),
+        (_new_york(26, 10, 0), streams.OVERNIGHT),  # Thanksgiving
+        (_new_york(14, 10, 0), streams.OVERNIGHT),  # a Saturday
+    ],
+)
+def test_the_stock_session_follows_the_new_york_clock(now: datetime, session: str) -> None:
+    assert streams.stock_session(now.astimezone(UTC), timedelta(0)) == session
+
+
+def test_a_delayed_feed_is_in_the_session_of_its_own_time() -> None:
+    delay = timedelta(minutes=15)
+    assert streams.stock_session(_new_york(10, 9, 44), delay) == streams.PRE_MARKET
+    assert streams.stock_session(_new_york(10, 9, 45), delay) == streams.REGULAR
+    assert streams.stock_session(_new_york(10, 20, 14), delay) == streams.AFTER_HOURS

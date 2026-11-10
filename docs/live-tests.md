@@ -32,7 +32,7 @@ optional:
 
 | Variable | What you get | Without it |
 |---|---|---|
-| `MASSIVE_DELAYED_API_KEY` | Two checks of a delayed Stocks key. With your main key on Stocks Developer, set it to a key on Stocks Basic or Starter. With your main key on Stocks Advanced or higher, set it to a key on Stocks Starter. On Stocks Basic or Starter, leave it unset. | The checks it can't serve skip |
+| `MASSIVE_DELAYED_API_KEY` | Three checks of a delayed Stocks key. With your main key on Stocks Developer, set it to a key on Stocks Basic or Starter. With your main key on Stocks Advanced or higher, set it to a key on Stocks Starter. On Stocks Basic or Starter, leave it unset. | The checks it can't serve skip |
 | `MASSIVE_LIVE_PLANS` | Your plans, declared instead of asked of Massive ([Declare your plans](#declare-the-plans)) | The run asks Massive |
 
 <a id="run-order"></a>
@@ -50,6 +50,9 @@ The connection-limit tests run last and alone, because they disturb the key's co
 
    A weekday run in market hours covers more, because a stream test checks rows only while its
    market is open. The rate-limit tests run only while one asset class is still on Basic.
+
+   The command also runs every README example as written and checks it against its text. Its
+   streaming examples check the most from 09:50 to 15:55 New York time.
 
 3. Run the connection-limit tests, one command after the other:
 
@@ -173,7 +176,7 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 <a id="checks-to-read-by-hand"></a>
 
-## Read five checks by hand
+## Read six checks by hand
 
 Read each one's evidence. The index minute-file check fails when its file disagrees with the New
 York day or with REST, and the others pass whatever Massive answers:
@@ -184,6 +187,7 @@ York day or with REST, and the others pass whatever Massive answers:
 | `test_an_index_minute_file_holds_its_own_new_york_day` | Indices Starter and `s3` | The minutes REST has that the file lacks | Any minute is missing |
 | `test_index_day_windows_and_files_across_many_indices` | Indices Starter and `s3` | Its verdict lines (a), (b), and (c) | Always: index day bars end at 01:00 New York time until this answer is read |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Futures Starter | Its `VERDICT` lines | A line differs from the library's model: each bar holds the whole sessions that open in its UTC days |
+| `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Options Starter | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A unit isn't per $0.01, as Massive's description says |
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Any plan that streams stocks | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics for want of a plan. It also skips as
@@ -198,31 +202,30 @@ uv run pytest -m integration tests/namespaces/test_indices_integration.py -k man
 uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar_buckets 2>&1 | tee -a live-checks.log
 ```
 
-<a id="user-doc-checks"></a>
+<a id="other-plans"></a>
 
-## Check the user docs by hand
+## Tests that run only on other plans
 
-These claims in the user docs need a run with a key, and no live test asserts them. Run each
-README or tester example as pasted, in the console of a server started as the README's
-[Install](../README.md#install) section starts it. Open an issue for each claim the run
+These tests skip unless the run's plans match theirs:
+
+| Test | Runs only with |
+|---|---|
+| `test_the_free_examples_fill_on_stocks_basic` | The main key on Stocks Basic |
+| `test_tester_example_10_fails_the_live_minute_bars_on_basic` | The main key on Stocks Basic |
+| `test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan` | A delayed Stocks plan: the main key on Starter or Developer, or `MASSIVE_DELAYED_API_KEY` |
+| `test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them` | The main key on Options Starter, Developer, or Business |
+
+<a id="index-hosts"></a>
+
+## Check the index hosts by hand
+
+No live test covers this check. Run it in the console of a server started as the README's
+[Install](../README.md#install) section starts it, and open an issue for each claim it
 contradicts:
 
 | Where | Plan | What to record |
 |---|---|---|
-| Every README example | The plan it names | Whether the tables, charts, and panels match the text after the example |
-| [README 1 to 7](../README.md#read-daily-bars), one after another | Stocks Basic | Whether every table fills when the examples, run back to back, send more than five requests in a minute |
-| [README 5, news](../README.md#follow-the-news) | Stocks Basic | Whether `latest` starts with up to ten articles per stock, newest first |
-| [README 6, stopping](../README.md#stop-live-tables) | Stocks Basic | Whether `headlines` and `latest` show the closed-session error and keep their rows, and `kept` holds the same rows |
-| [README 7, watchlist](../README.md#drive-with-a-watchlist) | Stocks Basic | Whether Nvidia's row arrives and Microsoft's leaves at the next poll, with no other change |
-| [README 8, settings file](../README.md#what-your-plan-allows) | Stocks Starter or higher | Whether the snapshot returns rows with your plan's file, and on Starter or Developer, raises `dm.EntitlementError` without it |
-| [README 9, streaming](../README.md#stream-minute-bars) | Stocks Starter or higher | Whether minute bars arrive in pre-market and after-hours trading, and `latest` stays empty overnight. On Currencies Starter, whether the crypto line fills at any hour. |
-| [README 10, change since close](../README.md#change-since-close) | Stocks Starter or higher | Whether each row shows `PrevClose` before the stock's first minute bar, then `Close` and `ChangePct` with each bar |
-| [README 12, backfill](../README.md#backfill-then-live) | Stocks Starter or higher | Whether `spy` has one row per traded minute of the day so far, with no gap or repeat where history meets the stream |
-| [README 4 and 13, charts](../README.md#chart-closes) | The plan each names | Whether Example 4's chart draws Nvidia's closes for the year, and the dashboard opens with both panels and its chart grows each minute |
-| [Tester example 10](tester-guide.md#run-by-hand), the live minute bars, pasted into the console | Stocks Basic | Whether the `stocks.bars` row of `streams` reads `FAILED` with Massive's refusal of `AM.AAPL`, or with an `AuthenticationError` because Massive rejected the key, or the connection reconnects instead |
 | [`m.indices.bars`](datasets/indices.bars.md) and [`m.indices.values`](datasets/indices.values.md) of `I:SPX`: `m.indices.bars("I:SPX", dm.Timespan.MINUTE).last_by()` and `m.indices.values("I:SPX").last_by()` | Indices Starter, then Advanced or Business | Massive documents `delayed.massive.com` and `socket.massive.com` for index bars, but only `business.massive.com` for index values, and the library allows that host only for real-time streams. On Starter, set `delayed_subscriptions={dm.Subscription.INDICES}`, and expect a bar each minute in market hours. Then add `websocket_hosts={dm.AssetClass.INDICES: "business.massive.com"}`, and record whether the library refuses it, with the exact message. Expect a refusal; open an issue with the message, since Starter then has no documented host for index values. On Advanced or Business, set nothing for indices and expect bars; then set that host and expect values. Open an issue for any table that stays empty in market hours. |
-| [`m.options.admin_messages`](datasets/options.admin_messages.md): `m.options.admin_messages().append_only()`, then `m.streams()`, in a session whose `delayed_subscriptions` does not list `dm.Subscription.OPTIONS` | Options Advanced or Real-time FLEX Trades Business; then any other Options plan | A session that lists it raises `ValueError` at the call, naming the setting. On either plan that includes it, record whether the stream's row reads `RUNNING` and, in market hours, whether messages arrive, each with an `Exchange`, a `Timestamp`, and OPRA's text in `Message`; a Business key whose options snapshot Massive refuses also logs a WARNING about the snapshot, which is expected. On Options Starter, Developer, or Business, record what happens: the call raises `dm.EntitlementError` saying the dataset streams only in real time when Massive labels the plan's data delayed; otherwise the row reads `FAILED` with Massive's refusal of `AD.*`. Either message must end with the link to the dataset's page of plans. Open an issue with the message when it does not, or when a plan that includes the channel shows no row. |
-| [`GreeksGamma`](datasets/options.snapshots.md) of `m.options.snapshots` | Options Starter or higher, with `delayed_subscriptions` listing options on Starter or Developer | For one contract, enter the underlying's price, the strike, the days to expiration, and `ImpliedVolatility` into a standard Black-Scholes calculator, which gives gamma per $1 move of the underlying. Record whether `GreeksGamma` matches that, or a hundredth of it, per $0.01 move as Massive's description says. |
 
 <a id="live-run-program"></a>
 
