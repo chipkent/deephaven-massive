@@ -126,8 +126,8 @@ Each of these has a source. Check it again before you write:
 
 - Python 3.11 or later (`pyproject.toml`); Java 17 or later with `JAVA_HOME` set (Deephaven's
   [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/)).
-- Install from PyPI by name, with no version. The plain command skips release candidates,
-  which install only with `--pre` (`docs/dev/releasing.md`):
+- Install from PyPI by name, with no version. Testers install a release candidate from its
+  tag, as `docs/tester-guide.md` shows:
 
   ```bash
   pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive

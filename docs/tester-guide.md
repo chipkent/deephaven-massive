@@ -68,8 +68,8 @@ Each step that differs shows both.
 
 ### Prerequisites
 
-You need the README's [prerequisites](../README.md#prerequisites), git and the GitHub CLI to
-clone the release you test, and uv to run the test tools:
+You need the README's [prerequisites](../README.md#prerequisites). You also need git and the
+GitHub CLI to install and clone the release you test, and uv to run the test tools:
 
 | What | Check it with | Get it from |
 |---|---|---|
@@ -92,8 +92,17 @@ Follow the README's [Install](../README.md#install) section, from
 server:
 
 - Python environment: do every step, and keep the environment the README names, `~/dh-massive`.
-  Add `--pre` to the install command, so that it installs the version you test even when
-  that's a release candidate.
+  In place of the README's install command, run this one. It installs the release you test
+  from its tag, release candidates included, so the [setup check](#check-the-setup) can match
+  it with the test tools you clone:
+
+  ```bash
+  TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
+  pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
+    "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  ```
+
+  In an environment uv made, write `uv pip install` for `pip install`.
 - Docker: skip [Install the library](../README.md#install-the-library). The image you build in
   [Check the setup](#check-the-setup) holds the library.
 
