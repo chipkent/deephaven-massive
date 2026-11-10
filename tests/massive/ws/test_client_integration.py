@@ -381,7 +381,7 @@ def target(live_plans: plans.LivePlans, rows_due: RowsDue) -> Callable[..., _Tar
 
     Returns:
         A function `(*, rows)`: when `rows` is True the check needs rows, so on stocks it skips
-        unless stock bars are due, in any stock session past the plan's feed delay
+        unless stock bars are due, in the regular session past the plan's feed delay
         (`rows_due`); it skips without a plan that streams crypto or stocks.
     """
 

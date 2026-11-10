@@ -4262,8 +4262,8 @@ def rows_due(
     For futures it reads the E-mini S&P 500's `market_event` and its `timestamp` from
     `/futures/v1/market-status`; for every other market its status from
     `/v1/marketstatus/now` (`_MARKETS`). The session the stream's rows come from opens as
-    `streams.opened_at` says (stock trades, quotes, and bars in the extended hours from 04:00 New
-    York time, the regular session at 09:30), and rows are due once it has been open longer than
+    `streams.opened_at` says (stock trades and quotes in the extended hours from 04:00 New York
+    time, the regular session at 09:30), and rows are due once it has been open longer than
     the plan's feed delay (`streams.rows_due`). A stock, option, or index stream that needs the
     regular session has no rows due from its close (`streams.regular_close`: 16:00, 13:00 on a
     half trading day), even while Massive's status still says `open`.

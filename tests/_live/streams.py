@@ -3,9 +3,9 @@
 A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires
 rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
 on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
-the first values of a session fifteen minutes after its open. Stock trades, quotes, and bars,
-which Massive builds from trades, flow in the extended hours too, from 04:00 New York time.
-Every other stock stream, and every option and index stream, needs the regular session, from
+the first values of a session fifteen minutes after its open. Stock trades and quotes are due in
+the extended hours too, from 04:00 New York time. Every other stock stream, and every option
+and index stream, is due only in the regular session, from
 09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says after
 the close. The futures session opens at the time of Massive's futures market status, and forex
 and crypto at no time this module knows, so their rows are due as soon as their market is open.
@@ -16,10 +16,13 @@ reached the table.
 A minute bar arrives only after its minute has ended, so a test that streams minute bars waits
 until a little past the next minute boundary (`minute_bar_deadline`).
 
-Stock minute bars come from trades, so they flow in every stock session: pre-market from 04:00,
-the regular session from 09:30, and after hours from its close to 20:00 (17:00 on a half trading
-day). `stock_session` names the session a plan's feed is in, so a test can check what each one
-sends, an empty table overnight included.
+Stock bars come from trades, so they flow in every stock session, as the README says:
+pre-market from 04:00, the regular session from 09:30, and after hours from its close to 20:00
+(17:00 on a half trading day). Massive sends a bar only for a minute with trades, though, and
+one stock can go a minute without a trade outside the regular session, so a test that streams
+one stock's bars requires them only in the regular session. `stock_session` names the session
+a plan's feed is in, so a test of several stocks, such as the README's streaming examples, can
+check what each session sends, an empty table overnight included.
 
 Every function is pure; `tests/conftest.py`'s `rows_due` fixture reads the market status and
 calls them.
@@ -69,10 +72,10 @@ HALF_DAY_CLOSE: Final = time(13, 0)
 EXTENDED_OPEN: Final = time(4, 0)
 """When the stock market's extended hours open each trading day, in New York time."""
 
-EXTENDED_HOURS_FAMILIES: Final = frozenset({"trades", "quotes", "bars"})
-"""The stream families whose stock rows flow in the extended hours (Massive's status
-`extended-hours`): trades, quotes, and the bars built from trades, which the README's streaming
-example promises in pre-market and after-hours trading. A stream's family is the last part of
+EXTENDED_HOURS_FAMILIES: Final = frozenset({"trades", "quotes"})
+"""The stream families whose stock rows are due in the extended hours (Massive's status
+`extended-hours`): trades and quotes. Bars flow then too, but only for a minute with trades,
+which one stock may lack outside the regular session. A stream's family is the last part of
 its dataset's name, such as `"trades"` for `stocks.trades`."""
 
 MINUTE_BAR_LAG: Final = timedelta(seconds=15)
@@ -122,7 +125,7 @@ def opened_at(
             `timestamp`); None when it does not.
 
     Returns:
-        For stock trades, quotes, and bars while the market is `open` or `extended-hours`, 04:00 New
+        For stock trades and quotes while the market is `open` or `extended-hours`, 04:00 New
         York time of `now`'s day; for every other stock, option, or index stream while it is
         `open` and before the regular session's close (`regular_close`), 09:30; for another
         market that is `open`, `since`, or `now` when it is None; None in every other case.

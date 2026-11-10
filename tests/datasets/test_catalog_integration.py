@@ -11,9 +11,9 @@ columns. No human reads anything:
   is never paced: it passes once two cycles have published rows, within 30 s. Every other
   dataset served by REST alone is already called by its `fetch()` case, the same request.
 - `append_only()`: it must reach Massive's acknowledgement (up to 15 s), then rows, whenever
-  rows must flow: while the stream's market is open for its kind of rows (stock trades,
-  quotes, and bars in the extended hours too) and has been open longer than the plan's feed
-  delay (`streams`). A minute bar stream waits until just past the next minute boundary. When rows
+  rows must flow: while the stream's market is open for its kind of rows (stock trades and
+  quotes in the extended hours too) and has been open longer than the plan's feed delay
+  (`streams`). A minute bar stream waits until just past the next minute boundary. When rows
   need not flow, the case skips after the acknowledgement, "not exercised: market closed
   (acknowledged)" or the like, so a pass always means rows reached the table.
 
