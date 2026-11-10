@@ -517,7 +517,7 @@ class ConnectionTaken(StrEnum):
     Massive allows your account one WebSocket connection per asset class. When another program
     connects with the same key, Massive keeps the newer connection and closes the older one.
     Another session on this server does the same when its streaming settings, such as
-    `websocket_hosts` and `max_outage`, differ from this one's. `MassiveConfig.connection_taken`
+    `max_outage`, differ from this one's. `MassiveConfig.connection_taken`
     picks what the older connection's live tables do:
 
     - `FAIL`, the default: they fail at once, with a `MassiveError` that names the time and the

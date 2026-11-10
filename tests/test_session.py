@@ -295,9 +295,9 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
         (
             f"{label(apart)} uses the same API key as {label(first)} with different connection "
             "settings (subscription_confirmation_timeout, flush_interval), so the two cannot "
-            "share WebSocket connections; on an individual plan, which allows one connection per "
-            "cluster, each one's connection takes the other's, and the live tables of the one "
-            "taken follow its connection_taken"
+            "share WebSocket connections; Massive allows an account one connection per asset "
+            "class and keeps the newer, so the live tables on the older follow their session's "
+            "connection_taken"
         )
     ]
     caplog.clear()

@@ -2004,10 +2004,11 @@ _TIME = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
 
 _TAKEN_ERROR = (
     r"another connection with this API key took the WebSocket connection to socket\.test/stocks "
-    rf"at ({_TIME}), so this table stopped; stop the other program that uses the key and call "
-    r"the method again, or set MassiveConfig\(connection_taken=dm\.ConnectionTaken\.RECONNECT\) "
-    r"to take the connection back; see https://github\.com/chipkent/deephaven-massive/blob/main/"
-    r"docs/troubleshooting\.md#live-table-messages"
+    rf"at ({_TIME}), so this table stopped; stop the other program or session that uses the key "
+    r"and call the method again, or set "
+    r"MassiveConfig\(connection_taken=dm\.ConnectionTaken\.RECONNECT\) to take the connection "
+    r"back; see https://github\.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting\.md"
+    r"#live-table-messages"
 )
 
 
@@ -2167,11 +2168,13 @@ def test_a_reconnect_session_that_lets_go_during_the_wait_closes_the_connection(
 
 def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it_attaches(
     *,
-    ws_session: WsSession,
+    make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: ToPylist,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A long backoff keeps the connection in its reconnect wait while the stream attaches.
+    ws_session = make_ws_session(backoff=60.0)
     other = join(ws_session, connection_taken=dm.ConnectionTaken.RECONNECT)
     theirs = ws_session.query(TRADES, ["AAPL"], other).blink()  # it keeps the connection
     ws_session.subscribed("T.AAPL")
@@ -2241,3 +2244,61 @@ def test_a_stream_that_opens_during_the_reconnect_wait_rides_the_reconnect(
         other.release(kept)
     finally:
         other.close()
+
+
+def test_a_reconnected_connection_forgets_it_was_taken(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Once it has taken the connection back, its last table leaving is an ordinary idle close.
+    monkeypatch.setattr(ws_connection, "IDLE_GRACE", 0.05)
+    session = make_ws_session(connection_taken=dm.ConnectionTaken.RECONNECT)
+    result = session.query(TRADES, ["AAPL"]).blink()
+    session.subscribed("T.AAPL")
+    with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
+        fake_ws_server.evict()
+        session.wait(lambda s: s.opens == 2)
+        session.subscribed("T.AAPL")  # on the new socket
+        session.session.release(result)
+        session.wait(lambda s: WsState.CLOSED in s.states)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len([m for m in messages if "took the connection at" in m]) == 1  # the eviction's
+    assert f"closing {_URL}: no stream for 0 s" in messages
+    assert not result.j_table.isFailed()
+
+
+def test_a_taken_connection_decides_to_close_once(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Two tables leaving during the wait: the first change closes, and a later one finds the
+    # close decided, so the WARNING and the failures come once.
+    session = make_ws_session(backoff=60.0, connection_taken=dm.ConnectionTaken.RECONNECT)
+    first = session.query(TRADES, ["AAPL"]).blink()
+    second = session.query(TRADES, ["MSFT"]).blink()
+    session.subscribed("T.AAPL", "T.MSFT")
+    connection = session.connection()
+    fake_ws_server.evict()
+    session.wait(lambda s: WsState.TAKEN in s.states)
+    with caplog.at_level(logging.WARNING, logger=ws_connection.__name__):
+        # Both leases go before the loop hears of either, as when a session releases its tables.
+        with session.connections.group.lock:
+            leases = dict(session.connections.group.streams)
+        for stream_id in leases:
+            with session.connections.group.lock:
+                session.connections._forget(stream_id)
+
+        def twice() -> None:
+            connection._after_change()
+            connection._after_change()
+
+        session.on_loop(connection, twice)
+        session.wait(lambda s: WsState.CLOSED in s.states)
+    closes = [r for r in caplog.records if "the connection closes" in r.getMessage()]
+    assert len(closes) == 1
+    del first, second

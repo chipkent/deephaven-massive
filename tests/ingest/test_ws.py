@@ -182,7 +182,7 @@ def settle(ws_session: WsSession) -> None:
 STALL = (
     r"connection down since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ; no data; waiting for a WebSocket "
     r"slot on socket\.test/options: another connection with this API key, perhaps from another "
-    r"process, holds it; the plan allows one connection per cluster"
+    r"process, holds it; the account allows one connection per asset class"
 )
 """A pattern of the `Error` of an options stream whose connection waits for a slot."""
 

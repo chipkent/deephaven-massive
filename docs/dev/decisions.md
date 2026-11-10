@@ -378,7 +378,7 @@ labels delayed with an `EntitlementError` that points to the dataset's page of p
 subscription Massive refuses fails the table with the same pointer.
 
 **97. A taken connection fails its live tables by default: `MassiveConfig.connection_taken`**
-(2026-11-10). Massive keeps the newer of two WebSocket connections with one key on a cluster. In
+(2026-11-10). Massive keeps the newer of two WebSocket connections with one key for an asset class. In
 three live runs (2026-11-03 and twice on 2026-11-10), 2.6 to 8.3 s after the newer connection
 authenticated, the older, authenticated socket got the status `max_connections` ("Maximum number
 of websocket connections exceeded. You have reached the connection limit for your account...")

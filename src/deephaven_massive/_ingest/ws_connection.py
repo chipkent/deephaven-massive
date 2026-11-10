@@ -1092,7 +1092,7 @@ class Connection:
         error = MassiveError(
             f"another connection with this API key took the WebSocket connection to "
             f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped; stop "
-            "the other program that uses the key and call the method again, or set "
+            "the other program or session that uses the key and call the method again, or set "
             "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
             f"connection back; see {_TAKEN_HELP}",
             cause=ErrorCause.EXPECTED,
@@ -1125,8 +1125,9 @@ class Connection:
             "remains, so its %d live tables fail and the connection closes",
             self.url,
             utc_text(at),
-            len(failing),
+            len(leased),  # the opening ones too, which fail as they attach
         )
+        self._taken_at = None  # the close is decided: a later change must not decide it again
         self._last_error = str(error)
         self.flusher.fail(failing, error)
         self.close(final_flush=True)  # the client reports CLOSED; the failures go first
@@ -1347,7 +1348,7 @@ class Connection:
         return (
             f"waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
             "connection with this API key, perhaps from another process, holds it; the "
-            "plan allows one connection per cluster"
+            "account allows one connection per asset class"
         )
 
     def _outage(self, *, detail: str | None) -> None:

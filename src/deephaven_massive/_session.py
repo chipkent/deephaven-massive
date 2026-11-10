@@ -193,9 +193,9 @@ def _register(core: SessionCore) -> None:
         if differ:
             logger.warning(
                 "%s uses the same API key as %s with different connection settings (%s), so "
-                "the two cannot share WebSocket connections; on an individual plan, which "
-                "allows one connection per cluster, each one's connection takes the other's, "
-                "and the live tables of the one taken follow its connection_taken",
+                "the two cannot share WebSocket connections; Massive allows an account one "
+                "connection per asset class and keeps the newer, so the live tables on the "
+                "older follow their session's connection_taken",
                 core.label,
                 label,
                 ", ".join(differ),

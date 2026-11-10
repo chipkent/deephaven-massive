@@ -350,12 +350,23 @@ def test_a_newer_connection_with_one_key_takes_the_older_ones_place(
             "another connection with this API key took the WebSocket connection to "
             "socket.massive.com/crypto at "
         ), errors[0]
-        assert first.j_table.isFailed()
-        crypto = [
-            r
-            for r in table_rows(live_session.connections())
-            if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
-        ]
+        # The table's failure and the connection's CLOSED row land on other threads, so each
+        # may show a cycle after the stream's row.
+        failed = _wait_until(
+            lambda: [{"Failed": bool(first.j_table.isFailed())}],
+            lambda rows: rows[0]["Failed"],
+            wait=_WAIT,
+        )
+        assert failed[0]["Failed"], "the first table never failed"
+        crypto = _wait_until(
+            lambda: [
+                r
+                for r in table_rows(live_session.connections())
+                if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
+            ],
+            lambda rows: [r["State"] for r in rows] == ["CLOSED"],
+            wait=_WAIT,
+        )
         assert [r["State"] for r in crypto] == ["CLOSED"]
         seen = len(table_rows(second))
         later = _wait_until(
