@@ -29,6 +29,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from tests._live import calendar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -403,16 +404,19 @@ def _new_york_day(millis: int) -> date:
 
 
 def _monthly_expiry_after(day: date) -> date:
-    """Return the third Friday of the month after a day's: a standard monthly expiration.
+    """Return the standard monthly expiration of the month after a day's: its third Friday.
 
     Monthly contracts of SPY and SPXW are listed months ahead, so on a half day and the day
-    before it the next month's are listed and trading, with weeks left to expiry.
+    before it the next month's are listed and trading, with weeks left to expiry. When the third
+    Friday is an exchange holiday, as Juneteenth is on June 18, 2027, the contracts expire on the
+    trading day before it.
 
     Returns:
-        The date, between the 15th and the 21st of the next month.
+        The date, between the 14th and the 21st of the next month.
     """
     first = (day.replace(day=1) + timedelta(days=32)).replace(day=1)
-    return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+    friday = first + timedelta(days=(4 - first.weekday()) % 7 + 14)
+    return friday if calendar.is_trading_day(friday) else calendar.trading_day_before(friday)
 
 
 def _stamp_candidates(range_bars: RangeBars, days: tuple[date, date]) -> dict[str, list[str]]:
