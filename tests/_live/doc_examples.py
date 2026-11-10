@@ -384,11 +384,14 @@ def snapshots_cleared(now: datetime, delay: timedelta) -> bool:
         delay: The plan's feed delay, zero on a real-time plan.
 
     Returns:
-        True when the feed's own time, `now` less the delay, is from 03:30 to 04:00 New York
-        time (`SNAPSHOTS_CLEARED`).
+        True from 03:30 New York time, when Massive clears the snapshots whatever the plan, until
+        04:00 plus the delay, when a delayed plan's first refilled data is due
+        (`SNAPSHOTS_CLEARED`).
     """
-    clock = (now - delay).astimezone(NEW_YORK).time()
-    return SNAPSHOTS_CLEARED[0] <= clock < SNAPSHOTS_CLEARED[1]
+    wall = now.astimezone(NEW_YORK)
+    cleared = datetime.combine(wall.date(), SNAPSHOTS_CLEARED[0], NEW_YORK)
+    refilled = datetime.combine(wall.date(), SNAPSHOTS_CLEARED[1], NEW_YORK) + delay
+    return cleared <= wall < refilled
 
 
 def seam_gaps(

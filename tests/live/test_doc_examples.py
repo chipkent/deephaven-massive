@@ -213,6 +213,7 @@ def _new_york(hour: int, minute: int) -> datetime:
         (_new_york(3, 30), timedelta(0), True),
         (_new_york(3, 59), timedelta(0), True),
         (_new_york(4, 0), timedelta(0), False),
+        (_new_york(3, 35), timedelta(minutes=15), True),  # cleared for every plan at 03:30
         (_new_york(4, 10), timedelta(minutes=15), True),  # a delayed feed is at 03:55
         (_new_york(4, 15), timedelta(minutes=15), False),
     ],
