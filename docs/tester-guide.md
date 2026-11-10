@@ -68,10 +68,13 @@ Each step that differs shows both.
 
 ### Prerequisites
 
-You need the README's [prerequisites](../README.md#prerequisites), and uv to run the test tools:
+You need the README's [prerequisites](../README.md#prerequisites), git and the GitHub CLI to
+clone the release you test, and uv to run the test tools:
 
 | What | Check it with | Get it from |
 |---|---|---|
+| Git | `git --version` | [git-scm.com](https://git-scm.com) |
+| The GitHub CLI, signed in | `gh auth status` | [cli.github.com](https://cli.github.com), then `gh auth login` and `gh auth setup-git` |
 | uv | `uv --version` | [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) |
 | Docker, only to run the server in Docker | `docker info` | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
 
@@ -84,11 +87,13 @@ gives.
 ### Install the library and set your keys
 
 Follow the README's [Install](../README.md#install) section, from
-[Sign in to GitHub](../README.md#sign-in-to-github) through
+[Install the library](../README.md#install-the-library) through
 [Set your API keys](../README.md#set-your-api-keys), and stop before the README starts the
 server:
 
 - Python environment: do every step, and keep the environment the README names, `~/dh-massive`.
+  Add `--pre` to the install command, so that it installs the version you test even when
+  that's a release candidate.
 - Docker: skip [Install the library](../README.md#install-the-library). The image you build in
   [Check the setup](#check-the-setup) holds the library.
 

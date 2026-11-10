@@ -89,14 +89,14 @@ later date refines an earlier one:
 | Approved text | Owner-approved intent and content bind every revision and every grader. Wording may improve, but a revision never dilutes an approved message's clarity or directness. | 11-05 |
 | Only requested sections | The README holds the hook, Install, the examples, Configuration, next steps, and contributing, in that order. No recipes, no common-errors section, no status section, no "Terms", "How it works", or "How do I" sections. | 11-04, 11-05 |
 | Order | Don't bury the lead: the hook, then Install, then the tutorial. Install reaches the first result by the shortest path and sets every key in one step. Reference (environment variables, settings, configuration tables) comes after the tutorial. | 11-05 |
-| Install | Best practice: in order, scannable, every command working as written. Until the PyPI release, install from git at the newest release tag, looked up in the same step, never hard-coded. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
+| Install | Best practice: in order, scannable, every command working as written. Install from PyPI, by package name with no version. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
 | Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. Every configuration concept a page mentions links to its reference page, generated from the code: `docs/configuration.md` for `MassiveConfig` and the settings file. | 11-04, 11-05 |
 | Examples | Each is complete and runs as pasted, with its imports and session. Each says the plan it needs, any setting, and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
 | Terms | Industry-standard words: Massive's for its data, Deephaven's for its operations, practitioners' for market concepts, Python's for Python. | 11-04 |
 | Deephaven and Massive | Describe Deephaven in its own terms, from deephaven.io. Keep Massive's names for its products, datasets, and columns. Dates in examples are ISO strings. | 10-27, 10-28, 11-03 |
 | Coverage | Live tables driven by a watchlist; which plans include each dataset, generated so it follows Massive's changes; split adjustment, documented with the `adjusted` argument; how to filter out a known problem in Massive's data; column meanings on the generated dataset pages. | 10-27, 10-28, 10-30, 11-02 |
 | Tester guide | Every step, its commands, example code, and what to put in a report, automated as far as possible. | 10-30 |
-| Hero image and badges | A slot for the owner's hero image after the title. Only badges that render for the page's viewers and can't go stale; the CI badge renders on github.com for people with access to the private repository. At the public launch and the PyPI release, add the badges that become possible then, such as a PyPI version badge. | 11-03, 11-05 |
+| Hero image and badges | A slot for the owner's hero image after the title. Only badges that render for the page's viewers and can't go stale: CI, and the PyPI version, Python versions, and license, which shields.io reads from PyPI. | 11-03, 11-05 |
 | Repository | Never describe the repository as private. No legal, licensing, data-sharing, access, or contact instructions. Testers report on a GitHub issue. | 11-04 |
 | Process | A code change that alters documented behavior updates the user docs in the same PR. Moved text is rewritten to this standard. Docs are graded before they go out. | 10-31, 11-03, 11-04 |
 
@@ -126,15 +126,11 @@ Each of these has a source. Check it again before you write:
 
 - Python 3.11 or later (`pyproject.toml`); Java 17 or later with `JAVA_HOME` set (Deephaven's
   [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/)).
-- Until the PyPI release, sign in with `gh auth login` and `gh auth setup-git`, then install at
-  the newest release tag, looked up in the same command. `gh release list` includes release
-  candidates, and `gh release view` skips them. Write the repository name out, because it
-  never changes:
+- Install from PyPI by name, with no version. The plain command skips release candidates,
+  which install only with `--pre` (`docs/dev/releasing.md`):
 
   ```bash
-  TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-  pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
-    "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive
   ```
 
 - `deephaven-plugin-ui` (imported as `from deephaven import ui`) and
@@ -450,9 +446,11 @@ block, then what to notice and the one idea, and a bridge to the next. See
 - Give every cited section an explicit anchor, `<a id="install"></a>`, on the line before its
   heading. Keep the id when you reword the heading.
 - A docstring cites a page by its full URL,
-  `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`; a user page links
-  another with a relative path. When you move or rename an anchor, rewrite its citations in the
-  same PR; `tests/test_docs.py` fails on a missing one.
+  `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`. PyPI shows the
+  README but can't resolve a relative path, so the README links every other file, its images
+  included, by full URL; the other user pages link each other with a relative path. When you
+  move or rename an anchor, rewrite its citations in the same PR; `tests/test_docs.py` fails
+  on a missing one.
 
 <a id="rubric"></a>
 

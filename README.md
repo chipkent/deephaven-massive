@@ -1,8 +1,11 @@
 # deephaven-massive
 
-![A Deephaven dashboard: type a symbol, and its last price, live trades, today's news, a 90-minute chart, and a by-the-second chart switch to it.](docs/images/hero.webp)
+![A Deephaven dashboard: type a symbol, and its last price, live trades, today's news, a 90-minute chart, and a by-the-second chart switch to it.](https://raw.githubusercontent.com/chipkent/deephaven-massive/main/docs/images/hero.webp)
 
 [![CI](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml/badge.svg)](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/deephaven-massive)](https://pypi.org/project/deephaven-massive/)
+[![Python versions](https://img.shields.io/pypi/pyversions/deephaven-massive)](https://pypi.org/project/deephaven-massive/)
+[![License](https://img.shields.io/pypi/l/deephaven-massive)](https://github.com/chipkent/deephaven-massive/blob/main/LICENSE)
 
 Market data from [Massive](https://massive.com) as live and historical
 [Deephaven](https://deephaven.io) tables, for traders and quants who work in Python.
@@ -48,20 +51,7 @@ You need:
 |---|---|---|
 | Python 3.11 or later | `python3 --version` | [python.org](https://www.python.org/downloads/) |
 | Java 17 or later, with `JAVA_HOME` set | `java -version` and `echo $JAVA_HOME` | Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/) |
-| Git and the GitHub CLI | `git --version` and `gh --version` | [git-scm.com](https://git-scm.com) and [cli.github.com](https://cli.github.com) |
 | A Massive account | Sign in at [massive.com](https://massive.com) | [Massive's plans](https://massive.com/pricing) |
-
-<a id="sign-in-to-github"></a>
-
-### Sign in to GitHub
-
-The library installs from its GitHub repository. Sign in with the GitHub CLI, and let git use
-the same sign-in:
-
-```bash
-gh auth login
-gh auth setup-git
-```
 
 <a id="install-the-library"></a>
 
@@ -75,9 +65,7 @@ With pip:
 ```bash
 python3 -m venv ~/dh-massive
 source ~/dh-massive/bin/activate
-TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
-  "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive
 ```
 
 With [uv](https://docs.astral.sh/uv/getting-started/installation/):
@@ -85,9 +73,7 @@ With [uv](https://docs.astral.sh/uv/getting-started/installation/):
 ```bash
 uv venv --python ">=3.11" ~/dh-massive
 source ~/dh-massive/bin/activate
-TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
-  "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive
 ```
 
 <a id="set-your-api-keys"></a>
@@ -124,7 +110,7 @@ in your browser. Keep the terminal open while you work, and press Control-C ther
 server.
 
 Next, run the tutorial's [first example](#read-daily-bars). If a step fails,
-[Troubleshooting](docs/troubleshooting.md#setup-messages) lists common setup problems and their
+[Troubleshooting](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#setup-messages) lists common setup problems and their
 fixes.
 
 <a id="tutorial"></a>
@@ -171,7 +157,7 @@ apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30
 query's other methods read the data and return a Deephaven table, so Deephaven's
 [table operations](https://deephaven.io/core/docs/conceptual/table-operations-overview/) work on
 it. The
-[dataset index](docs/datasets/README.md) lists each dataset's arguments and columns.
+[dataset index](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md) lists each dataset's arguments and columns.
 
 Next, one query for every listed stock at once.
 
@@ -374,7 +360,7 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
 covers the environment variables and the settings a new user needs, and the
-[settings page](docs/configuration.md) lists every setting a file can hold.
+[settings page](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md) lists every setting a file can hold.
 
 Next, a live table that streams instead of polling.
 
@@ -550,8 +536,8 @@ the server and start it from a new terminal, as [Start the server](#start-the-se
 | `HTTPS_PROXY`, `NO_PROXY` | A proxy for every connection to Massive, and the hosts that skip it | Your system's proxy on macOS; none on Linux |
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own. Flat-file reads use only `SSL_CERT_FILE`. | The `certifi` bundle |
 
-[Turn on the debug log](docs/troubleshooting.md#the-log) explains each log level and how to
-record what the library does, and [Report a bug](docs/troubleshooting.md#report-a-bug) says how
+[Turn on the debug log](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#the-log) explains each log level and how to
+record what the library does, and [Report a bug](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug) says how
 to attach the log to an issue.
 
 <a id="massive-config"></a>
@@ -586,7 +572,7 @@ m = dm.MassiveSession(config)
 ```
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
-[Example 8](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
+[Example 8](#what-your-plan-allows) shows. The [settings page](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
 <a id="next-steps"></a>
@@ -594,15 +580,15 @@ setting, its values, and its default, with an example settings file.
 ## Next steps
 
 - Call `help()` on any object for its full documentation, such as `help(m.stocks.bars)`.
-- The [dataset index](docs/datasets/README.md) has a page for each of the 112 datasets, with its
+- The [dataset index](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md) has a page for each of the 112 datasets, with its
   arguments, its columns, and the plans that include it. `dm.datasets()` lists them in the
   console.
-- [Troubleshooting](docs/troubleshooting.md) covers the problems whose message doesn't say how
+- [Troubleshooting](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md) covers the problems whose message doesn't say how
   to fix them, and how to report a bug.
 
 <a id="contributing"></a>
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up a development checkout, run the
+[CONTRIBUTING.md](https://github.com/chipkent/deephaven-massive/blob/main/CONTRIBUTING.md) explains how to set up a development checkout, run the
 checks, and propose a change.
