@@ -435,6 +435,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
                     backfill_day,
                     live_session,
                     strict=first_session == streams.REGULAR,
+                    locked_rows=locked_rows,
                     table_rows=table_rows,
                     evidence=evidence,
                 )
@@ -530,6 +531,7 @@ def _check_seam(
     live_session: dm.MassiveSession,
     *,
     strict: bool,
+    locked_rows: Callable[..., list[Rows]],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -541,11 +543,14 @@ def _check_seam(
         live_session: The session that reads REST's minutes again.
         strict: Whether every REST minute must be in `spy`: in the regular session only, since
             outside it REST may hold minutes made only of trades reported late.
-        table_rows: Reads one table.
+        locked_rows: Reads tables together, under the update graph's shared lock, so `spy`
+            and `live` hold the same live bars.
+        table_rows: Reads REST's minutes.
         evidence: Records the comparison.
     """
-    spy = [int(row["TimestampStart"]) for row in table_rows(backfill["spy"])]
-    live = [int(row["TimestampStart"]) for row in table_rows(backfill["live"])]
+    spy_rows, live_rows = locked_rows(backfill["spy"], backfill["live"])
+    spy = [int(row["TimestampStart"]) for row in spy_rows]
+    live = [int(row["TimestampStart"]) for row in live_rows]
     assert len(spy) == len(set(spy)), "Example 12's spy holds a minute twice"
     assert live, "no live bar reached Example 12"
     missing, extra = doc_examples.seam_gaps(spy, live, _rest_minutes(live_session, table_rows, day))
