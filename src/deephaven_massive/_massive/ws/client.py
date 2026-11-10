@@ -26,7 +26,9 @@ authenticated connection and each close (its code, the server's reason, and how 
 connection was up) at INFO; each connection attempt, failed connect, backoff, and refused
 handshake, a refusal for want of a free connection (`max_connections`) included, at DEBUG,
 since every attempt of an outage repeats them (the library's connection logs one WARNING per
-outage); a handshake that breaks protocol or an internal error at ERROR with how to report it;
+outage); a `max_connections` status on an authenticated socket, which means a newer connection
+with the key took this one's place, at INFO, since the library decides what it means; a
+handshake that breaks protocol or an internal error at ERROR with how to report it;
 each status object Massive sends (an acknowledgement, a refusal) and each subscription frame it
 sends at DEBUG; and each rejected row, whole, at DEBUG (`ws.protocol`). Never the
 authentication frame: websockets' own frame log is kept off, and a server text that
@@ -114,9 +116,13 @@ class WsState(StrEnum):
     """The connection closed or an attempt failed; the detail is the next attempt's time."""
     WAITING_SLOT = "WAITING_SLOT"
     """The account has no free connection: the server answered the key with
-    `max_connections`, or sent a `max_connections` status before closing an authenticated
-    socket. The client waits its backoff and tries again; the detail is the next attempt's
-    time."""
+    `max_connections`. The client waits its backoff and tries again; the detail is the next
+    attempt's time."""
+    TAKEN = "TAKEN"
+    """Another connection with the key took this one's place: the server sent a
+    `max_connections` status on the authenticated socket, then closed it. The client waits its
+    backoff and tries again, which takes the connection back, unless the library calls `close()`
+    meanwhile; the detail is the next attempt's time."""
     FAILED = "FAILED"
     """A fatal failure ended the client; the detail is the `WireError`. An internal failure (a
     callback that raised, an unexpected exception) also ends here, with the original exception
@@ -132,15 +138,16 @@ class _Ended:
     Attributes:
         uptime: Seconds the generation stayed authenticated; `None` when the attempt never
             authenticated.
-        waiting_slot: Whether the server reported `max_connections`, as the reply to the key
-            or as a status before it closed an authenticated socket.
+        state: The state the client reports while it waits: `WAITING_SLOT` when the server
+            answered the key with `max_connections`, `TAKEN` when it sent a `max_connections`
+            status on the authenticated socket before closing it, `RECONNECTING` otherwise.
         least_wait: The least wait before the next attempt that the failure demands (an HTTP
             429's `Retry-After`); the backoff may be longer, and the client caps it at
             `max_reconnect_backoff`.
     """
 
     uptime: float | None = None
-    waiting_slot: bool = False
+    state: WsState = WsState.RECONNECTING
     least_wait: float = 0.0
 
 
@@ -190,7 +197,7 @@ class WsClient:
       `rejects` are the rows dropped because a required key is absent, null, or does not fit;
       `drift` is the `DriftReport` of the channel's objects in the frame.
     - `on_state(state, detail)`: the detail is the next attempt's time in seconds since the
-      Unix epoch for `RECONNECTING` and `WAITING_SLOT`, the `WireError` for `FAILED`, and
+      Unix epoch for `RECONNECTING`, `WAITING_SLOT`, and `TAKEN`, the `WireError` for `FAILED`, and
       `None` for `CONNECTING` and `CLOSED`.
 
     Example:
@@ -515,8 +522,7 @@ class WsClient:
             least = min(ended.least_wait, self._max_wait)
             wait = self._clamped(max(self._backoff.next_wait(ended.uptime), least), least)
             logger.debug("reconnecting to %s in %.1f s", self._url, wait)
-            state = WsState.WAITING_SLOT if ended.waiting_slot else WsState.RECONNECTING
-            self._on_state(state, self._clock.time() + wait)
+            self._on_state(ended.state, self._clock.time() + wait)
             await self._sleep(wait)
 
     def _clamped(self, wait: float, least: float) -> float:
@@ -615,7 +621,7 @@ class WsClient:
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout_at(deadline):
                     await websocket.wait_closed()
-            return _Ended(waiting_slot=True)
+            return _Ended(state=WsState.WAITING_SLOT)
         return await self._run_generation(websocket)
 
     async def _handshake(self, websocket: ClientConnection) -> WireError | str | None:
@@ -658,8 +664,8 @@ class WsClient:
             websocket: The authenticated socket.
 
         Returns:
-            The generation's end, with its uptime, and whether the server reported
-            `max_connections` before closing.
+            The generation's end, with its uptime, and whether the server sent a
+            `max_connections` status before closing: another connection took its place.
         """
         self._generations += 1
         generation = _Generation(number=self._generations, outbox=asyncio.Queue())
@@ -667,7 +673,7 @@ class WsClient:
         opened_at = self._clock.monotonic()
         logger.info("authenticated with %s (generation %d)", self._url, generation.number)
         sender = asyncio.create_task(self._send(websocket, generation.outbox))
-        no_slot = False
+        taken = False
         try:
             self._on_open(generation.number)
             async for frame in websocket:
@@ -675,7 +681,7 @@ class WsClient:
                 capture_frame(host=self._host, path=self._path, frame=cleaned)
                 for event in self._decoder.decode(cleaned):
                     if isinstance(event, Status):
-                        no_slot = no_slot or event.kind is StatusKind.MAX_CONNECTIONS
+                        taken = taken or event.kind is StatusKind.MAX_CONNECTIONS
                         logger.debug("%s status %s: %s", self._url, event.kind.name, event.message)
                         self._on_status(generation.number, event)
                     else:
@@ -697,7 +703,13 @@ class WsClient:
             reason,
             uptime,
         )
-        return _Ended(uptime=uptime, waiting_slot=no_slot)
+        if taken:
+            logger.info(
+                "%s: another connection with this API key took this one's place "
+                "(a max_connections status, then the close)",
+                self._url,
+            )
+        return _Ended(uptime=uptime, state=WsState.TAKEN if taken else WsState.RECONNECTING)
 
     def _clean(self, frame: str | bytes) -> str | bytes:
         """Return a received frame with the API key replaced, should the server echo it.

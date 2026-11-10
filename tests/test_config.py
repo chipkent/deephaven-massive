@@ -134,6 +134,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
+    assert base.connection_taken is dm.ConnectionTaken.FAIL
 
 
 def test_defaults_live_in_exactly_one_place() -> None:
@@ -167,8 +168,8 @@ def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
         _replace(base, reconnect_backoff=0)
     with pytest.raises(
         ValueError,
-        match=r"reconnect_backoff must be at least 15 s, not 14\.99: Massive takes roughly 10 to "
-        r"30 s to release a dropped connection",
+        match=r"^reconnect_backoff must be at least 15 s, not 14\.99, which limits reconnect "
+        r"churn$",
     ):
         _replace(base, reconnect_backoff=14.99)
     with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
@@ -435,6 +436,17 @@ def test_symbol_settings_are_the_enum(base: MassiveConfig, setting: str) -> None
         _replace(base, **{setting: "log"})
 
 
+def test_connection_taken_is_the_enum(base: MassiveConfig) -> None:
+    reconnect = dm.ConnectionTaken.RECONNECT
+    assert _replace(base, connection_taken=reconnect).connection_taken is reconnect
+    with pytest.raises(
+        TypeError,
+        match=r"^connection_taken must be dm\.ConnectionTaken, e\.g\. "
+        r"dm\.ConnectionTaken\.RECONNECT$",
+    ):
+        _replace(base, connection_taken="reconnect")
+
+
 def test_api_key_must_be_a_string() -> None:
     with pytest.raises(TypeError, match="api_key must be a str, not NoneType"):
         MassiveConfig(api_key=cast("str", None))
@@ -630,6 +642,7 @@ noncanonical_symbols: raise
 unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
+connection_taken: reconnect
 """,
     )
     expected = MassiveConfig(
@@ -654,6 +667,7 @@ unavailable_symbols: raise
         unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
+        connection_taken=dm.ConnectionTaken.RECONNECT,
     )
     config = MassiveConfig.from_file(file)
     assert config == expected
@@ -914,6 +928,13 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             (
                 ", line 1, column 21: unreadable_symbols ' raise' "
                 "is not a symbol setting; write one of raise, log, ignore, exactly as shown"
+            ),
+        ),
+        (
+            "connection_taken: Reconnect\n",
+            (
+                ", line 1, column 19: connection_taken 'Reconnect' "
+                "is not a connection_taken value; write one of fail, reconnect, exactly as shown"
             ),
         ),
         (

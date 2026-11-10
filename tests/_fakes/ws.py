@@ -17,7 +17,8 @@ Tests script the next connections before they happen (`reject_next`, `greet_next
 `auth_replies`, whose entries are a status, a `(status, message)` pair, a raw frame, or
 `NoReply.TO_KEY` for a server that never answers the key; `hold_slot`, for another connection
 that holds the account's one slot until the test frees it) and act on the live one (`send`,
-`close`) from the test thread. Everything the server observes is kept under one lock, and
+`close`, and `evict`, for a newer connection with the key that takes the live one's place) from
+the test thread. Everything the server observes is kept under one lock, and
 `wait_for` blocks on a condition until a predicate over it holds, so tests synchronize with the
 client's thread deterministically, never by sleeping. Built by the `fake_ws_server` fixture in
 `tests/conftest.py`.
@@ -246,6 +247,15 @@ class FakeMassiveServer:
             reason: The close frame's reason text; empty for none.
         """
         self._call(lambda ws: ws.close(code, reason))
+
+    def evict(self) -> None:
+        """Close the latest connection as Massive does when a newer one with the key takes it.
+
+        Sends a `max_connections` status on the authenticated socket, then closes it with code
+        1008 (policy violation), as Massive did in every live run that saw it.
+        """
+        self.send(status_frame("max_connections"))
+        self.close(1008)
 
     def hold_slot(self, *, held: bool) -> None:
         """Take or free the account's one connection slot, as another connection would.

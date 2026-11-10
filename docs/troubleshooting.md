@@ -49,6 +49,7 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. For a long read, pass `wait=False` to `fetch()` or `history()`: the call returns at once, and its table fills in the background. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
 | A symbol on your watchlist never appears | The table skips a row that isn't Massive's exact ticker, or a crypto pair Massive doesn't list. `Error` lists the skipped rows. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class, and `help(dm.canonicalize_symbols)` shows how to convert a table of other spellings to it. |
+| `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
 | `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise `max_outage` in [`MassiveConfig`](../README.md#massive-config). |
 | `over capacity: <n>/1000; <k> deferred` in `Error` | Massive allows 1,000 option contracts on one connection, and the library counts a contract's trades and its quotes as two. | Watch fewer contracts. The waiting ones subscribe as others leave. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
@@ -88,9 +89,7 @@ Act on these states:
 | Table | `State` | Why | What to do |
 |---|---|---|---|
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
-| `m.connections()` | `WAITING_SLOT` | Massive allows your account one connection per asset class, and another program is using it. | Stop the other program. |
-| `m.connections()` | `WAITING_SLOT` after you restart the server | Massive takes up to 30 seconds to free the old server's connection. | Wait. The library reconnects on its own. |
-| `m.connections()` | `WAITING_SLOT` that doesn't clear, with no other program running | Two sessions on this server have different settings, such as `max_outage`, so they compete for one connection. | Give both sessions the same `MassiveConfig`. |
+| `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 
 <a id="the-log"></a>

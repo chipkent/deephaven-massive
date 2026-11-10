@@ -51,6 +51,7 @@ import yaml
 
 from deephaven_massive._enums import (
     AssetClass,
+    ConnectionTaken,
     OnError,
     Subscription,
     _require_enum,
@@ -97,8 +98,8 @@ CONFIG_FILE_VARIABLE: Final = "DEEPHAVEN_MASSIVE_CONFIG_FILE"
 MIN_RECONNECT_BACKOFF: Final = 15.0
 """The shortest `reconnect_backoff` accepted, in seconds.
 
-Massive releases a dropped connection only after roughly 10 to 30 seconds; a client that
-retries sooner can be refused for holding the allowance it just lost.
+It limits reconnect churn: a connection that keeps dropping, or that another program with the
+same key keeps taking (`connection_taken`), reconnects at most this often.
 """
 
 NO_ACK_RESEND: Final = 60.0
@@ -267,7 +268,7 @@ class MassiveConfig:
             Defaults to 30 seconds.
 
             Lower it to reconnect sooner after a brief drop. It must be at least 15 seconds,
-            since Massive can refuse a sooner reconnect, and at most `max_reconnect_backoff`.
+            which limits reconnect churn, and at most `max_reconnect_backoff`.
 
             Each failure in a row doubles the wait, up to `max_reconnect_backoff`, and the count
             resets once a connection stays up for 60 seconds. A failure no retry can fix, such as a
@@ -277,6 +278,22 @@ class MassiveConfig:
 
             Lower it to retry more often during a long outage, or raise it to retry less often.
             It must be at least `reconnect_backoff`.
+        connection_taken: Decides what a live table does when another connection with the same
+            API key takes over its own. Defaults to `FAIL`.
+
+            Massive allows your account one WebSocket connection per asset class, and keeps the
+            newest. When another program, or a session with different streaming settings,
+            connects with the same key, Massive closes this session's connection.
+
+            - `dm.ConnectionTaken.FAIL` fails the live tables at once, with an error that names
+              the time and the fix.
+            - `dm.ConnectionTaken.RECONNECT` reconnects after the reconnect backoff, which takes
+              the connection back. If the other program does the same, the two take turns, and
+              each loses data while the other holds the connection.
+
+            Sessions with the same key and streaming settings share one connection whatever
+            this setting. See
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         max_outage: Sets how many seconds a stream or `poll()` table may stay cut off from Massive
             before it fails. Defaults to 300 seconds.
 
@@ -401,6 +418,7 @@ class MassiveConfig:
     subscription_confirmation_timeout: float = 5.0
     reconnect_backoff: float = 30.0
     max_reconnect_backoff: float = 120.0
+    connection_taken: ConnectionTaken = ConnectionTaken.FAIL
     max_outage: float = 300.0
     flat_file_symbol_threshold: int = 50
     max_concurrency: int = 8
@@ -419,7 +437,8 @@ class MassiveConfig:
         """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
         A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, or
-        `unavailable_symbols` that is not a `dm.OnError`, a `websocket_hosts` key that is not a
+        `unavailable_symbols` that is not a `dm.OnError`, a `connection_taken` that is not a
+        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a
         `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
@@ -474,8 +493,7 @@ class MassiveConfig:
         if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
             raise ValueError(
                 f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} s, not "
-                f"{self.reconnect_backoff:g}: Massive takes roughly 10 to 30 s to release a "
-                "dropped connection, and a sooner retry can be refused for holding it"
+                f"{self.reconnect_backoff:g}, which limits reconnect churn"
             )
         if self.subscription_confirmation_timeout >= NO_ACK_RESEND:
             raise ValueError(
@@ -491,6 +509,7 @@ class MassiveConfig:
         _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
+        _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
         _check_url("rest_base_url", self.rest_base_url)
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
@@ -1188,6 +1207,18 @@ def _on_error(node: yaml.Node) -> OnError:
     return _word(node, OnError, "a symbol setting")
 
 
+def _connection_taken(node: yaml.Node) -> ConnectionTaken:
+    """Convert `connection_taken`'s word: `fail` or `reconnect` (`_word`).
+
+    Args:
+        node: The value's node.
+
+    Returns:
+        The `ConnectionTaken` member.
+    """
+    return _word(node, ConnectionTaken, "a connection_taken value")
+
+
 def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
     """Convert a list of subscription words, such as `[stocks, options]` (`_word`).
 
@@ -1334,6 +1365,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "subscription_confirmation_timeout": _seconds,
     "reconnect_backoff": _seconds,
     "max_reconnect_backoff": _seconds,
+    "connection_taken": _connection_taken,
     "max_outage": _seconds,
     "flat_file_symbol_threshold": _count,
     "max_concurrency": _count,
@@ -1563,6 +1595,10 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "max_reconnect_backoff": _Example(
         120.0, "Longest wait, in seconds, before reconnecting a dropped stream."
     ),
+    "connection_taken": _Example(
+        ConnectionTaken.FAIL,
+        "When another program with this key takes a stream's connection: fail, or reconnect.",
+    ),
     "rest_base_url": _Example(
         "https://api.massive.com", "Where REST requests go: change it only for another server."
     ),
@@ -1591,7 +1627,9 @@ _DEFAULT_SENTENCE: Final = re.compile(r" ?Defaults to [^.]*(?:\.[^ ][^.]*)*\.$")
 A period followed by a character other than a space (`0.05`, `api.massive.com`) does not end
 the sentence."""
 
-_ENUM_IN_CODE: Final = re.compile(r"`dm\.(OnError|Subscription|AssetClass)\.([A-Z]+)`")
+_ENUM_IN_CODE: Final = re.compile(
+    r"`dm\.(OnError|Subscription|AssetClass|ConnectionTaken)\.([A-Z]+)`"
+)
 """An enum member as code spells it, such as `dm.OnError.RAISE`, which a settings file spells
 `raise`."""
 
@@ -1671,6 +1709,7 @@ def _as_file_words(text: str) -> str:
         "OnError": OnError,
         "Subscription": Subscription,
         "AssetClass": AssetClass,
+        "ConnectionTaken": ConnectionTaken,
     }
     return _ENUM_IN_CODE.sub(lambda match: f"`{enums[match[1]][match[2]].value}`", text)
 
@@ -1695,7 +1734,10 @@ def _as_page_links(text: str) -> str:
 def _spellings(members: Iterable[StrEnum]) -> str:
     """Return enum members' settings-file words as a list for a page: `` `a`, `b`, or `c` ``."""
     words = [f"`{member.value}`" for member in members]
-    return ", ".join(words[:-1]) + ", or " + words[-1]
+    *rest, last = words
+    if len(rest) == 1:  # two words take no comma
+        return f"{rest[0]} or {last}"
+    return ", ".join(rest) + ", or " + last
 
 
 _HOSTS_KEY: Final = "websocket_hosts"
@@ -1743,6 +1785,7 @@ def _value_forms() -> dict[str, str]:
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "
         "`max_reconnect_backoff`, such as `60`",
         "max_reconnect_backoff": "A number of seconds, at least `reconnect_backoff`, such as `300`",
+        "connection_taken": _spellings([ConnectionTaken.FAIL, ConnectionTaken.RECONNECT]),
         "rest_base_url": url,
         "s3_endpoint_url": "An `http` or `https` URL, such as `https://files.massive.com`",
         "s3_bucket": "A bucket name, such as `flatfiles`",

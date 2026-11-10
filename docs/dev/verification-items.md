@@ -32,8 +32,6 @@ settles it.
   `tests/massive/ws/test_client_integration.py`.
 - **11.** Whether the options cap counts contracts or topics. Topics, the stricter count. Settled
   by `tests/massive/ws/test_client_integration.py` (Options Advanced).
-- **12.** The exact `max_connections` status text and timing. Any `max_connections` status shows
-  `WAITING_SLOT`. Settled by `tests/ingest/test_ws_integration.py`.
 - **13.** `orjson` free-threaded wheels. An optional extra; the standard-library codec is the
   default. Checked by CI's 3.14 job; no cp314t wheel exists yet.
 - **15.** Whether a wildcard and an explicit topic of one channel (`T.*` and `T.AAPL`) deliver an
@@ -149,6 +147,10 @@ settles it.
   (item 78).
 - **9.** Massive acknowledges an unsubscribe. Settled 2026-11-02: "unsubscribed to:", and no row
   afterwards; nothing waits for it.
+- **12.** The exact `max_connections` status text and timing. Settled 2026-11-10: Massive keeps
+  the newer connection and sends the older, authenticated one "Maximum number of websocket
+  connections exceeded. ..." 2.6 to 8.3 s later, then close code 1008 (decision 97); verified by
+  `tests/ingest/test_ws_integration.py`.
 - **14.** No flat-file publish time is assumed. Settled by decision 78; the 2026-10-30 and
   2026-11-02 checks saw files land from 00:42 to 11:17 ET.
 - **17.** Retired: `poll()` results no longer use input tables.

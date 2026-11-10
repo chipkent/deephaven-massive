@@ -320,6 +320,9 @@ class WsConnections:
         self.fetch_rows = fetch_rows
         self._crypto_pair = crypto_pair
         self._unlisted: Final = core.config.unlisted_symbols
+        # What this session's streams do when another connection takes theirs; read by its
+        # connections under the group's lock, so sessions differing in it still share them.
+        self.connection_taken: Final = core.config.connection_taken
         # The futures schedule calendar reads the paths of the futures reference datasets.
         by_name = core.catalog.by_name
         self._calendar_paths: Final = (
@@ -648,7 +651,9 @@ class WsConnections:
         The stream goes to the connection that holds its lease. Routing and the check for the
         connection's failure happen in one section of the group's lock, the one the connection's
         `_failed` takes, so a connection that failed meanwhile never leaves the stream running:
-        the stream fails here, on the caller thread.
+        the stream fails here, on the caller thread. So does a stream of a
+        `connection_taken=FAIL` session whose connection was taken while it opened
+        (`Connection.pending_failures`).
         A stream whose lease is gone (the session closed) is left as it is.
 
         Args:
@@ -657,6 +662,8 @@ class WsConnections:
         with self._lock:
             connection = self.group.streams.get(stream.stream_id)
             failure = None if connection is None else connection.failure
+            if failure is None and connection is not None:
+                failure = connection.pending_failures.pop(stream.stream_id, None)
             if connection is not None and failure is None:
                 connection.flusher.routes.add(stream.channel, stream.sink)
                 connection.post(connection.add_stream, stream)
@@ -698,6 +705,7 @@ class WsConnections:
         self._mine.discard(stream_id)
         self._skipped_pairs.pop(stream_id, None)
         current.cap_pending.pop(stream_id, None)
+        current.pending_failures.pop(stream_id, None)
         current.give(self)
         return current
 
