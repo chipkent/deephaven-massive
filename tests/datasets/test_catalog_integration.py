@@ -161,6 +161,10 @@ a row to arrive in a test's time, while some band of the market's changes every 
 
 _RARE: Final = {
     "stocks.imbalances": "imbalances arrive only around the opening and closing auctions",
+    "options.admin_messages": (
+        "OPRA sends admin messages only with FLEX activity or an exchange's notice, "
+        "not on a schedule"
+    ),
 }
 """The streams whose rows no test can wait for, with why: they pass only by skipping after
 the acknowledgement."""
