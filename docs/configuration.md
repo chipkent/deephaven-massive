@@ -137,6 +137,9 @@ reconnect_backoff: 30  # the default
 # Longest wait, in seconds, before reconnecting a dropped stream.
 max_reconnect_backoff: 120  # the default
 
+# When another program with this key takes a stream's connection: fail, or reconnect.
+connection_taken: fail  # the default
+
 # Where REST requests go: change it only for another server.
 rest_base_url: https://api.massive.com  # the default
 
@@ -174,6 +177,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `subscription_confirmation_timeout` | Sets how many seconds Massive has to confirm a stream's channel before the library asks again. | A positive number of seconds below 60, such as `10` | `5` |
 | `reconnect_backoff` | Sets the shortest wait, in seconds, before reconnecting a dropped stream. | A number of seconds from 15 to `max_reconnect_backoff`, such as `60` | `30` |
 | `max_reconnect_backoff` | Sets the longest wait, in seconds, before reconnecting a dropped stream. | A number of seconds, at least `reconnect_backoff`, such as `300` | `120` |
+| `connection_taken` | Decides what a live table does when another connection with the same API key takes over its own. | `fail` or `reconnect` | `fail` |
 | `rest_base_url` | Sets the URL REST requests go to. | An `https` URL of a host alone, or `http` for your own machine, such as `https://api.massive.com` | `https://api.massive.com` |
 | `s3_endpoint_url` | Sets the URL flat files are read from. | An `http` or `https` URL, such as `https://files.massive.com` | `https://files.massive.com` |
 | `s3_bucket` | Sets the S3 bucket flat files are read from. | A bucket name, such as `flatfiles` | `flatfiles` |
@@ -332,7 +336,7 @@ seconds.
 #### reconnect_backoff
 
 Lower it to reconnect sooner after a brief drop. It must be at least 15 seconds,
-since Massive can refuse a sooner reconnect, and at most `max_reconnect_backoff`.
+which limits reconnect churn, and at most `max_reconnect_backoff`.
 
 Each failure in a row doubles the wait, up to `max_reconnect_backoff`, and the count
 resets once a connection stays up for 60 seconds. A failure no retry can fix, such as a
@@ -342,6 +346,22 @@ rejected key, isn't retried.
 
 Lower it to retry more often during a long outage, or raise it to retry less often.
 It must be at least `reconnect_backoff`.
+
+#### connection_taken
+
+Massive allows your account one WebSocket connection per asset class, and keeps the
+newest. When another program, or a session with different streaming settings,
+connects with the same key, Massive closes this session's connection.
+
+- `dm.ConnectionTaken.FAIL` fails the live tables at once, with an error that names
+  the time and the fix.
+- `dm.ConnectionTaken.RECONNECT` reconnects after the reconnect backoff, which takes
+  the connection back. If the other program does the same, the two take turns, and
+  each loses data while the other holds the connection.
+
+Sessions with the same key and streaming settings share one connection whatever
+this setting. See
+[Live table messages](troubleshooting.md#live-table-messages).
 
 #### rest_base_url
 

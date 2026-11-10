@@ -1,13 +1,12 @@
-"""Live checks of the session's WebSocket handling: feeds, a dropped socket, the slot limit.
+"""Live checks of the session's WebSocket handling: feeds, a dropped socket, a taken connection.
 
 Each test records the session's diagnostics and Massive's messages (`evidence`). Streams
 subscribe to one symbol and are released at once. The reconnect check closes the session's
 socket from under it, through the wire client's private `_run_generation`, which receives each
 authenticated socket: the library has no public way to drop a connection, and needs none. The
-slot test opens a second connection to a
-cluster on purpose: it is marked `integration_limits`, runs only with `-m integration_limits`,
-and should run alone and last, with no other client of the key. How to run these tests is in
-`docs/live-tests.md`.
+taken-connection test opens a second connection to a cluster on purpose: it is marked
+`integration_limits`, runs only with `-m integration_limits`, and should run alone and last,
+with no other client of the key. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ _WAIT = 45.0
 """Seconds a test waits for a frame or a state change."""
 
 _FIRST_WAIT = 20.0
-"""Seconds the slot test waits for the first session's trades; crypto trades all the time."""
+"""Seconds the taken-connection test waits for a session's trades; crypto trades all the time."""
 
 _DELAYED_FEED_LAG = timedelta(minutes=15)
 """How far Massive's delayed stocks feed lags the market: its first trade of a session comes
@@ -71,23 +70,6 @@ class _Socket(Protocol):
     def transport(self) -> asyncio.Transport:
         """The socket's asyncio transport, whose `abort()` drops the connection at once."""
         ...
-
-
-def _wait_for_state(
-    session: dm.MassiveSession, table_rows: TableRows, *, states: set[str]
-) -> list[dict[str, Any]]:
-    """Wait until one of a session's WebSocket connections is in one of `states`, or time out.
-
-    Returns:
-        The session's connection rows when the wait ended.
-    """
-    pause = threading.Event()  # never set; only paces the polling
-    deadline = time.monotonic() + _WAIT
-    while True:
-        rows = table_rows(session.connections())
-        if any(r["State"] in states for r in rows) or time.monotonic() >= deadline:
-            return rows
-        pause.wait(0.5)
 
 
 def _wait_until(
@@ -297,10 +279,10 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
 
 
 @pytest.mark.needs("currencies:starter")
-@pytest.mark.settles("12")
+@pytest.mark.verifies("12")
 @pytest.mark.integration_limits
-@pytest.mark.timeout(100)
-def test_a_second_connection_with_one_key_waits_for_a_slot(
+@pytest.mark.timeout(200)
+def test_a_newer_connection_with_one_key_takes_the_older_ones_place(
     live_session: dm.MassiveSession,
     *,
     live_config: dm.MassiveConfig,
@@ -310,19 +292,21 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     caplog: pytest.LogCaptureFixture,
     evidence: Evidence,
 ) -> None:
-    """What happens when a second session with the same key connects to a busy cluster.
+    """Whether Massive keeps the newer of two connections with one key, and the older table fails.
 
     Deliberately takes a second connection slot (marked `integration_limits`; run it alone and
-    last, with no other client of the key). Streams `X:BTCUSD` trades in one session, opens a
-    second session on the same cluster, and records both sessions' connection states and
-    errors while both are open and after the second closes. Sessions of one process whose key
-    and connection settings are all equal share their WebSocket connections, so the second
+    last, with no other client of the key). Streams `X:BTCUSD` trades in one session, then opens
+    a second session on the same cluster that streams them too. Sessions of one process whose
+    key and connection settings are all equal share their WebSocket connections, so the second
     session's `max_outage` is one second longer than the first's: that alone gives it a socket
-    of its own. Fails when the library's WARNING that the two sessions cannot share connections
-    is missing, since then no second socket competed and the run shows nothing. Reading it:
-    the second waiting (`WAITING_SLOT`, a `max_connections` message) while the first keeps
-    running confirms the library's slot handling; the first being dropped instead means
-    Massive keeps the newer connection, and the slot rule needs revisiting.
+    of its own, and the library's WARNING that the two cannot share connections must appear.
+
+    Passes when, under the default `connection_taken` (`FAIL`), Massive closes the first
+    session's connection within 45 s of the second's: the first table fails with the error that
+    names the taken connection, its crypto connection shows `CLOSED`, and the second session's
+    table keeps receiving trades afterward. A failure here means Massive kept the older
+    connection, or refused the newer one at its key (`WAITING_SLOT`), and the handling of a
+    taken connection needs revisiting; the evidence holds both sessions' rows.
     """
     first = live_session.crypto.trades("X:BTCUSD").append_only()
     first_rows = wait_rows(live_session, first, time.monotonic() + _FIRST_WAIT)
@@ -330,7 +314,15 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
     if not first_rows:
         for line in stream_report(live_session):
             evidence(line)
-        pytest.skip("the first session received no trade, so it may hold no slot to compete for")
+        pytest.skip("the first session received no trade, so it holds no slot to compete for")
+    # The live session's earlier tests may have left failed streams of their own.
+    failed_before = {
+        r["StreamId"] for r in table_rows(live_session.streams()) if r["State"] == "FAILED"
+    }
+
+    def newly_failed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [r for r in rows if r["State"] == "FAILED" and r["StreamId"] not in failed_before]
+
     # A different connection setting keeps the second session out of the first's connections.
     config = dataclasses.replace(live_config, max_outage=live_config.max_outage + 1)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
@@ -341,19 +333,40 @@ def test_a_second_connection_with_one_key_waits_for_a_slot(
         assert apart, "the second session shares the first's connections, so none competes"
         second = second_session.crypto.trades("X:BTCUSD").append_only()
         started = time.monotonic()
-        _wait_for_state(second_session, table_rows, states={"WAITING_SLOT", "FAILED"})
-        evidence(f"second session after {time.monotonic() - started:.1f} s:")
-        for line in stream_report(second_session):
-            evidence(f"    {line}")
-        evidence("first session while the second is open:")
+        streams = _wait_until(
+            lambda: table_rows(live_session.streams()),
+            lambda rows: bool(newly_failed(rows)),
+            wait=_WAIT,
+        )
+        evidence(f"first session after {time.monotonic() - started:.1f} s:")
         for line in stream_report(live_session):
             evidence(f"    {line}")
+        evidence("second session meanwhile:")
+        for line in stream_report(second_session):
+            evidence(f"    {line}")
+        errors = [str(r["Error"]) for r in newly_failed(streams)]
+        assert errors, "Massive did not close the older connection"
+        assert errors[0].startswith(
+            "another connection with this API key took the WebSocket connection to "
+            "socket.massive.com/crypto at "
+        ), errors[0]
+        assert first.j_table.isFailed()
+        crypto = [
+            r
+            for r in table_rows(live_session.connections())
+            if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
+        ]
+        assert [r["State"] for r in crypto] == ["CLOSED"]
+        seen = len(table_rows(second))
+        later = _wait_until(
+            lambda: table_rows(second), lambda rows: len(rows) > seen, wait=_FIRST_WAIT
+        )
+        evidence(f"second session: {len(later) - seen} trades after the first was taken")
+        assert len(later) > seen, "the newer connection got no trade after taking the older's"
+        assert not second.j_table.isFailed()
         second_session.release(second)
     finally:
         second_session.close()
-    evidence("first session after the second closed:")
-    for line in stream_report(live_session):
-        evidence(f"    {line}")
     live_session.release(first)
 
 

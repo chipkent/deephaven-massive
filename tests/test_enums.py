@@ -70,6 +70,7 @@ EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
     ],
     dm.SymbolConvention: ["massive", "yahoo", "nasdaq", "cms"],
     dm.OnError: ["raise", "log", "ignore"],
+    dm.ConnectionTaken: ["fail", "reconnect"],
 }
 
 # Enums that mirror a parameter enum of the generated REST paths, by parameter name. Every path
@@ -320,6 +321,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.unlisted_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
     "MassiveConfig.__init__.unavailable_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
     "canonicalize_symbols.asset_class": _CANONICALIZE_ENUMS,

@@ -320,6 +320,9 @@ class WsConnections:
         self.fetch_rows = fetch_rows
         self._crypto_pair = crypto_pair
         self._unlisted: Final = core.config.unlisted_symbols
+        # What this session's streams do when another connection takes theirs; read by its
+        # connections under the group's lock, so sessions differing in it still share them.
+        self.connection_taken: Final = core.config.connection_taken
         # The futures schedule calendar reads the paths of the futures reference datasets.
         by_name = core.catalog.by_name
         self._calendar_paths: Final = (

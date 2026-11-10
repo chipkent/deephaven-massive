@@ -680,16 +680,42 @@ def test_a_combined_ack_lists_every_topic(
     assert h.recorder.of("status")[0][1].topics == ("T.AAPL", "Q.AAPL")
 
 
-def test_a_max_connections_status_then_a_close_waits_for_a_slot(
-    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+def test_a_max_connections_status_then_a_close_reports_the_connection_taken(
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # A newer connection with the key took this one's place: distinct from a refusal at the
+    # key, so the library can decide what it means.
+    caplog.set_level(logging.INFO, logger=client_module.__name__)
     h = make_client(free_waits=0)
     h.recorder.wait_open(1)
-    fake_ws_server.send(_status("max_connections", "Maximum number of connections exceeded."))
-    fake_ws_server.close(1008)
+    fake_ws_server.evict()
     h.sleeper.wait_for_count(1)
     assert h.recorder.of("status")[0][1].kind is StatusKind.MAX_CONNECTIONS
-    assert h.recorder.states() == [WsState.CONNECTING, WsState.WAITING_SLOT]
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.TAKEN]
+    [(_, at)] = [s for s in h.recorder.of("state") if s[0] is WsState.TAKEN]
+    assert at == h.clock.time() + h.sleeper.waits[0]
+    taken = [r for r in caplog.records if "took this one's place" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in taken] == [
+        (
+            logging.INFO,
+            (
+                f"{fake_ws_server.url()}: another connection with this API key took this one's "
+                "place (a max_connections status, then the close)"
+            ),
+        )
+    ]
+
+
+def test_a_taken_connection_reconnects_after_its_backoff(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(backoff=(1.0, 1.0))
+    h.recorder.wait_open(1)
+    fake_ws_server.evict()
+    h.recorder.wait_open(2)  # the reconnect takes the connection back
+    assert h.recorder.states() == [WsState.CONNECTING, WsState.TAKEN, WsState.CONNECTING]
 
 
 def test_subscribe_splits_large_sets_into_frames_of_1000(

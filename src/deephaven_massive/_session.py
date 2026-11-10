@@ -168,8 +168,10 @@ def _register(core: SessionCore) -> None:
     sessions of one process with the same key share their connections. They can only when
     every connection setting (`CONNECTION_SETTINGS`) is equal: a connection carries one value
     of each. A new session whose settings differ from those of an open session with the same
-    key gets connections of its own, which compete with the other session's for the slot, so
-    a WARNING names the first such session and the settings that differ. Sessions on
+    key gets connections of its own, which compete with the other session's for the slot:
+    Massive keeps the newer connection and closes the older, whose live tables then follow
+    their session's `connection_taken`. So a WARNING names the first such session and the
+    settings that differ. Sessions on
     different Deephaven update graphs never share either; that is not warned about, since a
     server normally has one graph. Sessions are held weakly; closed and collected ones do not
     count.
@@ -192,7 +194,8 @@ def _register(core: SessionCore) -> None:
             logger.warning(
                 "%s uses the same API key as %s with different connection settings (%s), so "
                 "the two cannot share WebSocket connections; on an individual plan, which "
-                "allows one connection per cluster, they compete for it",
+                "allows one connection per cluster, each one's connection takes the other's, "
+                "and the live tables of the one taken follow its connection_taken",
                 core.label,
                 label,
                 ", ".join(differ),
@@ -220,10 +223,12 @@ class MassiveSession:
 
     Messages name the session by its label, such as `MassiveSession #1`.
 
-    Use one session per API key. Massive allows one streaming connection per asset class by default.
-    Two sessions with the same key share it only when their streaming settings match, such as
-    `websocket_hosts` and `max_outage`. Otherwise they compete for it, and a WARNING says so when
-    you create the second one.
+    Use one session per API key. Massive allows your account one streaming connection per asset
+    class. Two sessions with the same key share it only when their streaming settings match, such
+    as `websocket_hosts` and `max_outage`. Otherwise each opens its own, and the newer connection
+    takes the older one's place. The live tables on the older one then fail, or reconnect if their
+    session's `MassiveConfig.connection_taken` is `RECONNECT`. A WARNING names the clash when you
+    create the second session.
 
     Example:
         ::

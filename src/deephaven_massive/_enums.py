@@ -7,8 +7,8 @@ one spelling per value, tab completion in every IDE and in the Deephaven web con
 safety at type-check time. At run time `_require_enum` turns a plain string into a `TypeError` that
 names the member to use; `Timespan("minute")` is the documented way to convert text.
 An enum of a library setting that never reaches the wire (`PollMode`, `HistorySource`,
-`Reread`, `SymbolConvention`, `OnError`, `Subscription`) takes its member names in lower case
-as values.
+`Reread`, `SymbolConvention`, `OnError`, `ConnectionTaken`, `Subscription`) takes its member
+names in lower case as values.
 
 Four further enums are internal and not exported: `Recency` (how fresh a WebSocket host's
 data is) and `ChannelFamily` (which host a channel is served from), which appear as values in
@@ -19,7 +19,7 @@ class of a dataset whose symbols span classes, each read from its prefix; and `N
 plain `Enum` too (so it never equals a `Timespan` value), whose one member `ANY` keys the one
 WebSocket channel and flat-file prefix of a dataset that is not bars.
 
-The nineteen public enums are re-exported by `deephaven_massive/__init__.py`; this module is
+The twenty public enums are re-exported by `deephaven_massive/__init__.py`; this module is
 private. `subscription_of` maps an asset class to the subscription that covers it.
 """
 
@@ -33,6 +33,7 @@ __all__ = [
     "ChannelFamily",
     "ClassFromPrefix",
     "ConditionDataType",
+    "ConnectionTaken",
     "ContractType",
     "Direction",
     "FuturesVenue",
@@ -508,6 +509,38 @@ class OnError(StrEnum):
     RAISE = "raise"
     LOG = "log"
     IGNORE = "ignore"
+
+
+class ConnectionTaken(StrEnum):
+    """What a live table does when another connection with the same API key takes over its own.
+
+    Massive allows your account one WebSocket connection per asset class. When another program
+    connects with the same key, Massive keeps the newer connection and closes the older one.
+    Another session on this server does the same when its streaming settings, such as
+    `websocket_hosts` and `max_outage`, differ from this one's. `MassiveConfig.connection_taken`
+    picks what the older connection's live tables do:
+
+    - `FAIL`, the default: they fail at once, with a `MassiveError` that names the time and the
+      fix.
+    - `RECONNECT`: they reconnect after `reconnect_backoff` and take the connection back.
+      Meanwhile, their `m.streams()` row's `Error` says when the connection was taken and when it
+      is taken back. They miss the data of each gap, and if the other program does the same, the
+      two take turns indefinitely.
+
+    Sessions with the same key and streaming settings share one connection whatever this
+    setting, and each table follows its own session's setting.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            assert dm.ConnectionTaken("reconnect") is dm.ConnectionTaken.RECONNECT
+            config = dm.MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT)
+    """
+
+    FAIL = "fail"
+    RECONNECT = "reconnect"
 
 
 class Subscription(StrEnum):

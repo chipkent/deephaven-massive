@@ -100,6 +100,7 @@ __all__ = [
     "AssetClass",
     "AuthenticationError",
     "ConditionDataType",
+    "ConnectionTaken",
     "ContractType",
     "Direction",
     "EntitlementError",
@@ -149,6 +150,7 @@ _EXPORTS: dict[str, str] = {
     "AssetClass": "deephaven_massive._enums",
     "AuthenticationError": "deephaven_massive._errors",
     "ConditionDataType": "deephaven_massive._enums",
+    "ConnectionTaken": "deephaven_massive._enums",
     "ContractType": "deephaven_massive._enums",
     "Direction": "deephaven_massive._enums",
     "EntitlementError": "deephaven_massive._errors",
@@ -215,6 +217,7 @@ if TYPE_CHECKING:
     from deephaven_massive._enums import (
         AssetClass,
         ConditionDataType,
+        ConnectionTaken,
         ContractType,
         Direction,
         FuturesVenue,

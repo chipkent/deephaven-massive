@@ -23,6 +23,12 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   outage that lasts `MassiveConfig.max_outage` fails them all, since their rows from the
   outage's start on are missing. A silent connection's streams say so in their `Error` too,
   but keep running: quiet symbols and market holidays are silent as well.
+- **A taken connection.** Massive keeps the newest connection of a key on a cluster, and closes
+  the older with a `max_connections` status (`WsState.TAKEN`). Each stream follows its
+  session's `MassiveConfig.connection_taken`: a `FAIL` session's streams fail at once, and the
+  connection reconnects, taking the connection back, only while a stream of a `RECONNECT`
+  session remains; otherwise it closes (`_taken`). The setting is no connection setting, so
+  sessions that differ only in it still share connections and never take them from each other.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
 - **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
@@ -61,7 +67,7 @@ from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
-from deephaven_massive._enums import AssetClass, ChannelFamily, subscription_of
+from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -178,6 +184,12 @@ _FMV_CHANNEL: Final = "FMV"
 
 _group_numbers: Final = itertools.count(1)
 """Numbers the connection groups of the process, for their threads' names."""
+
+_TAKEN_HELP: Final = (
+    "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
+    "#live-table-messages"
+)
+"""The troubleshooting section the error of a taken connection points to."""
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
@@ -1000,18 +1012,23 @@ class Connection:
         A `RECONNECTING` or `WAITING_SLOT` warns of the outage once (`_warn_down`), and the
         reconnect logs it at INFO (`_on_open`), the outage's end once every stream receives
         data again (`_check_recovered`). Each also starts or continues the outage (`_outage`).
+        A `TAKEN` applies each stream's `connection_taken` (`_taken`).
 
         Args:
             state: The client's new state.
-            detail: The next attempt's time (seconds since the epoch) for `RECONNECTING` and
-                `WAITING_SLOT`, the `WireError` for `FAILED`, None otherwise.
+            detail: The next attempt's time (seconds since the epoch) for `RECONNECTING`,
+                `WAITING_SLOT`, and `TAKEN`, the `WireError` for `FAILED`, None otherwise.
         """
         self._next_reconnect_at = None  # shown only while a reconnect waits for its time
+        if state is WsState.TAKEN:
+            self.subscriptions.ended()
+            self._taken(cast("float", detail))
+            return
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
             self._next_reconnect_at = int(cast("float", detail) * 1e9)
             self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=cast("float", detail))
-            self._outage(waiting_slot=state is WsState.WAITING_SLOT)
+            self._outage(detail=self._slot_text() if state is WsState.WAITING_SLOT else None)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
             self._failed(cast("WireError", detail))
@@ -1026,6 +1043,84 @@ class Connection:
             self._cancel_outage_timers()
             self._streams.clear()
             self._notes_shown.clear()
+
+    def _taken(self, next_at: float) -> None:
+        """Apply `connection_taken` after another connection with the key took this one.
+
+        Under the group's lock, which every lease and route holds, the streams leased on the
+        connection are split by their session's setting. While one of a `RECONNECT` session
+        remains, the streams of `FAIL` sessions fail, and the rest ride an outage as for a
+        reconnect: the row shows `RECONNECTING`, and their `Error` says when the connection was
+        taken and when the client takes it back. Otherwise every routed stream fails, the
+        connection leaves the registry with the failure recorded, so a stream attaching at that
+        moment fails too (`WsConnections._attach`), and it closes: the client reports `CLOSED`
+        instead of reconnecting, which would take the connection back.
+
+        Args:
+            next_at: When the client's next attempt is due, seconds since the epoch.
+        """
+        at = time.time()
+        group = self._group
+        with self._lock:
+            leased = [sid for sid, connection in group.streams.items() if connection is self]
+            keepers = {
+                sid
+                for sid in leased
+                if group.owners[sid].connection_taken is ConnectionTaken.RECONNECT
+            }
+            failing = [
+                sink.stream_id
+                for sink in self.flusher.routes.sinks()
+                if sink.stream_id not in keepers
+            ]
+            error = MassiveError(
+                f"another connection with this API key took the WebSocket connection to "
+                f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped; stop "
+                "the other program that uses the key and call the method again, or set "
+                "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
+                f"connection back; see {_TAKEN_HELP}",
+                cause=ErrorCause.EXPECTED,
+            )
+            if not keepers:  # one section: no verb leases the connection once it has failed
+                self.failure = error
+                group.retire(self, idle=False)
+        if keepers:
+            logger.warning(
+                "%s: another connection with this API key took the connection at %s "
+                "(max_connections); %d live tables of sessions with connection_taken=RECONNECT "
+                "remain, so it reconnects at %s and takes the connection back; %d live tables of "
+                "sessions with connection_taken=FAIL fail",
+                self.url,
+                utc_text(at),
+                len(keepers),
+                utc_text(next_at),
+                len(failing),
+            )
+            self._last_error = (
+                f"another connection with this API key took the connection at {utc_text(at)}"
+            )
+            self._episodes.expired.update(failing)  # no outage holds a failing stream down
+            if failing:
+                self.flusher.fail(failing, error)
+            self._next_reconnect_at = int(next_at * 1e9)
+            self._outage(
+                detail=f"another connection with this API key took it at {utc_text(at)}; "
+                f"reconnecting at {utc_text(next_at)} takes it back (connection_taken=RECONNECT)"
+            )
+            self._state = ConnectionState.RECONNECTING
+            self._write_row()
+            return
+        logger.warning(
+            "%s: another connection with this API key took the connection at %s "
+            "(max_connections); no live table of a session with connection_taken=RECONNECT "
+            "remains, so its %d live tables fail and the connection closes",
+            self.url,
+            utc_text(at),
+            len(failing),
+        )
+        self._last_error = str(error)
+        self.flusher.fail(failing, error)
+        self.close(final_flush=True)  # the client reports CLOSED; the failures go first
 
     def _failed(self, error: WireError) -> None:
         """Fail every stream after a fatal failure, and leave the registry.
@@ -1200,7 +1295,15 @@ class Connection:
 
     # --- loop thread: outages and notes --------------------------------------------------------
 
-    def _outage(self, *, waiting_slot: bool) -> None:
+    def _slot_text(self) -> str:
+        """Return what a down stream's `Error` adds while the connection waits for a slot."""
+        return (
+            f"waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
+            "connection with this API key, perhaps from another process, holds it; the "
+            "plan allows one connection per cluster"
+        )
+
+    def _outage(self, *, detail: str | None) -> None:
         """Start or continue an outage: hold every stream down, and fail each at its limit.
 
         The first `RECONNECTING` or `WAITING_SLOT` of an outage dates it at the last frame the
@@ -1213,12 +1316,12 @@ class Connection:
         drop. A connection that never received a frame (it never connected) counts from now,
         so its streams get the full `max_outage`. A limit of zero, or one already passed,
         fires on the loop's next turn. A stream an outage already failed is never held down
-        again. Every attempt rewrites the note, since a wait for a slot and a plain reconnect
-        read differently.
+        again. Every attempt rewrites the note, since a wait for a slot, a taken connection,
+        and a plain reconnect read differently.
 
         Args:
-            waiting_slot: True for `WAITING_SLOT`: the note says another connection holds the
-                account's slot.
+            detail: What the note adds after "no data", such as why the connection waits; None
+                for a plain reconnect.
         """
         episodes = self._episodes
         now = time.time()
@@ -1229,12 +1332,8 @@ class Connection:
             episodes.quiet_note = None
         since = utc_text(episodes.down_since)
         note = f"connection down since {since}; no data"
-        if waiting_slot:
-            note += (
-                f"; waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
-                "connection with this API key, perhaps from another process, holds it; the "
-                "plan allows one connection per cluster"
-            )
+        if detail is not None:
+            note += f"; {detail}"
         start = max(last, now - KEEPALIVE_WINDOW) if last else now
         left = max(start + self._group.max_outage - now, 0.0)
         newly = [s for s in self._streams if s not in episodes.down and s not in episodes.expired]

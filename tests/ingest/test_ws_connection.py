@@ -676,10 +676,13 @@ def test_a_retired_connection_is_never_leased(
     ws_session.session.release(second)
 
 
-def join(ws_session: WsSession) -> dm.MassiveSession:
-    # A second session with the same key and settings, sharing the wrapper's connections; the
-    # wrapper's own session is closed by its fixture, this one by the test.
-    session = dm.MassiveSession(ws_session.config)
+def join(ws_session: WsSession, **changes: object) -> dm.MassiveSession:
+    # A second session with the same key and connection settings, sharing the wrapper's
+    # connections; `changes` are other settings it differs in. The wrapper's own session is
+    # closed by its fixture, this one by the test.
+    session = dm.MassiveSession(
+        dataclasses.replace(ws_session.config, **cast("dict[str, Any]", changes))
+    )
     connections = ws.WsConnections(
         session._core,
         resolve_host=ws_session._resolve,
@@ -1995,3 +1998,148 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     assert "streams only in real time" not in errors["options.trades"]
     m.release(notices)
     m.release(trades)
+
+
+_TIME = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
+
+_TAKEN_ERROR = (
+    r"another connection with this API key took the WebSocket connection to socket\.test/stocks "
+    rf"at ({_TIME}), so this table stopped; stop the other program that uses the key and call "
+    r"the method again, or set MassiveConfig\(connection_taken=dm\.ConnectionTaken\.RECONNECT\) "
+    r"to take the connection back; see https://github\.com/chipkent/deephaven-massive/blob/main/"
+    r"docs/troubleshooting\.md#live-table-messages"
+)
+
+
+def test_a_taken_connection_fails_its_tables_and_closes_by_default(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    q = ws_session.query(TRADES, ["AAPL"])
+    result = q.blink()
+    ws_session.subscribed("T.AAPL")
+    taken = ws_session.connection()
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+        fake_ws_server.evict()
+        ws_session.wait(lambda s: WsState.CLOSED in s.states)
+        assert taken.flusher.join(TIMEOUT)  # its last flush applied the failure
+    # It never reconnects, which would take the connection back from the other program.
+    assert ws_session.states == [WsState.CONNECTING, WsState.TAKEN, WsState.CLOSED]
+    assert len(fake_ws_server.connections) == 1
+    [row] = connections_of(ws_session, dh_to_pylist)
+    assert row["State"] == "CLOSED"
+    assert re.fullmatch(_TAKEN_ERROR, row["LastError"])
+    [stream] = streams_of(ws_session, dh_to_pylist)
+    assert stream["State"] == "FAILED"
+    match = re.fullmatch(_TAKEN_ERROR, stream["Error"])
+    assert match is not None
+    assert result.j_table.isFailed()
+    warnings = [r for r in caplog.records if "took the connection at" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in warnings] == [
+        (
+            logging.WARNING,
+            (
+                f"{_URL}: another connection with this API key took the connection at "
+                f"{match.group(1)} (max_connections); no live table of a session with "
+                "connection_taken=RECONNECT remains, so its 1 live tables fail and the connection "
+                "closes"
+            ),
+        )
+    ]
+    with ws_session.connections.group.lock:
+        assert ws_session.connections.group.connections == {}  # the next stream opens anew
+    again = q.blink()
+    ws_session.subscribed("T.AAPL")
+    assert len(ws_session.urls) == 2
+    ws_session.session.release(again)
+
+
+def test_a_reconnect_session_says_when_it_takes_the_connection_back(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A long backoff holds the connection in its wait, so the row and the note can be read.
+    session = make_ws_session(backoff=60.0, connection_taken=dm.ConnectionTaken.RECONNECT)
+    result = session.query(TRADES, ["AAPL"]).blink()
+    session.subscribed("T.AAPL")
+    fake_ws_server.evict()
+    session.wait(lambda s: WsState.TAKEN in s.states)
+    [row] = connections_of(session, dh_to_pylist)
+    assert row["State"] == "RECONNECTING"
+    assert row["NextReconnectAt"] is not None
+    assert re.fullmatch(
+        rf"another connection with this API key took the connection at {_TIME}", row["LastError"]
+    )
+    [stream] = streams_of(session, dh_to_pylist)
+    assert stream["State"] == "RUNNING"
+    assert re.fullmatch(
+        rf"connection down since {_TIME}; no data; another connection with this API key took "
+        rf"it at {_TIME}; reconnecting at {_TIME} takes it back \(connection_taken=RECONNECT\)",
+        stream["Error"],
+    )
+    assert not result.j_table.isFailed()
+    session.close()
+
+
+def test_a_reconnect_session_takes_the_connection_back_and_streams_on(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    rows_when: RowsWhen,
+) -> None:
+    session = make_ws_session(connection_taken=dm.ConnectionTaken.RECONNECT)
+    result = session.query(TRADES, ["AAPL"]).append_only()
+    session.subscribed("T.AAPL")
+    fake_ws_server.evict()
+    session.wait(lambda s: s.opens == 2)
+    session.subscribed("T.AAPL")  # on the new socket
+    session.send(trade("AAPL"))
+    session.flush()
+    rows_when(result, lambda rows: len(rows) == 1)
+    assert WsState.TAKEN in session.states
+    session.session.release(result)
+
+
+def test_a_shared_connection_taken_fails_only_the_tables_of_fail_sessions(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    rows_when: RowsWhen,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Differing only in connection_taken, the sessions still share one connection (`join`
+    # checks it), so they never take it from each other.
+    other = join(ws_session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    mine = ws_session.query(TRADES, ["AAPL"]).append_only()
+    theirs = ws_session.query(TRADES, ["AAPL"], other).append_only()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with caplog.at_level(logging.WARNING, logger=ws_connection.__name__):
+        fake_ws_server.evict()
+        ws_session.wait(lambda s: s.opens == 2)  # a RECONNECT table remains: it reconnects
+    # The failing table is never held down by the outage the other one rides.
+    [failing] = [r["StreamId"] for r in rows_of(ws_session.session, dh_to_pylist)]
+    assert ws_session.on_loop(connection, lambda: sorted(connection._episodes.expired)) == [failing]
+    ws_session.flush()  # applies the failure
+    wait_for(lambda: bool(mine.j_table.isFailed()))
+    ws_session.subscribed("T.AAPL")
+    ws_session.send(trade("AAPL"))
+    ws_session.flush()
+    rows_when(theirs, lambda rows: len(rows) == 1)
+    assert not theirs.j_table.isFailed()
+    [warning] = [r.getMessage() for r in caplog.records if "took the connection" in r.getMessage()]
+    assert re.fullmatch(
+        rf"{re.escape(_URL)}: another connection with this API key took the connection at "
+        rf"{_TIME} \(max_connections\); 1 live tables of sessions with "
+        rf"connection_taken=RECONNECT remain, so it reconnects at {_TIME} and takes the "
+        "connection back; 1 live tables of sessions with connection_taken=FAIL fail",
+        warning,
+    )
+    other.release(theirs)
+    other.close()

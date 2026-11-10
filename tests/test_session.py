@@ -277,9 +277,14 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         first = dm.MassiveSession(config)
         sharing = dm.MassiveSession(config)
+        # What a taken connection does is no connection setting: such sessions share one.
+        reconnecting = dm.MassiveSession(
+            dm.MassiveConfig(api_key="shared-key", connection_taken=dm.ConnectionTaken.RECONNECT)
+        )
         other = dm.MassiveSession(dm.MassiveConfig(api_key="other-key"))
         assert caplog.records == []
         sharing.close()
+        reconnecting.close()
         apart = dm.MassiveSession(
             dm.MassiveConfig(
                 api_key="shared-key", flush_interval=0.5, subscription_confirmation_timeout=9.0
@@ -291,7 +296,8 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
             f"{label(apart)} uses the same API key as {label(first)} with different connection "
             "settings (subscription_confirmation_timeout, flush_interval), so the two cannot "
             "share WebSocket connections; on an individual plan, which allows one connection per "
-            "cluster, they compete for it"
+            "cluster, each one's connection takes the other's, and the live tables of the one "
+            "taken follow its connection_taken"
         )
     ]
     caplog.clear()
