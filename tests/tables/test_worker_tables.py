@@ -2,8 +2,8 @@
 
 Most of the registry is exercised through those tables' own tests (`test_poll.py`,
 `test_background_read.py`, `test_followed_read.py`); these cover what they cannot reach: a
-followed read's progress after the close, a shutdown after the session was freed, and
-registrations racing the close.
+followed read's progress after the close, a shutdown after the session was freed,
+registrations racing the close, and an interrupt that lands after a row is stored.
 """
 
 from __future__ import annotations
@@ -11,9 +11,10 @@ from __future__ import annotations
 import gc
 import threading
 import weakref
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from deephaven import empty_table
 
 import deephaven_massive as dm
 from deephaven_massive._errors import MassiveError
@@ -21,13 +22,18 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables import worker_tables as _worker_tables
 from deephaven_massive._tables.diagnostics import (
+    Diagnostics,
     StreamKind,
     StreamRow,
     StreamState,
     StreamUpdate,
 )
+from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.liveness import new_scope
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from deephaven_massive._tables.worker_tables import WorkerTables
 
 TIMEOUT = 30.0
@@ -56,7 +62,7 @@ def test_a_followed_read_s_progress_after_close_changes_nothing(
     # The coordinator may report progress after the close: the row keeps what the close wrote.
     core = massive_session._core
     call = core.next_stream_id()
-    core.workers._register(core, _read_row(call), fail=lambda _error: True)
+    core.workers._register(core, _read_row(call), fail=lambda _error: True, registered=[])
     massive_session.close()
     with core.registry_lock:
         closed = core.workers._workers[call].row
@@ -111,7 +117,7 @@ def test_a_registration_racing_close_is_closed_or_refused(
 
         start.wait(TIMEOUT)
         try:
-            core.workers._register(core, _read_row(call), fail=fail)
+            core.workers._register(core, _read_row(call), fail=fail, registered=[])
         except MassiveError:
             with lock:
                 refused.append(call)
@@ -151,3 +157,67 @@ def test_a_shutdown_that_outlives_its_session_records_nothing() -> None:
     tables._shut_down(7)
     with tables._lock:
         assert tables._workers == {}
+
+
+class _UnstartedWorker:
+    # A worker as `WorkerTables.track` sees it; its thread is never started.
+
+    def __init__(self) -> None:
+        self.abandoned = False
+
+    def fail(self, error: MassiveError) -> bool:
+        del error
+        return True
+
+    def release(self) -> None:
+        pass
+
+    def abandon(self) -> None:
+        self.abandoned = True
+
+
+@pytest.mark.parametrize("step", ["writing the row", "updating the live set"])
+def test_an_interrupt_after_the_row_is_stored_still_releases_it(
+    *,
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    step: str,
+) -> None:
+    # A KeyboardInterrupt (Control-C in the console) can land in `_register` after the record
+    # is stored, while the row is written or the live set updated; the row is released anyway,
+    # so only the blink table's shutdown is left to take the record out of the registry.
+    core = massive_session._core
+    call = core.next_stream_id()
+    row = _read_row(call)
+    owner, name, arg = (
+        (Diagnostics, "write", 1) if step == "writing the row" else (live_set, "sync", 0)
+    )
+    ours = row if step == "writing the row" else core
+    original = getattr(owner, name)
+    interrupted: list[bool] = []
+
+    def interrupt_once(*args: object) -> None:
+        if args[arg] is ours and not interrupted:
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        original(*args)
+
+    monkeypatch.setattr(owner, name, interrupt_once)
+    worker = _UnstartedWorker()
+    with entered(core.exec_ctx):
+        result = empty_table(0)
+    with pytest.raises(KeyboardInterrupt):
+        core.workers.track(result, new_scope(), lambda: (worker, row))
+    monkeypatch.undo()
+    assert interrupted
+    assert worker.abandoned
+    with core.registry_lock:
+        state = core.workers._workers[call]
+    assert (state.held, state.row.state) == (False, StreamState.RELEASED)
+    core.workers.shutdown_callback(call, threading.Event())()  # as the blink table's shutdown
+    with core.registry_lock:
+        assert core.workers._workers == {}
+    assert id(core) not in live_set._live
+    (shown,) = stream_rows()  # holding m.streams() puts the session back in the live set
+    assert (shown["State"], shown["HeldResults"]) == ("RELEASED", 0)

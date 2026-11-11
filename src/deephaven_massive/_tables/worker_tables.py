@@ -188,10 +188,11 @@ class WorkerTables:
 
         The one way `poll()`, a background read, and a followed read register their table:
         the worker and its first row are made (`make`), the row registered (`_register`),
-        and the result
-        tracked (`ResultRegistry.track`), so releasing it marks the row released. If any step
-        raises, even `KeyboardInterrupt`, the worker is abandoned, a registered row released
-        (`release`), and the result scope released, and the exception propagates. If
+        and the result tracked (`ResultRegistry.track`), so releasing it marks the row
+        released. If any step raises, even `KeyboardInterrupt`, the worker is abandoned, a
+        registered row released (`release`), and the result scope released, and the exception
+        propagates. `_register` reports the row in `registered` right after storing it, so an
+        interrupt that lands later in `_register`, or as it returns, still releases the row. If
         the session closed once the row was registered (`close()` failed the table meanwhile),
         the worker is abandoned and the result released. Run it on the caller thread, under no
         library lock; the caller starts the worker's thread only after it returns.
@@ -211,19 +212,18 @@ class WorkerTables:
                 the row was registered or after.
         """
         worker: _W | None = None
-        registered: int | None = None  # the stream id, once the row is registered
+        registered: list[int] = []  # the stream id, as soon as `_register` stores the row
         try:
             core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
             worker, row = make()
-            self._register(core, row, fail=worker.fail)
-            registered = row.stream_id
+            self._register(core, row, fail=worker.fail, registered=registered)
             self._results.track(result, scope, worker.release)
         except BaseException:
             try:
                 if worker is not None:
                     worker.abandon()
-                if registered is not None:
-                    self.release(registered)
+                for stream_id in registered:
+                    self.release(stream_id)
             finally:
                 release_scope(self._exec_ctx, scope)
             raise
@@ -257,7 +257,12 @@ class WorkerTables:
         )
 
     def _register(
-        self, core: SessionCore, row: StreamRow, *, fail: Callable[[MassiveError], bool]
+        self,
+        core: SessionCore,
+        row: StreamRow,
+        *,
+        fail: Callable[[MassiveError], bool],
+        registered: list[int],
     ) -> None:
         """Register a new worker table in `m.streams()` and the live set, before its thread starts.
 
@@ -278,6 +283,10 @@ class WorkerTables:
                 and a poll's host and path; `RUNNING` for a poll, `LOADING` for a read.
             fail: Stops the thread and fails the table, once (`_WorkerState.fail`); `close()`
                 and a dying library thread call it.
+            registered: The caller's list of rows to release if it fails; the table's
+                `StreamId` is appended right after its record is stored, before the row is
+                written or the live set updated, so a `KeyboardInterrupt` in either still
+                leaves the caller a row to release.
 
         Raises:
             MassiveError: If the session is closed (`"MassiveSession #1 is closed"`): the table
@@ -287,6 +296,7 @@ class WorkerTables:
             if core.closed:
                 raise MassiveError(f"{self._label} is closed")
             self._workers[row.stream_id] = _WorkerState(row, fail)
+            registered.append(row.stream_id)  # before any call: an interrupt still releases it
             self._diagnostics.write(row)
             live_set.sync(core)
 
