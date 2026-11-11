@@ -17,10 +17,13 @@ key headers (`ReadPlan.required`) fails before its first block. Every block's ba
 with a `DriftReport` of those headers and of its own odd values; what to log and show is the
 library's decision.
 
-A line Arrow cannot split into the header's fields (too few or too many, or a quote that does
-not close) is skipped and counted (`FlatFile.malformed_lines`, with the first one's row number
-and field count in `FlatFile.malformed_reason`), never its text; the rest of its block is read.
-A file whose every row is malformed raises after its last block.
+A malformed line is skipped and counted (`FlatFile.malformed_lines`, with the first one's row
+number and what is wrong with it in `FlatFile.malformed_reason`), never its text, and the rest
+of its block is read: a line that is not UTF-8 text, found before Arrow reads its chunk, since
+Arrow would refuse the whole chunk for it, and a line Arrow cannot split into the header's
+fields (too few or too many, or a quote that does not close). Whether a skipped line fails the
+read is the library's decision. A file whose every row is malformed raises after its last
+block.
 
 Arrow reads every header as text, so one value that does not parse never fails a block. Each
 block then goes through pure Arrow operations, in this order:
@@ -230,12 +233,14 @@ class FlatFile:
             names none).
         rows_kept: Of those, the rows `batches()` yielded: a readable key, inside the plan's
             window. The three tell a caller which step emptied a file.
-        malformed_lines: The lines `batches()` skipped because Arrow could not split them into
-            the header's fields: too few or too many, or a quote that does not close (which
-            takes the lines after it, up to the next quote or the end of its block, into the
-            same bad row; those lines are counted too). Not part of `rows_read`.
+        malformed_lines: The lines `batches()` skipped as malformed: a line that is not UTF-8
+            text, or one Arrow could not split into the header's fields: too few or too many,
+            or a quote that does not close (which takes the lines after it, up to the next
+            quote or the end of its block, into the same bad row; those lines are counted
+            too). Not part of `rows_read`.
         malformed_reason: Where the first skipped line is and what is wrong with it, such as
-            `"row 1234 after the header has 5 fields where the header has 9"`; rows are
+            `"row 1234 after the header has 5 fields where the header has 9"` or
+            `"row 1234 after the header is not UTF-8 text"`; rows are
             counted from the line after the header, blank lines left out. Never quotes the
             line, which a caller could log. `""` when no line was skipped.
 
@@ -330,11 +335,11 @@ class FlatFile:
     def batches(self, plan: ReadPlan) -> Generator[tuple[pa.RecordBatch, DriftReport], None, None]:
         """Decode the file block by block, keeping the rows the plan asks for.
 
-        Reads the header line first and matches columns by name. A line Arrow cannot split
-        into the header's fields is skipped and counted (`malformed_lines`, `malformed_reason`).
-        Yields one batch per block,
-        possibly empty, so the consumer can check for cancellation after every block; a file
-        with a header and no rows yields one empty batch, so its drift is still reported.
+        Reads the header line first and matches columns by name. A line that is not UTF-8
+        text, or that Arrow cannot split into the header's fields, is skipped and counted
+        (`malformed_lines`, `malformed_reason`). Yields one batch per block, possibly empty, so
+        the consumer can check for cancellation after every block; a file with a header and no
+        rows yields one empty batch, so its drift is still reported.
         Each batch has one column per `plan.columns`, named by `ReadColumn.column`, typed by
         `read_type` (or `list_type`); a documented header the file lacks is a column of nulls.
         The calling thread decompresses the file as it iterates, and a pool of
@@ -395,6 +400,8 @@ class FlatFile:
                     # default null markers include `NA` and `NULL`, which are real tickers.
                     null_values=[""],
                     strings_can_be_null=True,
+                    # Each chunk is checked as UTF-8 whole before Arrow reads it (`_is_text`).
+                    check_utf8=False,
                 ),
             )
             # Rows of the requested symbols the file held, and how many of them were dropped.
@@ -444,13 +451,12 @@ class FlatFile:
 
         The calling thread decompresses the file and cuts the text after a line end into
         chunks of about `plan.chunk_size` bytes (`_chunk`); `plan.parse_threads` threads of
-        the pool each parse a chunk (`pyarrow.csv.read_csv`, in blocks of `plan.block_size`)
-        and run `_apply` on its blocks, skipping the lines Arrow cannot split into the header's
-        fields (`_Malformed`), which are added to `malformed_lines` and `malformed_reason` as
-        each chunk is handed on. At most `plan.parse_threads + 1` chunks are read
-        ahead of the consumer, so a reader holds about that many chunks of text and their
-        rows whatever the file's length. The pool's threads are named after the calling
-        thread, and end before this generator does, however it ends.
+        the pool each parse a chunk (`_parse`), skipping its malformed lines, which are added
+        to `malformed_lines` and `malformed_reason` as each chunk is handed on. At most
+        `plan.parse_threads + 1` chunks are read ahead of the consumer, so a reader holds about
+        that many chunks of text and their rows whatever the file's length. The pool's threads
+        are named after the calling thread, and end before this generator does, however it
+        ends.
 
         Args:
             text: The decompressed file, positioned at its first row.
@@ -467,19 +473,7 @@ class FlatFile:
             read or decompress is raised once every block read before it has been handed on,
             as a reader that reached it block by block would.
         """
-        read_options, convert_options = options
-
-        def parse(chunk: bytes) -> _Parsed:
-            malformed = _Malformed()
-            table = pacsv.read_csv(
-                pa.py_buffer(chunk),
-                read_options=read_options,
-                parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
-                convert_options=convert_options,
-            )
-            blocks = [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
-            return blocks, table.num_rows, malformed
-
+        parse = functools.partial(self._parse, plan=plan, options=options)
         rows_before = 0  # rows read in the chunks handed on, for the first skipped row's number
 
         def handed(parsed: _Parsed) -> list[tuple[pa.RecordBatch, DriftReport, int, int]]:
@@ -514,6 +508,45 @@ class FlatFile:
                     future.cancel()
         if failed is not None:
             raise failed
+
+    def _parse(
+        self,
+        chunk: bytes,
+        *,
+        plan: ReadPlan,
+        options: tuple[pacsv.ReadOptions, pacsv.ConvertOptions],
+    ) -> _Parsed:
+        """Parse one chunk into blocks, skipping its malformed lines, and filter each block.
+
+        A chunk that is not UTF-8 text first loses each line that is not (`_text_lines`), so
+        one such line costs only itself: Arrow would refuse the whole chunk. Arrow then reads
+        the rest in blocks of `plan.block_size`, skipping each row it cannot split into the
+        header's fields (`_Malformed.skip`), and `_apply` filters and converts each block.
+        Runs on a thread of the reader's pool.
+
+        Args:
+            chunk: The chunk's text, cut after a line end.
+            plan: What to read and which rows to keep.
+            options: How Arrow reads the file's rows: its read and convert options.
+
+        Returns:
+            What `_apply` returns for each block with the block's row count, the rows Arrow
+            read, and the lines skipped.
+        """
+        read_options, convert_options = options
+        malformed = _Malformed()
+        if not _is_text(chunk):
+            chunk = _text_lines(chunk, malformed)
+            if not chunk:  # every line was removed, and Arrow refuses an empty body
+                return [], 0, malformed
+        table = pacsv.read_csv(
+            pa.py_buffer(chunk),
+            read_options=read_options,
+            parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
+            convert_options=convert_options,
+        )
+        blocks = [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
+        return blocks, table.num_rows, malformed
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
         """Read and parse the file's header line, and require the plan's key headers.
@@ -644,15 +677,17 @@ class FlatFile:
 
 
 class _Malformed:
-    """The rows of one chunk that Arrow could not split into the header's fields, skipped.
+    """The malformed lines of one chunk, skipped: not UTF-8 text, or not the header's fields.
 
-    `FlatFile._blocks` makes one per chunk and passes `skip` to Arrow as the chunk's
-    `invalid_row_handler`. Arrow calls it on the parse thread reading that chunk; the reader
-    thread reads the counts only once that parse has ended, so no lock is needed.
+    `FlatFile._parse` makes one per chunk. It records each line that is not UTF-8 text
+    (`not_text`) as it removes the line, before Arrow reads the chunk, and passes `skip` to
+    Arrow as the chunk's `invalid_row_handler`. Both run on the parse thread reading that
+    chunk; the reader thread reads the counts only once that parse has ended, so no lock is
+    needed.
 
     Attributes:
         rows: The rows skipped, as Arrow counts rows (a quote that does not close makes one row
-            of several lines).
+            of several lines); a line that is not UTF-8 text is one row.
         lines: The lines those rows spanned.
     """
 
@@ -662,23 +697,45 @@ class _Malformed:
         """Start with nothing skipped."""
         self.rows = 0
         self.lines = 0
-        self._first = (0, 0, 0)
+        self._first: tuple[int, str] = (0, "")
 
-    def skip(self, row: pacsv.InvalidRow) -> str:
-        """Count a row Arrow cannot read and tell Arrow to skip it.
+    def not_text(self, number: int) -> None:
+        """Count a line that is not UTF-8 text, removed before Arrow reads the chunk.
 
         Args:
-            row: Arrow's description of the row: its number in the chunk (from 1, blank lines
-                left out), its field count, the header's, and its text, which is only counted.
+            number: The line's row number in the chunk (from 1, blank lines left out).
+        """
+        self._note(number, "is not UTF-8 text")
+
+    def skip(self, row: pacsv.InvalidRow) -> str:
+        """Count a row Arrow cannot split into the header's fields, and tell Arrow to skip it.
+
+        Args:
+            row: Arrow's description of the row: its number in the chunk Arrow was given
+                (from 1, blank lines left out), its field count, the header's, and its text,
+                which is only counted. Without the lines `not_text` removed, the number is low
+                by the removed lines before the row, but such a row is never the chunk's first:
+                the first removed line comes before it, and its number is no higher.
 
         Returns:
             `"skip"`, Arrow's word for leaving the row out and reading on.
         """
-        if not self.rows:
-            self._first = (row.number, row.actual_columns, row.expected_columns)
-        self.rows += 1
-        self.lines += row.text.count("\n") + 1
+        problem = f"has {row.actual_columns} fields where the header has {row.expected_columns}"
+        self._note(row.number, problem, lines=row.text.count("\n") + 1)
         return "skip"
+
+    def _note(self, number: int, problem: str, *, lines: int = 1) -> None:
+        """Count a skipped row, keeping the chunk's first one.
+
+        Args:
+            number: The row's number in the chunk.
+            problem: What is wrong with it, such as `"is not UTF-8 text"`.
+            lines: The lines it spans.
+        """
+        if not self.rows or number < self._first[0]:
+            self._first = (number, problem)
+        self.rows += 1
+        self.lines += lines
 
     def reason(self, rows_before: int) -> str:
         """Return where the chunk's first skipped row is in the file, and what is wrong with it.
@@ -688,13 +745,57 @@ class _Malformed:
                 only the file's first skipped row is reported.
 
         Returns:
-            Such as `"row 1234 after the header has 5 fields where the header has 9"`.
+            Such as `"row 1234 after the header has 5 fields where the header has 9"` or
+            `"row 1234 after the header is not UTF-8 text"`.
         """
-        number, fields, expected = self._first
-        return (
-            f"row {rows_before + number} after the header has {fields} fields where the "
-            f"header has {expected}"
-        )
+        number, problem = self._first
+        return f"row {rows_before + number} after the header {problem}"
+
+
+def _is_text(chunk: bytes) -> bool:
+    """Tell whether a chunk is UTF-8 text, in one Arrow validation that copies nothing.
+
+    Args:
+        chunk: The chunk's bytes.
+
+    Returns:
+        True when every byte belongs to a valid UTF-8 sequence.
+    """
+    offsets = pa.array([0, len(chunk)], pa.int64()).buffers()[1]
+    text = pa.Array.from_buffers(pa.large_string(), 1, [None, offsets, pa.py_buffer(chunk)])
+    try:
+        text.validate(full=True)
+    except pa.ArrowInvalid:
+        return False
+    return True
+
+
+def _text_lines(chunk: bytes, malformed: _Malformed) -> bytes:
+    """Remove the lines of a chunk that are not UTF-8 text, counting each in `malformed`.
+
+    Arrow refuses a whole chunk for one value that is not UTF-8 text, and cannot hand such a
+    line to `_Malformed.skip` either, so the lines are found here, one by one, only in a chunk
+    that `_is_text` refused. Massive writes no line end inside a value, so a line is a row.
+
+    Args:
+        chunk: A chunk that is not UTF-8 text.
+        malformed: The chunk's count of skipped lines.
+
+    Returns:
+        The chunk without those lines; empty when none was text.
+    """
+    kept = []
+    number = 0
+    for line in chunk.splitlines(keepends=True):
+        if line.rstrip(b"\r\n"):  # Arrow numbers rows with the blank lines left out
+            number += 1
+        try:
+            line.decode("utf-8")
+        except UnicodeDecodeError:
+            malformed.not_text(number)
+        else:
+            kept.append(line)
+    return b"".join(kept)
 
 
 _Parsed: TypeAlias = tuple[list[tuple[pa.RecordBatch, DriftReport, int, int]], int, _Malformed]

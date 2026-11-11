@@ -880,6 +880,75 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
             )
 
 
+def _trade_line(n: int, *, ticker: bytes = b"AAPL", tape: bytes = b"1") -> bytes:
+    return b",,4,%d,1,1.5,%d,17410122000000000%02d,10,%s,%s,,\n" % (n, n, n, tape, ticker)
+
+
+def test_a_line_that_is_not_utf8_is_skipped_and_counted(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow refuses a whole chunk for one such line, or hands its handler text it cannot
+    # decode when the line also has the wrong field count: each line costs only itself, a
+    # byte in a header the plan does not read included.
+    rows = (
+        _trade_line(1)
+        + _trade_line(2, ticker=b"AA\xffPL")
+        + b"\n"
+        + _trade_line(3)
+        + _trade_line(4, tape=b"\xe9")
+        + b"SECRET,1\n"
+        + _trade_line(5).replace(b"\n", b",\xffSECRET\n")
+        + _trade_line(6)
+    )
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    result = table(file, plan())
+    assert result["Id"].to_pylist() == ["1", "3", "6"]
+    assert file.rows_read == 3
+    assert file.malformed_lines == 4
+    assert file.malformed_reason == "row 2 after the header is not UTF-8 text"
+
+
+def test_the_first_malformed_line_is_reported_whichever_its_kind(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A line with the wrong field count before a line that is not UTF-8 text: Arrow numbers
+    # the rows of the chunk without the removed line, which comes after, so the number holds.
+    rows = _trade_line(1) + b"SECRET,1\n" + _trade_line(2, ticker=b"\xff") + _trade_line(3)
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    assert table(file, plan())["Id"].to_pylist() == ["1", "3"]
+    assert (file.malformed_lines, file.malformed_reason) == (
+        2,
+        "row 2 after the header has 2 fields where the header has 13",
+    )
+
+
+def test_a_chunk_of_lines_that_are_not_utf8_is_skipped_and_numbered_in_the_file() -> None:
+    # A whole chunk of such lines leaves Arrow nothing to read; the chunks around it are read,
+    # and the first such line is numbered by the rows of every chunk before its own.
+    good = b"".join(_trade_line(n) for n in range(1, 41))
+    bad = b"".join(_trade_line(n, ticker=b"\xff") for n in range(41, 81))
+    after = b"".join(_trade_line(n) for n in range(81, 91))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + good + bad + after))
+    result = table(file, read)
+    assert result["Id"].to_pylist() == [str(n) for n in [*range(1, 41), *range(81, 91)]]
+    assert file.malformed_lines == 40
+    assert file.malformed_reason == "row 41 after the header is not UTF-8 text"
+
+
+def test_a_file_whose_every_line_is_not_utf8_fails(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    rows = _trade_line(1, ticker=b"\xff") + _trade_line(2, ticker=b"\xfe")
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
+        "lines is malformed, so the file's format may have changed; the first: row 1 after "
+        "the header is not UTF-8 text"
+    )
+
+
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
