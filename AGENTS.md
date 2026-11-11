@@ -108,7 +108,7 @@ These protect the owner's repository, money, and secrets.
   change.
 - **Compatibility starts at `0.1.0`.** Release candidates owe none: until `v0.1.0` is tagged
   (`git fetch --tags`, then `git rev-parse -q --verify refs/tags/v0.1.0`) or published on PyPI
-  (`pip index versions deephaven-massive`), nothing is kept, aliased, or shimmed. From `0.1.0` the
+  (`uv run --with pip pip index versions deephaven-massive`), nothing is kept, aliased, or shimmed. From `0.1.0` the
   library has users, and a breaking change needs the owner's permission. A change breaks when
   code written to the last release's documented contract stops working or gets a different
   documented result. When the owner requests a public change, say whether it breaks existing
