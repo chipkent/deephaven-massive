@@ -61,12 +61,12 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. Null on a row of any other class. |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Value` | double | Value of Index. |
-| `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
-| `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
-| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
-| `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
-| `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). |
+| `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
+| `ExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
+| `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
+| `SharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
+| `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `Error` | String | The error while looking for this ticker. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `GreeksDelta` | double | The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
@@ -83,9 +83,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `LastMinuteDecimalVolume` | String | The trading volume for the minute aggregate with decimal precision. This field provides support for fractional shares, representing volume as a decimal string where the fractional part is expressed in millionths. This field is only returned for stocks snapshots. From the `last_minute` object: The most recent minute aggregate for this stock. |
 | `LastMinuteTransactions` | long | The number of transactions that took place within the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this stock. |
 | `LastMinuteLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `last_minute` object: The most recent minute aggregate for this stock. |
-| `LastQuoteBid` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteBidPrice` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidSize` | double | The bid size. This represents the number of shares, or contracts for options, buyers are bidding for at the given bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
-| `LastQuoteAsk` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteAskPrice` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskSize` | double | The ask size. This represents the number of shares, or contracts for options, sellers are offering at the given ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidExchange` | long | The bid side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskExchange` | long | The ask side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
@@ -148,12 +148,12 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `OptionRoot` | `ticker` |
 | `RawSymbol` | `ticker` |
 | `Value` | `value` |
-| `DetailsContractType` | `details.contract_type` |
-| `DetailsExerciseStyle` | `details.exercise_style` |
-| `DetailsExpirationDate` | `details.expiration_date` |
-| `DetailsSharesPerContract` | `details.shares_per_contract` |
-| `DetailsStrikePrice` | `details.strike_price` |
 | `BreakEvenPrice` | `break_even_price` |
+| `ContractType` | `details.contract_type` |
+| `ExerciseStyle` | `details.exercise_style` |
+| `ExpirationDate` | `details.expiration_date` |
+| `SharesPerContract` | `details.shares_per_contract` |
+| `StrikePrice` | `details.strike_price` |
 | `Error` | `error` |
 | `Fmv` | `fmv` |
 | `GreeksDelta` | `greeks.delta` |
@@ -170,9 +170,9 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `LastMinuteDecimalVolume` | `last_minute.decimal_volume` |
 | `LastMinuteTransactions` | `last_minute.transactions` |
 | `LastMinuteLastUpdated` | `last_minute.last_updated` |
-| `LastQuoteBid` | `last_quote.bid` |
+| `LastQuoteBidPrice` | `last_quote.bid` |
 | `LastQuoteBidSize` | `last_quote.bid_size` |
-| `LastQuoteAsk` | `last_quote.ask` |
+| `LastQuoteAskPrice` | `last_quote.ask` |
 | `LastQuoteAskSize` | `last_quote.ask_size` |
 | `LastQuoteBidExchange` | `last_quote.bid_exchange` |
 | `LastQuoteAskExchange` | `last_quote.ask_exchange` |

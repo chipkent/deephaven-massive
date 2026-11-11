@@ -202,7 +202,9 @@ def test_snapshot_rows_lead_with_their_symbol(spec: DatasetSpec) -> None:
 def test_conversion_keeps_the_vendor_symbol() -> None:
     columns = _schema(forex.CONVERSION)
     assert next(iter(columns)) == "Symbol"
-    assert {"Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp"} <= set(columns)
+    assert {"Converted", "InitialAmount", "LastAskPrice", "LastBidPrice", "LastTimestamp"} <= set(
+        columns
+    )
     assert columns["LastTimestamp"] is ColumnType.INSTANT
 
 
@@ -779,7 +781,14 @@ def test_conversion_sends_the_pair_amount_and_precision(
     assert fake_rest.get_queries() == [
         ("/v1/conversion/AUD/USD", {"amount": ["100"], "precision": ["4"]})
     ]
-    columns = ("Symbol", "Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp")
+    columns = (
+        "Symbol",
+        "Converted",
+        "InitialAmount",
+        "LastAskPrice",
+        "LastBidPrice",
+        "LastTimestamp",
+    )
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
         ("C:AUDUSD", 73.14, 100.0, 1.3673344, 1.3672596, 1_605_555_313_000 * MS)
