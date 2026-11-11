@@ -400,20 +400,25 @@ plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
 
-**98. Every type a public signature names is public: `deephaven_massive.namespaces`**
-(2026-11-10). A private class as a public return type is a major API failure. The classes of
-`m.stocks` and the other fifteen namespaces were private (`_Stocks`), so API references, IDE
-hovers, and users' annotations could not name the type that holds every dataset method. The
-namespace classes are now public under the names of their properties (`Stocks`,
-`StockFinancials`, `EtfGlobal`), exported from a second public module,
-`deephaven_massive.namespaces`, which mirrors `queries`: for annotations only, and not imported
-by `import deephaven_massive`. `queries` holds what a dataset method returns; `namespaces` holds
-what the session's namespace properties return; the root holds what users construct or pass.
-`queries` also exports `AllSymbols` (the type of `dm.ALL`, named by `Symbols`) and
-`StreamBarTimespan` and `FuturesBarTimespan` (the `timespan` types of the `bars()` overloads).
-Users never construct a namespace or a query: a constructor parameter whose name starts with an
-underscore (`_core`) is internal, and its type may be private. Out of scope: private base
-classes (`Namespace`, `QueryBase`), which no signature names, and the private `MassiveError`
-subclasses raised at run time, which users catch as `dm.MassiveError`. A test walks the public
-names, the members of every class they reach, and every signature, overload, default, and
-alias, and fails on any private type.
+**98. Every type the public contract declares is public: `deephaven_massive.namespaces`**
+(2026-11-10). The public API is the declared contract users program against: the public names,
+and for each public class its documented members and their signatures, inherited ones
+included. Every type that contract declares must be public: each parameter, return, and
+property type, each type inside a public alias, and each exception a `Raises:` section
+documents. An implementation detail may stay private when the declared type is public: a
+method declared to return a public interface may return a private class that implements it; a
+public class may inherit members from a private base (`QueryBase`, `Namespace`), whose members
+are part of the public class and render with it in `help()` and in API docs; and an exception
+may be a private subclass of a documented public type (`MassiveError`), unless the docs tell
+users to catch it by its own type. A constructor users never call is no part of the contract,
+and its parameters, named with a leading underscore (`_core`), may have private types. The
+defect this fixes: `m.stocks` and the other fifteen namespace properties declared private
+classes (`_Stocks`), so no public type declared the dataset methods. The namespace classes are
+now public concrete classes named after their properties (`Stocks`, `StockFinancials`,
+`EtfGlobal`), exported from a second public module, `deephaven_massive.namespaces`, which mirrors
+`queries`: for annotations, and not imported by `import deephaven_massive`. Public interfaces
+with private implementations were rejected: they would copy about 130 method signatures and
+their docstrings. `queries` also exports the declared types `AllSymbols` (the type of
+`dm.ALL`, inside `Symbols`), `StreamBarTimespan`, and `FuturesBarTimespan` (the `timespan` types
+of the `bars()` overloads). A test walks the contract and fails on any private type it
+declares.

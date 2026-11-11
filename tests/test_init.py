@@ -7,6 +7,7 @@ import importlib
 import importlib.metadata
 import inspect
 import json
+import re
 import subprocess
 import sys
 import typing
@@ -233,17 +234,21 @@ def _in_package(module: str | None) -> bool:
 
 
 class _PublicApiWalk:
-    """Walk everything reachable from the public modules and record each private type named.
+    """Walk the declared public contract and record each private type it declares.
 
-    A type is private when the package defines it and no public module exports it: a class or
-    function whose `__module__` is a package module, or an alias a package module assigns at
-    its top level. The walk covers each public name; each member of each class reached,
-    inherited ones included: methods, dunders, properties, cached properties, class-level
-    values, and annotated attributes; and each signature and overload, with its parameters,
-    defaults, and return. A class or alias reached through an annotation is walked in turn, so
-    a sub-namespace returned by a property is checked like a top-level one. A constructor
-    parameter whose name starts with an underscore is internal (a namespace's session core),
-    so its type is not checked; on any other method, such a parameter is checked.
+    The contract is the public names of the public modules and, for each public class, its
+    members, inherited ones included. Every type that contract declares must be public: each
+    parameter, return, and property type, each class-level value's and annotated attribute's
+    type, each default's type, each type inside an alias, and each exception a `Raises:`
+    section documents. A type is private when the package defines it and no public module
+    exports it: a class or function whose `__module__` is a package module, or an alias a
+    package module assigns at its top level. A class a declaration names is walked in turn, so
+    a sub-namespace returned by a property is checked like a top-level one.
+
+    An implementation detail may stay private: a private base class (its members are walked as
+    the public class's own), and the runtime class of a value declared as a public type. A
+    constructor parameter whose name starts with an underscore is internal (a namespace's
+    session core), so its type is not checked; on any other method, such a parameter is.
     """
 
     def __init__(self, modules: tuple[ModuleType, ...]) -> None:
@@ -367,6 +372,16 @@ class _PublicApiWalk:
                 if parameter.default is not inspect.Parameter.empty:
                     self.check_object(type(parameter.default), f"{where}({parameter.name}=)")
             self.check_annotation(signature.return_annotation, module, f"{where} ->")
+        self.check_raises(function, where)
+
+    def check_raises(self, function: Callable[..., object], where: str) -> None:
+        """Check that each exception a `Raises:` section documents is builtin or public."""
+        public_names = {path.rpartition(".")[2] for path in self.public.values()}
+        for name in _documented_raises(function):
+            builtin = getattr(builtins, name, None)
+            is_builtin = isinstance(builtin, type) and issubclass(builtin, BaseException)
+            if not is_builtin and name not in public_names:
+                self.findings.add(f"{where} raises: {name}")
 
     def check_annotation(self, annotation: object, module: ModuleType, where: str) -> None:
         """Check each name an annotation uses, resolved in the module that wrote it."""
@@ -379,6 +394,27 @@ class _PublicApiWalk:
         for node in ast.walk(ast.parse(annotation, mode="eval")):
             if isinstance(node, ast.Name | ast.Attribute):
                 self.check_object(_resolve(names, node, where), where, ast.unparse(node))
+
+
+_RAISES_ENTRY = re.compile(r"^    ([A-Za-z_][\w.]*):")
+
+
+def _documented_raises(function: Callable[..., object]) -> frozenset[str]:
+    """Return the exception names a function's Google `Raises:` section lists.
+
+    Returns:
+        Each name, without its module path, such as `MassiveError` for `dm.MassiveError`.
+    """
+    names: set[str] = set()
+    inside = False
+    for line in (inspect.getdoc(function) or "").splitlines():
+        if line == "Raises:":
+            inside = True
+        elif inside and line and not line.startswith(" "):
+            inside = False
+        elif inside and (entry := _RAISES_ENTRY.match(line)) is not None:
+            names.add(entry.group(1).rpartition(".")[2])
+    return frozenset(names)
 
 
 def _top_level_assignments(module: ModuleType) -> frozenset[str]:
@@ -514,6 +550,24 @@ def _private_default(self: object, value: object = _Hidden()) -> None:
     raise NotImplementedError
 
 
+def _documents_a_private_error(self: object) -> None:
+    """Fail.
+
+    Raises:
+        ValueError: Never; a builtin is public.
+        dm.MassiveError: Never; a public type, by its public path.
+        RowDataError: Always; a private type.
+    """
+    raise NotImplementedError
+
+
+class _Stocks:
+    """A stand-in for the private namespace class `m.stocks` once declared."""
+
+
+_Stocks.__module__ = "deephaven_massive._session"
+
+
 @pytest.mark.parametrize(
     ("member", "finding"),
     [
@@ -529,6 +583,8 @@ def _private_default(self: object, value: object = _Hidden()) -> None:
             "planted ->: planted_tables.session_core.SessionCore",
         ),
         (_private_default, "planted(value=): _Hidden"),
+        (property(_planted({"return": "_Stocks"})), "planted ->: _Stocks"),
+        (_documents_a_private_error, "planted raises: RowDataError"),
         (_Hidden(), "planted: _Hidden"),
     ],
 )
@@ -542,9 +598,11 @@ def test_the_walk_finds_a_private_type_planted_in_a_public_class(
     monkeypatch.setattr(sys.modules[__name__], "NormalizedSymbols", alias, raising=False)
     tables = importlib.import_module("deephaven_massive._tables")
     monkeypatch.setattr(session_module, "planted_tables", tables, raising=False)
+    monkeypatch.setattr(session_module, "_Stocks", _Stocks, raising=False)
     monkeypatch.setattr(session_module.MassiveSession, "planted", member, raising=False)
     walk = _walk_public_api()
     assert f"deephaven_massive.MassiveSession.{finding}" in walk.findings
+    assert {found for found in walk.findings if ".planted" not in found} == set()
 
 
 def test_a_constructor_skips_its_underscore_parameters() -> None:
