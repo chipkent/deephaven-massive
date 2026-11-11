@@ -108,6 +108,7 @@ __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
     "DROPPED_COUNT_INTERVAL",
+    "FINAL_STATES",
     "FLAT_FILES_AND_REST",
     "GAPS_SHOWN",
     "QUERY_SHOWN",
@@ -259,6 +260,9 @@ _NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
+FINAL_STATES: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
+"""The states no failure changes any more: a failed or closed table, and a read whose rows have
+landed. `close()` and a dying library thread fail only the tables in none of them."""
 _NOT_A_COLUMN: Final = "not_a_column"
 """The metadata key of a row field that `as_row` leaves out of the table."""
 

@@ -411,6 +411,23 @@ class MassiveConfig:
             `adjusted=False`. Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a `poll()` table
             lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
             a `dm.PollMode.REPLACE` poll drops its rows.
+        malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
+            readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
+            Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` when a `history()` read from flat files must have every row
+            of each file it reads.
+
+            - `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning
+              per file with the count of such lines and the first one's row number. The warning
+              never quotes the line.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
+              first such line's row. A `history()` of a live table instead marks every symbol
+              of the read `FAILED` in `m.symbol_reads()`.
+
+            Only a `history()` that reads flat files meets such a line. Under any setting, a
+            file whose every line is malformed fails the read.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -434,14 +451,15 @@ class MassiveConfig:
     unlisted_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
     unavailable_symbols: OnError = OnError.LOG
+    malformed_rows: OnError = OnError.LOG
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
-        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, or
-        `unavailable_symbols` that is not a `dm.OnError`, a `connection_taken` that is not a
-        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a
-        `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
+        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
+        `unavailable_symbols`, or `malformed_rows` that is not a `dm.OnError`, a
+        `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
+        not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
         number that is not positive raises `ValueError`, though `max_outage` may be zero.
@@ -511,6 +529,7 @@ class MassiveConfig:
         _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
+        _require_enum(self.malformed_rows, OnError, "malformed_rows")
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
         _check_url("rest_base_url", self.rest_base_url)
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
@@ -1198,7 +1217,10 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
 
 
 def _on_error(node: yaml.Node) -> OnError:
-    """Convert a symbol setting's word: `raise`, `log`, or `ignore` (`_word`).
+    """Convert the word of a setting of what to do on an error: `raise`, `log`, or `ignore`.
+
+    The settings are `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
+    `unavailable_symbols`, and `malformed_rows` (`_word`).
 
     Args:
         node: The value's node.
@@ -1206,7 +1228,7 @@ def _on_error(node: yaml.Node) -> OnError:
     Returns:
         The `OnError` member.
     """
-    return _word(node, OnError, "a symbol setting")
+    return _word(node, OnError, "an error setting")
 
 
 def _connection_taken(node: yaml.Node) -> ConnectionTaken:
@@ -1381,6 +1403,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "unlisted_symbols": _on_error,
     "unreadable_symbols": _on_error,
     "unavailable_symbols": _on_error,
+    "malformed_rows": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""
@@ -1584,6 +1607,9 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "unavailable_symbols": _Example(
         OnError.LOG, "A symbol Massive answers as not found: log, ignore, or raise."
     ),
+    "malformed_rows": _Example(
+        OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
+    ),
     "websocket_hosts": _Example(
         {AssetClass.INDICES: BUSINESS_HOST},
         "The WebSocket host per asset class: index values stream only from business.massive.com.",
@@ -1764,7 +1790,7 @@ def _value_forms() -> dict[str, str]:
         as `4` `` for `max_concurrency`.
     """
     delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
-    symbol_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
+    error_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
     url = (
         "An `https` URL of a host alone, or `http` for your own machine, such as "
         "`https://api.massive.com`"
@@ -1778,10 +1804,11 @@ def _value_forms() -> dict[str, str]:
         "flush_interval": "A positive number of seconds, such as `0.1`",
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",
         "max_concurrency": "A positive whole number, such as `4`",
-        "noncanonical_symbols": symbol_words,
-        "unlisted_symbols": symbol_words,
-        "unreadable_symbols": symbol_words,
-        "unavailable_symbols": symbol_words,
+        "noncanonical_symbols": error_words,
+        "unlisted_symbols": error_words,
+        "unreadable_symbols": error_words,
+        "unavailable_symbols": error_words,
+        "malformed_rows": error_words,
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "

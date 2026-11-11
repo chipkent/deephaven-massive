@@ -368,7 +368,7 @@ its nested namespaces have their own (`stock_financials.py`, `stock_filings.py`)
 # --- Namespaces ---------------------------------------------------------------------------------
 
 
-class Stocks(Namespace):
+class Stocks(Namespace):  # noqa: PLR0904 - a facade: one delegating method per dataset or dataset namespace, no state beyond the core
     """The US stock datasets, reached as `m.stocks`.
 
     Its methods cover trades, quotes, bars, limit up-limit down bands, imbalances, fair market

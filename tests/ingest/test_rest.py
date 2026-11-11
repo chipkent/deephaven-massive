@@ -3855,7 +3855,7 @@ def test_fetch_rows_reads_every_page_raw(
 
 def _join_reads(m: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end.
-    for state in list(m._core._workers.values()):
+    for state in list(m._core.workers._workers.values()):
         cast("Any", state.fail).__self__.thread.join(30.0)
 
 
@@ -3871,7 +3871,7 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
     rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
     assert fake_rest.requests == []
-    assert session._core._workers == {}
+    assert session._core.workers._workers == {}
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(

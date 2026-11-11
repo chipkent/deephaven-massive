@@ -83,9 +83,11 @@ its type, or an `Instant` other than the time column that fails the routine, is 
 logs one WARNING per (dataset, transport, header) through the session's `DriftRegistry`. A row
 whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
 fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
-WARNING per dataset with the running count). A line that does not split into the header's
-fields (too few or too many, or a quote that does not close) is skipped, and each file that
-had one logs one WARNING with the count and the first one's row number, never its text. A file
+WARNING per dataset with the running count). A malformed line, one that is not UTF-8 text or
+does not split into the header's fields (too few or too many, or a quote that does not close),
+follows `MassiveConfig.malformed_rows`: under `LOG`, the default, it is skipped and each file
+that had one logs one WARNING with the count and the first one's row number, never its text;
+under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with `RowDataError`. A file
 that lacks a key header fails the call with `MassiveError`, and so does a file whose every row
 is malformed or whose every row of the requested symbols was dropped, the sign of a change in
 the file's format rather than of one odd row.
@@ -162,6 +164,7 @@ from deephaven_massive._errors import (
     EntitlementError,
     ErrorCause,
     MassiveError,
+    RowDataError,
     from_wire,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
@@ -1418,12 +1421,13 @@ class FlatFileHistory:
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once. A file with lines that do not split into the header's
-        fields logs one WARNING with their count and the first one's row number and field
-        count (`FlatFile.malformed_reason`). Then logs one DEBUG line with the rows after each
-        step: read, of the requested symbols, kept by the window (and a readable key), and
-        kept as whole bars of the requested sessions, so an empty table can be traced to the
-        step that emptied it.
+        read again is counted once. A file with malformed lines (not UTF-8 text, or not the
+        header's fields) follows `MassiveConfig.malformed_rows` (`_log_malformed`): under `LOG`, it
+        logs one WARNING with their count and the first one's row number and fault
+        (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
+        one DEBUG line with the rows after each step: read, of the requested symbols, kept by
+        the window (and a readable key), and kept as whole bars of the requested sessions, so
+        an empty table can be traced to the step that emptied it.
 
         Args:
             batches: The file's batches, one per block, each with its drift.
@@ -1435,6 +1439,11 @@ class FlatFileHistory:
 
         Returns:
             The file's tables, in file order.
+
+        Raises:
+            RowDataError: Under `malformed_rows=RAISE`, at the first block handed on after the
+                file's first malformed line (`_malformed_message`); every chunk hands on one,
+                so a run of such lines fails the read before the file ends.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
@@ -1442,8 +1451,11 @@ class FlatFileHistory:
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
         served = 0
+        setting = self._core.config.malformed_rows
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
+                if file.malformed_lines and setting is OnError.RAISE:
+                    raise RowDataError(_malformed_message(transform.dataset, file))
                 rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
                 served += rows.num_rows
                 found = found.merge(drift).merge(odd)
@@ -1464,15 +1476,7 @@ class FlatFileHistory:
                 tables.append(_convert(pending, transform))
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
-            # The reason gives the row's number and field count, never the line's text.
-            logger.warning(
-                "%s: skipped %d malformed line(s) of %s that do not split into the header's "
-                "fields, the first: %s; the file's other rows are kept",
-                transform.dataset,
-                file.malformed_lines,
-                file.location,
-                file.malformed_reason,
-            )
+            _log_malformed(transform.dataset, file, setting)
         logger.debug(
             "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
             "whole bars",
@@ -1484,6 +1488,50 @@ class FlatFileHistory:
             served,
         )
         return tables
+
+
+def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
+    """Log the malformed lines of a file read to its end, under `malformed_rows` `LOG` or `IGNORE`.
+
+    The line gives the lines' count and the first one's row number and fault
+    (`FlatFile.malformed_reason`), never a line's text. Under `RAISE`, the read failed at the
+    first block after such a line, so no file with one is read to its end.
+
+    Args:
+        dataset: The dataset read, such as `stocks.trades`.
+        file: The file, with at least one malformed line.
+        setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
+    """
+    logger.log(
+        logging.WARNING if setting is OnError.LOG else logging.DEBUG,
+        "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",
+        dataset,
+        file.malformed_lines,
+        file.location,
+        file.malformed_reason,
+    )
+
+
+def _malformed_message(dataset: str, file: FlatFile) -> str:
+    """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
+
+    A `RowDataError` carries it (`ErrorCause.LIBRARY_DEFECT`: data from Massive the library
+    can't read), and a retry of the read would meet the same line.
+
+    Args:
+        dataset: The dataset read, such as `stocks.trades`.
+        file: The file, with at least one malformed line.
+
+    Returns:
+        The message: the dataset, the file, the first such line's row number and fault (never
+        its text), and the setting that skips such lines.
+    """
+    return (
+        f"{dataset}: {file.location} holds a malformed line, the first: "
+        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, pass "
+        "MassiveConfig(malformed_rows=dm.OnError.LOG), or write 'malformed_rows: log' in the "
+        "settings file"
+    )
 
 
 def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:

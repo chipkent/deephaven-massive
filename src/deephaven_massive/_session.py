@@ -203,7 +203,7 @@ def _register(core: SessionCore) -> None:
             return
 
 
-class MassiveSession:
+class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namespaces, cross-asset snapshots, four diagnostics tables, release/close and the context-manager protocol; each member delegates to the core
     """Your connection to Massive: its datasets and the live tables you make from them.
 
     Create a session inside a Deephaven server, in its console or an application script. Its

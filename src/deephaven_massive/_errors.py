@@ -448,11 +448,12 @@ class CutShortError(MassiveError):
 
 
 class RowDataError(PermanentError):
-    """REST rows that break their dataset's schema.
+    """Rows from Massive that break their dataset's schema.
 
-    A page whose every row was dropped because a key could not be read (one odd row is dropped
-    and counted, never raised), a symbol spelling the library cannot read under
-    `unreadable_symbols=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
+    A REST page whose every row was dropped because a key could not be read (one odd row is
+    dropped and counted, never raised), a symbol spelling the library cannot read under
+    `unreadable_symbols=RAISE`, a flat-file line that is not a readable row under
+    `malformed_rows=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
     dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
     a `poll()` table fails with it, since the next cycle would fail alike. Data from Massive
     that the library cannot read is the library's to fix, so its cause is

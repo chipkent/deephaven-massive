@@ -29,13 +29,13 @@ its `view` and `update_view` refuse stateful columns, so a user could not call t
 result. `ungroup`'s columns are stateless.
 
 **Its row in `m.streams()`.** `Kind=read`, keyed by the call's id: `LOADING` from the call,
-then `DONE` with `RowsPublished` once the rows have landed (`SessionCore.finish_read`), or
+then `DONE` with `RowsPublished` once the rows have landed (`WorkerTables.finish_read`), or
 `FAILED` with the error. The rows land on the update cycle after the publish, so `DONE` is
 recorded by a listener on the ungrouped table (`_RowsLanded`), in the cycle that adds the rows:
 the row reaches `m.streams()` on a later cycle, so whoever sees `DONE` there sees the rows in the
 result. An empty result adds no rows and has nothing to wait for; the read records it `DONE`
 as soon as it is published. The read is a *worker table* of the session core
-(`SessionCore.track_worker`), as a `poll()` table is, so its record keeps the session alive
+(`WorkerTables.track`), as a `poll()` table is, so its record keeps the session alive
 while the result is held, or still in use while it loads, and `m.close()` fails it while it is
 loading. Once the read is `DONE` and its result released, the record leaves the session: a
 table derived from the result keeps its rows without it.
@@ -215,7 +215,7 @@ class BackgroundRead:
         self._thread.start()
 
     def abandon(self) -> None:
-        """Stop a read whose thread will never start (`SessionCore.track_worker`)."""
+        """Stop a read whose thread will never start (`WorkerTables.track`)."""
         self._stop.set()
 
     def release(self) -> None:
@@ -225,12 +225,12 @@ class BackgroundRead:
         the result may still want its rows; the read stops when the blink table shuts down.
         The session is alive: the read's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).release_worker(self._call)
+        cast("SessionCore", self._core()).workers.release(self._call)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the read and fail its table, once: the session closed, or a library thread died.
 
-        The session's hook for the read (`SessionCore.track_worker`), called outside every
+        The session's hook for the read (`WorkerTables.track`), called outside every
         lock while the session is alive (a read that is `DONE` may have left the registry
         meanwhile; it fails nothing).
 
@@ -259,7 +259,7 @@ class BackgroundRead:
             published = self._published
         if published is not None:
             logger.debug("call %d done at the close: its %d rows land next", self._call, published)
-            core.finish_read(self._call, published)
+            core.workers.finish_read(self._call, published)
         return False
 
     def _read(self) -> None:
@@ -369,7 +369,7 @@ class BackgroundRead:
             self._published = rows
         logger.debug("call %d published: %d rows in %.3f s", self._call, rows, self._took)
         if not rows:  # no rows to land: the empty result is already what the table shows
-            core.finish_read(self._call, 0)
+            core.workers.finish_read(self._call, 0)
 
     def _fail_once(self, core: SessionCore, error: MassiveError) -> bool:
         """Mark the row `FAILED`, then fail the table, once; never after the rows landed.
@@ -406,7 +406,7 @@ class _RowsLanded(TableListener):
     so its one update marks the row `DONE` with the number of rows it added. An empty result
     never changes, and the read marks it `DONE` itself. It runs on an update-graph thread,
     holding the update graph's lock: it only reads the update's row count and records the
-    state under `registry_lock` (`SessionCore.finish_read`), which never blocks.
+    state under `registry_lock` (`WorkerTables.finish_read`), which never blocks.
     """
 
     def __init__(self, core_ref: weakref.ref[SessionCore], call: int) -> None:
@@ -437,7 +437,7 @@ class _RowsLanded(TableListener):
         logger.debug("call %d done: its %d rows landed in the result", self._call, rows)
         core = self._core_ref()
         if core is not None:
-            core.finish_read(self._call, rows)
+            core.workers.finish_read(self._call, rows)
 
     @override
     def on_error(self, e: Exception) -> None:
@@ -493,7 +493,7 @@ def _build(
         blink, publisher = blink_publisher(
             f"massive.{spec.name}#{call}",
             _grouped_columns(schema),
-            on_shutdown=core.worker_shutdown_callback(call, stop),
+            on_shutdown=core.workers.shutdown_callback(call, stop),
             release_later=core.release_later,
         )
         built.append(publisher)
@@ -558,7 +558,7 @@ def open_read(
     Raises:
         MassiveError: If the session closed after the read was registered but before its
             thread started (`"MassiveSession #1 is closed"`). One closed before the read
-            could be registered raises the `MassiveError` of `SessionCore.track_worker`.
+            could be registered raises the `MassiveError` of `WorkerTables.track`.
     """
     stop = core.read_stop()
     with entered(core.exec_ctx):
@@ -589,6 +589,6 @@ def open_read(
         )
         return read, row
 
-    read = core.track_worker(result, scope, make)
+    read = core.workers.track(result, scope, make)
     read.start()
     return result

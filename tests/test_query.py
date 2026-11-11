@@ -1415,7 +1415,7 @@ def test_every_stream_shape_is_described(
         assert_described(massive_session, TRADES_SPEC, result)
     assert results[0].is_blink
     # The stream's own blink table is never described: every result is a copy.
-    streams = massive_session._core._streams.values()
+    streams = massive_session._core.streams._streams.values()
     blinks = [state.handle.blink for state in streams if state.handle is not None]
     assert blinks
     assert all("TableDescription" not in blink.attributes() for blink in blinks)
@@ -1869,7 +1869,7 @@ def _futures(count: int) -> list[str]:
 
 def _join_reads(session: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end, then for its row to be written.
-    for state in list(session._core._workers.values()):
+    for state in list(session._core.workers._workers.values()):
         cast("Any", state.fail).__self__.thread.join(TIMEOUT)
 
 
@@ -1939,7 +1939,7 @@ def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder)
     with pytest.raises(TypeError, match="wait must be a bool, not str"):
         trades(massive_session).history("2025-03-03", wait=cast("bool", "no"))
     assert rest.calls == []
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_wait_false_raises_argument_errors_at_the_call(
@@ -1963,7 +1963,7 @@ def test_wait_false_raises_argument_errors_at_the_call(
         news(massive_session).fetch(wait=False)
     assert rest.calls == []
     assert flat.calls == []
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
@@ -2361,7 +2361,7 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
     }
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     rest.outcomes = {}
     rest.raises = dm.AuthenticationError("HTTP 401: wrong key")  # the read fails as a unit
     with pytest.raises(dm.AuthenticationError, match="wrong key"):

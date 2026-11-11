@@ -716,18 +716,18 @@ class WsConnections:
 
         Runs on whichever thread dropped the table's last reference (the reaper, an
         update-graph thread, a gRPC thread, or Deephaven's liveness-cleanup thread). It does
-        two things only: the registry updates (`SessionCore.stream_shut_down`, then the
+        two things only: the registry updates (`SharedStreams.shut_down`, then the
         stream's lease, under the group's lock) and one `call_soon_threadsafe` to the
         connection's loop, which releases the topics there. A closed loop (the connection ended)
         is logged at INFO. It never raises. The session is alive: the stream's record keeps it
-        in the live set until `stream_shut_down` has run, and while the stream opens the opening
-        caller holds it.
+        in the live set until `SharedStreams.shut_down` has run, and while the stream opens the
+        opening caller holds it.
 
         Args:
             stream_id: The stream.
         """
         try:
-            cast("SessionCore", self._core()).stream_shut_down(stream_id)
+            cast("SessionCore", self._core()).streams.shut_down(stream_id)
             with self._lock:
                 connection = self._forget(stream_id)
             if connection is not None:

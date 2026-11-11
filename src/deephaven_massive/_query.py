@@ -50,7 +50,7 @@ dataset takes one value (`Request.value_table`: an option chain's underlying, a 
 code) is read value by value, each as if passed alone (`RestTransport.fetch_by_value`): a static
 one once, a refreshing one followed by `fetch()` the same way, keyed by the value, and re-read by
 each `poll()` cycle. Live stream results are shaped
-and tracked by the session (`SessionCore.stream_result`), so every stream verb shares one stream per
+and tracked by the session (`SharedStreams.result`), so every stream verb shares one stream per
 (dataset, channel, symbol set).
 
 A dataset's class follows from the transports its spec declares (`query_class`), and a
@@ -129,6 +129,7 @@ from deephaven_massive._tables.execution_context import entered, refuse_update_g
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
 from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.transports import (
     FlatFileTransport,
@@ -1392,7 +1393,7 @@ class StreamQuery(QueryBase):
         if isinstance(symbols, SymbolTable):
             _read_symbol_table(self._core, spec, symbols, query=repr(self), live=True)
         schema = self._core.dataset_schema(spec)
-        return self._core.stream_result(
+        return self._core.streams.result(
             spec,
             request,
             channel=self._channel,
@@ -1412,7 +1413,7 @@ class StreamQuery(QueryBase):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        SessionCore.stream_result,
+        SharedStreams.result,
         StreamTransport.open_stream,
         StreamTransport.tradable_pairs,
     )
@@ -1457,7 +1458,7 @@ class StreamQuery(QueryBase):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        SessionCore.stream_result,
+        SharedStreams.result,
         StreamTransport.open_stream,
         StreamTransport.tradable_pairs,
     )
@@ -1501,7 +1502,7 @@ class StreamQuery(QueryBase):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        SessionCore.stream_result,
+        SharedStreams.result,
         StreamTransport.open_stream,
         StreamTransport.tradable_pairs,
         require_positive_int,
@@ -1613,7 +1614,7 @@ class SymbolStreamQuery(StreamQuery):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        SessionCore.stream_result,
+        SharedStreams.result,
         StreamTransport.open_stream,
         StreamTransport.tradable_pairs,
         _last_by_keys,
