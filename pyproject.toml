@@ -180,9 +180,9 @@ namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
 # Besides ALL: the preview rules selected by name. DOC201 and DOC501 check that docstring
-# Returns and Raises sections cover the code; PLR0904, PLR0914, and PLR0916 are the
-# pylint limits on public methods, local variables, and boolean expressions.
-select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916"]
+# Returns and Raises sections cover the code; PLR0904, PLR0914, PLR0916, and PLR1702 are the
+# pylint limits on public methods, local variables, boolean expressions, and nested blocks.
+select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916", "PLR1702"]
 # Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
 # every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
 # family, ...) to their preview behavior.
@@ -233,10 +233,9 @@ max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-positional-args = 3
-# A namespace class has one public factory method per dataset, so its size is the API's: the
-# stocks namespace holds 21, its two nested namespaces included. The limit still catches any
-# other class that grows past it.
-max-public-methods = 24
+# Ruff's default. Only a class whose size is the API's (`MassiveSession` and the stocks
+# namespace) passes it, through a `noqa` that says so; any other class splits instead.
+max-public-methods = 20
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

@@ -107,7 +107,8 @@ These protect the owner's repository, money, and secrets.
   of public modules decides it. A fix that makes code do what its docs say is not a public
   change.
 - **Compatibility starts at `0.1.0`.** Release candidates owe none: until `v0.1.0` is tagged
-  (`git fetch --tags`, then `git rev-parse -q --verify refs/tags/v0.1.0`), nothing is kept, aliased, or shimmed. From `0.1.0` the
+  (`git fetch --tags`, then `git rev-parse -q --verify refs/tags/v0.1.0`) or published on PyPI
+  (`pip index versions deephaven-massive`), nothing is kept, aliased, or shimmed. From `0.1.0` the
   library has users, and a breaking change needs the owner's permission. A change breaks when
   code written to the last release's documented contract stops working or gets a different
   documented result. When the owner requests a public change, say whether it breaks existing
@@ -119,8 +120,8 @@ These protect the owner's repository, money, and secrets.
 - **One name per field.** A column for a field Massive also serves in another dataset takes
   the name that dataset already uses, so a user's query strings work across tables. The spec
   refresh's `field-spelling` gate stops on fields Massive describes alike; it can't see fields
-  described in other words, so also compare a new dataset's columns with those of datasets
-  serving the same objects (`docs/dev/spec-refresh.md`). A match proven from Massive's
+  described in other words, so also compare every new or changed column, in a new dataset or an
+  existing one, with those of datasets serving the same objects (`docs/dev/spec-refresh.md`). A match proven from Massive's
   documentation of both fields, their types, and units gets one name through an
   `overrides.SPELLINGS` entry; a suspected but unproven match keeps its names and goes to the
   owner for a verdict, with both fields' documentation quoted and a live test that settles it.

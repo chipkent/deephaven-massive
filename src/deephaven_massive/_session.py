@@ -203,7 +203,7 @@ def _register(core: SessionCore) -> None:
             return
 
 
-class MassiveSession:
+class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namespaces, cross-asset snapshots, four diagnostics tables, release/close and the context-manager protocol; each member delegates to the core
     """Your connection to Massive: its datasets and the live tables you make from them.
 
     Create a session inside a Deephaven server, in its console or an application script. Its
@@ -503,8 +503,8 @@ class MassiveSession:
             A live table keyed by `StreamId`, with these columns:
 
             - `Kind`: `stream` for a stream method's table, and `poll` for a `poll()` table. `read`
-              is a background read (`wait=False`), or a `history()` or `fetch()` that follows a
-              watchlist.
+              is a `history()` or `fetch()` that reads in the background (without `wait=True`)
+              or follows a watchlist.
             - `Dataset`: the dataset's name, such as `stocks.trades`.
             - `Query`: the call that built the query, such as `m.stocks.trades('AAPL')`.
             - `Symbols`: the symbols it reads now; empty for a dataset that takes none.
@@ -632,10 +632,10 @@ class MassiveSession:
             raise ValueError(
                 "table is not a live result of this session: release() takes a table that this "
                 "session returned from blink(), append_only(), ring(), last_by(), poll(), "
-                "fetch(wait=False), history(..., wait=False), history() or fetch() of a "
-                "refreshing symbol table, connections(), streams(), rate_limits(), or "
+                "fetch(), history(), connections(), streams(), rate_limits(), or "
                 "symbol_reads(). For a table derived from one, release the live table it came "
-                "from; a static fetch() or history() table has nothing to release"
+                "from; a static fetch(wait=True) or history(..., wait=True) table has nothing to "
+                "release"
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)
@@ -668,7 +668,9 @@ class MassiveSession:
     def __enter__(self) -> Self:
         """Enter a `with` block; the session closes when the block ends.
 
-        Use it in a script whose results are static: its live tables fail when the block ends.
+        Use it in a script whose results are static: its live tables fail when the block ends,
+        and so does a `fetch()` or `history()` still reading in the background. Pass `wait=True`
+        to read the rows inside the block.
 
         Returns:
             The session.

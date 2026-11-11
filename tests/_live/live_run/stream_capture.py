@@ -713,7 +713,7 @@ def run_stream_day(
     record_gap(folder, clock.now(), day_start=day_start)
     options: list[str] = []
     if any(u.startswith("options") for u in units):
-        chain = m.options.chain("SPY").fetch()
+        chain = m.options.chain("SPY").fetch(wait=True)
         options = option_contracts(rows_of(chain), today)
     streams = stream_day_streams(units, tiers=tiers, today=today, options=options)
     recorder = Recorder(folder)

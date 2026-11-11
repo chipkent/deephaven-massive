@@ -10,9 +10,9 @@ replaces:
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
-  table, per background read (`wait=False`), and per followed read (a `history()` or `fetch()` that
-  follows a refreshing symbol table), told apart by `Kind`, with the `repr` of the query that opened
-  it in `Query`. Keyed by `StreamId`.
+  table, per background read (a `fetch()` or `history()` without `wait=True`), and per followed
+  read (a `history()` or `fetch()` that follows a refreshing symbol table), told apart by `Kind`,
+  with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
 - **symbol_reads**: one row per symbol of each followed read: whether it is queued, loading,
   waiting to retry, done, failed, removed, stopped, or closed, with its source, its rows, its
   attempts, and its latest error. Keyed by `StreamId` and `Symbol`. The session's follow
@@ -108,6 +108,7 @@ __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
     "DROPPED_COUNT_INTERVAL",
+    "FINAL_STATES",
     "FLAT_FILES_AND_REST",
     "GAPS_SHOWN",
     "QUERY_SHOWN",
@@ -181,7 +182,7 @@ class StreamKind(StrEnum):
     Attributes:
         STREAM: A WebSocket stream, shared by every live verb of an equal query.
         POLL: A `poll()` table, which re-reads a REST dataset on an interval.
-        READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
+        READ: A background read, `fetch()` or `history()` without `wait=True`, whose
             table fills once, when its download completes; or a followed read, a `history()`
             or `fetch()` of a refreshing symbol table, whose table gains and drops each symbol's
             rows as the symbol table changes.
@@ -259,6 +260,9 @@ _NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
+FINAL_STATES: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
+"""The states no failure changes any more: a failed or closed table, and a read whose rows have
+landed. `close()` and a dying library thread fail only the tables in none of them."""
 _NOT_A_COLUMN: Final = "not_a_column"
 """The metadata key of a row field that `as_row` leaves out of the table."""
 

@@ -24,8 +24,9 @@ Every text it writes passes through the secret filter (`SecretFilter.clean`). An
 ends `passed`; `refused by your plan` when it raised `EntitlementError`, a refusal by
 Massive because of the key's plans, which is expected on a free key; or `failed` with any
 other error, which is a finding to report. A stream that Massive refuses fails after its
-example returns, so after the last example the run waits `REFUSAL_WAIT` seconds and gives a
-passed example the verdict of its sessions' failed streams (`stream_verdict`). Every table the
+example returns, and so does a `fetch()` or `history()` that reads in the background, so after
+the last example the run waits `REFUSAL_WAIT` seconds and gives a passed example the verdict
+of its sessions' failed streams and reads (`stream_verdict`). Every table the
 examples make belongs to one liveness scope; at the end the runner closes every session the
 examples opened, forgets their variables, and releases that scope, so nothing they started
 outlives the run.
@@ -96,6 +97,12 @@ streams: a refused subscription fails its stream seconds after the example retur
 STREAM_REFUSAL: Final = "refused the subscription"
 """The words of a stream's `Error` when Massive's WebSocket server refused its subscription,
 a refusal by the key's plans; the connection writes them (`ws_connection`, `_refused`)."""
+
+READ_REFUSALS: Final = ("does not include", "MassiveConfig.delayed_subscriptions")
+"""Words of a background read's `Error` when it failed with `EntitlementError`, a refusal by
+the key's plans: the REST and flat-file refusals say what the plan "does not include"
+(`RestReader._dataset_error`, `_ingest/flatfiles.py`), and a refusal of delayed data names
+the setting that accepts it (`recency_labels.delayed_refusal`)."""
 
 SETTINGS_PATH: Final = "~/massive/settings.yaml"
 """The settings file the paid examples read, where the README's settings example saves it."""
@@ -277,20 +284,24 @@ def failed_streams(session: dm.MassiveSession) -> list[str]:
 
 
 def stream_verdict(outcome: Outcome, errors: list[str]) -> Outcome:
-    """Give a passed example the verdict of the streams its sessions failed after it returned.
+    """Give a passed example the verdict of the streams and reads that failed after it returned.
 
     Args:
         outcome: The example's outcome when it returned.
-        errors: The `Error` of each failed stream of the sessions it opened (`failed_streams`).
+        errors: The `Error` of each failed row of `m.streams()` of the sessions it opened
+            (`failed_streams`): streams, and reads in the background.
 
     Returns:
-        The outcome as it was when it isn't `PASSED` or no stream failed; `REFUSED` when Massive
-        refused every failed stream's subscription (`STREAM_REFUSAL`); otherwise `FAILED`. The
-        new outcome's error names the first failed stream's `Error`.
+        The outcome as it was when it isn't `PASSED` or nothing failed; `REFUSED` when Massive
+        refused every failed stream's subscription (`STREAM_REFUSAL`) and every failed read
+        (`READ_REFUSALS`); otherwise `FAILED`. The new outcome's error names the first failed
+        row's `Error`.
     """
     if outcome.status != PASSED or not errors:
         return outcome
-    status = REFUSED if all(STREAM_REFUSAL in error for error in errors) else FAILED
+    refusals = (STREAM_REFUSAL, *READ_REFUSALS)
+    refused = all(any(words in error for words in refusals) for error in errors)
+    status = REFUSED if refused else FAILED
     return Outcome(outcome.name, status, outcome.seconds, f"a stream failed: {errors[0]}")
 
 

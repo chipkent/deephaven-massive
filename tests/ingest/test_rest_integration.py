@@ -79,9 +79,9 @@ def test_a_reference_lookup_and_the_market_status_count_in_the_other_row(
     try:
         before = _attempts(rows_when(view, lambda rows: _OTHER in _attempts(rows)))
         tickers = table_rows(
-            live_session.reference.tickers(market=dm.Market.STOCKS, limit=1).fetch()
+            live_session.reference.tickers(market=dm.Market.STOCKS, limit=1).fetch(wait=True)
         )
-        status = table_rows(live_session.reference.market_status().fetch())
+        status = table_rows(live_session.reference.market_status().fetch(wait=True))
         evidence(f"reference.tickers(market=stocks, limit=1): {[r['Symbol'] for r in tickers]}")
         evidence(f"reference.market_status(): {len(status)} row")
         after = _attempts(

@@ -611,7 +611,9 @@ def test_fetch_returns_every_fixture_value(
     target = path.replace("{ticker}", "AAPL")
     fake_rest.reply(target, Reply(body))
     make = factory(rest_session, name)
-    table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch()
+    table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch(
+        wait=True
+    )
 
     # One request, for the documented maximum page, and nothing the caller did not set.
     size = page_size(spec, CATALOG.rest_path(path))
@@ -648,7 +650,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
         order=Order.DESC,
         limit=10,
         filters={"date_gte": date(2025, 1, 2), "rating_action_any_of": ["upgrades", "downgrades"]},
-    ).fetch()
+    ).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (
             "/benzinga/v1/ratings",
@@ -669,7 +671,7 @@ def test_etf_symbols_filter_the_fund(
     fake_rest.reply("/etf-global/v1/constituents", Reply(envelope([])))
     rest_session.partners.etf_global.constituents(
         "SPY", filters={"effective_date": "2025-09-18"}
-    ).fetch()
+    ).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (
             "/etf-global/v1/constituents",
@@ -689,7 +691,7 @@ def test_news_sends_an_instant_range_and_tickers(
     end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
     rest_session.partners.benzinga.news(
         symbols=["NVDA", "AAPL"], start=datetime(2025, 6, 2, 4, tzinfo=UTC), end=end
-    ).fetch()
+    ).fetch(wait=True)
     ((path, query),) = fake_rest.get_queries()
     assert path == "/benzinga/v2/news"
     assert query.pop("tickers.any_of") == ["AAPL,NVDA"]
@@ -700,7 +702,7 @@ def test_news_sends_an_instant_range_and_tickers(
     assert datetime.fromisoformat(bounds["published.gte"][0]) == datetime(2025, 6, 2, 4, tzinfo=UTC)
     assert datetime.fromisoformat(bounds["published.lt"][0]) == end
     two_days = rest_session.partners.benzinga.news(start="2025-06-02", end=date(2025, 6, 3))
-    two_days.fetch()
+    two_days.fetch(wait=True)
     ((_, query),) = fake_rest.get_queries()[1:]
     assert datetime.fromisoformat(query["published.lt"][0]) == datetime(2025, 6, 4, 4, tzinfo=UTC)
 
@@ -717,7 +719,7 @@ def test_a_date_range_is_whole_days(
 ) -> None:
     path, _ = DATASETS[name]
     fake_rest.reply(path, Reply(envelope([])))
-    factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch()
+    factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch(wait=True)
     ((_, query),) = fake_rest.get_queries()
     assert query[f"{axis}.gte"] == ["2025-07-01"]
     assert query[f"{axis}.lte"] == ["2025-07-31"]
@@ -738,7 +740,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
         fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
     table = rest_session.partners.benzinga.consensus_ratings(
         ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
-    ).fetch()
+    ).fetch(wait=True)
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(fake_rest.get_queries()) == [
         ("/benzinga/v1/consensus-ratings/BRK.B", window),
@@ -759,7 +761,7 @@ def test_a_consensus_row_without_its_ticker_fails(
     # row with a null `Symbol`.
     fake_rest.reply("/benzinga/v1/consensus-ratings/MSFT", Reply(envelope([{"buy_ratings": 9}])))
     with pytest.raises(dm.MassiveError, match="ticker"):
-        rest_session.partners.benzinga.consensus_ratings("MSFT").fetch()
+        rest_session.partners.benzinga.consensus_ratings("MSFT").fetch(wait=True)
 
 
 @pytest.mark.parametrize(("name", "param"), SYMBOL_PARAMS.items())
@@ -769,7 +771,7 @@ def test_every_symbol_list_goes_in_one_request(
     path, _ = DATASETS[name]
     spec = spec_of(name)
     fake_rest.reply(path, Reply(envelope([])))
-    factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch()
+    factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (path, {param: ["AAPL,MSFT"], "limit": [str(page_size(spec, CATALOG.rest_path(path)))]})
     ]
@@ -792,7 +794,7 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
         {"tmx_record_id": "B2", "isin": "CA0000000001", "date": "2025-07-24"},
     ]
     fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows)))
-    table = rest_session.partners.tmx.corporate_events().fetch()
+    table = rest_session.partners.tmx.corporate_events().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "Isin", "TmxRecordId"]))
     assert out == [
         {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
@@ -820,7 +822,7 @@ def test_tmx_rows_keep_global_tickers_as_written(
 
     rows_ = [event("ERIC B", "R1", "XSTO"), event("7203", "R2", "XTKS")]
     fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows_)))
-    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch()
+    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch(wait=True)
     assert sorted(row[0] for row in table.iter_tuple(cols="Symbol")) == ["7203", "ERIC B"]
     ((_, query),) = fake_rest.get_queries()
     assert query["ticker.any_of"] == ["7203,ERIC B"]
@@ -837,7 +839,7 @@ def test_the_vendor_analyst_insights_sample_without_a_ticker_has_a_null_symbol(
     body = json.loads(load_fixture(FIXTURES, "benzinga_analyst_insights_vendor_sample.json"))
     assert "ticker" not in body["results"][0]
     fake_rest.reply("/benzinga/v1/analyst-insights", Reply(body))
-    table = rest_session.partners.benzinga.analyst_insights().fetch()
+    table = rest_session.partners.benzinga.analyst_insights().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "BenzingaId", "Firm"]))
     assert out == [{"Symbol": None, "BenzingaId": "681363c1fd0258abcbedc074", "Firm": "Needham"}]
 
@@ -856,6 +858,6 @@ def test_a_benzinga_row_without_a_ticker_has_a_null_symbol(
     rows = fixture_rows(load_fixture, name)[:1]
     rows = [{key: value for key, value in rows[0].items() if key != "ticker"}]
     fake_rest.reply(path, Reply(envelope(rows)))
-    table = factory(rest_session, name)().fetch()
+    table = factory(rest_session, name)().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "BenzingaId"]))
     assert out == [{"Symbol": None, "BenzingaId": rows[0]["benzinga_id"]}]

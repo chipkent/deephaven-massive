@@ -468,7 +468,9 @@ def test_the_backfill_example_merges_history_with_live_bars(
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     rows = _wait_for_rows(names["spy"], lambda rows: len(rows) == 2, dh_to_pylist)
-    # Today's minute from history, then the live minute after it, oldest first.
+    # Today's minute from history and the live minute after it. History reads in the
+    # background, so either may land first: the rows are compared oldest first.
+    rows.sort(key=lambda r: r["TimestampStart"])
     assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
@@ -498,9 +500,10 @@ def test_the_whole_market_example_ranks_the_day(
     [block] = section_blocks(README, "whole-market-day")
     [names] = run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
-    # One row per stock, ranked by dollars traded, largest first.
-    assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
-    busiest = dh_to_pylist(names["busiest"])
+    # One row per stock, ranked by dollars traded, largest first, once the background read lands.
+    day_rows = _wait_for_rows(names["day"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in day_rows} == {"UP", "BIG", "FLAT"}
+    busiest = _wait_for_rows(names["busiest"], lambda rows: len(rows) == 3, dh_to_pylist)
     assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
     assert [r["DollarVolume"] for r in busiest] == pytest.approx(
         [50_000_000, 20_000_000, 15_000_000]

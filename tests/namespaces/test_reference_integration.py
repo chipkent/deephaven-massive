@@ -78,7 +78,7 @@ def test_key_of_the_ticker_event_type(
     rows = live_rest.get(source(Transport.REST, _EVENTS), {"id": _RENAMED}, {}, bucket="other").rows
     for row in rows:
         evidence(f"raw event keys {sorted(row)}: {row}")
-    library = table_rows(live_session.reference.ticker_events(_RENAMED).fetch())
+    library = table_rows(live_session.reference.ticker_events(_RENAMED).fetch(wait=True))
     evidence(f"library ticker_events({_RENAMED}): Type {[r['Type'] for r in library]}")
     assert rows
     assert all("type" in row for row in rows), f"events without `type`: {rows}"
@@ -108,7 +108,7 @@ def test_inactive_tickers_on_several_rows(
     rows = table_rows(
         live_session.reference.tickers(
             active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=limit
-        ).fetch()
+        ).fetch(wait=True)
     )
     repeated = _repeated((row["Symbol"],) for row in rows)
     cut = " (cut short at the limit)" if len(rows) == limit else ""
@@ -132,7 +132,7 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
     Records every repeated key. Passes when no key repeats; a repeated one means the key
     needs another column.
     """
-    rows = table_rows(live_session.reference.exchanges().fetch())
+    rows = table_rows(live_session.reference.exchanges().fetch(wait=True))
     repeated = _repeated((row["AssetClass"], row["Id"]) for row in rows)
     evidence(f"exchanges: {len(rows)} rows; repeated (AssetClass, Id): {repeated}")
     assert rows
@@ -158,7 +158,7 @@ def test_conditions_are_keyed_by_every_column(
     failure names the repeated rows.
     """
     limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
-    rows = table_rows(live_session.reference.conditions(limit=limit).fetch())
+    rows = table_rows(live_session.reference.conditions(limit=limit).fetch(wait=True))
     cut = " (cut short at the limit)" if len(rows) == limit else ""
     triples = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
     evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {triples}")

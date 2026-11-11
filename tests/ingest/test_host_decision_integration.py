@@ -279,7 +279,7 @@ def test_a_delayed_plan_is_refused_on_the_default_configuration(
     try:
         try:
             if name == "options":
-                session.options.chain("SPY").fetch()
+                session.options.chain("SPY").fetch(wait=True)
             else:
                 today = datetime.now(UTC).date()
                 queries = {

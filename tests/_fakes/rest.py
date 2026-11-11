@@ -69,9 +69,11 @@ class Reply:
             replaces the server's own, which states the real time.
         reset: Close the connection without any response (a connection reset).
         gzip: Compress the body and send `Content-Encoding: gzip`.
-        hold: When set, send only the first `hold_after` bytes of the body, then wait (ten
-            seconds at most) until the test sets this event before sending the rest, as a
-            slow server does. The rest is dropped quietly if the client has closed the
+        hold: When set, send only the first `hold_after` bytes of the body, then wait until
+            the test sets this event before sending the rest, as a slow server does. The wait
+            has no time limit, so a slow test still meets the reply it held; `close()` sets
+            the event of every reply still held, so a test that fails first never leaves a
+            handler waiting. The rest is dropped quietly if the client has closed the
             connection by then.
         hold_after: How many bytes of the (compressed) body `hold` sends before it waits.
         cut_after: When set, announce the whole body's length but send only this many bytes
@@ -177,6 +179,8 @@ class FakeRestServer:
         self._received: list[Received] = []
         self._on_request: Callable[[Received], None] | None = None
         self._tunnel_status: int | None = None
+        self._holds: list[threading.Event] = []  # every reply's hold a handler waited on
+        self._closed = False
         self._server = LoopbackHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._scheme = "http"
@@ -200,7 +204,12 @@ class FakeRestServer:
         self._thread.start()
 
     def close(self) -> None:
-        """Stop serving and release the port."""
+        """Release every held reply, stop serving, and release the port."""
+        with self._lock:
+            self._closed = True
+            holds = list(self._holds)
+        for hold in holds:
+            hold.set()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join()
@@ -284,6 +293,18 @@ class FakeRestServer:
             )
         return found
 
+    def _wait_for_release(self, hold: threading.Event) -> None:
+        """Wait, on a handler thread, until the test sets `hold` or the server closes.
+
+        Args:
+            hold: The held reply's event.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._holds.append(hold)
+        hold.wait()
+
     def _record(self, received: Received) -> None:
         """Record a request that gets no scripted reply (a `CONNECT`).
 
@@ -354,7 +375,9 @@ class FakeRestServer:
                 for name, value in reply.headers.items():
                     self.send_header(name, value)
                 self.end_headers()
-                if not _write_body(self.wfile, reply, data):
+                if not _write_body(
+                    self.wfile, reply, data, wait_for_release=fake._wait_for_release
+                ):
                     self.close_connection = True
 
             def do_CONNECT(self) -> None:
@@ -386,13 +409,20 @@ class FakeRestServer:
         return Handler
 
 
-def _write_body(out: io.BufferedIOBase, reply: Reply, data: bytes) -> bool:
+def _write_body(
+    out: io.BufferedIOBase,
+    reply: Reply,
+    data: bytes,
+    *,
+    wait_for_release: Callable[[threading.Event], None],
+) -> bool:
     """Send a reply's body as its `cut_after` and `hold` options say.
 
     Args:
         out: The connection's output stream.
         reply: The reply.
         data: The body's bytes, as `Reply.payload` returns them.
+        wait_for_release: Waits until a held reply is released (`FakeRestServer`).
 
     Returns:
         True when the connection may serve another request; False when it must close: the
@@ -406,7 +436,7 @@ def _write_body(out: io.BufferedIOBase, reply: Reply, data: bytes) -> bool:
         return True
     out.write(data[: reply.hold_after])
     out.flush()
-    reply.hold.wait(10)
+    wait_for_release(reply.hold)
     try:  # send the tail if the client still listens
         out.write(data[reply.hold_after :])
         out.flush()
