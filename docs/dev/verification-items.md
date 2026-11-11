@@ -150,7 +150,8 @@ settles it.
   it, or the quote of another pair: Massive's conversion sample for AUD to USD shows a bid of
   1.3672596, its last-quote sample for AUD/USD 0.73122. Kept as `Last*` until read, not
   `LastQuote*`. Settled by `tests/massive/refresh/test_overrides_integration.py` (Currencies
-  Starter), which compares the three in both directions of AUD/USD when they carry one quote.
+  Starter), which compares the three in both directions of AUD/USD when they carry one quote
+  and flags a conversion quote that matches the inverse pair's.
 
 ## Settled
 

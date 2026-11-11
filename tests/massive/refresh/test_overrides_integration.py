@@ -51,6 +51,9 @@ _UPDATE_TOLERANCE_NS: Final = 1_000_000_000
 _FX: Final = "currencies"
 """The rate bucket and plan class of forex and crypto, both under the Currencies plans."""
 
+_INVERSE_TOLERANCE: Final = 0.01
+"""How close, relatively, a conversion's bid must be to a price to count as that price."""
+
 _QUOTE_TRIES: Final = 4
 """How many times the forex check reads both endpoints, looking for one quote in both."""
 
@@ -78,16 +81,21 @@ def _rows(
     return client.get(source(Transport.REST, path), names, query, bucket=bucket).rows
 
 
-def _verdict(same: bool) -> str:
+def _verdict(*, compared: int, differing: int, wanted: int = 1) -> str:
     """Return the verdict word the evidence ends with.
 
     Args:
-        same: Whether the two fields carried the same quantity.
+        compared: How many cases could be compared.
+        differing: How many of them differed.
+        wanted: How many cases a settled answer needs.
 
     Returns:
-        `SAME` or `DIFFERENT`.
+        `DIFFERENT` when any compared case differed; `INCONCLUSIVE` when fewer than `wanted`
+        could be compared, since missing data proves nothing; else `SAME`.
     """
-    return "SAME" if same else "DIFFERENT"
+    if differing:
+        return "DIFFERENT"
+    return "INCONCLUSIVE" if compared < wanted else "SAME"
 
 
 def _nanoseconds(stamp: int) -> int:
@@ -113,16 +121,17 @@ def test_todays_change_is_the_change_from_the_previous_close(
 
     Reads the v2 stocks snapshot of five stocks and records, for each, `todaysChange`,
     `todaysChangePerc`, `prevDay.c`, and the prices it may be measured from (`lastTrade.p`,
-    `day.c`, `min.c`). SAME when every change is one of those prices minus `prevDay.c` within
-    `_CHANGE_TOLERANCE` and every percent is 100 times the change over `prevDay.c` within
-    `_PERCENT_TOLERANCE`: the definition `options.chain` documents for `day.change` and
+    `day.c`, `min.c`). SAME when, for all five, the change is one of those prices minus
+    `prevDay.c` within `_CHANGE_TOLERANCE` and the percent is 100 times the change over
+    `prevDay.c` within `_PERCENT_TOLERANCE`; INCONCLUSIVE when a stock lacks a field. That is
+    the definition `options.chain` documents for `day.change` and
     `day.change_percent`, which `test_chain_day_change_is_the_change_from_the_previous_close`
     checks on its side.
     """
     rows = _rows(
         live_rest, _V2_STOCKS, names={}, query={"tickers": ",".join(_STOCKS)}, bucket="stocks"
     )
-    same = bool(rows)
+    compared = differing = 0
     for row in rows:
         previous = (row.get("prevDay") or {}).get("c")
         change, percent = row.get("todaysChange"), row.get("todaysChangePerc")
@@ -136,7 +145,6 @@ def test_todays_change_is_the_change_from_the_previous_close(
             f"prevDay.c={previous} {prices}"
         )
         if not previous or change is None or percent is None:
-            same = False
             continue
         matched = [
             name
@@ -145,8 +153,10 @@ def test_todays_change_is_the_change_from_the_previous_close(
         ]
         expected = change / previous * 100
         evidence(f"  measured from {matched or 'none'}; 100*change/close={expected:.4f}")
-        same = same and bool(matched) and abs(percent - expected) <= _PERCENT_TOLERANCE
-    evidence(f"v2 todaysChange is the change from prevDay.c, in percent: {_verdict(same)}")
+        compared += 1
+        differing += not matched or abs(percent - expected) > _PERCENT_TOLERANCE
+    verdict = _verdict(compared=compared, differing=differing, wanted=len(_STOCKS))
+    evidence(f"v2 todaysChange is the change from prevDay.c, in percent: {verdict}")
     assert rows
 
 
@@ -163,13 +173,14 @@ def test_chain_day_change_is_the_change_from_the_previous_close(
     close, `day.change`, `day.change_percent`, `day.close`, and `day.previous_close`. SAME
     when every change is the close minus the previous close within `_CHANGE_TOLERANCE` and
     every percent is 100 times the change over the previous close within
-    `_PERCENT_TOLERANCE`, the definition the v2 check tests for `todaysChange`.
+    `_PERCENT_TOLERANCE`, the definition the v2 check tests for `todaysChange`; INCONCLUSIVE
+    when no contract has all four.
     """
     rows = _rows(
         live_rest, _CHAIN, names={"underlyingAsset": "SPY"}, query={"limit": 50}, bucket="options"
     )
     days = [day for row in rows if (day := row.get("day") or {}).get("previous_close")]
-    same = bool(days)
+    compared = differing = 0
     for day in days:
         close, previous = day.get("close"), day["previous_close"]
         change, percent = day.get("change"), day.get("change_percent")
@@ -177,14 +188,14 @@ def test_chain_day_change_is_the_change_from_the_previous_close(
             f"close={close} previous_close={previous} change={change} change_percent={percent}"
         )
         if close is None or change is None or percent is None:
-            same = False
             continue
-        same = (
-            same
-            and abs(close - previous - change) <= _CHANGE_TOLERANCE
-            and abs(percent - change / previous * 100) <= _PERCENT_TOLERANCE
+        compared += 1
+        differing += (
+            abs(close - previous - change) > _CHANGE_TOLERANCE
+            or abs(percent - change / previous * 100) > _PERCENT_TOLERANCE
         )
-    evidence(f"chain day.change is the change from previous_close, in percent: {_verdict(same)}")
+    verdict = _verdict(compared=compared, differing=differing)
+    evidence(f"chain day.change is the change from previous_close, in percent: {verdict}")
     assert rows
 
 
@@ -226,8 +237,9 @@ def test_updated_is_the_unified_snapshot_s_last_updated(
     Reads the v2 snapshot and the unified snapshot (`/v3/snapshot`) of the same tickers back
     to back, timing the two requests, and records each ticker's `updated` and `last_updated`
     in nanoseconds (an `updated` below 10**17 is read as milliseconds). SAME when, for every
-    ticker in both, the two differ by no more than the time between the requests plus
-    `_UPDATE_TOLERANCE_NS`; the evidence also counts the tickers whose two times are equal.
+    requested ticker, the two differ by no more than the time between the requests plus
+    `_UPDATE_TOLERANCE_NS`; INCONCLUSIVE when a ticker lacks either time. The evidence also
+    counts the tickers whose two times are equal.
     """
     started = time.monotonic_ns()
     v2 = _rows(live_rest, v2_path, names={}, query={"tickers": ",".join(tickers)}, bucket=bucket)
@@ -245,13 +257,14 @@ def test_updated_is_the_unified_snapshot_s_last_updated(
     ]
     for ticker, updated, last_updated in pairs:
         evidence(f"{ticker}: updated={updated} last_updated={last_updated}")
-    same = bool(pairs) and all(
-        abs(updated - last_updated) <= gap + _UPDATE_TOLERANCE_NS
+    differing = sum(
+        abs(updated - last_updated) > gap + _UPDATE_TOLERANCE_NS
         for _, updated, last_updated in pairs
     )
     equal = sum(updated == last_updated for _, updated, last_updated in pairs)
     evidence(f"requests {gap / 1e9:.3f} s apart; {equal} of {len(pairs)} times equal")
-    evidence(f"v2 updated is the unified last_updated: {_verdict(same)}")
+    verdict = _verdict(compared=len(pairs), differing=differing, wanted=len(tickers))
+    evidence(f"v2 updated is the unified last_updated: {verdict}")
     assert v2
     assert unified
 
@@ -272,11 +285,14 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
     snapshot's `lastQuote`. SAME when, in a try where the conversion's `last.timestamp` equals
     the last quote's `last.timestamp`, the two quotes' bid and ask are equal, and the
     snapshot's `lastQuote` has the same bid and ask whenever its `t` is that timestamp too.
-    Massive's own samples suggest otherwise: the conversion's sample for AUD to USD shows a
-    bid of 1.3672596 (US dollars to Australian), the last quote's for AUD/USD 0.73122.
+    DIFFERENT when such a try disagrees, or when any try's conversion bid lies within 1% of
+    the inverse of the last quote's ask but not of its bid (the inverse pair's quote);
+    INCONCLUSIVE when no try read one quote on both. Massive's own samples suggest otherwise:
+    the conversion's sample for AUD to USD shows a bid of 1.3672596 (US dollars to
+    Australian), the last quote's for AUD/USD 0.73122.
     """
     names = {"from": base, "to": quote}
-    matched: list[bool] = []
+    compared = differing = 0
     for _ in range(_QUOTE_TRIES):
         conversion = _rows(live_rest, _CONVERSION, names=names, query={"amount": 1}, bucket=_FX)[0]
         last = _rows(live_rest, _LAST_QUOTE, names=names, query={}, bucket=_FX)[0]
@@ -290,6 +306,7 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
             f"converted={conversion.get('converted')} last={converted}; last quote={quoted}; "
             f"snapshot lastQuote={snapped}"
         )
+        differing += _inverse(converted, quoted)
         if converted.get("timestamp") is None or converted.get("timestamp") != quoted.get(
             "timestamp"
         ):
@@ -303,9 +320,30 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
                 converted.get("bid"),
                 converted.get("ask"),
             )
-        matched.append(same)
-    evidence(f"{len(matched)} of {_QUOTE_TRIES} tries read one quote on both endpoints")
-    evidence(
-        f"conversion {base}->{quote} last is the pair's last quote: "
-        f"{_verdict(bool(matched) and all(matched))}"
-    )
+        compared += 1
+        differing += not same
+    evidence(f"{compared} of {_QUOTE_TRIES} tries read one quote on both endpoints")
+    verdict = _verdict(compared=compared, differing=differing)
+    evidence(f"conversion {base}->{quote} last is the pair's last quote: {verdict}")
+
+
+def _inverse(converted: Mapping[str, Any], quoted: Mapping[str, Any]) -> bool:
+    """Return whether a conversion's quote looks like the inverse pair's.
+
+    Args:
+        converted: The conversion's `last` object.
+        quoted: The last quote's `last` object.
+
+    Returns:
+        True when the conversion's bid lies within `_INVERSE_TOLERANCE` of one over the last
+        quote's ask but not within it of its bid.
+    """
+    prices = [
+        float(price)
+        for price in (converted.get("bid"), quoted.get("bid"), quoted.get("ask"))
+        if isinstance(price, (int, float)) and price
+    ]
+    if len(prices) < 3:
+        return False
+    bid, quote_bid, quote_ask = prices
+    return abs(bid * quote_ask - 1) <= _INVERSE_TOLERANCE < abs(bid / quote_bid - 1)

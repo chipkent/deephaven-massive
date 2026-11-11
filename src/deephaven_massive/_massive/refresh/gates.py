@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from deephaven_massive._massive.refresh.hand_input import HandInput
-    from deephaven_massive._massive.refresh.overrides import TypeFix
+    from deephaven_massive._massive.refresh.overrides import Projection, TypeFix
 
 __all__ = [
     "Gate",
@@ -357,31 +357,53 @@ def _names_by_description(
     """Gather the names of the described fields of every source, by description.
 
     Args:
-        hand: The hand input, whose `renames` projections give some fields their names.
+        hand: The hand input, whose `projections` give some fields other names in a kind.
         uses: What each generated source consumed.
 
     Returns:
         Each own description to each long name its fields take, to `"<source> <wire key>"`
         of each; and each wire key and description to each column, to its sources.
     """
-    renamed: dict[str, dict[str, str]] = {}
+    projected: dict[str, list[Projection]] = {}
     for (_, source), projection in hand.projections.items():
-        renamed.setdefault(source, {}).update(projection.renames or {})
+        projected.setdefault(source, []).append(projection)
     by_text: _Named = {}
     by_key: dict[tuple[str, str], dict[str, set[str]]] = {}
     for source, use in uses.items():
-        names = renamed.get(source, {})
         for wire_key, text in use.descriptions.items():
             if not text:
                 continue
-            if wire_key in names:
-                long_name = naming.snake(names[wire_key])
-                column = naming.column_name([names[wire_key]])
-            else:
-                long_name, column = use.long_names[wire_key], use.columns[wire_key]
-            by_text.setdefault(text, {}).setdefault(long_name, set()).add(f"{source} {wire_key}")
-            by_key.setdefault((wire_key, text), {}).setdefault(column, set()).add(source)
+            for long_name, column in _names_shown(use, wire_key, projected.get(source, [])):
+                by_text.setdefault(text, {}).setdefault(long_name, set()).add(
+                    f"{source} {wire_key}"
+                )
+                by_key.setdefault((wire_key, text), {}).setdefault(column, set()).add(source)
     return by_text, by_key
+
+
+def _names_shown(
+    use: PathUse, wire_key: str, projections: Sequence[Projection]
+) -> set[tuple[str, str]]:
+    """Return every long name and column a field takes in a table.
+
+    Args:
+        use: What the field's source consumed.
+        wire_key: The field's wire key.
+        projections: The source's projections, one per kind it joins that way.
+
+    Returns:
+        The long name and column each projection that names the field gives it, and the
+        field's own, unless a `renames` projection replaces it: a source that joins a kind by
+        keeping some `fields` still shows its own names in its own dataset.
+    """
+    shown = {
+        (naming.snake(projection.named[wire_key]), naming.column_name([projection.named[wire_key]]))
+        for projection in projections
+        if wire_key in projection.named
+    }
+    if not any(wire_key in (projection.renames or {}) for projection in projections):
+        shown.add((use.long_names[wire_key], use.columns[wire_key]))
+    return shown
 
 
 def _shared_description_problems(hand: HandInput, by_text: _Named) -> Iterator[Problem]:

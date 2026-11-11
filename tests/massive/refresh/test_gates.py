@@ -358,6 +358,25 @@ def test_field_spelling_a_renaming_projection_gives_the_name_its_table_shows() -
     assert list(field_spellings(hand, uses)) == []
 
 
+def test_field_spelling_reads_every_name_a_projection_or_the_source_gives() -> None:
+    # A source that joins a kind keeping some `fields` still shows its own name in its own
+    # dataset; two kinds that rename one field differently give it two names.
+    kept = overrides.Projection(fields={"bid": "bid_price"}, reason="test")
+    hand = dataclasses.replace(_EMPTY, projections={("quotes", "/last"): kept})
+    uses = {"/last": _described(bid=(_BID, "bid", "Bid"))}
+    assert _found(field_spellings(hand, uses)) == [
+        ("field-spelling", "", "bid"),
+        ("field-spelling", "", "bid | bid_price"),
+    ]
+    one = overrides.Projection(renames={"bid": "bid_price"}, reason="test")
+    other = overrides.Projection(renames={"bid": "best_bid"}, reason="test")
+    hand = dataclasses.replace(_EMPTY, projections={("a", "/last"): one, ("b", "/last"): other})
+    assert _found(field_spellings(hand, uses)) == [
+        ("field-spelling", "", "best_bid | bid_price"),
+        ("field-spelling", "", "bid"),
+    ]
+
+
 _TIME = "The Timestamp in Unix MS."
 _TIMES = overrides.SharedDescription(
     long_names=frozenset({"sip_timestamp", "timestamp"}), reason="test"
