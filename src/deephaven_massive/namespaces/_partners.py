@@ -11,10 +11,9 @@ Partner datasets stay nested by vendor, one class each:
   hierarchy.
 
 Every partner dataset is a REST list endpoint, so every factory returns a `FetchQuery`: `fetch()`
-reads every page once into a static table, and `poll()` re-reads it on an interval into a live
-one. Nothing streams over the WebSocket and nothing has flat files. Each factory validates its
-arguments synchronously and touches no network; the request runs only when a query method is
-called.
+reads every page once, and `poll()` re-reads them on an interval. Nothing streams over the
+WebSocket and nothing has flat files. Each factory validates its arguments synchronously and
+touches no network; the request runs only when a query method is called.
 
 This module owns the partners' `DatasetSpec`s, exported as `DATASETS` and composed into the
 dataset catalog (`CATALOG` in `_session.py`). A spec names its REST path and the facts the

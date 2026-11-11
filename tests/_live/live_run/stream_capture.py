@@ -155,22 +155,22 @@ def option_contracts(rows: list[dict[str, Any]], today: date) -> list[str]:
     """Choose the SPY contracts nearest the money at the nearest expiry.
 
     Args:
-        rows: The chain's rows: `Symbol`, `DetailsExpirationDate`, `DetailsStrikePrice`, and
+        rows: The chain's rows: `Symbol`, `ExpirationDate`, `StrikePrice`, and
             `UnderlyingAssetPrice`.
         today: The New York date.
 
     Returns:
         Up to `OPTION_CONTRACTS` symbols, nearest strike first; empty for an empty chain.
     """
-    live = [r for r in rows if (r["DetailsExpirationDate"] or "") >= today.isoformat()]
+    live = [r for r in rows if (r["ExpirationDate"] or "") >= today.isoformat()]
     if not live:
         return []
-    expiry = min(r["DetailsExpirationDate"] for r in live)
-    chosen = [r for r in live if r["DetailsExpirationDate"] == expiry]
+    expiry = min(r["ExpirationDate"] for r in live)
+    chosen = [r for r in live if r["ExpirationDate"] == expiry]
     prices = [r["UnderlyingAssetPrice"] for r in chosen if r["UnderlyingAssetPrice"] is not None]
-    strikes = sorted(r["DetailsStrikePrice"] for r in chosen)
+    strikes = sorted(r["StrikePrice"] for r in chosen)
     middle = prices[0] if prices else strikes[len(strikes) // 2]
-    chosen.sort(key=lambda r: (abs(r["DetailsStrikePrice"] - middle), r["Symbol"]))
+    chosen.sort(key=lambda r: (abs(r["StrikePrice"] - middle), r["Symbol"]))
     return [r["Symbol"] for r in chosen[:OPTION_CONTRACTS]]
 
 
@@ -713,7 +713,7 @@ def run_stream_day(
     record_gap(folder, clock.now(), day_start=day_start)
     options: list[str] = []
     if any(u.startswith("options") for u in units):
-        chain = m.options.chain("SPY").fetch()
+        chain = m.options.chain("SPY").fetch(wait=True)
         options = option_contracts(rows_of(chain), today)
     streams = stream_day_streams(units, tiers=tiers, today=today, options=options)
     recorder = Recorder(folder)

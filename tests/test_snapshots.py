@@ -88,7 +88,7 @@ def test_fetch_fills_the_underlying_and_root_of_options_rows_only(
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(vendor_sample(load_fixture)))
     symbols = ["O:NCLH221014C00005000", "AAPL", "TSLAAPL"]
-    out = dh_to_pylist(rest_session.snapshots(symbols).fetch())
+    out = dh_to_pylist(rest_session.snapshots(symbols).fetch(wait=True))
     assert fake_rest.get_queries() == [
         (
             "/v3/snapshot",
@@ -111,7 +111,7 @@ def test_fetch_sends_250_tickers_a_request(
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(envelope([])))
     symbols = [f"T{i:03d}" for i in range(251)]
-    rest_session.snapshots(symbols).fetch()
+    rest_session.snapshots(symbols).fetch(wait=True)
     batches = [q["ticker.any_of"][0].split(",") for _, q in fake_rest.get_queries()]
     assert sorted(len(batch) for batch in batches) == [1, 250]
     assert sorted(s for batch in batches for s in batch) == symbols

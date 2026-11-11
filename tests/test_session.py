@@ -694,7 +694,7 @@ def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
         ValueError, match=r"not a live result of this session: release\(\) takes"
     ) as caught:
         massive_session.release(new_table([string_col("Symbol", ["A"])]))
-    assert "fetch(wait=False)" in str(caught.value)
+    assert "a static fetch(wait=True) or history(..., wait=True) table" in str(caught.value)
     assert "streams()" in str(caught.value)
     assert "release the live table it came from" in str(caught.value)
 
@@ -823,12 +823,14 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def opening() -> None:
         m = dm.MassiveSession(config)
         sessions.append(m)
-        made["fetch"] = m.stocks.last_trade("AAPL").fetch()
+        made["fetch"] = m.stocks.last_trade("AAPL").fetch(wait=True)
         bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
-        made["rest"] = bars.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
+        made["rest"] = bars.history(
+            "2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True
+        )
         files = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
         made["files"] = files.history(
-            "2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES
+            "2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES, wait=True
         )
         made["poll"] = m.stocks.ipos().poll(60)
         made["streams"] = m.streams()
@@ -842,7 +844,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def closing() -> None:
         sessions[0].close()
         with dm.MassiveSession(config) as other:  # opened and closed within one command
-            made["other"] = other.stocks.last_trade("AAPL").fetch()
+            made["other"] = other.stocks.last_trade("AAPL").fetch(wait=True)
 
     console_command(closing)
     assert [r["Price"] for r in dh_to_pylist(made["other"])] == [129.84]

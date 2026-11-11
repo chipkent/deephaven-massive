@@ -2486,20 +2486,25 @@ class RestEndpoints:
         )
         return self._static(spec, table)
 
-    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
-        """Plan `fetch`'s requests with none made, so a parameter error raises now.
+    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
+        """Plan `fetch`'s requests with no data request, so a parameter error raises now.
 
-        A background `fetch(wait=False)` calls it on the caller thread before its table
-        exists. Crypto pairs are not split (`_unsplit`): the read splits them, and a pair
-        Massive does not list fails the read's table instead.
+        A background `fetch()` calls it on the caller thread before its table exists. With
+        `split_pairs`, for crypto pairs passed in code, each pair is split by the session's
+        crypto ticker list (`RestReader.crypto_pair`), as `poll()` splits it at the call, so a
+        pair Massive does not list raises its `UnlistedPairError` now; otherwise pairs are not
+        split (`_unsplit`), and a table's pair follows `MassiveConfig.unlisted_symbols` in the
+        read.
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols.
+            split_pairs: True for symbols passed in code.
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
-        self._reader("check").plan_fetch(spec, request, request.symbols, split=_unsplit)
+        split = None if split_pairs else _unsplit
+        self._reader("check").plan_fetch(spec, request, request.symbols, split=split)
 
     def fetch_by_symbol(
         self,
@@ -2681,19 +2686,25 @@ class RestEndpoints:
         )
         return self._static(spec, table)
 
-    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
-        """Plan `history`'s requests with none made, so a parameter error raises now.
+    def check_history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
+    ) -> None:
+        """Plan `history`'s REST requests with no data request, so a parameter error raises now.
 
-        The `check_fetch` of a background `history(..., wait=False)` served by REST.
+        The `check_fetch` of a background `history()` that REST serves or may serve.
 
         Args:
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
+            split_pairs: True for symbols passed in code, whose crypto pairs are split by the
+                session's crypto ticker list now, as `check_fetch` splits them.
 
         A parameter the path does not take raises the `ValueError` of `shared_params`.
         """
-        _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
+        reader = self._reader("check")
+        split = reader.crypto_pair if split_pairs else _unsplit
+        _history_plan(reader, spec, request, window=window, split=split)
 
     def history_by_symbol(
         self,

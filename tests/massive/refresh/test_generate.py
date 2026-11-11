@@ -133,7 +133,7 @@ def test_a_reworded_description_changes_only_the_descriptions_file(tmp_path: Pat
     # The only change is one field's description: the schema files must stay byte for byte as
     # they are, so a reviewer sees that no schema moved.
     original = (DIRECTORY / OPENAPI).read_bytes()
-    reworded = original.replace(b"The exchange symbol that this item is traded under.", b"Moved.")
+    reworded = original.replace(b"The percentage change since the previous day.", b"Moved.")
     assert reworded != original
     _copy_snapshot(tmp_path / "snapshot", reworded)
     (tmp_path / "spec").mkdir()
@@ -295,8 +295,10 @@ def _relexicon(name: str, **long_names: str) -> HandInput:
 def test_gate_type_agreement_stocks_dv_against_futures_dv() -> None:
     # Naming the futures dollar volume like the stocks fractional volume puts a double and a
     # string into one column of the bars kind: the naming error the gate exists to catch.
-    # The renamed column is also one the futures stream alone supplies.
+    # The renamed column is also one the futures stream alone supplies, and a second name
+    # for the field the futures flat file documents alike as `dollar_volume`.
     assert _problems(_relexicon("futures_bar", dv="decimal_volume")) == [
+        ("field-spelling", "", "decimal_volume | dollar_volume"),
         ("transport-agreement", "bars", "DecimalVolume"),
         ("type-agreement", "bars", "DecimalVolume"),
     ]
@@ -434,6 +436,8 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         kinds={},
         sample_errors=(),
         projections={},
+        spellings={},
+        shared_descriptions={},
         transport_only={},
         venues={},
         undeclared_fields={},

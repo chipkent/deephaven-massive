@@ -142,7 +142,7 @@ def test_the_live_set_follows_every_registry_under_concurrent_changes(
         start.wait(TIMEOUT)
         for _ in range(ROUNDS):
             call = core.next_stream_id()
-            core.workers._register(core, _read_row(call), fail=lambda _error: True)
+            core.workers._register(core, _read_row(call), fail=lambda _error: True, registered=[])
             check("a registered worker table")
             core.workers.release(call)  # as releasing the result, then its shutdown, do
             core.workers.shutdown_callback(call, threading.Event())()

@@ -142,7 +142,7 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     The schema nests the ticker and product code as `details.ticker` and
     `details.product_code`, while both documented samples send them at the top level. The
     live run of 2026-11-02 found them nested, which the library now reads (`Symbol` and
-    `DetailsProductCode`). Records the top-level `ticker` and `product_code` and the nested
+    `ProductCode`). Records the top-level `ticker` and `product_code` and the nested
     pair of three ES rows, and the library's `Symbol`. Passes when every row nests its ticker
     and product code under `details` and the library fills `Symbol`; top-level keys alone mean
     the library must read those again.
@@ -163,7 +163,7 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     nested = first.get("details")
     ticker = first.get("ticker") or (nested.get("ticker") if isinstance(nested, dict) else None)
     assert ticker, "no ticker anywhere in the first snapshot row"
-    library = table_rows(live_session.futures.snapshots(str(ticker)).fetch())
+    library = table_rows(live_session.futures.snapshots(str(ticker)).fetch(wait=True))
     evidence(f"library snapshots({ticker}): Symbol {[r['Symbol'] for r in library]}")
     flat = [row for row in rows if not isinstance(row.get("details"), dict)]
     unnested = [
@@ -245,7 +245,7 @@ def test_the_session_after_a_holiday_and_year_candles(
     else:
         minutes = table_rows(
             live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
-                session_day, session_day
+                session_day, session_day, wait=True
             )
         )
         evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
@@ -293,7 +293,7 @@ def test_futures_sessions_end_only_on_weekdays(
     rows = table_rows(
         live_session.futures.schedules(
             product_code=list(_PRODUCTS), start=start, end=end, limit=_SCHEDULE_LIMIT
-        ).fetch()
+        ).fetch(wait=True)
     )
     ended = [
         (row["ProductCode"], date.fromisoformat(row["SessionEndDate"]))
@@ -371,7 +371,9 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
         assert shown
         return
     library = table_rows(
-        live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(start, end)
+        live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(
+            start, end, wait=True
+        )
     )
     windows = [
         (instant_text(r["TimestampStart"]), instant_text(r["TimestampEnd"]), r["Date"])
@@ -417,7 +419,7 @@ def test_shapes_of_futures_contract_tickers(
     library = table_rows(
         live_session.futures.contracts(
             product_code="NG", limit=20, filters={"type": "single"}
-        ).fetch()
+        ).fetch(wait=True)
     )
     evidence(f"library contracts(NG): (Symbol, Date) {[(r['Symbol'], r['Date']) for r in library]}")
     assert tickers
@@ -611,7 +613,9 @@ def test_session_labels_around_the_roll_and_a_holiday(
         (front_contract("ES", recent_monday), es_start, es_start + timedelta(hours=2)),
         (front_contract("ES", good_friday), holiday_start, holiday_end),
     ):
-        bars = live_session.futures.bars(contract, dm.Timespan.MINUTE).history(start, end)
+        bars = live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
+            start, end, wait=True
+        )
         rows = table_rows(bars)
         found += len(rows)
         changes = _label_changes(rows, "TimestampStart")
@@ -654,7 +658,7 @@ def _record_corn_labels(
     reads = (("quotes", live_session.futures.quotes), ("trades", live_session.futures.trades))
     for kind, read in reads:
         try:
-            rows = table_rows(read(corn).history(start, end))
+            rows = table_rows(read(corn).history(start, end, wait=True))
         except dm.EntitlementError as error:
             evidence(f"{corn} {kind} {start:%Y-%m-%d}: refused, {error}")
             continue
@@ -1016,7 +1020,7 @@ def test_contracts_follow_a_live_table_of_product_codes(
     m = live_session
     codes = dh_input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
     codes.add(new_table([string_col("ProductCode", ["ES"])]))
-    result = m.futures.contracts(product_code=codes, as_of=recent_monday, limit=10).fetch()
+    result = m.futures.contracts(product_code=codes, as_of=recent_monday, limit=10).fetch(wait=True)
     try:
         first = _codes_until(table_rows, result, lambda seen: seen == {"ES"})
         evidence(f"at the call: {sorted(first)}, {result.size} rows")

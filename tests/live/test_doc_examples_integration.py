@@ -301,32 +301,40 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
 def _check_history_examples(
     ran: dict[str, Names], *, table_rows: TableRows, evidence: Evidence
 ) -> None:
-    """Check the hook and Examples 1 to 4: real bars, in plausible numbers."""
-    year = table_rows(ran["hook"]["apple"])
+    """Check the hook and Examples 1 to 4: real bars, in plausible numbers.
+
+    Each reads in the background, so each check first waits for its table to fill.
+    """
+
+    def when_filled(table: Table, enough: Callable[[int], bool]) -> list[dict[str, Any]]:
+        _wait(lambda: enough(len(table_rows(table))), _FILL_WAIT)
+        return table_rows(table)
+
+    year = when_filled(ran["hook"]["apple"], lambda rows: rows >= 240)
     evidence(f"hook: {len(year)} daily bars of AAPL")
     assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
 
     first = ran["read-daily-bars"]["apple"]
-    week = table_rows(first)
+    week = when_filled(first, lambda rows: rows == 5)
     evidence(f"example 1: {len(week)} bars, dates {[row['Date'] for row in week]}")
     assert len(week) == 5, "Example 1 reads five trading days"
     assert set(_BAR_COLUMNS) <= set(first.column_names)
 
     market = ran["whole-market-day"]
-    day = table_rows(market["day"])
+    day = when_filled(market["day"], lambda rows: rows > 1000)
     otc = [row["Symbol"] for row in day if row.get("Otc")]
     evidence(f"example 2: {len(day)} stocks, {len(otc)} over the counter")
     assert len(day) > 1000, "Example 2's day holds every listed US stock"
     assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
-    assert len(table_rows(market["busiest"])) == 20
+    assert len(when_filled(market["busiest"], lambda rows: rows == 20)) == 20
 
-    compared = ran["compare-stocks"]["returns"]  # read in the background (wait=False)
+    compared = ran["compare-stocks"]["returns"]
     filled = _wait(lambda: _symbols(table_rows(compared)) == _STOCKS, _FILL_WAIT)
     returns = table_rows(compared)
     evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}, filled: {filled}")
     assert filled, f"Example 3's returns did not fill within {_FILL_WAIT:.0f} s"
 
-    nvda = table_rows(ran["chart-closes"]["nvda"])
+    nvda = when_filled(ran["chart-closes"]["nvda"], lambda rows: rows >= 240)
     evidence(f"example 4: {len(nvda)} daily bars of NVDA")
     assert len(nvda) >= 240, "Example 4's year of Nvidia's daily bars is short"
 
@@ -450,6 +458,7 @@ def _check_snapshot(
 ) -> None:
     """Check Example 8: a snapshot of three stocks, with the columns its text names."""
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
+    _wait(lambda: bool(table_rows(snapshot)), _FILL_WAIT)  # it reads in the background
     rows = table_rows(snapshot)
     evidence(f"example 8: {[(r['Symbol'], r['DayClose']) for r in rows]}")
     if doc_examples.snapshots_cleared(datetime.now(UTC), delay):
@@ -523,7 +532,9 @@ def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: d
     Returns:
         The starts.
     """
-    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(day.isoformat())
+    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(
+        day.isoformat(), wait=True
+    )
     return {int(row["TimestampStart"]) for row in table_rows(history)}
 
 
@@ -598,15 +609,17 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
+    table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Example 8 raises `dm.EntitlementError` on a delayed plan without its setting.
+    """Whether Example 8's snapshot fails on a delayed plan without its setting.
 
     Saves the real-time plans' settings file, `delayed_subscriptions: []`, with the README's
     own commands, then runs Example 8 with a delayed Stocks key (`MASSIVE_DELAYED_API_KEY`, or
-    the main key on Starter or Developer). Passes when the snapshot raises
-    `dm.EntitlementError` and its message says stocks are not in `delayed_subscriptions`, which
-    sets this refusal apart from one of a plan without snapshots, such as a Basic key's.
+    the main key on Starter or Developer). The snapshot reads in the background, so the refusal
+    fails its table. Passes when the read's row in `m.streams()` is `FAILED` and its `Error`
+    says stocks are not in `delayed_subscriptions`, which sets this refusal apart from one of a
+    plan without snapshots, such as a Basic key's.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("MASSIVE_API_KEY", delayed_key)
@@ -614,21 +627,23 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     [block] = doc_examples.section_blocks(README, "what-your-plan-allows")
     script = tmp_path / "settings_example.py"
     script.write_text(block.code, encoding="utf-8")
-    raised: list[tuple[bool, str]] = []
+    ran: list[dict[str, Any]] = []
 
     def example() -> None:
-        try:
-            runpy.run_path(str(script))
-        except dm.MassiveError as error:
-            raised.append((isinstance(error, dm.EntitlementError), str(error)))
+        ran.append(runpy.run_path(str(script)))
+
+    def errors() -> list[str]:
+        streams = ran[0]["m"].streams()
+        return [str(r["Error"]) for r in table_rows(streams) if r["State"] == "FAILED"]
 
     with doc_examples.recorded_sessions():
         console_command(example, timeout=_CONSOLE_WAIT)
-    evidence(f"example 8 without the setting: {raised or 'no error'}")
-    assert raised, "Example 8 read the snapshot without its setting"
-    entitlement, message = raised[0]
-    assert entitlement, message
-    assert _DELAYED_REFUSAL in message, "the refusal does not name delayed_subscriptions"
+        _wait(lambda: bool(errors()), _FILL_WAIT)
+        failed = errors()
+        ran[0]["m"].close()
+    evidence(f"example 8 without the setting: {failed or 'no failure'}")
+    assert failed, "Example 8 read the snapshot without its setting"
+    assert _DELAYED_REFUSAL in failed[0], "the refusal does not name delayed_subscriptions"
 
 
 @pytest.mark.needs("currencies:starter")

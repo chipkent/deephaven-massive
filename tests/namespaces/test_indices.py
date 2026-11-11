@@ -316,7 +316,9 @@ def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
 
 def test_values_history_has_no_rest_source(m: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"indices\.values has no REST history"):
-        m.indices.values("I:SPX").history("2025-06-02", "2025-06-02", source=dm.HistorySource.REST)
+        m.indices.values("I:SPX").history(
+            "2025-06-02", "2025-06-02", source=dm.HistorySource.REST, wait=True
+        )
 
 
 def test_values_history_from_flat_files_needs_credentials(
@@ -328,7 +330,7 @@ def test_values_history_from_flat_files_needs_credentials(
         q = session.indices.values("I:SPX")
         for source in (dm.HistorySource.FLAT_FILES, dm.HistorySource.AUTO):
             with pytest.raises(ValueError, match="no S3 credentials are configured"):
-                q.history("2025-06-02", "2025-06-02", source=source)
+                q.history("2025-06-02", "2025-06-02", source=source, wait=True)
 
 
 @pytest.mark.parametrize(
@@ -395,14 +397,14 @@ def test_bars_history_over_rest_needs_explicit_symbols(m: dm.MassiveSession) -> 
     for timespan in (dm.Timespan.MINUTE, dm.Timespan.DAY):
         with pytest.raises(ValueError, match=r"indices\.bars history over REST needs explicit"):
             m.indices.bars(dm.ALL, timespan).history(
-                "2025-06-02", "2025-06-02", source=dm.HistorySource.REST
+                "2025-06-02", "2025-06-02", source=dm.HistorySource.REST, wait=True
             )
 
 
 def test_bar_flat_files_hold_only_minutes_and_days(m: dm.MassiveSession) -> None:
     q = m.indices.bars("I:SPX", dm.Timespan.HOUR)
     with pytest.raises(ValueError, match="flat files hold only 1-minute, 1-day bars"):
-        q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES)
+        q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES, wait=True)
 
 
 def test_snapshots_query(m: dm.MassiveSession) -> None:
@@ -543,7 +545,7 @@ def test_the_snapshot_names_at_most_250_indices_a_request(
 ) -> None:
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
     symbols = [f"I:X{n:03d}" for n in range(251)]
-    rest_session.indices.snapshots(symbols).fetch()
+    rest_session.indices.snapshots(symbols).fetch(wait=True)
     batches = [query["ticker.any_of"][0].split(",") for _, query in fake_rest.get_queries()]
     # The batches are requested concurrently, so they arrive in either order.
     assert sorted(len(batch) for batch in batches) == [1, 250]
@@ -555,7 +557,7 @@ def test_snapshots_order_alone_is_sent_as_is(
 ) -> None:
     # The snapshot has its own order parameter, so no sort is needed beside it.
     fake_rest.reply(SNAPSHOT, Reply(envelope([])))
-    rest_session.indices.snapshots("I:SPX", order=dm.Order.DESC).fetch()
+    rest_session.indices.snapshots("I:SPX", order=dm.Order.DESC).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (SNAPSHOT, {"ticker.any_of": ["I:SPX"], "order": ["desc"], "limit": ["250"]})
     ]
@@ -571,7 +573,7 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     q = rest_session.indices.snapshots(
         ["I:SPX", "I:NDX", "I:NOPE"], sort="ticker", order=dm.Order.DESC
     )
-    out = rows(q.fetch())
+    out = rows(q.fetch(wait=True))
     assert fake_rest.get_queries() == [
         (
             SNAPSHOT,
@@ -615,7 +617,7 @@ def test_previous_day_bars_fetch_one_index_a_request(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
-    out = bar_rows(rest_session.indices.previous_day_bar("I:SPX").fetch())
+    out = bar_rows(rest_session.indices.previous_day_bar("I:SPX").fetch(wait=True))
     assert fake_rest.get_queries() == [("/v2/aggs/ticker/I:SPX/prev", {})]
     # The New York day, ending an hour late at 01:00 New York time (midnight in Chicago),
     # since whether an index day bar covers the New York or the Chicago day is not verified.
@@ -656,7 +658,9 @@ def test_bars_history_over_rest_fills_the_range_and_the_symbol(
     path = f"/v2/aggs/ticker/I:SPX/range/1/minute/{MIDNIGHT_MS}/{MIDNIGHT_MS + 86_400_000 - 1}"
     fake_rest.reply(quote(path), Reply(load_fixture(OWNER, "range.json")))
     q = rest_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE)
-    out = rows(q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST))
+    out = rows(
+        q.history(date(2025, 6, 2), date(2025, 6, 2), source=dm.HistorySource.REST, wait=True)
+    )
     assert fake_rest.get_queries() == [(path, {"limit": ["50000"], "sort": ["asc"]})]
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         ("I:SPX", "2025-06-02", 1748871000000 * MS, 1748871060000 * MS),
@@ -695,10 +699,10 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
         quote(PREVIOUS.format(indicesTicker="I:SPX")), bars_reply(MIDNIGHT_MS + 16 * HOUR_MS)
     )
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
-    ranged = rows(q.history(day, day, source=dm.HistorySource.REST))
+    ranged = rows(q.history(day, day, source=dm.HistorySource.REST, wait=True))
     assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
     prev = rest_session.indices.previous_day_bar("I:SPX")
-    assert [r["TimestampStart"] for r in rows(prev.fetch())] == [MIDNIGHT_MS * MS]
+    assert [r["TimestampStart"] for r in rows(prev.fetch(wait=True))] == [MIDNIGHT_MS * MS]
     # Massive starts a week on its Sunday, so a week bar is stamped 01:00 (midnight in
     # Chicago) on its Sunday; since an index can update around the clock, the week holds its
     # weekend: it starts at Sunday's midnight and ends an hour after the next Sunday's. A
@@ -712,18 +716,18 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     )
     week = rest_session.indices.bars("I:SPX", dm.Timespan.WEEK)
     first, last = date(2025, 6, 1), date(2025, 6, 7)
-    weeks = rows(week.history(first, last, source=dm.HistorySource.REST))
+    weeks = rows(week.history(first, last, source=dm.HistorySource.REST, wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
         (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
     ]
     # A range from the Monday holds no whole week, so it asks for none.
-    assert rows(week.history(day, last, source=dm.HistorySource.REST)) == []
+    assert rows(week.history(day, last, source=dm.HistorySource.REST, wait=True)) == []
     assert not stamp_warnings(caplog)
     # A week bar at the close, or a day bar at 02:00, may be another cut: each keeps its stamp
     # and ends a period later, past these ranges, so neither range holds it; each warns once.
-    assert rows(week.history(first, last, source=dm.HistorySource.REST)) == []
+    assert rows(week.history(first, last, source=dm.HistorySource.REST, wait=True)) == []
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    assert rows(q.history(day, day, source=dm.HistorySource.REST)) == []
+    assert rows(q.history(day, day, source=dm.HistorySource.REST, wait=True)) == []
     week_warning, day_warning = stamp_warnings(caplog)
     assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
     assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
@@ -754,7 +758,7 @@ def test_an_index_day_bar_is_kept_once_its_end_has_passed(
     path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + 2 * DAY_MS - 1}"
     fake_rest.reply(quote(path), bars_reply(MIDNIGHT_MS + HOUR_MS))
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
-    out = rows(q.history(day, None, source=dm.HistorySource.REST))
+    out = rows(q.history(day, None, source=dm.HistorySource.REST, wait=True))
     assert [p for p, _ in fake_rest.get_queries()] == [path]
     assert [r["TimestampEnd"] for r in out] == [(MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS] * kept
 
@@ -770,7 +774,9 @@ def test_daily_open_close_fetches_each_index_for_the_day(
     del ndx["afterHours"]
     fake_rest.reply(quote("/v1/open-close/I:SPX/2025-06-02"), Reply(spx))
     fake_rest.reply(quote("/v1/open-close/I:NDX/2025-06-02"), Reply(ndx))
-    out = rows(rest_session.indices.daily_open_close(["I:SPX", "I:NDX"], "2025-06-02").fetch())
+    out = rows(
+        rest_session.indices.daily_open_close(["I:SPX", "I:NDX"], "2025-06-02").fetch(wait=True)
+    )
     assert sorted(path for path, _ in fake_rest.get_queries()) == [
         "/v1/open-close/I:NDX/2025-06-02",
         "/v1/open-close/I:SPX/2025-06-02",
@@ -980,7 +986,7 @@ def test_one_flat_file_round_trips(
         q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.DAY), "Close"
     else:
         q, value = s3_session.indices.bars(["I:SPX"], dm.Timespan.MINUTE), "Close"
-    out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES))
+    out = rows(q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES, wait=True))
     time = "Timestamp" if value == "Value" else "TimestampStart"
     assert [
         (r["Symbol"], r["Date"], r[time], r.get("TimestampEnd"), r[value]) for r in out
@@ -1001,7 +1007,7 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_served_with_a_war
     q = s3_session.indices.bars(dm.ALL, dm.Timespan.DAY)
     empty = "ticker,open,close,high,low,window_start\n"
     fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-03.csv.gz", make_csv_gz(empty))
-    out = rows(q.history("2025-06-02", "2025-06-03", source=dm.HistorySource.FLAT_FILES))
+    out = rows(q.history("2025-06-02", "2025-06-03", source=dm.HistorySource.FLAT_FILES, wait=True))
     # The bar keeps its stamp, ends a day later, and has no Date; the range holds that window.
     assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         ("I:SPX", None, odd, odd + 86_400 * 10**9)

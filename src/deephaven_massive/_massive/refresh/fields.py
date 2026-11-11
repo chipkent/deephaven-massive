@@ -9,8 +9,10 @@ one field gets one column and one type whichever transport serves it:
 - **Wire keys.** A field is read under the key its source declares, unless a `KEY_FIXES`
   entry gives the key every documented sample sends in its place; from then on the field is
   that key, for its name and every other hand entry.
-- **Names.** Each segment of a wire key is translated to Massive's long form: the vendor's own
-  long key as it is; a short key through the lexicon of the object it sits in (`SHAPES`),
+- **Names.** Each segment of a wire key is translated to Massive's long form: its `SPELLINGS`
+  entry's name when Massive spells the same field another way on another endpoint (none, for
+  a wrapper object whose fields that endpoint serves flat); else the vendor's own long key as
+  it is; a short key through the lexicon of the object it sits in (`SHAPES`),
   whose entries cite the endpoint that spells the same field out; else an identity entry. The
   last segment is replaced by its `NAMES` entry when Massive names the key nowhere (a name
   derived from the field's description, which the entry quotes). `naming.column_name` joins
@@ -222,6 +224,10 @@ class SourceFields:
         self.identities: set[str] = set()
         self.concepts: dict[str, str] = {}
         self.columns: dict[str, str] = {}
+        # Each generated field's own description, corrected, and the long name of its last
+        # segment, by wire key, for the `field-spelling` gate.
+        self.descriptions: dict[str, str] = {}
+        self.long_name_of: dict[str, str] = {}
         # Each field's own documented `example`, by wire key.
         self.field_examples: dict[str, Json] = {}
         self.converted: set[str] = set()
@@ -251,6 +257,8 @@ class SourceFields:
             identities=frozenset(self.identities),
             concepts=dict(self.concepts),
             columns=dict(self.columns),
+            descriptions=dict(self.descriptions),
+            long_names=dict(self.long_name_of),
             converted=frozenset(self.converted),
             needed_conversions=frozenset(self.needed_conversions),
             example_keys=frozenset(self.example_keys),
@@ -273,19 +281,31 @@ class SourceFields:
         )
 
     def long_names(self, raw: RawField) -> list[str]:
-        """Translate each segment of a wire key to its long name (lexicon, identity, NAMES).
+        """Translate each segment of a wire key to its long name.
+
+        A segment takes its `SPELLINGS` entry first, under the dotted key up to and including
+        it; then, for the last segment, its `NAMES` entry; then its object's lexicon entry;
+        else it stays as it is, an identity or long key.
 
         Args:
             raw: The field.
 
         Returns:
-            The long name of each segment; a short key that nothing translates is kept as is,
-            with a `short-key` problem.
+            The long names, outermost first, without the wrapper objects a `SPELLINGS` entry
+            drops; a short key that nothing translates is kept as is, with a `short-key`
+            problem. A field whose own name an entry drops keeps its key, and a field an
+            entry gives a library column (`naming.is_key_column`) keeps it, each with a
+            `field-spelling` problem.
         """
         segments = raw.wire_key.split(".")
         names: list[str] = []
+        spelled = False
         for index, segment in enumerate(segments):
             prefix = ".".join(segments[:index])
+            if (respelled := self.spelled(raw, index)) is not None:
+                names += respelled
+                spelled = True
+                continue
             lexicon_name = self.hand.shapes.get((self.source, prefix))
             entries = self.hand.lexicons[lexicon_name].entries if lexicon_name else {}
             override = self.hand.names.get((self.source, raw.wire_key))
@@ -320,7 +340,52 @@ class SourceFields:
                         description=text(raw.schema, "description"),
                     )
                 names.append(segment)
+        if spelled:
+            self.check_spelled_column(raw, names)
         return names
+
+    def spelled(self, raw: RawField, index: int) -> list[str] | None:
+        """Return a segment's long name from its `SPELLINGS` entry, if it has one.
+
+        Args:
+            raw: The field.
+            index: The segment's place in the wire key.
+
+        Returns:
+            `None` without an entry; else the entry's long name, or nothing for a wrapper
+            object whose name the entry drops. An entry that drops the field's own name
+            keeps its key, with a `field-spelling` problem.
+        """
+        segments = raw.wire_key.split(".")
+        spelling = self.hand.spellings.get((self.source, ".".join(segments[: index + 1])))
+        if spelling is None:
+            return None
+        if spelling.long_name:
+            return [spelling.long_name]
+        if index < len(segments) - 1:
+            return []
+        self.problem(
+            Gate.FIELD_SPELLING,
+            raw.wire_key,
+            "SPELLINGS drops the name of a field; only a wrapper object's name can be dropped",
+        )
+        return [segments[index]]
+
+    def check_spelled_column(self, raw: RawField, names: Sequence[str]) -> None:
+        """Report a field whose `SPELLINGS` entries give it a library column.
+
+        Args:
+            raw: The field.
+            names: Its long names, outermost first.
+        """
+        coined = naming.column_name(names)
+        if naming.is_key_column(coined):
+            self.problem(
+                Gate.FIELD_SPELLING,
+                raw.wire_key,
+                f"SPELLINGS coins the library column {coined!r}; only the dataset key rename "
+                "and the library's time columns produce it",
+            )
 
     def wire_type(self, raw: RawField) -> WireType | None:
         """Apply the representation rules to a field, before units and type fixes.
@@ -409,8 +474,11 @@ class SourceFields:
                     description=description,
                 )
             required = False
-        described, class_texts = self.noted(raw, description)
+        own = self.description(raw.wire_key, description)
+        described, class_texts = self.noted(raw, *own)
         column = naming.column_name(long_names)
+        self.descriptions[raw.wire_key] = own[0]
+        self.long_name_of[raw.wire_key] = naming.snake(long_names[-1])
         self.concepts[column] = ".".join(naming.snake(name) for name in long_names)
         self.columns[raw.wire_key] = column
         return Field(
@@ -424,17 +492,19 @@ class SourceFields:
             class_descriptions=class_texts,
         )
 
-    def noted(self, raw: RawField, vendor: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    def noted(
+        self, raw: RawField, own: str, own_classes: tuple[tuple[str, str], ...]
+    ) -> tuple[str, tuple[tuple[str, str], ...]]:
         """Return a field's description followed by the notes of its enclosing objects.
 
-        The field's own text and each object's note are corrected by their own
-        `DESCRIPTION_FIXES` entries (`description`); an object's note is looked up once per
-        source, so a stale entry on it is reported once. Each note reads
-        ``From the `<object wire key>` object: <text>``.
+        Each object's note is corrected by its own `DESCRIPTION_FIXES` entry (`description`),
+        as the field's own text already is, and looked up once per source, so a stale entry on
+        it is reported once. Each note reads ``From the `<object wire key>` object: <text>``.
 
         Args:
             raw: The field, under its `KEY_FIXES` key if it has one.
-            vendor: The field's own description, as the specification gives it.
+            own: The field's own description, corrected (`description`).
+            own_classes: The field's own per-asset-class descriptions (`description`).
 
         Returns:
             The description and the per-asset-class descriptions (`Field.class_descriptions`).
@@ -442,7 +512,6 @@ class SourceFields:
             field's text and each note for that class, the shared one where an entry lists
             no text for it.
         """
-        own, own_classes = self.description(raw.wire_key, vendor)
         notes: list[tuple[str, str, dict[str, str]]] = []
         for key, note in raw.notes:
             if key not in self.notes:

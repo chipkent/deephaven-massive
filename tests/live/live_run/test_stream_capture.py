@@ -371,8 +371,8 @@ def _chain_row(
 ) -> dict[str, Any]:
     return {
         "Symbol": symbol,
-        "DetailsExpirationDate": expiry,
-        "DetailsStrikePrice": strike,
+        "ExpirationDate": expiry,
+        "StrikePrice": strike,
         "UnderlyingAssetPrice": price,
     }
 

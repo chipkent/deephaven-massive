@@ -1964,7 +1964,7 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     fetched = build_query(ignoring_session._core, SMA, symbols=["MSFT"])
     assert isinstance(fetched, FetchQuery)
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
-        fetched.fetch()
+        fetched.fetch(wait=True)
     assert caplog.records == []
 
 

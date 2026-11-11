@@ -226,10 +226,10 @@ class MassiveConfig:
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
-            Leave a delayed subscription out, and a stream or a `fetch()` of its current data
-            raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
-            table of it fails with the same message. `history()` and other past data don't
-            depend on this setting.
+            Leave a delayed subscription out, and a stream of its current data raises
+            `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
+            `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+            `history()` and other past data don't depend on this setting.
         rest_basic_subscriptions: Lists the subscriptions on Massive's free Basic plan, so their
             requests keep to Basic's five a minute from the start. Defaults to an empty set.
 
@@ -323,8 +323,10 @@ class MassiveConfig:
             many flat files it reads at a time. Defaults to 8.
 
             Raise it to run more at once, or lower it to open fewer connections. Both limits
-            cover all the session's calls together. A Basic subscription still keeps to five
-            requests a minute.
+            cover all the session's calls together. It also sets how many downloads of
+            `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
+            the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
+            subscription still keeps to five requests a minute.
         flush_interval: Sets how many seconds pass between the batches of streamed rows added to
             live tables. Defaults to 0.05 seconds (50 ms).
 
@@ -368,8 +370,9 @@ class MassiveConfig:
 
             - `dm.OnError.LOG` skips the pair and logs a warning naming it.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes a stream or `fetch()` fail with `MassiveError` at the
-              call, and fails a `poll()` table, or a live table when such a pair is added later.
+            - `dm.OnError.RAISE` makes a stream fail with `MassiveError` at the call, and fails
+              a `fetch()` or `poll()` table, or a live table when such a pair is added later.
+              `fetch(wait=True)` raises it at the call.
 
             It applies to streams and to calls for a pair's last trade or daily open and close. A
             pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
@@ -378,8 +381,9 @@ class MassiveConfig:
             Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream keeps its other pairs. A
             stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
             until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
-            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
-            pairs are all skipped raises `MassiveError` at the call.
+            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream whose pairs are all
+            skipped raises `MassiveError` at the call, and a `fetch()` whose pairs are all
+            skipped fails its table, or raises with `wait=True`.
         unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
             can't read. Defaults to `LOG`.
 
@@ -402,9 +406,10 @@ class MassiveConfig:
             - `dm.OnError.LOG` leaves the symbol out, keeps the others, and logs a warning
               naming it.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails a `poll()` table and makes a `fetch()` or `history()`
-              raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
-              symbol `FAILED` in `m.symbol_reads()` and reads the others.
+            - `dm.OnError.RAISE` fails a `poll()`, `fetch()`, or `history()` table with
+              `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
+              A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
+              `m.symbol_reads()` and reads the others.
 
             Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
             also one the poll can't read, such as a crypto pair in an indicator poll with

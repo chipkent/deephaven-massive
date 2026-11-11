@@ -444,7 +444,9 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
     assert schema.column_names[0] == "Symbol"
     assert "Timestamp" not in schema.column_names
     assert "Ticker" not in schema.column_names
-    assert {"LastTradePrice", "LastQuoteBid", "SessionSettlementPrice"} <= set(schema.column_names)
+    assert {"LastTradePrice", "LastQuoteBidPrice", "SessionSettlementPrice"} <= set(
+        schema.column_names
+    )
 
 
 def test_contracts_name_the_contract_symbol_from_the_row() -> None:
@@ -605,7 +607,9 @@ def test_tick_history_over_rest_reads_each_session_by_its_date(
     serve(path, fixture)
     symbol = path.rsplit("/", 1)[1]
     factory = getattr(rest_session.futures, dataset)
-    out = rows(factory(symbol).history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))
+    out = rows(
+        factory(symbol).history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True)
+    )
     # A date names its session, which is requested by that date with no time window, so the
     # hours a holiday adds to a session are covered. Rows are kept by SessionEndDate.
     assert fake_rest.get_queries() == [
@@ -635,7 +639,7 @@ def test_trades_rest_rows(
 ) -> None:
     serve("/futures/v1/trades/ESZ4", "trades.json")
     q = rest_session.futures.trades("ESZ4")
-    first = rows(q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))[0]
+    first = rows(q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True))[0]
     supplied = {
         "Symbol": "ESZ4",
         "Timestamp": 1734472799000509200,
@@ -656,7 +660,7 @@ def test_quotes_rest_rows(
 ) -> None:
     serve("/futures/v1/quotes/GCJ5", "quotes.json")
     q = rest_session.futures.quotes("GCJ5")
-    first = rows(q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST))[0]
+    first = rows(q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True))[0]
     assert first["AskTimestamp"] == first["BidTimestamp"] == 1734472800076125400
     assert (first["AskPrice"], first["AskSize"], first["BidPrice"], first["BidSize"]) == (
         None,
@@ -674,7 +678,7 @@ def test_session_bars_over_rest(
 ) -> None:
     serve("/futures/v1/aggs/GCJ5", "aggs.json")
     q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION)
-    out = rows(q.history("2025-02-04", "2025-02-05", source=dm.HistorySource.REST))
+    out = rows(q.history("2025-02-04", "2025-02-05", source=dm.HistorySource.REST, wait=True))
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/aggs/GCJ5",
@@ -708,7 +712,7 @@ def test_five_minute_bars_send_their_resolution(
 ) -> None:
     serve("/futures/v1/aggs/GCJ5", "aggs.json")
     q = rest_session.futures.bars("GCJ5", dm.Timespan.MINUTE, multiplier=5)
-    q.history("2025-02-04", "2025-02-05")
+    q.history("2025-02-04", "2025-02-05", wait=True)
     assert [query["resolution"] for _, query in fake_rest.get_queries()] == [["5min"]]
 
 
@@ -722,7 +726,7 @@ def test_snapshots_over_rest(
     q = rest_session.futures.snapshots(
         ["ESZ5", "CBN5"], product_code="CB", sort="ticker", order=dm.Order.DESC
     )
-    out = rows(q.fetch())
+    out = rows(q.fetch(wait=True))
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/snapshot",
@@ -737,10 +741,10 @@ def test_snapshots_over_rest(
     assert len(out) == 1
     row = out[0]
     assert row["Symbol"] == "CBN5"
-    assert row["DetailsProductCode"] == "CB"
-    assert row["DetailsSettlementDate"] == "2025-07-30"  # midnight in Chicago, as a date
+    assert row["ProductCode"] == "CB"
+    assert row["SettlementDate"] == "2025-07-30"  # midnight in Chicago, as a date
     assert row["LastMinuteLastUpdated"] == 1746045300000 * 10**6  # sent in milliseconds
-    assert row["LastTradeLastUpdated"] == 1746045242858242600  # sent in nanoseconds
+    assert row["LastTradeTimestamp"] == 1746045242858242600  # sent in nanoseconds
     assert (row["LastTradePrice"], row["LastTradeSize"]) == (240.00000000000003, 5)
     assert row["SessionPreviousSettlement"] == 219.39
 
@@ -755,7 +759,7 @@ def test_snapshot_minute_time_sent_in_nanoseconds(
     # nanoseconds, where the documented sample has milliseconds.
     serve("/futures/v1/snapshot", "snapshot_nanosecond_minute.json")
     with caplog.at_level(logging.WARNING):
-        out = rows(rest_session.futures.snapshots("CBN5").fetch())
+        out = rows(rest_session.futures.snapshots("CBN5").fetch(wait=True))
     minute = datetime(2026, 11, 2, 17, 23, tzinfo=UTC)
     assert out[0]["LastMinuteLastUpdated"] == int(minute.timestamp()) * 10**9
     assert "schema drift" not in caplog.text
@@ -768,7 +772,7 @@ def test_every_contract_of_a_product(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/snapshot", "snapshot.json")
-    rest_session.futures.snapshots(dm.ALL, product_code="CB").fetch()
+    rest_session.futures.snapshots(dm.ALL, product_code="CB").fetch(wait=True)
     assert fake_rest.get_queries() == [
         ("/futures/v1/snapshot", {"product_code": ["CB"], "limit": ["50000"]})
     ]
@@ -782,7 +786,7 @@ def test_contracts_over_rest(
 ) -> None:
     serve("/futures/v1/contracts", "contracts.json")
     q = rest_session.futures.contracts(product_code="ES", filters={"active": True}, limit=5)
-    out = rows(q.fetch())
+    out = rows(q.fetch(wait=True))
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/contracts",
@@ -804,7 +808,7 @@ def test_contract_symbols_and_day_go_on_the_wire(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/contracts", "contracts.json")
-    rest_session.futures.contracts(["NQZ6", "ESZ6"], as_of="2026-10-07").fetch()
+    rest_session.futures.contracts(["NQZ6", "ESZ6"], as_of="2026-10-07").fetch(wait=True)
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/contracts",
@@ -819,7 +823,7 @@ def test_a_long_contract_list_is_split_into_requests(
     fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": []}))
     # 360 contracts: three products, twelve months, ten years.
     tickers = [f"{p}{m}{y}" for p in ("ES", "NQ", "GC") for y in range(10) for m in "FGHJKMNQUVXZ"]
-    rest_session.futures.contracts(tickers).fetch()
+    rest_session.futures.contracts(tickers).fetch(wait=True)
     sizes = sorted(
         len(query["ticker.any_of"][0].split(",")) for _, query in fake_rest.get_queries()
     )
@@ -833,7 +837,7 @@ def test_several_product_codes_go_in_one_request(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/contracts", "contracts.json")
-    rest_session.futures.contracts(product_code=["NQ", "ES"]).fetch()
+    rest_session.futures.contracts(product_code=["NQ", "ES"]).fetch(wait=True)
     assert fake_rest.get_queries() == [
         ("/futures/v1/contracts", {"product_code.any_of": ["NQ,ES"], "limit": ["1000"]})
     ]
@@ -846,7 +850,7 @@ def test_exchanges_over_rest(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/exchanges", "exchanges.json")
-    out = rows(rest_session.futures.exchanges().fetch())
+    out = rows(rest_session.futures.exchanges().fetch(wait=True))
     assert fake_rest.get_queries() == [("/futures/v1/exchanges", {"limit": ["1000"]})]
     assert out == [
         {
@@ -869,7 +873,7 @@ def test_products_over_rest(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/products", "products.json")
-    out = rows(rest_session.futures.products(product_code="EBE").fetch())
+    out = rows(rest_session.futures.products(product_code="EBE").fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/futures/v1/products", {"product_code": ["EBE"], "limit": ["50000"]})
     ]
@@ -887,7 +891,7 @@ def test_market_status_over_rest(
     serve: Callable[[str, str], None],
 ) -> None:
     serve("/futures/v1/market-status", "market_status.json")
-    out = rows(rest_session.futures.market_status(product_code="ERL").fetch())
+    out = rows(rest_session.futures.market_status(product_code="ERL").fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/futures/v1/market-status", {"product_code": ["ERL"], "limit": ["100"]})
     ]
@@ -913,7 +917,7 @@ def test_schedules_over_rest(
     q = rest_session.futures.schedules(
         product_code="ERL", start=date(2024, 6, 10), end=date(2024, 6, 10)
     )
-    out = rows(q.fetch())
+    out = rows(q.fetch(wait=True))
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/schedules",
@@ -953,7 +957,7 @@ def test_poll_keys_tell_the_rows_apart(
     # The fixture holds, for each key column, a row that differs from the first only there,
     # so every key column is needed: without any one of them, two rows would collide.
     serve(path, f"poll_keys_{dataset}.json")
-    out = rows(getattr(rest_session.futures, dataset)().fetch())
+    out = rows(getattr(rest_session.futures, dataset)().fetch(wait=True))
     keys = _spec(dataset).poll_keys
     assert len(out) == len(keys) + 1
     assert len({tuple(r[k] for k in keys) for r in out}) == len(out)
@@ -1078,7 +1082,7 @@ def test_a_contracts_table_feeds_a_stream(
     # A contracts table's `Symbol` is the contract, so a part of it is a stream's symbol table.
     listed = [{"ticker": "ESZ4", "product_code": "ES"}, {"ticker": "ESH5", "product_code": "ES"}]
     fake_rest.reply("/futures/v1/contracts", Reply({"status": "OK", "results": listed}))
-    contracts = rest_session.futures.contracts(product_code="ES").fetch()
+    contracts = rest_session.futures.contracts(product_code="ES").fetch(wait=True)
     ws_session.rows.update(SCHEDULE_ROWS)
     live = ws_session.session.futures.trades(contracts.head(1)).last_by()
     assert ws_session.connections.futures_calendar().wait_loaded(
@@ -1142,7 +1146,7 @@ def test_one_block_round_trips_through_the_flat_files(
     key = object_key(f"us_futures_{{venue}}/{prefix}", day, "cme")
     fake_s3.put(key, make_csv_gz(text))
     query = build(s3_session.futures)
-    out = rows(query.history(day, day, source=dm.HistorySource.FLAT_FILES))
+    out = rows(query.history(day, day, source=dm.HistorySource.FLAT_FILES, wait=True))
     assert fake_s3.keys() == [key]
     wire = next(csv.DictReader(io.StringIO(text)))
     time_key = "window_start" if "window_start" in wire else "timestamp"
@@ -1182,13 +1186,13 @@ def test_a_file_of_spreads_reads_every_ticker_as_written(
     key = object_key("us_futures_{venue}/session_aggs_v1", day, "cbot")
     fake_s3.put(key, make_csv_gz("\n".join([header, *SPREAD_ROWS]) + "\n"))
     every = s3_session.futures.bars(dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CBOT})
-    out = rows(every.history(day, day, source=dm.HistorySource.FLAT_FILES))
+    out = rows(every.history(day, day, source=dm.HistorySource.FLAT_FILES, wait=True))
     assert [r["Symbol"] for r in out] == [row.split(",")[0] for row in SPREAD_ROWS]
     # A spread is a symbol a dataset takes, and filters the same file.
     one = s3_session.futures.bars(
         "BOB 02-01 U6", dm.Timespan.SESSION, venues={dm.FuturesVenue.CBOT}
     )
-    picked = rows(one.history(day, day, source=dm.HistorySource.FLAT_FILES))
+    picked = rows(one.history(day, day, source=dm.HistorySource.FLAT_FILES, wait=True))
     assert [(r["Symbol"], r["Close"]) for r in picked] == [("BOB 02-01 U6", 3.0)]
 
 
@@ -1237,7 +1241,7 @@ def test_a_month_bar_by_date_needs_the_session_that_opens_on_its_last_day(
     ]
     serve_buckets(fake_rest, months)
     q = rest_session.futures.bars("ESZ6", dm.Timespan.MONTH)
-    out = rows(q.history("2026-09-01", "2026-10-01", source=dm.HistorySource.REST))
+    out = rows(q.history("2026-09-01", "2026-10-01", source=dm.HistorySource.REST, wait=True))
     assert [(r["TimestampStart"], r["TimestampEnd"], r["Date"]) for r in out] == [
         (utc_ns("2026-09-01"), chicago_open(date(2026, 10, 1)), None)
     ]
@@ -1246,7 +1250,9 @@ def test_a_month_bar_by_date_needs_the_session_that_opens_on_its_last_day(
     assert query["window_start.lt"] == [str(chicago_open(date(2026, 10, 1)) + 3600 * NS)]
     # Ending on 09-30 leaves out September's last session, so no month bar fits.
     serve_buckets(fake_rest, months)
-    assert rows(q.history("2026-09-01", "2026-09-30", source=dm.HistorySource.REST)) == []
+    assert (
+        rows(q.history("2026-09-01", "2026-09-30", source=dm.HistorySource.REST, wait=True)) == []
+    )
 
 
 # The ESZ6 2-session bars Massive sent from 2026-08-01: each covers two calendar days, so the
@@ -1273,7 +1279,7 @@ def test_bars_of_several_sessions_by_date_keep_every_bucket_inside_the_range(
     monkeypatch.setattr(history_source, "_now", lambda: AFTER_THE_LIVE_RUN)
     serve_buckets(fake_rest, TWO_SESSIONS)
     q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION, multiplier=2)
-    out = rows(q.history("2026-08-03", "2026-08-14", source=dm.HistorySource.REST))
+    out = rows(q.history("2026-08-03", "2026-08-14", source=dm.HistorySource.REST, wait=True))
     assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (utc_ns(day), chicago_open(date.fromisoformat(label))) for day, label in TWO_SESSIONS[:6]
     ]
@@ -1296,7 +1302,7 @@ def test_bars_of_several_sessions_by_instants_keep_the_buckets_at_the_range_s_ed
     serve_buckets(fake_rest, TWO_SESSIONS)
     q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION, multiplier=2)
     start, end = datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 8, 15, tzinfo=UTC)
-    out = rows(q.history(start, end, source=dm.HistorySource.REST))
+    out = rows(q.history(start, end, source=dm.HistorySource.REST, wait=True))
     assert [r["TimestampStart"] for r in out] == [utc_ns(day) for day, _ in TWO_SESSIONS[:6]]
 
 
@@ -1313,10 +1319,10 @@ def test_a_range_of_instants_from_a_session_s_open_leaves_out_its_session_bar(
     q = rest_session.futures.bars("ESZ6", dm.Timespan.SESSION)
     end = datetime(2026, 9, 16, tzinfo=UTC)
     session_open = datetime(2026, 9, 13, 17, tzinfo=CHICAGO)
-    from_open = rows(q.history(session_open, end, source=dm.HistorySource.REST))
+    from_open = rows(q.history(session_open, end, source=dm.HistorySource.REST, wait=True))
     assert [r["TimestampStart"] for r in from_open] == [utc_ns("2026-09-14")]
     midnight = datetime(2026, 9, 13, tzinfo=UTC)
-    from_midnight = rows(q.history(midnight, end, source=dm.HistorySource.REST))
+    from_midnight = rows(q.history(midnight, end, source=dm.HistorySource.REST, wait=True))
     assert [r["TimestampStart"] for r in from_midnight] == [
         utc_ns("2026-09-13"),
         utc_ns("2026-09-14"),
@@ -1340,7 +1346,7 @@ def test_a_bar_whose_bucket_is_still_open_is_left_out(
     ]
     serve_buckets(fake_rest, buckets)
     q = rest_session.futures.bars("ESZ6", dm.Timespan.MONTH, multiplier=2)
-    out = rows(q.history("2026-07-01", None, source=dm.HistorySource.REST))
+    out = rows(q.history("2026-07-01", None, source=dm.HistorySource.REST, wait=True))
     assert [r["TimestampEnd"] for r in out] == [
         chicago_open(date(2026, 9, 1)),
         chicago_open(date(2026, 10, 30)),
@@ -1360,7 +1366,7 @@ def test_history_with_dates_refuses_a_session_end_date_filter(
     )
     assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
-        q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST)
+        q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []
 
 
@@ -1368,7 +1374,7 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     # An explicit APPEND poll appends each new state of a contract, or each status change.
     revised = {spec.name: spec.revision_keys for spec in futures.DATASETS if spec.revision_keys}
     assert revised == {
-        "futures.snapshots": ("LastQuoteLastUpdated", "LastTradeLastUpdated"),
+        "futures.snapshots": ("LastQuoteTimestamp", "LastTradeTimestamp"),
         "futures.market_status": ("Timestamp",),
     }
     for name, keys in revised.items():

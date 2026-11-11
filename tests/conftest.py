@@ -4220,7 +4220,7 @@ def special_dividends(
                 limit=50,
                 filters={"distribution_type": "special"},
             )
-            rows = table_rows(query.fetch())
+            rows = table_rows(query.fetch(wait=True))
             found = events.special_dividends(rows, _all_splits(session, table_rows))
             common = _is_common_stock(session, table_rows)
             _EVENTS["dividends"] = _common_events(
@@ -4285,7 +4285,7 @@ def _all_splits(
             order=dm.Order.DESC,
             limit=5_000,
         )
-        _EVENTS["all splits"] = table_rows(query.fetch())
+        _EVENTS["all splits"] = table_rows(query.fetch(wait=True))
     return list(_EVENTS["all splits"])
 
 
@@ -4306,7 +4306,7 @@ def _is_common_stock(
 
     def check(symbol: str) -> bool:
         query = session.reference.tickers(symbol, ticker_type=dm.TickerType.CS)
-        return bool(table_rows(query.fetch()))
+        return bool(table_rows(query.fetch(wait=True)))
 
     return check
 

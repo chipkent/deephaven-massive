@@ -339,14 +339,15 @@ m = dm.MassiveSession()
 
 yesterday = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=1)
 daily = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
-    yesterday - timedelta(days=13), yesterday
+    yesterday - timedelta(days=13), yesterday, wait=True
 )
 print(daily.size)
 ```
 
-You should see a number from 24 to 30, and a `daily` panel with eight to ten bars per stock,
-oldest first. Its `Date` column holds each trading day as text, such as `2026-10-30`. Hover
-over the `Close` header to see the column's description.
+`wait=True` makes `history()` wait for the rows, so `daily.size` counts them. You should see a
+number from 24 to 30, and a `daily` panel with eight to ten bars per stock, oldest first. Its
+`Date` column holds each trading day as text, such as `2026-10-30`. Hover over the `Close`
+header to see the column's description.
 
 #### 4. Summarize bars with table operations
 
@@ -464,8 +465,8 @@ Then close the `paced` panel. The table stops, and the `stocks` row returns to `
 
 #### 8. Read history in the background
 
-Start reading a year of two stocks with `wait=False`, which returns at once and fills the table
-when the read is done:
+Start reading a year of two stocks. `history()` returns at once and fills the table when the
+read is done:
 
 ```python
 from datetime import datetime, timedelta
@@ -476,7 +477,7 @@ import deephaven_massive as dm
 m = dm.MassiveSession()
 
 year_ago = datetime.now(ZoneInfo("America/New_York")).date() - timedelta(days=365)
-year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago, wait=False)
+year = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY).history(year_ago)
 streams = m.streams()
 ```
 
@@ -542,7 +543,8 @@ growth_chart = (
 #### 10. Ask for data Basic doesn't include
 
 Ask Basic for the latest trade, live minute bars, and bars from 2015. Basic includes none of
-them, and the code prints how Massive refuses each:
+them, and the code prints how Massive refuses each. `wait=True` makes `fetch()` and `history()`
+wait for Massive's answer, so a refusal raises in the call:
 
 ```python
 import deephaven_massive as dm
@@ -552,7 +554,7 @@ streams = m.streams()
 connections = m.connections()
 
 try:
-    m.stocks.last_trade(["AAPL"]).fetch()
+    m.stocks.last_trade(["AAPL"]).fetch(wait=True)
     print("the latest trade: no error, so your plan includes it")
 except dm.MassiveError as error:
     print(f"the latest trade: {type(error).__name__}: {error}")
@@ -564,7 +566,7 @@ except dm.MassiveError as error:
     print(f"live minute bars: {type(error).__name__}: {error}")
 
 try:
-    m.stocks.bars("AAPL", dm.Timespan.DAY).history("2015-01-05", "2015-01-09")
+    m.stocks.bars("AAPL", dm.Timespan.DAY).history("2015-01-05", "2015-01-09", wait=True)
     print("bars from 2015: no error, so your plan includes them")
 except dm.MassiveError as error:
     print(f"bars from 2015: {type(error).__name__}: {error}")
@@ -982,7 +984,8 @@ You should see `saved to` and the folder, such as `/Users/you/massive-test/diagn
 #### 25. Close a session
 
 Close a session, and check that it refuses new work. Then read a week of bars in a `with`
-block, which closes its session when the block ends:
+block, which closes its session when the block ends. Closing a session stops its reads, so the
+read in the block passes `wait=True` to finish first:
 
 ```python
 from datetime import datetime, timedelta
@@ -1004,7 +1007,7 @@ except dm.MassiveError as error:
 # A with block closes its session when the block ends.
 with dm.MassiveSession() as m2:
     last_week = m2.stocks.bars("NVDA", dm.Timespan.DAY).history(
-        yesterday - timedelta(days=6), yesterday
+        yesterday - timedelta(days=6), yesterday, wait=True
     )
 print(m2, last_week.size)
 ```

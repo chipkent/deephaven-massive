@@ -294,7 +294,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once_per_pause(
         assert message.startswith(
             f"{label(massive_session)}: m.test.trades().append_only() ran for "
         )
-        assert "until the command ends; pass wait=False to fetch() or history() to read" in message
+        assert "the command ends; leave out wait=True to let fetch() or history() read" in message
         caplog.clear()
         next_update_cycle()  # the live tables updated again: the pause ended
         console_command(lambda: made.append(q.ring(7)))
@@ -803,9 +803,9 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     monkeypatch.setattr(diagnostics, "_release_later", handing)
     held = massive_session.connections()
     assert not held.j_table.isFailed()
-    publisher.go.set()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.diagnostics"):
-        result = stream_query(massive_session).append_only()  # its row kills the writer
+        result = stream_query(massive_session).append_only()  # its row waits for `go`
+        publisher.go.set()  # the row kills the writer only now, after the call returned
         writer.join(TIMEOUT)
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]

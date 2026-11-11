@@ -275,7 +275,7 @@ CHAIN: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CHAIN,
     serves_current_data=True,
-    keys={(_REST, _CHAIN): _keys("DetailsTicker", fanout="UnderlyingAssetTicker")},
+    keys={(_REST, _CHAIN): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     revision_keys=_SNAPSHOT_REVISION,
 )
 

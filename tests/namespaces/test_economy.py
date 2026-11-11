@@ -180,9 +180,9 @@ def test_each_series_fetches_its_vendor_sample(
     fake_rest.reply(series.path, Reply(load_fixture(OWNER, f"{series.method}.json")))
     factory = getattr(rest_session.economy, series.method)
     out = dh_to_pylist(
-        factory(
-            start="2020-01-01", end=date(2025, 12, 31), sort="date", order=dm.Order.DESC
-        ).fetch()
+        factory(start="2020-01-01", end=date(2025, 12, 31), sort="date", order=dm.Order.DESC).fetch(
+            wait=True
+        )
     )
     (request,) = fake_rest.requests
     assert urlsplit(request.target).path == series.path

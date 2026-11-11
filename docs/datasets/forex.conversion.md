@@ -45,8 +45,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Converted` | double | The result of the conversion. |
 | `From` | String | The "from" currency symbol. |
 | `InitialAmount` | double | The amount to convert. |
-| `LastBid` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastAsk` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastBidPrice` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastAskPrice` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
 | `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
 | `LastTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
 | `To` | String | The "to" currency symbol. |
@@ -65,8 +65,8 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Converted` | `converted` |
 | `From` | `from` |
 | `InitialAmount` | `initialAmount` |
-| `LastBid` | `last.bid` |
-| `LastAsk` | `last.ask` |
+| `LastBidPrice` | `last.bid` |
+| `LastAskPrice` | `last.ask` |
 | `LastExchange` | `last.exchange` |
 | `LastTimestamp` | `last.timestamp` |
 | `To` | `to` |

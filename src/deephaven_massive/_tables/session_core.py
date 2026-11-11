@@ -15,7 +15,7 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   `shared_streams.py`), every WebSocket stream from just before it opens until its holds are
   released and its blink table has shut down, one per `(dataset, channel, symbols)` shared by
   every verb that asks for it; and the worker-table registry (`WorkerTables`,
-  `worker_tables.py`), every table one library thread of its own fills (a `poll()` table, a
+  `worker_tables.py`), every table a library thread fills (a `poll()` table, a
   background read, a followed read) from its creation until its result is released and its
   blink table has shut down. Transports report row changes, failures, and drift by stream id
   to the core (`update_streams`, `fail_stream`, `record_stream_drift`), which applies each to
@@ -23,6 +23,8 @@ one `SessionCore`, which queries and namespaces share. The core owns:
 - the latest `m.symbol_reads()` row of every symbol of every followed read, kept for the
   session's life so `close()` can mark the unfinished ones `CLOSED`, and the session's follow
   coordinator (`follow_coordinator.py`), which owns the followed reads' per-symbol state;
+- the read pool (`read_pool.py`), at most `max_concurrency` threads that run every background
+  and followed read, so the session's downloads share one limit;
 - the result registry and the reaper thread (`liveness.py`);
 - the diagnostics tables and their writer thread, the count of diagnostics views users hold, and
   the drift registry that every transport reports schema drift to (`diagnostics.py`);
@@ -103,6 +105,7 @@ from deephaven_massive._tables.liveness import (
     release_scope,
     weak_owner_callback,
 )
+from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.stream_ids import next_stream_id
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
@@ -183,6 +186,7 @@ def _collect_session(
     results: ResultRegistry,
     closers: list[Callable[[], None]],
     follows: FollowCoordinator,
+    reads: ReadPool,
 ) -> None:
     """Finalizer of a session freed without `close()`: clean up, without waiting.
 
@@ -207,12 +211,14 @@ def _collect_session(
         results: The session's result registry, retired here.
         closers: The session's registered closers; emptied here.
         follows: The session's follow coordinator, whose thread the reaper stops.
+        reads: The session's read pool, which the reaper stops.
     """
     pending = tuple(closers)
     closers.clear()
     if pending:
         reaper.submit(functools.partial(_close_collected, label, pending))
     reaper.submit(follows.stop)  # a freed session follows nothing: its results all stopped
+    reaper.submit(reads.stop)  # and reads nothing: no result of it is held
     # After the closers, whose rows it still applies; it waits for the writer to end, which
     # never needs the reaper, and the reaper's retirement waits behind it.
     reaper.submit(diagnostics.release)
@@ -312,7 +318,9 @@ class SessionCore:
             raise
         self.drift: Final = DriftRegistry()
         # Owns every followed read's per-symbol state; starts its thread with the first one.
-        self.follows: Final = FollowCoordinator(exec_ctx, thread_prefix, config.max_concurrency)
+        # Runs every background and followed read; starts its threads with the first one.
+        self.reads: Final = ReadPool(thread_prefix, config.max_concurrency)
+        self.follows: Final = FollowCoordinator(exec_ctx, thread_prefix, self.reads)
         # The session's WebSocket streams, and its `poll()` tables and background and followed
         # reads: the two registries of `m.streams()` rows, guarded by `registry_lock`.
         self.streams: Final = SharedStreams(self)
@@ -345,6 +353,7 @@ class SessionCore:
             results=self.results,
             closers=self._closers,
             follows=self.follows,
+            reads=self.reads,
         )
         finalizer.atexit = False
 
@@ -461,8 +470,8 @@ class SessionCore:
         logger.log(
             logging.WARNING if first else logging.DEBUG,
             "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
-            "update graph's lock: live tables do not update until the command ends; pass "
-            "wait=False to fetch() or history() to read in the background",
+            "update graph's lock: live tables do not update until the command ends; leave "
+            "out wait=True to let fetch() or history() read in the background",
             self.label,
             call,
             seconds,
@@ -914,6 +923,7 @@ class SessionCore:
             except Exception:
                 logger.exception("%s: a transport failed to close. %s", self.label, LIBRARY_BUG)
         self.follows.stop()  # the events queued before it are handled; nothing is joined
+        self.reads.stop()  # every read's table has failed: its waiting tasks are dropped
         # The writer releases the diagnostics scope under the update graph's shared lock, which
         # it cannot take while this thread holds the lock: waiting for it there would never end.
         self.diagnostics.release(wait=not locked)
