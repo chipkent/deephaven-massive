@@ -500,9 +500,10 @@ def test_the_whole_market_example_ranks_the_day(
     [block] = section_blocks(README, "whole-market-day")
     [names] = run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
-    # One row per stock, ranked by dollars traded, largest first.
-    assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
-    busiest = dh_to_pylist(names["busiest"])
+    # One row per stock, ranked by dollars traded, largest first, once the background read lands.
+    day_rows = _wait_for_rows(names["day"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in day_rows} == {"UP", "BIG", "FLAT"}
+    busiest = _wait_for_rows(names["busiest"], lambda rows: len(rows) == 3, dh_to_pylist)
     assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
     assert [r["DollarVolume"] for r in busiest] == pytest.approx(
         [50_000_000, 20_000_000, 15_000_000]
