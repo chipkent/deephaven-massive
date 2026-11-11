@@ -427,3 +427,21 @@ def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
     assert param_base("timestamp.gte") == "timestamp"
     assert param_base("ticker.any_of") == "ticker"
     assert param_base("date") == "date"
+
+
+def test_comma_items_splits_an_item_on_its_commas() -> None:
+    assert filters._comma_items("a,b", label="d filter 'k'", value=("a,b",)) == ["a", "b"]
+    # A blank value stays empty, for the caller to refuse.
+    assert filters._comma_items("a,,b", label="d filter 'k'", value=("a,,b",)) == ["a", "", "b"]
+    assert filters._comma_items("a, ", label="d filter 'k'", value=("a, ",)) == ["a", ""]
+
+
+def test_comma_items_refuses_a_value_with_surrounding_whitespace() -> None:
+    with pytest.raises(ValueError, match=r"^d filter 'k' has the item ' b' with surrounding"):
+        filters._comma_items("a, b", label="d filter 'k'", value=("a, b",))
+
+
+def test_date_text_writes_a_day_only_for_a_list_of_dates() -> None:
+    assert filters._date_text(date(2026, 10, 30), ParamKind.DATE, label="x") == "2026-10-30"
+    with pytest.raises(ValueError, match=r"^d filter 'k' takes no dates"):
+        filters._date_text(date(2026, 10, 30), None, label="d filter 'k'")

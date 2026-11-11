@@ -156,6 +156,39 @@ class KeySpec:
     instrument: bool = True
     required: bool = True
 
+    def check(self, role: str, transport: Transport, *, where: str) -> None:
+        """Check that the key fits the role it is declared for, as the attributes above say.
+
+        Args:
+            role: The key's role in its `SourceKeys`: `symbol`, `time`, `end`, `fanout`, or
+                `date`.
+            transport: The transport of the source that declares it.
+            where: The dataset, transport, and source, which start the message.
+
+        Raises:
+            ValueError: If a key other than `symbol` or `fanout` is filled from the request; a
+                key other than `fanout` is marked as no instrument; a fan-out key that is no
+                instrument is filled from the request (it would have no column to keep); or a
+                key other than a `symbol` or `fanout` key read from a REST path's rows is
+                optional.
+        """
+        if self.from_request and role not in _FROM_REQUEST_ROLES:
+            raise ValueError(f"{where}: the {role} key cannot come from the request")
+        if not self.instrument and role != "fanout":
+            raise ValueError(f"{where}: only a fanout key can be no instrument")
+        if not self.instrument and self.from_request:
+            raise ValueError(
+                f"{where}: a fanout key that is no instrument keeps a column of the "
+                "rows, so it cannot come from the request"
+            )
+        optional_ok = (
+            role in _OPTIONAL_ROLES and transport is Transport.REST and not self.from_request
+        )
+        if not self.required and not optional_ok:
+            raise ValueError(
+                f"{where}: only a symbol or fanout key read from a REST path's rows can be optional"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class SourceKeys:
@@ -506,6 +539,31 @@ class DatasetSpec:
             raise ValueError(
                 f"{self.name}: channels and flat_file_prefixes must be keyed by {kind}"
             )
+        self._check_class_requirements()
+        self._check_current_data_flags()
+        self._check_keys()
+        self._check_symbol_free()
+        if self.times is RowTimes.DAY and self.asset_class not in DAY_ZONES:
+            raise ValueError(
+                f"{self.name}: a daily summary needs an asset class whose days are calendar "
+                f"days of one zone ({', '.join(c.value for c in DAY_ZONES)}), so its window "
+                "and its descriptions can name that zone"
+            )
+        self._check_poll_keys()
+        self._check_flat_files()
+        self._check_verbs()
+
+    def _check_class_requirements(self) -> None:
+        """Check the fields that need the dataset to be of one asset class, or of every class.
+
+        A stream, a dataset in a kind, and a flat-file dataset are of one class; symbols kept
+        as written are for REST datasets only; `option_rows` is for a dataset of every class.
+
+        Raises:
+            ValueError: If a dataset with channels, flat files, or a kind has no `asset_class`
+                (`ClassFromPrefix.ANY`); a dataset that keeps its symbols as written has
+                channels or flat-file prefixes; or a dataset of one class sets `option_rows`.
+        """
         if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
         if self.kind is not None and self.asset_class is ClassFromPrefix.ANY:
@@ -519,6 +577,15 @@ class DatasetSpec:
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
+
+    def _check_current_data_flags(self) -> None:
+        """Check the flags that say a dataset serves current or real-time data.
+
+        Raises:
+            ValueError: If a dataset without a fetch path, or whose fetch path is a reference
+                endpoint, sets `serves_current_data` or `latest_is_current`; a dataset sets
+                both; or a dataset without channels sets `real_time_only`.
+        """
         if (self.serves_current_data or self.latest_is_current) and (
             self.fetch_path is None or REFERENCE_PATH.match(self.fetch_path)
         ):
@@ -534,17 +601,6 @@ class DatasetSpec:
             )
         if self.real_time_only and not self.channels:
             raise ValueError(f"{self.name}: only a stream (with channels) can be real-time only")
-        self._check_keys()
-        self._check_symbol_free()
-        if self.times is RowTimes.DAY and self.asset_class not in DAY_ZONES:
-            raise ValueError(
-                f"{self.name}: a daily summary needs an asset class whose days are calendar "
-                f"days of one zone ({', '.join(c.value for c in DAY_ZONES)}), so its window "
-                "and its descriptions can name that zone"
-            )
-        self._check_poll_keys()
-        self._check_flat_files()
-        self._check_verbs()
 
     def _check_summary(self) -> None:
         """Check that the summary is one sentence: one line of text that ends in a period.
@@ -727,25 +783,7 @@ class DatasetSpec:
             if declared.date is not None and times is RowTimes.NONE:
                 raise ValueError(f"{where}: a date key needs a dataset whose rows have a Date")
             for role, spec in declared.declared():
-                if spec.from_request and role not in _FROM_REQUEST_ROLES:
-                    raise ValueError(f"{where}: the {role} key cannot come from the request")
-                if not spec.instrument and role != "fanout":
-                    raise ValueError(f"{where}: only a fanout key can be no instrument")
-                if not spec.instrument and spec.from_request:
-                    raise ValueError(
-                        f"{where}: a fanout key that is no instrument keeps a column of the "
-                        "rows, so it cannot come from the request"
-                    )
-                optional_ok = (
-                    role in _OPTIONAL_ROLES
-                    and transport is Transport.REST
-                    and not spec.from_request
-                )
-                if not spec.required and not optional_ok:
-                    raise ValueError(
-                        f"{where}: only a symbol or fanout key read from a REST path's rows can "
-                        "be optional"
-                    )
+                spec.check(role, transport, where=where)
 
     def _check_symbol_free(self) -> None:
         """Check that a dataset whose rows name no instrument is a plain stream.

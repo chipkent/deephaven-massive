@@ -1710,3 +1710,55 @@ def test_the_poll_keys_gate_reads_only_a_dataset_with_poll() -> None:
     assert problems(change(EXCHANGES, poll_keys=("Nope",))) == (
         "poll keys: reference.exchanges: ['Nope'] are not columns",
     )
+
+
+@pytest.mark.parametrize(
+    ("key", "role", "transport", "message"),
+    [
+        (KeySpec("t", from_request=True), "time", Transport.REST, "the time key cannot come"),
+        (KeySpec("c", instrument=False), "symbol", Transport.REST, "only a fanout key can be no"),
+        (
+            KeySpec("c", instrument=False, from_request=True),
+            "fanout",
+            Transport.REST,
+            "a fanout key that is no instrument",
+        ),
+        (KeySpec("s", required=False), "symbol", Transport.WS, "only a symbol or fanout key"),
+        (KeySpec("t", required=False), "time", Transport.REST, "only a symbol or fanout key"),
+        (
+            KeySpec("s", from_request=True, required=False),
+            "symbol",
+            Transport.REST,
+            "only a symbol or fanout key",
+        ),
+    ],
+    ids=[
+        "time-from-request",
+        "symbol-no-instrument",
+        "no-instrument-from-request",
+        "optional-on-ws",
+        "optional-time",
+        "optional-from-request",
+    ],
+)
+def test_a_key_spec_refuses_a_role_it_cannot_fill(
+    *, key: KeySpec, role: str, transport: Transport, message: str
+) -> None:
+    with pytest.raises(ValueError, match=rf"^d: rest p: {message}"):
+        key.check(role, transport, where="d: rest p")
+
+
+@pytest.mark.parametrize(
+    ("key", "role", "transport"),
+    [
+        (KeySpec("stocksTicker", from_request=True), "symbol", Transport.REST),
+        (KeySpec("FilerCik", instrument=False), "fanout", Transport.REST),
+        (KeySpec("Ticker", required=False), "symbol", Transport.REST),
+        (KeySpec("SipTimestamp"), "time", Transport.WS),
+    ],
+    ids=["symbol-from-request", "fanout-no-instrument", "optional-rest-symbol", "time"],
+)
+def test_a_key_spec_accepts_a_role_it_fits(
+    *, key: KeySpec, role: str, transport: Transport
+) -> None:
+    key.check(role, transport, where="d: rest p")
