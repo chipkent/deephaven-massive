@@ -98,6 +98,11 @@ _REPOSITORY_FILE = re.compile(
     r"|raw\.githubusercontent\.com/chipkent/deephaven-massive/main)/([^#]+)(?:#(.*))?"
 )
 """A link to a file on the repository's main branch, as a page or as raw content."""
+_REPOSITORY_FILE_PREFIXES = (
+    "https://github.com/chipkent/deephaven-massive/blob/",
+    "https://raw.githubusercontent.com/chipkent/deephaven-massive/",
+)
+"""The start of every link to a file in the repository, on any branch."""
 
 
 def _name(page: Path) -> str:
@@ -411,8 +416,11 @@ def test_every_readme_link_opens_from_pypi() -> None:
             path, anchor = repository_file[1], repository_file[2] or ""
             if not _resolves((ROOT / path).resolve(), anchor):
                 broken.append(target)
-        elif not target.startswith(("#", "http://", "https://", "mailto:")):
-            broken.append(target)
+        else:
+            # A relative path, or a repository file off main (another branch, or a typo).
+            relative = not target.startswith(("#", "http://", "https://", "mailto:"))
+            if relative or target.startswith(_REPOSITORY_FILE_PREFIXES):
+                broken.append(target)
     assert broken == []
 
 
