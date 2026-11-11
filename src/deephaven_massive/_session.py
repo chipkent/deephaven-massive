@@ -86,8 +86,8 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
-    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 

@@ -206,7 +206,6 @@ def _resolution_namespace() -> dict[str, object]:
         "_errors",
         "_config",
         "_debug_log",
-        "_symbols_like",
         "queries",
         "queries._call",
         "queries._query",

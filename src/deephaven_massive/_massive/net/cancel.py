@@ -20,24 +20,13 @@ from __future__ import annotations
 import functools
 import itertools
 import threading
-from typing import TYPE_CHECKING, Self, TypeVar
+from typing import TYPE_CHECKING, Self
 
-_F = TypeVar("_F")
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
-
-    from typing_extensions import override
-else:
-
-    def override(method: _F) -> _F:
-        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
-
-        Type checkers read `typing_extensions.override` instead, from its bundled stub, so
-        overrides stay checked without a run-time dependency.
-        """
-        return method
 
 
 __all__ = ["Cancel"]

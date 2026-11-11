@@ -48,7 +48,7 @@ from deephaven_massive.queries import (
 )
 
 if TYPE_CHECKING:
-    from deephaven_massive._symbols_like import SymbolsLike
+    from deephaven_massive._datasets.symbols import SymbolsLike
 
 __all__ = ["DATASETS", "ForexNamespace"]
 

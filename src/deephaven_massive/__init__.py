@@ -111,6 +111,7 @@ from deephaven_massive._datasets.dates import DateLike
 from deephaven_massive._datasets.filters import FilterValue
 from deephaven_massive._datasets.symbols import (
     ALL,
+    SymbolsLike,
     canonical_symbol,
     canonical_symbol_crypto,
     canonical_symbol_forex,
@@ -153,7 +154,6 @@ from deephaven_massive._errors import (
     MassiveError,
 )
 from deephaven_massive._session import MassiveSession
-from deephaven_massive._symbols_like import SymbolsLike
 from deephaven_massive._tables.symbols import canonicalize_symbols
 
 __all__ = [

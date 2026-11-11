@@ -62,8 +62,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ValueTable
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
-    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["DATASETS", "FuturesNamespace"]
 

@@ -23,10 +23,10 @@ The file also enforces the boundary of the wire package `deephaven_massive._mass
 the imports of every module with `ast`:
 
 - Inside `_massive`, a module imports only the standard library, the wire libraries
-  (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`), and other
-  `_massive` modules; never Deephaven, `jpy`, or the rest of the library. The exceptions are
-  `typing_extensions` anywhere and `types_boto3_s3` in `flatfiles`, inside
-  `if TYPE_CHECKING:`, which never runs.
+  (`urllib3`, `websockets`, `certifi`, `orjson`, `boto3`, `botocore`, `pyarrow`, and
+  `typing_extensions` for `override` on Python 3.11), and other `_massive` modules; never
+  Deephaven, `jpy`, or the rest of the library. The exception is `types_boto3_s3` in
+  `flatfiles`, inside `if TYPE_CHECKING:`, which never runs.
 - Its subpackages are layered: `net` and `spec` import nothing else in `_massive`; `rest`,
   `ws`, and `flatfiles` import only `net` and `spec`; `refresh` may import anything, and only
   `refresh` and its tests import `refresh`.
@@ -53,8 +53,8 @@ wire package.
 Then the file enforces the library's layers. Every module under `src/` is in one of six
 layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
 `_log_limits`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API
-(the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_snapshots`, `_symbols_like`,
-and the public packages `queries/` and `namespaces/`); a module in no known layer is itself a
+(the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_snapshots`, and the public
+packages `queries/` and `namespaces/`); a module in no known layer is itself a
 violation. Then:
 
 - every import, relative import, resolvable literal dynamic import, and module-name string,
@@ -62,8 +62,8 @@ violation. Then:
 - every import the rules cannot resolve is a violation: a computed name, a relative literal
   without a literal package, an `__import__` level other than 0, an import function used other
   than by a direct call, and a `sys.modules` lookup by a computed key;
-- Deephaven: the vocabulary imports only `deephaven.table`, the datasets import `deephaven`
-  only for type checking, and nothing imports `deephaven_server`
+- Deephaven: the vocabulary imports only `deephaven.table`, and nothing imports
+  `deephaven_server`
   (the wire boundary above already keeps Deephaven out of `_massive`);
 - the vocabulary and the datasets import no I/O or thread module and read neither
   `threading.Thread` nor `threading.Timer`;
@@ -582,7 +582,16 @@ _WIRE = "deephaven_massive._massive"
 
 # What `_massive` may import besides the standard library and itself.
 _WIRE_LIBRARIES = frozenset(
-    {"urllib3", "websockets", "certifi", "orjson", "boto3", "botocore", "pyarrow"}
+    {
+        "urllib3",
+        "websockets",
+        "certifi",
+        "orjson",
+        "boto3",
+        "botocore",
+        "pyarrow",
+        "typing_extensions",  # `override`, which the standard library has from Python 3.12
+    }
 )
 # The network libraries nothing outside `_massive` imports (`tests/_fakes/` excepted).
 _NETWORK_LIBRARIES = frozenset({"urllib3", "websockets", "certifi", "boto3", "botocore"})
@@ -596,11 +605,9 @@ _WIRE_SUBPACKAGES = {
     "flatfiles": frozenset({"flatfiles", "net", "spec"}),
 }
 _REFRESH = "refresh"
-# The libraries `_massive` may import for type checking only, and the layers that may: any
-# layer for `typing_extensions` (`override` on Python 3.11), only `flatfiles` for the boto3
-# stubs' `S3Client`.
+# The libraries `_massive` may import for type checking only, and the layers that may: only
+# `flatfiles`, for the boto3 stubs' `S3Client`.
 _TYPE_ONLY_LIBRARIES: dict[str, frozenset[str] | None] = {
-    "typing_extensions": None,
     "types_boto3_s3": frozenset({"flatfiles"}),
 }
 
@@ -1115,17 +1122,9 @@ def test_the_wire_package_must_not_import_outside_its_allow_list(source: str, na
 
 
 def test_the_wire_package_may_import_the_type_only_libraries_for_type_checking_only() -> None:
-    type_only = (
-        "from typing import TYPE_CHECKING\n"
-        "if TYPE_CHECKING:\n"
-        "    from typing_extensions import override\n"
-        "else:\n"
-        "    import ssl\n"
-    )
-    assert _check(_WIRE_FILE, type_only) == []
+    assert _check(_WIRE_FILE, "from typing_extensions import override\n") == []
     for source, line in [
-        ("from typing_extensions import override\n", 1),
-        ("if TYPE_CHECKING:\n    pass\nelse:\n    import typing_extensions\n", 4),
+        ("if TYPE_CHECKING:\n    pass\nelse:\n    import types_boto3_s3\n", 4),
         ("if TYPE_CHECKING:\n    import deephaven.table\n", 2),
     ]:
         [message] = _check(_WIRE_FILE, source)
@@ -1440,9 +1439,7 @@ def test_only_this_file_may_name_the_snapshot_files() -> None:
 _RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
 # The root modules of the vocabulary and of the API; every other root module is in no layer.
 _VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_log_limits"})
-_API_MODULES = frozenset(
-    {"__init__", "_dataset_list", "_debug_log", "_session", "_snapshots", "_symbols_like"}
-)
+_API_MODULES = frozenset({"__init__", "_dataset_list", "_debug_log", "_session", "_snapshots"})
 # The packages that are each one layer.
 _LAYER_PACKAGES = {
     "_massive": "wire",
@@ -1840,27 +1837,23 @@ def _client_reads(
     return found
 
 
-def _deephaven_rule(layer: str, name: str, *, type_only: bool) -> str | None:
+def _deephaven_rule(layer: str, name: str) -> str | None:
     """Return the Deephaven rule a reference breaks, if any.
 
     Args:
         layer: The importing module's layer.
         name: The imported or named module.
-        type_only: Whether the import sits in an `if TYPE_CHECKING:` block.
 
     Returns:
         The rule's text, or None when the reference is allowed.
     """
-    module = name
-    top = module.split(".", maxsplit=1)[0]
+    top = name.split(".", maxsplit=1)[0]
     if top == "deephaven_server":
         return f"nothing imports deephaven_server: {name}"
     if top != "deephaven":
         return None
-    if layer == "vocabulary" and not _inside(module, "deephaven.table"):
+    if layer == "vocabulary" and not _inside(name, "deephaven.table"):
         return f"the vocabulary imports only deephaven.table: {name}"
-    if layer == "datasets" and not type_only:
-        return f"the datasets layer imports deephaven only for type checking: {name}"
     return None
 
 
@@ -1880,7 +1873,6 @@ def layer_violations(path: PurePosixPath, source: str) -> list[str]:
         return [f"{where}:1: not in a known layer"]
     tree = ast.parse(source)
     module, package = _module_of(path)
-    type_only = _type_checking_lines(tree)
     references = [*_imports(tree, package), *_module_strings(tree)]
     found = []
     for line, name in references:
@@ -1889,7 +1881,7 @@ def layer_violations(path: PurePosixPath, source: str) -> list[str]:
             found.append(
                 f"{where}:{line}: the {layer} layer must not import the {target} layer: {name}"
             )
-        rule = _deephaven_rule(layer, name, type_only=line in type_only)
+        rule = _deephaven_rule(layer, name)
         if rule is not None:
             found.append(f"{where}:{line}: {rule}")
         if layer == "api" and _inside(name, _INGEST):
@@ -2103,7 +2095,7 @@ def test_a_literal_import_is_not_computed(source: str) -> None:
     ("module", "source"),
     [
         ("_enums.py", "from deephaven.table import Table\n"),
-        ("_datasets/symbols.py", "if TYPE_CHECKING:\n    from deephaven.table import Table\n"),
+        ("_datasets/symbols.py", "from deephaven.table import Table\n"),
         ("_tables/columns.py", "from deephaven import dtypes\n"),
         ("namespaces/_base.py", "from deephaven.table import Table\n"),
         ("_datasets/symbols.py", "import typing\nif typing.TYPE_CHECKING:\n    import deephaven\n"),
@@ -2116,16 +2108,6 @@ def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
 @pytest.mark.parametrize(
     ("module", "source", "message"),
     [
-        (
-            "_datasets/symbols.py",
-            "from deephaven.table import Table\n",
-            "1: the datasets layer imports deephaven only for type checking: deephaven.table.Table",
-        ),
-        (
-            "_datasets/schema.py",
-            "if TYPE_CHECKING:\n    pass\nelse:\n    from deephaven import dtypes\n",
-            "4: the datasets layer imports deephaven only for type checking: deephaven.dtypes",
-        ),
         (
             "_enums.py",
             "from deephaven import dtypes\n",

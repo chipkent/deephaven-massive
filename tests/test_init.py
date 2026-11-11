@@ -17,8 +17,7 @@ from typing import ParamSpec, ParamSpecArgs, ParamSpecKwargs, TypeVar
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _symbols_like
-from deephaven_massive._datasets import dates, filters
+from deephaven_massive._datasets import dates, filters, symbols
 
 EXPECTED_EXPORTS = [
     "MassiveSession",
@@ -105,7 +104,7 @@ def test_public_names_come_from_private_modules() -> None:
 
 
 def test_the_argument_aliases_are_the_ones_the_library_reads() -> None:
-    assert dm.SymbolsLike is _symbols_like.SymbolsLike
+    assert dm.SymbolsLike is symbols.SymbolsLike
     assert dm.DateLike is dates.DateLike
     assert dm.FilterValue is filters.FilterValue
 

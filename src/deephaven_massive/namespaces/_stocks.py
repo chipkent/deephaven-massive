@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
-    from deephaven_massive._symbols_like import SymbolsLike
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [

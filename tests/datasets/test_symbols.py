@@ -3,7 +3,8 @@
 import copy
 import json
 import re
-from collections.abc import Callable
+import typing
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
@@ -17,6 +18,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.symbols import (
     ALL,
     AllSymbols,
+    SymbolsLike,
     SymbolTable,
     check_symbol,
     check_symbols,
@@ -738,3 +740,11 @@ def test_all_shows_its_public_name() -> None:
     assert repr(ALL) == "dm.ALL"
     assert str(ALL) == "ALL"
     assert f"{ALL}" == "ALL"
+
+
+def test_symbols_like_names_every_form_symbols_takes() -> None:
+    assert set(typing.get_args(SymbolsLike)) == {str, Sequence[str], Table, AllSymbols}
+
+
+def test_all_is_an_instance_of_the_symbols_like_member() -> None:
+    assert isinstance(ALL, AllSymbols)
