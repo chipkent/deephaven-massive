@@ -266,7 +266,7 @@ _URL = "https://massive.com/docs/rest/x.md"
 
 def _descriptions(**change: object) -> str:
     document = {
-        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "generated_by": "python scripts/refresh.py",
         "fetched": "2026-10-27",
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},

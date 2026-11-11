@@ -1,7 +1,8 @@
 """The build-time refresh of the wire schemas: vendored snapshot in, `spec/*.json` out.
 
-`python -m deephaven_massive._massive.refresh` regenerates the committed wire schemas from a
-pinned snapshot of Massive's published specifications, `--fetch` replaces that snapshot with
+`scripts/refresh.py`, which runs this package's command inside the embedded Deephaven server
+the library's import needs, regenerates the committed wire schemas from a pinned snapshot of
+Massive's published specifications, `--fetch` replaces that snapshot with
 the live sources, and `--check` reports how the live sources differ from it. The snapshot
 lives outside the package, in `vendor/massive/` at the top of the source checkout: it is
 Massive's published content, vendored only as generation input, not covered by the

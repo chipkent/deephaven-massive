@@ -13,7 +13,10 @@ gate, and what to do when a refresh adds something new.
   drift check sees them change. They are Massive's content, not covered by this repository's license, and
   shipped in neither the wheel nor the sdist (CI's build job checks both).
 - **The refresh**, `deephaven_massive._massive.refresh`: reads the snapshot and writes
-  `spec/*.json`. It never touches the network unless asked to.
+  `spec/*.json`. It never touches the network unless asked to. Run it through
+  `scripts/refresh.py`, which starts the embedded Deephaven server first: the refresh is part
+  of the library, and importing the library imports Deephaven, which needs a running JVM
+  (JDK 17 or later).
 - **The hand input**: the only place a person adds knowledge the vendor's specifications lack.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
@@ -34,12 +37,12 @@ byte with what the generators produce.
 ## Commands
 
 ```bash
-uv run python -m deephaven_massive._massive.refresh           # regenerate spec/*.json; no network
-uv run python -m deephaven_massive._massive.refresh --fetch   # replace the snapshot with the live sources
-uv run python -m deephaven_massive._massive.refresh --check   # report drift from the live sources; changes nothing
-uv run pytest tests/massive/refresh -q                        # the parity test and every refresh gate
-uv run python scripts/render_reference.py                     # regenerate docs/datasets/
-uv run pytest tests/datasets/test_column_reference.py -q      # the column-reference parity tests
+uv run python scripts/refresh.py                             # regenerate spec/*.json; no network
+uv run python scripts/refresh.py --fetch                     # replace the snapshot with the live sources
+uv run python scripts/refresh.py --check --report drift.md   # write the drift report; changes nothing
+uv run pytest tests/massive/refresh -q                       # the parity test and every refresh gate
+uv run python scripts/render_reference.py                    # regenerate docs/datasets/
+uv run pytest tests/datasets/test_column_reference.py -q     # the column-reference parity tests
 ```
 
 ## Taking a change from Massive
@@ -121,5 +124,7 @@ as `vendor/massive/knowledge-base/<slug>.md`, with its URL and hashes in the man
 ## Drift
 
 `--check` reports what differs between the live sources and the snapshot, each item under the
-action that resolves it. `.github/workflows/spec-drift.yml` runs it weekly and keeps one standing
-"Massive API drift" issue. It is advisory, never a required check.
+action that resolves it, in the Markdown file `--report` names: the embedded server writes its
+own startup lines to standard output, so the report never goes there.
+`.github/workflows/spec-drift.yml` runs it weekly and keeps one standing "Massive API drift"
+issue. It is advisory, never a required check.

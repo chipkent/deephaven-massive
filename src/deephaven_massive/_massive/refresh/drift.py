@@ -1,10 +1,10 @@
 """Compare Massive's live published API with the vendored snapshot: the drift check.
 
-`python -m deephaven_massive._massive.refresh --check` calls `check`, which downloads the live
-vendor sources exactly as `--fetch` does (into a scratch directory, never over the vendored
-snapshot), compares them with the snapshot, and returns a `Report`. Nothing in the source
-checkout changes. The report lists every difference as one `Drift` item in one of three
-sections, each with the action a person takes:
+`scripts/refresh.py --check` calls `check`, which downloads the live vendor sources exactly as
+`--fetch` does (into a scratch directory, never over the vendored snapshot), compares them with
+the snapshot, and returns a `Report`. Nothing in the source checkout changes. The report lists
+every difference as one `Drift` item in one of three sections, each with the action a person
+takes:
 
 - **Unaccounted items** (`Section.UNACCOUNTED`): a REST endpoint, WebSocket feed, or flat-file
   dataset the live documentation names that the committed `spec/*.json` neither generates nor
@@ -105,7 +105,7 @@ _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The vendor statuses that account for a path or channel without generating it.
 _NOT_GENERATED: Final = frozenset({"deprecated", "draft"})
 # The command a person runs to see the report locally.
-_COMMAND: Final = "uv run python -m deephaven_massive._massive.refresh"
+_COMMAND: Final = "uv run python scripts/refresh.py"
 
 
 class Section(Enum):

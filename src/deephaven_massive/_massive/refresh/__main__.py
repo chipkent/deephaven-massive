@@ -1,7 +1,9 @@
-"""The refresh command: `python -m deephaven_massive._massive.refresh [--check | --fetch]`.
+"""The refresh command, which keeps the wire schemas in step with Massive's published API.
 
-Run it from a source checkout with `uv run`; neither the package nor the vendored snapshot it
-reads (`vendor/massive/`) is in a distribution.
+Run it from a source checkout through its launcher, which starts the embedded Deephaven server
+the library's import needs: `uv run python scripts/refresh.py [--check --report PATH |
+--fetch]`. Neither the package nor the vendored snapshot it reads (`vendor/massive/`) is in a
+distribution.
 
 - With no option, it regenerates `spec/rest.json`, `spec/ws.json`, `spec/flatfiles.json`,
   and `spec/descriptions.json` from the vendored snapshot, checking every refresh gate first,
@@ -14,13 +16,14 @@ reads (`vendor/massive/`) is in a distribution.
   run it again without the option to regenerate from the new snapshot. A failed download
   leaves the old snapshot in place and exits with status 1.
 - With `--check`, it downloads the same live sources into a scratch directory, compares them
-  with the vendored snapshot and the committed schemas (`drift`), prints the drift report as
-  Markdown to standard output, and changes nothing. It exits with status 0 when there is no
-  drift, 1 when there is, and 2 when the check could not be made (a download failed, a
-  vendored snapshot file is missing, unreadable, not JSON, or does not match the manifest, or
-  the flat-file bucket could not be listed), with the reason on standard error. With
-  `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` set, it also lists the
-  flat-file bucket's top-level prefixes.
+  with the vendored snapshot and the committed schemas (`drift`), writes the drift report as
+  Markdown to the file `--report` names, and changes nothing. The report goes to a file, not
+  standard output, because the embedded server writes its own startup lines there. It exits
+  with status 0 when there is no drift, 1 when there is, and 2 when the check could not be
+  made (a download failed, a vendored snapshot file is missing, unreadable, not JSON, or does
+  not match the manifest, or the flat-file bucket could not be listed), with the reason on
+  standard error and no report file written. With `MASSIVE_S3_ACCESS_KEY_ID` and
+  `MASSIVE_S3_SECRET_ACCESS_KEY` set, it also lists the flat-file bucket's top-level prefixes.
   The weekly drift workflow runs this same command.
 
 Review the snapshot diff and the `spec/*.json` diff together in one pull request.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from deephaven_massive._massive.net.errors import WireError
@@ -41,7 +45,7 @@ if TYPE_CHECKING:
 
 __all__ = ["main"]
 
-_PROG = "python -m deephaven_massive._massive.refresh"
+_PROG = "python scripts/refresh.py"
 # The exit status of a check that found drift, and of one that could not be made.
 _DRIFT = 1
 _CHECK_FAILED = 2
@@ -56,8 +60,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         The exit status. The plain run and `--fetch`: 0 on success, 1 when the refresh or the
         fetch stopped (the reason is printed to standard error). `--check`: 0 without drift,
-        1 with drift, 2 when the check could not be made. A usage error makes `argparse` exit
-        with status 2.
+        1 with drift, 2 when the check could not be made. A usage error, `--check` without
+        `--report` or `--report` without `--check` among them, makes `argparse` exit with
+        status 2.
     """
     parser = argparse.ArgumentParser(
         prog=_PROG,
@@ -68,8 +73,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     choice.add_argument(
         "--check",
         action="store_true",
-        help="compare the live vendor sources with the vendored snapshot and print the drift "
-        "report; changes nothing; exits 1 on drift, 2 when the check fails",
+        help="compare the live vendor sources with the vendored snapshot and write the drift "
+        "report to --report; changes nothing; exits 1 on drift, 2 when the check fails",
     )
     choice.add_argument(
         "--fetch",
@@ -77,9 +82,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="replace the vendored snapshot with the live vendor sources (reads public "
         "Massive URLs)",
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        metavar="PATH",
+        help="with --check, the file the Markdown drift report is written to",
+    )
     options = parser.parse_args(argv)
+    if options.check != (options.report is not None):
+        parser.error("--check and --report go together")
     if options.check:
-        return _check()
+        return _check(options.report)
     try:
         if options.fetch:
             names = fetch.fetch(snapshot.DIRECTORY)
@@ -97,12 +110,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _check() -> int:
-    """Run the drift check and print its report.
+def _check(report_file: Path) -> int:
+    """Run the drift check and write its report.
+
+    Args:
+        report_file: The file the Markdown report is written to, replacing any it holds.
 
     Returns:
         0 without drift, 1 with drift, 2 when the check could not be made (the reason is
-        printed to standard error and no report to standard output).
+        printed to standard error and no report is written).
     """
     try:
         report = drift.check()
@@ -119,7 +135,7 @@ def _check() -> int:
     ) as error:
         sys.stderr.write(f"the drift check could not be made: {error}\n")
         return _CHECK_FAILED
-    sys.stdout.write(report.text())
+    report_file.write_text(report.text(), encoding="utf-8")
     return _DRIFT if report.items else 0
 
 

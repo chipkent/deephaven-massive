@@ -1,7 +1,7 @@
 """Regenerate the committed wire schemas from the vendored snapshot: the refresh's one entry.
 
-`refresh()` is what `python -m deephaven_massive._massive.refresh` runs. It composes the
-other modules and adds only the rule for writing:
+`refresh()` is what `scripts/refresh.py` runs. It composes the other modules and adds only
+the rule for writing:
 
 1. `snapshot.Snapshot.load` reads the vendored snapshot and verifies it against its manifest;
 2. `generate` runs the three generators, `rest_sources.generate_rest` (the OpenAPI specification),
