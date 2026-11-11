@@ -5,7 +5,7 @@ description: "Use this skill whenever you write, change, or debug a test in this
 
 # Writing tests
 
-`AGENTS.md` sets where tests go and what they may touch (rules 10, 11, 13, and 16). This skill
+`AGENTS.md` sets where tests go and what they may touch (Code and tests, and Limits). This skill
 holds the harness details that keep a test deterministic and the JVM alive.
 
 ## The embedded JVM
@@ -27,7 +27,8 @@ holds the harness details that keep a test deterministic and the JVM alive.
   `dh_to_pylist`, `load_fixture`, `make_csv_gz`).
 - Drive state through the fakes in `tests/_fakes/` and explicit flush or poll calls, never
   `time.sleep()`: a sleep is slow when it is long enough and flaky when it is not.
-- Payload fixtures live under `tests/data/<test owner path>/`.
+- Unit tests never reach Massive: they use the fakes and payload fixtures under
+  `tests/data/<test owner path>/`.
 - Every behavior change gets a test that fails without the change.
 
 ## Input tables that stand in for a watchlist
@@ -41,8 +42,11 @@ The library never uses input tables, but a test may, to play a user's watchlist.
 
 ## Live tests
 
-Live tests (`tests/**/test_*_integration.py`) call Massive with a real key; agents write them
-but never run them with a key. `docs/live-tests.md` is their runbook.
+Live tests (`tests/**/test_*_integration.py`) call Massive with the owner's key. Agents write
+them. One runs only under the owner's supervision (`AGENTS.md`, Limits): either the owner runs
+it, or you run it after their yes, in the session, to a message giving the exact command, what
+it costs, and what its result settles.
+`docs/live-tests.md` is their runbook.
 
 - A live test names the open questions it answers with `@pytest.mark.verifies("N")` (it asserts
   the answer the library assumes) or `@pytest.mark.settles("N")` (it records evidence a person
