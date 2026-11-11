@@ -438,7 +438,9 @@ def test_snapshots_name_the_contract_symbol_and_have_no_single_time() -> None:
     assert schema.column_names[0] == "Symbol"
     assert "Timestamp" not in schema.column_names
     assert "Ticker" not in schema.column_names
-    assert {"LastTradePrice", "LastQuoteBid", "SessionSettlementPrice"} <= set(schema.column_names)
+    assert {"LastTradePrice", "LastQuoteBidPrice", "SessionSettlementPrice"} <= set(
+        schema.column_names
+    )
 
 
 def test_contracts_name_the_contract_symbol_from_the_row() -> None:
@@ -733,10 +735,10 @@ def test_snapshots_over_rest(
     assert len(out) == 1
     row = out[0]
     assert row["Symbol"] == "CBN5"
-    assert row["DetailsProductCode"] == "CB"
-    assert row["DetailsSettlementDate"] == "2025-07-30"  # midnight in Chicago, as a date
+    assert row["ProductCode"] == "CB"
+    assert row["SettlementDate"] == "2025-07-30"  # midnight in Chicago, as a date
     assert row["LastMinuteLastUpdated"] == 1746045300000 * 10**6  # sent in milliseconds
-    assert row["LastTradeLastUpdated"] == 1746045242858242600  # sent in nanoseconds
+    assert row["LastTradeTimestamp"] == 1746045242858242600  # sent in nanoseconds
     assert (row["LastTradePrice"], row["LastTradeSize"]) == (240.00000000000003, 5)
     assert row["SessionPreviousSettlement"] == 219.39
 
@@ -1366,7 +1368,7 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     # An explicit APPEND poll appends each new state of a contract, or each status change.
     revised = {spec.name: spec.revision_keys for spec in futures.DATASETS if spec.revision_keys}
     assert revised == {
-        "futures.snapshots": ("LastQuoteLastUpdated", "LastTradeLastUpdated"),
+        "futures.snapshots": ("LastQuoteTimestamp", "LastTradeTimestamp"),
         "futures.market_status": ("Timestamp",),
     }
     for name, keys in revised.items():

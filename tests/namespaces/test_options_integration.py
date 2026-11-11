@@ -984,11 +984,11 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
     units = []
     for row in table_rows(live_session.options.snapshots(symbols).fetch(wait=True)):
         expiry = datetime.combine(
-            date.fromisoformat(row["DetailsExpirationDate"]), dt_time(16, 0), _NEW_YORK
+            date.fromisoformat(row["ExpirationDate"]), dt_time(16, 0), _NEW_YORK
         )
         textbook = greeks.black_scholes_gamma(
             spot=spot,
-            strike=row["DetailsStrikePrice"],
+            strike=row["StrikePrice"],
             years=(expiry - now).total_seconds() / (365 * 24 * 3600),
             volatility=row["ImpliedVolatility"],
             rate=rate,
@@ -1039,5 +1039,5 @@ def _calls_near_the_money(
     near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
     chain = table_rows(calls(filters={**window, **near}).fetch(wait=True))
     priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
-    priced.sort(key=lambda r: abs(r["DetailsStrikePrice"] - spot))
+    priced.sort(key=lambda r: abs(r["StrikePrice"] - spot))
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]

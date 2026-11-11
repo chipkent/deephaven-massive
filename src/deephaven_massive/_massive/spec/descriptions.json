@@ -2205,12 +2205,12 @@
    },
    "/v3/snapshot": {
     "value": "Value of Index.",
+    "break_even_price": "The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid).",
     "details.contract_type": "The type of contract. Can be \"put\", \"call\", or in some rare cases, \"other\". From the `details` object: The details for this contract.",
     "details.exercise_style": "The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract.",
     "details.expiration_date": "The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract.",
     "details.shares_per_contract": "The number of shares per contract for this contract. From the `details` object: The details for this contract.",
     "details.strike_price": "The strike price of the option contract. From the `details` object: The details for this contract.",
-    "break_even_price": "The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid).",
     "error": "The error while looking for this ticker.",
     "fmv": "Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact).",
     "greeks.delta": "The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information.",
