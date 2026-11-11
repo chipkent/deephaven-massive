@@ -647,7 +647,7 @@ def test_a_download_is_never_published_after_the_table_failed(
     assert handle.fail_table(MassiveError("again")) is False
     with entered(massive_session._core.exec_ctx):
         rows = rows_of(massive_session, "AAPL", 1)
-        handle.publish("AAPL", 99, rows, decided_at_step=0)  # dropped
+        assert handle.publish("AAPL", 99, rows, decided_at_step=0, parts_before=2) == 2  # dropped
     gate.set()
     until(lambda: bool(result.j_table.isFailed()))
 
@@ -706,11 +706,15 @@ def test_always_hides_an_old_download_before_its_empty_download_lands(
     held = threading.Event()
     publish = followed_read.FollowedRead.publish
 
-    def holding(read: followed_read.FollowedRead, *download: object, decided_at_step: int) -> None:
+    def holding(
+        read: followed_read.FollowedRead, *download: object, decided_at_step: int, parts_before: int
+    ) -> int:
         symbol, seq, table = cast("tuple[str, int, Table | None]", download)
         if table is None:  # the empty download of a removal
             assert held.wait(TIMEOUT)
-        publish(read, symbol, seq, table, decided_at_step=decided_at_step)
+        return publish(
+            read, symbol, seq, table, decided_at_step=decided_at_step, parts_before=parts_before
+        )
 
     monkeypatch.setattr(followed_read.FollowedRead, "publish", holding)
     gate = script.gates["AAPL"] = threading.Event()  # and the new download waits too
@@ -740,15 +744,20 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
     publishing, go, published, freed = (threading.Event() for _ in range(4))
     publish = followed_read.FollowedRead.publish
 
-    def slow(read: followed_read.FollowedRead, *download: object, decided_at_step: int) -> None:
+    def slow(
+        read: followed_read.FollowedRead, *download: object, decided_at_step: int, parts_before: int
+    ) -> int:
         symbol, seq, table = cast("tuple[str, int, Table | None]", download)
         if table is None:  # the removal's empty row waits, so the stale row is latest
             assert freed.wait(TIMEOUT)
         elif not publishing.is_set():  # the first download
             publishing.set()
             assert go.wait(TIMEOUT)
-        publish(read, symbol, seq, table, decided_at_step=decided_at_step)
+        parts = publish(
+            read, symbol, seq, table, decided_at_step=decided_at_step, parts_before=parts_before
+        )
         published.set()
+        return parts
 
     monkeypatch.setattr(followed_read.FollowedRead, "publish", slow)
     add(wl, "AAPL")
@@ -947,7 +956,9 @@ def test_a_newer_download_replaces_a_seeded_symbol_s_rows(
     exec_ctx = massive_session._core.exec_ctx
     step = int(exec_ctx.update_graph.j_update_graph.clock().currentStep())
     with entered(exec_ctx):
-        read.publish("AAPL", 1, rows_of(massive_session, "AAPL", 5), decided_at_step=step)
+        read.publish(
+            "AAPL", 1, rows_of(massive_session, "AAPL", 5), decided_at_step=step, parts_before=0
+        )
     wait_rows(dh_to_pylist, result, {"AAPL": 5})
     massive_session.release(result)
 
@@ -1046,8 +1057,8 @@ def test_a_symbol_of_many_slices_lands_whole_and_a_smaller_download_replaces_it(
     dh_to_pylist: ToList,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Each row group holds at most GROUP_ROWS rows; a download of fewer parts than the one
-    # before must leave none of the earlier parts behind, and an empty one leaves no rows.
+    # Each row group holds at most GROUP_ROWS rows: a symbol of several lands whole, and each
+    # later download, of fewer parts or none, shows only its own rows.
     monkeypatch.setattr(followed_read, "GROUP_ROWS", 2)
     script = Script(massive_session)
     script.sizes = {"AAPL": 5}
@@ -1068,4 +1079,79 @@ def test_a_symbol_of_many_slices_lands_whole_and_a_smaller_download_replaces_it(
     until(lambda: script.read_of("AAPL") == 3)
     add(wl, "MSFT")
     wait_rows(dh_to_pylist, result, {"MSFT": 2})  # AAPL's empty download shows no rows
+    massive_session.release(result)
+
+
+@pytest.mark.parametrize(
+    ("size", "parts_before", "expected"),
+    [
+        (5, 0, [2, 2, 1]),
+        (2, 3, [2, None, None]),  # the earlier download's parts 1 and 2 are freed
+        (0, 2, [None, None]),
+        (0, 0, [None]),  # a symbol with no rows has a part 0, which the seed's mask reads
+    ],
+    ids=["slices", "fewer parts than before", "empty after two parts", "empty"],
+)
+def test_a_download_s_row_groups_free_every_earlier_part(
+    *,
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+    parts_before: int,
+    expected: list[int | None],
+) -> None:
+    monkeypatch.setattr(followed_read, "GROUP_ROWS", 2)
+    schema = massive_session._core.dataset_schema(SPEC)
+    with entered(massive_session._core.exec_ctx):
+        rows = followed_read._viewed(rows_of(massive_session, "AAPL", size), schema.column_names)
+        groups, parts = followed_read._row_groups(
+            "AAPL",
+            7,
+            rows,
+            decided_at_step=3,
+            parts_before=parts_before,
+            empty=followed_read._empty_row_group(schema),
+        )
+    found = dh_to_pylist(groups)
+    assert parts == sum(count is not None for count in expected)
+    assert [row["__MassivePart"] for row in found] == list(range(len(expected)))
+    assert {
+        (row["__MassiveKey"], row["__MassiveSeq"], row["__MassiveDecidedAtStep"]) for row in found
+    } == {("AAPL", 7, 3)}
+    assert [None if row["Price"] is None else len(row["Price"]) for row in found] == expected
+
+
+def test_a_removal_frees_every_part_of_the_symbol_s_download(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The coordinator keeps each symbol's count of parts, so the removal's empty download sends
+    # an empty row group for every part of the download it replaces.
+    monkeypatch.setattr(followed_read, "GROUP_ROWS", 2)
+    sent: list[tuple[bool, int, int]] = []
+    publish = followed_read.FollowedRead.publish
+
+    def counting(
+        read: followed_read.FollowedRead, *download: object, decided_at_step: int, parts_before: int
+    ) -> int:
+        symbol, seq, table = cast("tuple[str, int, Table | None]", download)
+        parts = publish(
+            read, symbol, seq, table, decided_at_step=decided_at_step, parts_before=parts_before
+        )
+        sent.append((table is None, parts_before, parts))
+        return parts
+
+    monkeypatch.setattr(followed_read.FollowedRead, "publish", counting)
+    script = Script(massive_session)
+    script.sizes = {"AAPL": 5}
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script)
+    wait_rows(dh_to_pylist, result, {"AAPL": 5})
+    delete(wl, "AAPL")
+    until(lambda: len(sent) == 2)
+    assert sent == [(False, 0, 3), (True, 3, 0)]
     massive_session.release(result)

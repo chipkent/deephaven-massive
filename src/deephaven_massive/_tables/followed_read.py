@@ -13,10 +13,10 @@ downloaded when and hands each download to `FollowedRead.publish`.
 table; the result shows them through *row groups*, rows that hold a symbol's columns as the
 vectors `group_by()` makes, which view the static table's columns without copying them. A
 symbol's rows make one row group per `GROUP_ROWS` rows (its *parts*, numbered from 0), because
-Deephaven 42.8's `ungroup` reads every value of a vector longer than 2^31 wrongly. The result is
-the `ungroup` of the row groups of the symbols it shows. A keyed input table would be the
-obvious holder of those row groups, but the library never uses input tables, so it builds them
-from its own parts (`_build`)::
+Deephaven 42.8's `ungroup` returns wrong values in every row once any vector is longer than
+2^31 (`GROUP_ROWS` says more). The result is the `ungroup` of the row groups of the symbols it
+shows. A keyed input table would be the obvious holder of those row groups, but the library
+never uses input tables, so it builds them from its own parts (`_build`)::
 
     blink, publisher = blink_publisher(name, <Key, Seq, Part, DecidedAtStep, then each
                                               dataset column as a vector>)
@@ -48,13 +48,13 @@ A download builds its row groups off the update graph's lock, and they land in o
 data row is copied in the update cycle. `publisher.add` never waits for a cycle, so the
 coordinator can publish while a console command holds the lock.
 
-**The cost of a new largest symbol.** `ungroup` gives each row group a block of 2^b row keys,
-where 2^b covers the longest vector it has seen. A download whose part is longer than every
-earlier one, past the next power of two, makes it widen the blocks, which gives every row of
-the result a new row key in that cycle: cheap for the result itself, but a derived table that
-tracks row keys (a `sort`, for one) does work in proportion to the result's rows. It happens at
-most once per doubling of the longest part, so a result meets it a few times, mostly while its
-first symbols land.
+**The cost of a new largest symbol.** `ungroup` gives each row group a block of 2^b row keys:
+at least 2^10, grown to cover the longest part since the result last had no rows, and never
+shrunk while it has any. A part longer than the block widens every block, which gives every
+row of the result a new row key in that cycle: cheap for the result itself, but a derived table
+that tracks row keys (a `sort`, for one) does work in proportion to the result's rows, several
+times what an add that widens nothing costs it. It happens at most once per doubling of the
+longest part, so a result meets it a few times, mostly while its first symbols land.
 
 **The `wait=True` seed.** `history(wait=True)` and `fetch(wait=True)` must return with the
 call-time symbols' rows in place, even in a console command, which holds the update graph's
@@ -237,8 +237,7 @@ class FollowedRead:
     and writes its `m.symbol_reads()` rows, and only then lets go of the result and the core.
     Nothing in Java holds this object strongly (the watch's router and the shutdown callback
     hold it weakly), so it keeps the session alive no longer than the library's own threads
-    need it. How many parts each symbol's latest download had is the coordinator thread's
-    alone, as `publish` is.
+    need it.
     """
 
     __slots__ = (
@@ -246,7 +245,6 @@ class FollowedRead:
         "_columns",
         "_empty",
         "_failed",
-        "_parts",
         "_publish_lock",
         "_publisher",
         "_watch",
@@ -296,7 +294,6 @@ class FollowedRead:
         self._publisher: BlinkPublisher | None = None
         self._watch: SymbolWatch | None = None
         self._empty: Table | None = None
-        self._parts: dict[str, int] = {}
         self.built_step = 0
 
     @property
@@ -321,15 +318,23 @@ class FollowedRead:
         self.built_step = built_step
         self._empty = empty
 
-    def publish(self, symbol: str, seq: int, table: Table | None, *, decided_at_step: int) -> None:
+    def publish(
+        self,
+        symbol: str,
+        seq: int,
+        table: Table | None,
+        *,
+        decided_at_step: int,
+        parts_before: int,
+    ) -> int:
         """Publish a symbol's download as row groups, or an empty download; nothing once stopped.
 
-        Runs on the coordinator thread, in the session's execution context, the only thread
-        that publishes. The rows are viewed as the dataset's columns, in schema order, and
-        grouped into one row group per `GROUP_ROWS` rows (`_row_groups`), with an empty row
-        group for each part the symbol's previous download had beyond this one's, so no earlier
-        part outlives it; none of it copies data. Every row group lands in one `add`, on the
-        next update cycle; `add` waits for none.
+        Runs on the coordinator thread, in the session's execution context. The rows are viewed
+        as the dataset's columns, in schema order, and grouped into one row group per
+        `GROUP_ROWS` rows (`_row_groups`), with an empty row group for each part the symbol's
+        previous download had beyond this one's, so no earlier part outlives it; none of it
+        copies data. Every row group lands in one `add`, on the next update cycle; `add` waits
+        for none.
 
         Args:
             symbol: The symbol.
@@ -339,6 +344,12 @@ class FollowedRead:
                 coordinator had applied when it decided to publish the download; under
                 `Reread.ALWAYS` it shows only if its symbol last joined the table at that cycle
                 or before.
+            parts_before: How many row groups of the symbol's previous published download
+                hold rows (the coordinator's count; 0 for none).
+
+        Returns:
+            How many row groups of the symbol's newest published download hold rows:
+            `parts_before` when nothing was published.
         """
         rows = None if table is None else _viewed(table, self._columns)
         groups, parts = _row_groups(
@@ -346,7 +357,7 @@ class FollowedRead:
             seq,
             rows,
             decided_at_step=decided_at_step,
-            parts_before=self._parts.get(symbol, 0),
+            parts_before=parts_before,
             empty=cast("Table", self._empty),
         )
         with self._publish_lock:
@@ -355,9 +366,9 @@ class FollowedRead:
                 logger.debug(
                     "call %d %s: stopped, so its download is not published", self.call, symbol
                 )
-                return
+                return parts_before
             cast("BlinkPublisher", self._publisher).add(groups)
-        self._parts[symbol] = parts
+        return parts
 
     def fail_table(self, error: MassiveError) -> bool:
         """Mark the row `FAILED`, then fail the table, once.
@@ -638,7 +649,9 @@ def _row_groups(
         rows: The symbol's static rows, viewed as the dataset's columns, or None for an empty
             download.
         decided_at_step: The download's `_DECIDED_AT_STEP`.
-        parts_before: How many parts held rows in the symbol's previous download; 0 for none.
+        parts_before: How many parts held rows in the symbol's previous published download, 0
+            for none: every part from that one up is empty or was never sent, because each
+            download sends an empty row group for each part it lacks below this count.
         empty: The template of an empty row group (`_empty_row_group`).
 
     Returns:
@@ -753,7 +766,8 @@ def _seed(
     """Return the static table of the call-time symbols' row groups.
 
     Flattened, so its row keys are dense: `ungroup` shifts each row key of the row groups left
-    by as many bits as the longest vector needs, and a merge spaces its tables' keys apart.
+    by up to 30 bits (`GROUP_ROWS`), and the shifted key must fit in a long, while a merge
+    spaces its tables' keys 2^16 apart.
 
     Args:
         seeded: Each symbol's static rows.

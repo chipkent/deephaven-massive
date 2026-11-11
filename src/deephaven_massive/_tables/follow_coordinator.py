@@ -258,6 +258,8 @@ class _Symbol:
         read_at: When the download whose rows the result holds began, or None.
         rows: Its rows in the result (0 for none).
         kept: Whether the result's newest download of it holds rows (is not empty).
+        parts: How many row groups of its newest published download hold rows: every part
+            from this one up is empty or was never sent (`FollowedRead.publish`).
         error: Its latest failure's text, until a read succeeds.
         cause: Its latest failure's cause, which groups it in `Error`.
         transport: The source of its latest read, as `m.symbol_reads()` shows it.
@@ -277,6 +279,7 @@ class _Symbol:
     read_at: int | None = None
     rows: int = 0
     kept: bool = False
+    parts: int = 0
     error: str | None = None
     cause: str | None = None
     transport: str | None = None
@@ -902,7 +905,13 @@ class FollowCoordinator:
             del result.queue[name]
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
-            result.read.publish(name, result.seq, None, decided_at_step=result.decided_at_step)
+            symbol.parts = result.read.publish(
+                name,
+                result.seq,
+                None,
+                decided_at_step=result.decided_at_step,
+                parts_before=symbol.parts,
+            )
             symbol.kept = False
             symbol.read_at = None
             symbol.rows = 0
@@ -984,8 +993,12 @@ class FollowCoordinator:
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
-                read.publish(
-                    name, result.seq, outcome.table, decided_at_step=result.decided_at_step
+                symbol.parts = read.publish(
+                    name,
+                    result.seq,
+                    outcome.table,
+                    decided_at_step=result.decided_at_step,
+                    parts_before=symbol.parts,
                 )
             symbol.state = SymbolReadState.DONE
             symbol.kept = True

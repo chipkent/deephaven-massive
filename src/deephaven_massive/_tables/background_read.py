@@ -114,9 +114,13 @@ __all__ = ["BACKGROUND_NOTE", "GROUP_ROWS", "BackgroundRead", "open_read"]
 logger = logging.getLogger(__name__)
 
 GROUP_ROWS: Final = 1 << 30
-"""The most rows one published row's vectors hold. Deephaven's `ungroup` reads every value of a
-vector longer than 2^31 wrongly (Deephaven 42.8), so a larger result is grouped in slices of
-this size, all published in the one `add`."""
+"""The most rows one published row's vectors hold, here and in a followed read's row groups.
+
+Once any vector in a table is longer than 2^31, Deephaven 42.8's `ungroup` returns wrong values
+in every row of its result, the rows of short vectors included, and raises no error; a sorted
+`group_by()` triggers it too (https://github.com/deephaven/deephaven-core/issues/9151). So a
+larger result is grouped in slices of this size, all published in the one `add`. The slicing can
+go once Deephaven ships a fix."""
 
 BACKGROUND_NOTE: Final = (
     "Read in the background (wait=False): no rows until the download completes, then the "

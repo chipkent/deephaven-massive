@@ -1785,8 +1785,11 @@ class _QuietRead:
     def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
         raise AssertionError(names, stop)  # the coordinator has no pool: nothing is read
 
-    def publish(self, name: str, seq: int, table: object, *, decided_at_step: int) -> None:
+    def publish(
+        self, name: str, seq: int, table: object, *, decided_at_step: int, parts_before: int
+    ) -> int:
         del name, seq, table, decided_at_step
+        return parts_before
 
 
 def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
