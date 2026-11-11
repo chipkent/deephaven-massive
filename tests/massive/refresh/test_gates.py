@@ -350,7 +350,11 @@ def test_field_spelling_one_wire_key_and_description_in_two_columns() -> None:
 
 def test_field_spelling_a_renaming_projection_gives_the_name_its_table_shows() -> None:
     projection = overrides.Projection(renames={"bid": "bid_price"}, reason="test")
-    hand = dataclasses.replace(_EMPTY, projections={("quotes", "/last"): projection})
+    hand = dataclasses.replace(
+        _EMPTY,
+        kinds={"quotes": {"forex": ["/last"]}},
+        projections={("quotes", "/last"): projection},
+    )
     uses = {
         "/last": _described(bid=(_BID, "bid", "Bid")),
         "/quotes": _described(bid_price=(_BID, "bid_price", "BidPrice")),
@@ -362,7 +366,9 @@ def test_field_spelling_reads_every_name_a_projection_or_the_source_gives() -> N
     # A source that joins a kind keeping some `fields` still shows its own name in its own
     # dataset; two kinds that rename one field differently give it two names.
     kept = overrides.Projection(fields={"bid": "bid_price"}, reason="test")
-    hand = dataclasses.replace(_EMPTY, projections={("quotes", "/last"): kept})
+    hand = dataclasses.replace(
+        _EMPTY, kinds={"quotes": {"forex": ["/last"]}}, projections={("quotes", "/last"): kept}
+    )
     uses = {"/last": _described(bid=(_BID, "bid", "Bid"))}
     assert _found(field_spellings(hand, uses)) == [
         ("field-spelling", "", "bid"),
@@ -370,10 +376,19 @@ def test_field_spelling_reads_every_name_a_projection_or_the_source_gives() -> N
     ]
     one = overrides.Projection(renames={"bid": "bid_price"}, reason="test")
     other = overrides.Projection(renames={"bid": "best_bid"}, reason="test")
-    hand = dataclasses.replace(_EMPTY, projections={("a", "/last"): one, ("b", "/last"): other})
+    kinds = {"a": {"forex": ["/last"]}, "b": {"forex": ["/last"]}}
+    hand = dataclasses.replace(
+        _EMPTY, kinds=kinds, projections={("a", "/last"): one, ("b", "/last"): other}
+    )
     assert _found(field_spellings(hand, uses)) == [
         ("field-spelling", "", "best_bid | bid_price"),
         ("field-spelling", "", "bid"),
+    ]
+    # A kind that takes the source with its own names still shows the field's own name.
+    hand = dataclasses.replace(hand, projections={("a", "/last"): one})
+    assert _found(field_spellings(hand, uses)) == [
+        ("field-spelling", "", "bid"),
+        ("field-spelling", "", "bid | bid_price"),
     ]
 
 

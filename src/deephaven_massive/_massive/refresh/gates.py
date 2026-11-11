@@ -357,23 +357,25 @@ def _names_by_description(
     """Gather the names of the described fields of every source, by description.
 
     Args:
-        hand: The hand input, whose `projections` give some fields other names in a kind.
+        hand: The hand input, whose `kinds` list the sources' memberships and whose
+            `projections` give some fields other names in a kind.
         uses: What each generated source consumed.
 
     Returns:
         Each own description to each long name its fields take, to `"<source> <wire key>"`
         of each; and each wire key and description to each column, to its sources.
     """
-    projected: dict[str, list[Projection]] = {}
-    for (_, source), projection in hand.projections.items():
-        projected.setdefault(source, []).append(projection)
+    memberships: dict[str, list[Projection | None]] = {}
+    for kind, groups in hand.kinds.items():
+        for source in {source for group in groups.values() for source in group}:
+            memberships.setdefault(source, []).append(hand.projections.get((kind, source)))
     by_text: _Named = {}
     by_key: dict[tuple[str, str], dict[str, set[str]]] = {}
     for source, use in uses.items():
         for wire_key, text in use.descriptions.items():
             if not text:
                 continue
-            for long_name, column in _names_shown(use, wire_key, projected.get(source, [])):
+            for long_name, column in _names_shown(use, wire_key, memberships.get(source, [])):
                 by_text.setdefault(text, {}).setdefault(long_name, set()).add(
                     f"{source} {wire_key}"
                 )
@@ -382,26 +384,33 @@ def _names_by_description(
 
 
 def _names_shown(
-    use: PathUse, wire_key: str, projections: Sequence[Projection]
+    use: PathUse, wire_key: str, memberships: Sequence[Projection | None]
 ) -> set[tuple[str, str]]:
     """Return every long name and column a field takes in a table.
 
     Args:
         use: What the field's source consumed.
         wire_key: The field's wire key.
-        projections: The source's projections, one per kind it joins that way.
+        memberships: The source's projection in each kind it joins, `None` where it joins
+            with its own names.
 
     Returns:
         The long name and column each projection that names the field gives it, and the
-        field's own, unless a `renames` projection replaces it: a source that joins a kind by
-        keeping some `fields` still shows its own names in its own dataset.
+        field's own, unless every kind the source joins renames the field: a source in no
+        kind, in a kind without a projection, or that joins a kind keeping some `fields`
+        (whose own dataset still shows its own names) shows the field's own name.
     """
+    projections = [projection for projection in memberships if projection is not None]
     shown = {
         (naming.snake(projection.named[wire_key]), naming.column_name([projection.named[wire_key]]))
         for projection in projections
         if wire_key in projection.named
     }
-    if not any(wire_key in (projection.renames or {}) for projection in projections):
+    renamed_everywhere = bool(memberships) and all(
+        projection is not None and wire_key in (projection.renames or {})
+        for projection in memberships
+    )
+    if not renamed_everywhere:
         shown.add((use.long_names[wire_key], use.columns[wire_key]))
     return shown
 

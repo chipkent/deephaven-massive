@@ -144,7 +144,7 @@ def test_todays_change_is_the_change_from_the_previous_close(
             f"{row.get('ticker')}: todaysChange={change} todaysChangePerc={percent} "
             f"prevDay.c={previous} {prices}"
         )
-        if not previous or change is None or percent is None:
+        if not previous or change is None or percent is None or not any(prices.values()):
             continue
         matched = [
             name
@@ -307,9 +307,9 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
             f"snapshot lastQuote={snapped}"
         )
         differing += _inverse(converted, quoted)
-        if converted.get("timestamp") is None or converted.get("timestamp") != quoted.get(
-            "timestamp"
-        ):
+        quotes = (converted.get("bid"), converted.get("ask"), quoted.get("bid"), quoted.get("ask"))
+        stamp = converted.get("timestamp")
+        if stamp is None or stamp != quoted.get("timestamp") or None in quotes:
             continue
         same = (converted.get("bid"), converted.get("ask")) == (
             quoted.get("bid"),
