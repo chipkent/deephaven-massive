@@ -1,0 +1,48 @@
+"""Tests of the live run's server sizing (`tests/_live/live_run/server.py`)."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import pytest
+
+from tests._live.live_run import machine_checks, server
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["status", "--out", "~/massive-live"],
+        ["run", "--out", "~/massive-live", "--any-time"],
+    ],
+)
+def test_a_command_other_than_a_group_child_gets_the_parent_heap(argv: list[str]) -> None:
+    assert server.jvm_args(argv) == [f"-Xmx{server.PARENT_HEAP >> 20}m"]
+
+
+@pytest.mark.parametrize(
+    ("group", "memory", "heap"),
+    [
+        ("responses", 64 << 30, server.SMALL_HEAP),
+        ("stream-day", 64 << 30, server.STREAM_HEAP_LIMIT),
+        ("throughput", 12 << 30, 6 << 30),
+        ("stream-night", 8 << 30, 4 << 30),
+        ("stream-day", None, server.SMALL_HEAP),
+    ],
+)
+def test_a_group_child_gets_a_heap_sized_to_its_group_and_its_crash_log_in_the_attempt(
+    *, group: str, memory: int | None, heap: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "request.json").write_text(json.dumps({"group": group, "tiers": {}}))
+    monkeypatch.setattr(machine_checks, "memory_total", lambda: memory)
+    argv = ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"]
+    assert server.jvm_args(argv) == [
+        f"-Xmx{heap >> 20}m",
+        f"-XX:ErrorFile={tmp_path.resolve() / 'a'}/hs_err_pid%p.log",
+    ]

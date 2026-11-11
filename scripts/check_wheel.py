@@ -16,9 +16,9 @@ To run it locally, install `dist/*.whl` and `deephaven-server` into a new enviro
 
     uv run --no-project --python <venv>/bin/python python -I scripts/check_wheel.py docs/datasets
 
-`import deephaven_massive` alone proves little, since the package imports its modules lazily.
-So the script starts an embedded Deephaven server (the library imports Deephaven, and the
-library itself never starts a server) and then:
+The script first starts an embedded Deephaven server, before it imports the library: importing
+the library imports Deephaven, which needs a running JVM, and the library itself never starts a
+server. Then it:
 
 1. checks that `deephaven_massive` comes from the installed wheel, not a source checkout, and,
    given `--version`, that `deephaven_massive.__version__` is exactly that version and, given
@@ -53,16 +53,16 @@ from typing import TYPE_CHECKING
 
 from deephaven_server import Server
 
-# Neither module imports Deephaven (the package's own __init__.py imports lazily), so both
-# import before the server starts.
-import deephaven_massive
-from deephaven_massive import _massive
-
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from deephaven_massive import _dataset_list, _session
-    from deephaven_massive._datasets import column_reference
+# Port 0 asks the OS for an ephemeral port, so the check never clashes with a server.
+Server(port=0, jvm_args=["-Xmx1g"]).start()
+
+# The library imports Deephaven, which needs the server started above.
+import deephaven_massive  # noqa: E402
+from deephaven_massive import _dataset_list, _massive, _session  # noqa: E402
+from deephaven_massive._datasets import column_reference  # noqa: E402
 
 _CHECKOUT_SOURCE = Path(__file__).resolve().parent.parent / "src"
 """The checkout's source tree, which must not be where the library is imported from."""
@@ -78,7 +78,7 @@ class WheelCheckError(Exception):
 def main() -> None:
     """Run every check and print one line per check that passed.
 
-    It starts an embedded Deephaven server in this process, opens and closes a session, and
+    It opens and closes a session, in the embedded Deephaven server this script started, and
     writes to standard output. It reads, and never writes, the directory of committed pages.
 
     Raises:
@@ -102,9 +102,6 @@ def main() -> None:
     if arguments.version is not None:
         _check_version(arguments.version, arguments.sdist)
 
-    # Port 0 asks the OS for an ephemeral port, so the check never clashes with a server.
-    Server(port=0, jvm_args=["-Xmx1g"]).start()
-
     names = sorted(
         module.name
         for module in pkgutil.walk_packages(deephaven_massive.__path__, "deephaven_massive.")
@@ -121,22 +118,16 @@ def main() -> None:
             getattr(package, name)
     _report("resolved every public name")
 
-    # Imported only once the server runs, since both import Deephaven. The type checker reads
-    # the static imports above instead, so a renamed module or function fails the type check.
-    if TYPE_CHECKING:
-        session, reference, dataset_list = _session, column_reference, _dataset_list
-    else:
-        session = importlib.import_module("deephaven_massive._session")
-        reference = importlib.import_module("deephaven_massive._datasets.column_reference")
-        dataset_list = importlib.import_module("deephaven_massive._dataset_list")
-    pages = reference.render(session.CATALOG, _massive.provenance(), dataset_list.dataset_calls())
+    pages = column_reference.render(
+        _session.CATALOG, _massive.provenance(), _dataset_list.dataset_calls()
+    )
     on_disk = {path.name: path.read_text(encoding="utf-8") for path in committed.glob("*.md")}
     if pages != on_disk:
         differ = sorted(n for n in pages.keys() | on_disk.keys() if pages.get(n) != on_disk.get(n))
         raise WheelCheckError(
             f"the installed catalog renders pages that differ from {committed}: {differ}"
         )
-    _report(f"rendered the dataset reference of {len(session.CATALOG.by_name)} datasets")
+    _report(f"rendered the dataset reference of {len(_session.CATALOG.by_name)} datasets")
 
     m = deephaven_massive.MassiveSession(deephaven_massive.MassiveConfig(api_key="wheel-check"))
     m.close()

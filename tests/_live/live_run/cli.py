@@ -6,8 +6,9 @@ Massive's servers, the machine checks, the checkout's commit, the keep-awake too
 clock and terminal), and runs one command of `live_run`. A refused command prints why and
 exits 2.
 
-The hidden `_group` command is the child of a built-in group (`attempts`): it starts an
-embedded Deephaven server, opens sessions on the key (declaring its Basic subscriptions,
+The hidden `_group` command is the child of a built-in group (`attempts`): in the embedded
+Deephaven server the script started, sized to the group (`server.jvm_args`), it opens sessions
+on the key (declaring its Basic subscriptions,
 except for the upgrade check, whose sessions declare nothing), and runs the group
 (`group_child`). The script then leaves through `os._exit`.
 """
@@ -57,10 +58,6 @@ GROUPS: Final = (
 
 REFUSED: Final = 2
 """The exit status of a refused command."""
-
-STREAM_HEAP_LIMIT: Final = 16 << 30
-SMALL_HEAP: Final = 4 << 30
-"""A built-in child's heap: half the memory up to 16 GB for streams, 4 GB for the others."""
 
 
 def credentials(environ: Mapping[str, str]) -> Credentials:
@@ -194,25 +191,18 @@ def run_group_child(
     attempt: str,
     *,
     environ: Mapping[str, str],
-    start_server: Callable[[int, Path], None],
     watch: Callable[[], None],
 ) -> None:
-    """Be a built-in group's child: watch the parent, start the server, then run the group.
+    """Be a built-in group's child: watch the parent, then run the group.
 
     Args:
         out: The results folder.
         attempt: The attempt's folder, relative to `out`.
         environ: The environment, for the probe of the upgrade check.
-        start_server: Starts an embedded Deephaven server with a heap of so many bytes,
-            writing a JVM crash's log into the given folder.
         watch: Starts watching the parent (`start_parent_watch`).
     """
     watch()
     request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
-    group = request["group"]
-    memory = machine_checks.memory_total() or SMALL_HEAP * 2
-    streams = group in {"stream-day", "throughput", "stream-night"}
-    start_server(min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP, out / attempt)
     tiers = request["tiers"].items()
     basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
     # The library serves delayed data only when asked: a delayed plan's streams ask for it.
@@ -271,7 +261,6 @@ def main(
     script: Path,
     environ: Mapping[str, str] = os.environ,
     stdout: IO[str] = sys.stdout,
-    start_server: Callable[[int, Path], None],
     make_context: Callable[..., RunContext] = real_context,
     watch: Callable[[], None] = start_parent_watch,
 ) -> int:
@@ -283,8 +272,6 @@ def main(
         script: `scripts/live_run.py`.
         environ: The environment.
         stdout: Where the program prints.
-        start_server: Starts an embedded Deephaven server with a heap of so many bytes, its
-            crash log in the given folder; only `_group` calls it.
         make_context: Builds the context (`real_context`); tests pass fakes.
         watch: Starts a `_group` child's watch of its parent (`start_parent_watch`).
 
@@ -300,9 +287,7 @@ def main(
         return int(stop.code or 0)
     out = arguments.out.expanduser().resolve()
     if arguments.command == "_group":
-        run_group_child(
-            out, arguments.attempt, environ=environ, start_server=start_server, watch=watch
-        )
+        run_group_child(out, arguments.attempt, environ=environ, watch=watch)
         return 0
     ctx = make_context(out, root=root, script=script, environ=environ, stdout=stdout)
     actions: dict[str, Callable[[], int]] = {
