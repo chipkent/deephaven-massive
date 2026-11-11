@@ -102,7 +102,9 @@ __all__ = [
 DateLike: TypeAlias = str | date | datetime | np.datetime64
 """A time bound: `history()`'s `start` and `end`, a list's `start`, `end`, and `as_of`, a day.
 
-One of:
+Every argument that names a date or an instant takes any of these forms, so a caller can pass
+text, a Python or Java time, or a numpy or pandas one, whichever their code holds. Annotate your
+own code with it, as `dm.DateLike`, when you pass a time through to a dataset method. One of:
 
 - text, read by one of two parsers:
   - ISO-8601: a date in any ISO form (`"2025-03-03"`, `"20250303"`, `"2025-W10-1"`), or a
@@ -213,7 +215,7 @@ class TimeTextError(ValueError):
     """
 
 
-def parse_date_like(value: DateLike, name: str, *, upper: bool = False) -> date | datetime:
+def parse_date_like(value: object, name: str, *, upper: bool = False) -> date | datetime:
     """Parse one time bound into a `date` or an aware `datetime`.
 
     Args:

@@ -33,6 +33,8 @@ from deephaven_massive._datasets.column_reference import (
     DatasetCall,
     QueryMethod,
     SyncResult,
+    _method_calls,
+    _methods,
     call_path,
     column_changes,
     page_name,
@@ -59,7 +61,7 @@ from deephaven_massive.namespaces._query_building import Namespace
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive.queries import FetchQuery
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "datasets"
@@ -654,6 +656,28 @@ CATALOG_INSERT = next(
     if c.name == "TimestampInsert"
 )
 """Every dataset's arrival-time description, the same on every page."""
+
+
+def test_bars_that_stream_at_some_timespans_name_them_beside_their_stream_methods() -> None:
+    bars = DatasetCall(
+        signature="m.stocks.bars(symbols, timespan)",
+        verbs=("history",),
+        methods=(
+            QueryMethod("history", "history(start, end=None)", "A range of rows."),
+            QueryMethod("ring", "ring(capacity)", "The latest rows."),
+        ),
+        stream_verbs=("blink", "ring"),
+        stream_condition="1-second and 1-minute bars",
+    )
+    assert _methods(bars) == (
+        "`history()`; for 1-second and 1-minute bars also `blink()`, `ring()`"
+    )
+    assert _method_calls(bars) == (
+        "`history(start, end=None)`; for 1-second and 1-minute bars also `blink()`, "
+        "`ring(capacity)`"
+    )
+    # A dataset whose every query has the same methods lists them alone.
+    assert _methods(_CALLS["stocks.trades"]) == "`blink()`, `history()`"
 
 
 def test_the_rendered_index() -> None:

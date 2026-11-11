@@ -38,15 +38,15 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import (
+from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
     SymbolStreamQuery,
-    query_class,
 )
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -1383,14 +1383,8 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
         massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
-    methods = "its methods are blink(), append_only(), ring()"
-    with pytest.raises(AttributeError) as last_by:
-        query.last_by  # type: ignore[attr-defined]  # noqa: B018  # the missing verb is the test
-    assert str(last_by.value) == f"options.admin_messages has no last_by(); {methods}"
-    with pytest.raises(AttributeError) as fetch:
-        query.fetch  # type: ignore[attr-defined]  # noqa: B018  # the missing verb is the test
-    # No snapshot serves the messages, so none is offered.
-    assert str(fetch.value) == f"options.admin_messages has no fetch(); {methods}"
+    assert not hasattr(query, "last_by")
+    assert not hasattr(query, "fetch")
 
 
 def test_admin_messages_of_every_exchange_arrive_in_each_shape(

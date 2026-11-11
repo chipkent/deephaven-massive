@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive.typehints._queries import Query
+from deephaven_massive.queries import Query
 
 
 def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:

@@ -13,7 +13,8 @@ the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dat
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import (
@@ -37,6 +38,7 @@ from deephaven_massive.namespaces._query_building import (
     list_params,
     optional_text,
 )
+from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -44,9 +46,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = ["DATASETS", "ReferenceNamespace"]
 
@@ -245,27 +246,26 @@ def _event_types(types: object) -> str | None:
     """
     if types is None or isinstance(types, str):
         return types
-    try:
-        items = tuple(cast("Sequence[object]", types))
-    except TypeError:
-        raise TypeError(f"types must be a sequence of str, not {type(types).__name__}") from None
+    if not isinstance(types, Iterable):
+        raise TypeError(f"types must be a sequence of str, not {type(types).__name__}")
+    items = tuple(types)
     if not items:
         raise ValueError("types is empty; pass None for every event type")
-    if not all(isinstance(item, str) for item in items):
+    texts = [item for item in items if isinstance(item, str)]
+    if len(texts) != len(items):
         raise TypeError("types must hold only str")
-    return ",".join(cast("tuple[str, ...]", items))
+    return ",".join(texts)
 
 
 class ReferenceNamespace(Namespace):
     """The reference datasets across asset classes, reached as `m.reference`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import ReferenceNamespace
-
-    Its methods cover tickers and their details, types, events, and related companies, news, the
-    exchanges, the trade and quote condition codes, the market status, and the market holidays. Each
-    method only builds a query, so it never blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover tickers and their details,
+    types, events, and related companies, news, the exchanges, the trade and quote condition codes,
+    the market status, and the market holidays. A method reads nothing, so it never blocks.
+    You can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import ReferenceNamespace` to annotate your own code.
 
     Example:
         ::
@@ -283,7 +283,7 @@ class ReferenceNamespace(Namespace):
     @raises_through(build_query, list_params, day_argument, _require_enum, optional_text)
     def tickers(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         market: Market | None = None,
         ticker_type: TickerType | None = None,
@@ -353,9 +353,10 @@ class ReferenceNamespace(Namespace):
             "search": optional_text("search", search),
             **list_params(sort=sort, order=order),
         }
-        query = build_query(
+        return build_query(
             self._core,
             TICKERS,
+            query_type=FetchQuery,
             symbols=symbols,
             symbols_optional=True,
             all_alternative="leave symbols out for every ticker",
@@ -364,10 +365,9 @@ class ReferenceNamespace(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, day_argument)
-    def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> FetchQuery:
+    def ticker_details(self, symbols: SymbolsLike, *, as_of: DateLike | None = None) -> FetchQuery:
         """One ticker's company and listing details: address, branding, shares, and more.
 
         Each row holds one ticker's company details. A ticker Massive doesn't know gets no row, and
@@ -394,9 +394,10 @@ class ReferenceNamespace(Namespace):
 
                 details = m.reference.ticker_details(["AAPL", "MSFT"]).fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             TICKER_DETAILS,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.reference.tickers() for every ticker",
             params={
@@ -404,7 +405,6 @@ class ReferenceNamespace(Namespace):
             },
             arguments={"date": "as_of"},
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, _require_enum, _asset_class)
     def ticker_types(
@@ -438,10 +438,12 @@ class ReferenceNamespace(Namespace):
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return cast("FetchQuery", build_query(self._core, TICKER_TYPES, params=params))
+        return build_query(self._core, TICKER_TYPES, query_type=FetchQuery, params=params)
 
     @raises_through(build_query, _event_types)
-    def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> FetchQuery:
+    def ticker_events(
+        self, symbols: SymbolsLike, *, types: Sequence[str] | None = None
+    ) -> FetchQuery:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
         Each row holds the event's date and type. A symbol may also be a CUSIP or a Composite FIGI,
@@ -468,17 +470,17 @@ class ReferenceNamespace(Namespace):
 
                 events = m.reference.ticker_events("META").fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             TICKER_EVENTS,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def related_companies(self, symbols: Symbols) -> FetchQuery:
+    def related_companies(self, symbols: SymbolsLike) -> FetchQuery:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
         `Symbol` is the related company, and `Underlying` is the ticker you asked about.
@@ -501,15 +503,18 @@ class ReferenceNamespace(Namespace):
 
                 peers = m.reference.related_companies("AAPL").fetch()
         """
-        query = build_query(
-            self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
+        return build_query(
+            self._core,
+            RELATED_COMPANIES,
+            query_type=FetchQuery,
+            symbols=symbols,
+            all_alternative="pass a list of symbols",
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params)
     def news(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -553,9 +558,10 @@ class ReferenceNamespace(Namespace):
 
                 headlines = m.reference.news(["AAPL", "MSFT"], limit=50).poll(60)
         """
-        query = build_query(
+        return build_query(
             self._core,
             NEWS,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="leave symbols out for every article",
             start=start,
@@ -564,7 +570,6 @@ class ReferenceNamespace(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, _require_enum, _asset_class)
     def exchanges(
@@ -598,7 +603,7 @@ class ReferenceNamespace(Namespace):
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return cast("FetchQuery", build_query(self._core, EXCHANGES, params=params))
+        return build_query(self._core, EXCHANGES, query_type=FetchQuery, params=params)
 
     @raises_through(build_query, list_params, _require_enum, _asset_class)
     def conditions(
@@ -659,15 +664,15 @@ class ReferenceNamespace(Namespace):
             "sip": None if sip is None else _require_enum(sip, Sip, "sip"),
             **list_params(sort=sort, order=order),
         }
-        query = build_query(
+        return build_query(
             self._core,
             CONDITIONS,
+            query_type=FetchQuery,
             params=params,
             arguments={"id": "condition_id"},
             filters=filters,
             limit=limit,
         )
-        return cast("FetchQuery", query)
 
     def market_status(self) -> FetchQuery:
         """Whether the markets are open now, by exchange, currency market, and index group.
@@ -684,7 +689,11 @@ class ReferenceNamespace(Namespace):
 
                 status = m.reference.market_status().poll(60)
         """
-        return cast("FetchQuery", build_query(self._core, MARKET_STATUS))
+        return build_query(
+            self._core,
+            MARKET_STATUS,
+            query_type=FetchQuery,
+        )
 
     def market_holidays(self) -> FetchQuery:
         """The upcoming market holidays and early closes, one row per exchange and day.
@@ -701,4 +710,8 @@ class ReferenceNamespace(Namespace):
 
                 holidays = m.reference.market_holidays().fetch()
         """
-        return cast("FetchQuery", build_query(self._core, MARKET_HOLIDAYS))
+        return build_query(
+            self._core,
+            MARKET_HOLIDAYS,
+            query_type=FetchQuery,
+        )

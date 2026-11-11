@@ -29,7 +29,7 @@ from deephaven_massive._errors import (
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._session import MassiveSession
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import Query
+from deephaven_massive.queries import Query
 
 ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError, PermanentError]
 
@@ -371,8 +371,8 @@ def test_the_check_covers_the_public_api() -> None:
     checked = _checked_functions()
     for name in (
         "deephaven_massive.namespaces._stocks.stocks.trades",
-        "deephaven_massive.typehints._queries.FetchQuery.fetch",
-        "deephaven_massive.typehints._queries.HistoryQuery.history",
+        "deephaven_massive.queries._fetch.FetchQuery.fetch",
+        "deephaven_massive.queries._history.HistoryQuery.history",
         "deephaven_massive._session.MassiveSession.release",
         "deephaven_massive._datasets.symbols.canonical_symbol_forex",
     ):

@@ -31,10 +31,11 @@ import logging
 import threading
 import weakref
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final, Self, cast
+from typing import TYPE_CHECKING, Final, Self
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from typing_extensions import override
 
 import deephaven_massive.namespaces._crypto as crypto
 import deephaven_massive.namespaces._economy as economy
@@ -54,7 +55,6 @@ from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
-from deephaven_massive._override import override
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
@@ -74,14 +74,14 @@ from deephaven_massive.namespaces._partners import PartnersNamespace
 from deephaven_massive.namespaces._query_building import build_query, list_params, shows_call
 from deephaven_massive.namespaces._reference import ReferenceNamespace
 from deephaven_massive.namespaces._stocks import StocksNamespace
+from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:
     from types import TracebackType
 
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 
@@ -389,7 +389,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
     @raises_through(build_query, list_params)
     def snapshots(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -438,9 +438,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 "snapshots takes no type filter: Massive refuses type beside tickers, and each "
                 "ticker's prefix selects its class"
             )
-        query = build_query(
+        return build_query(
             self._core,
             snapshots.SNAPSHOTS,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
@@ -450,7 +451,6 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             filters=filters,
             limit=limit,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(SessionCore.diagnostics_view)
     def connections(self) -> Table:

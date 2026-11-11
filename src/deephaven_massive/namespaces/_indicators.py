@@ -34,7 +34,7 @@ the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dat
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
@@ -48,6 +48,7 @@ from deephaven_massive.namespaces._query_building import (
     build_query,
     list_params,
 )
+from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -55,9 +56,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = ["DATASETS", "IndicatorsNamespace"]
 
@@ -178,14 +178,12 @@ def _check_window(name: str, value: object) -> int:
 class IndicatorsNamespace(Namespace):
     """The technical indicator datasets, reached as `m.indicators`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import IndicatorsNamespace
-
-    Its methods cover the simple and exponential moving averages, the relative strength index, and
-    the moving average convergence/divergence. Massive computes them from its bars, for tickers of
-    any asset class. Each method only builds a query, so it never blocks. You can call it from any
-    thread.
+    Each method returns a query of one dataset, and together they cover the simple and exponential
+    moving averages, the relative strength index, and the moving average convergence/divergence.
+    Massive computes them from its bars, for tickers of any asset class. A method reads nothing, so
+    it never blocks. You can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import IndicatorsNamespace` to annotate your own code.
 
     Example:
         ::
@@ -211,7 +209,7 @@ class IndicatorsNamespace(Namespace):
     def _query(
         self,
         spec: DatasetSpec,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         windows: Mapping[str, object],
         *,
         timespan: Timespan,
@@ -257,9 +255,10 @@ class IndicatorsNamespace(Namespace):
         }
         params["series_type"] = _require_enum(series_type, SeriesType, "series_type")
         params.update(list_params(sort=None, order=order))
-        query = build_query(
+        return build_query(
             self._core,
             spec,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="pass a list of symbols",
             timespan=span,
@@ -270,12 +269,11 @@ class IndicatorsNamespace(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(_query)
     def sma(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         window: int = 50,
         *,
         timespan: Timespan = Timespan.DAY,
@@ -349,7 +347,7 @@ class IndicatorsNamespace(Namespace):
     @raises_through(_query)
     def ema(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         window: int = 50,
         *,
         timespan: Timespan = Timespan.DAY,
@@ -423,7 +421,7 @@ class IndicatorsNamespace(Namespace):
     @raises_through(_query)
     def rsi(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         window: int = 14,
         *,
         timespan: Timespan = Timespan.DAY,
@@ -496,7 +494,7 @@ class IndicatorsNamespace(Namespace):
     @raises_through(_query)
     def macd(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         *,
         short_window: int = 12,
         long_window: int = 26,

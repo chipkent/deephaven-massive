@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive.typehints._queries import Query
+    from deephaven_massive.queries import Query
     from tests._live.plans import LivePlans
 
 pytestmark = [pytest.mark.integration, pytest.mark.integration_smoke]

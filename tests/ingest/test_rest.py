@@ -23,6 +23,7 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 from deephaven.update_graph import shared_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _log_limits, _massive, _session
@@ -58,7 +59,6 @@ from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
-from deephaven_massive._override import override
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
@@ -69,7 +69,7 @@ from deephaven_massive.namespaces import _options as options_ns
 from deephaven_massive.namespaces import _reference as reference
 from deephaven_massive.namespaces import _stocks as stocks_ns
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.typehints._queries import FetchQuery, HistoryQuery, Query
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
@@ -399,7 +399,7 @@ def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
         kwargs.setdefault("timespan", Timespan.MINUTE)
     # A list dataset's symbols only filter it, as its factory says.
     kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
-    return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
+    return build_query(m._core, spec, query_type=Query, **cast("dict[str, Any]", kwargs))
 
 
 def fetch(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> list[dict[str, Any]]:

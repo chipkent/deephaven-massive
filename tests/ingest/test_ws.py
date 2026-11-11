@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints._queries import SymbolStreamQuery
+    from deephaven_massive.queries import SymbolStreamQuery
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 

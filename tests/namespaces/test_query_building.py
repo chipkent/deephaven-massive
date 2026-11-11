@@ -28,7 +28,7 @@ from deephaven.column import int_col, string_col
 from deephaven.time import to_j_instant, to_j_local_date
 
 import deephaven_massive as dm
-from deephaven_massive import _enums, typehints
+from deephaven_massive import _enums, queries
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
@@ -53,15 +53,8 @@ from deephaven_massive.namespaces._query_building import (
     require_bool,
     value_table,
 )
-from deephaven_massive.typehints import _queries
-from deephaven_massive.typehints._queries import (
-    FetchQuery,
-    HistoryQuery,
-    Query,
-    StreamHistoryQuery,
-    bar_query_class,
-    query_class,
-)
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
+from deephaven_massive.queries._choice import bar_query_class, query_class
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
@@ -115,7 +108,7 @@ def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Qu
     # Most tests build a list dataset without symbols, which only filter it; the refusal of
     # None for a dataset that needs symbols has its own test.
     kwargs.setdefault("symbols_optional", True)
-    return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
+    return build_query(session._core, spec, query_type=Query, **cast("dict[str, Any]", kwargs))
 
 
 def test_list_params() -> None:
@@ -481,14 +474,31 @@ def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSessio
 
 def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
     spec = STOCK_BARS
-    q = build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=False)
+    q = build_query(massive_session._core, spec, query_type=Query, symbols=["AAPL"], adjusted=False)
     assert q._request.adjusted is False
-    assert build_query(massive_session._core, spec, symbols=["AAPL"])._request.adjusted is None
+    assert (
+        build_query(
+            massive_session._core, spec, query_type=Query, symbols=["AAPL"]
+        )._request.adjusted
+        is None
+    )
     with pytest.raises(TypeError, match="adjusted must be a bool, not str"):
-        build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=cast("bool", "false"))
+        build_query(
+            massive_session._core,
+            spec,
+            query_type=Query,
+            symbols=["AAPL"],
+            adjusted=cast("bool", "false"),
+        )
     # One channel only: adjusted never travels in params, where a transport could drop it.
     with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
-        build_query(massive_session._core, spec, symbols=["AAPL"], params={"adjusted": False})
+        build_query(
+            massive_session._core,
+            spec,
+            query_type=Query,
+            symbols=["AAPL"],
+            params={"adjusted": False},
+        )
 
 
 def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> None:
@@ -497,7 +507,13 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
     with pytest.raises(
         ValueError, match=r"^adjusted is set through its own argument, adjusted=, not filters"
     ):
-        build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
+        build_query(
+            massive_session._core,
+            STOCK_BARS,
+            query_type=Query,
+            symbols=["AAPL"],
+            filters={"adjusted": True},
+        )
 
 
 def test_a_symbol_table_is_boxed_by_identity(
@@ -592,8 +608,8 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
     names = {
         **vars(collections.abc),
         **vars(dt),
-        **vars(_queries),
-        **{name: getattr(typehints, name) for name in typehints.__all__},
+        **{name: getattr(queries, name) for name in queries.__all__},
+        **{name: getattr(dm, name) for name in ("SymbolsLike", "DateLike", "FilterValue")},
         **vars(_enums),
         "AbstractSet": collections.abc.Set,
         "Literal": Literal,
@@ -1143,3 +1159,30 @@ def test_a_namespace_method_logs_the_input_it_refuses(
     refusals = [r for r in caplog.records if "m.stocks.trades refused" in r.getMessage()]
     assert [r.levelno for r in refusals] == [logging.DEBUG]
     assert refusals[0].getMessage().startswith("m.stocks.trades refused: TypeError: ")
+
+
+def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Hour bars are history only; a method that declared them streaming would lie to its caller.
+    with pytest.raises(dm.MassiveError) as info:
+        build_query(
+            massive_session._core,
+            STOCK_BARS,
+            query_type=StreamHistoryQuery,
+            symbols=["AAPL"],
+            timespan=Timespan.HOUR,
+        )
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert str(info.value).startswith(
+        "m.stocks.bars gives a HistoryQuery, not the StreamHistoryQuery it declares. "
+    )
+    # A subclass of the declared class is what the declaration promises.
+    minute = build_query(
+        massive_session._core,
+        STOCK_BARS,
+        query_type=HistoryQuery,
+        symbols=["AAPL"],
+        timespan=Timespan.MINUTE,
+    )
+    assert type(minute) is StreamHistoryQuery

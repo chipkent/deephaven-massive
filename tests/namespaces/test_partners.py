@@ -26,7 +26,8 @@ from deephaven_massive._massive import RestPath, Transport, sources
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _partners as partners
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import FetchQuery, query_class
+from deephaven_massive.queries import FetchQuery
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:

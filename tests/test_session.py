@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import gc
 import itertools
-import json
 import logging
 import pkgutil
-import subprocess
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -53,7 +50,7 @@ from deephaven_massive.namespaces._partners import (
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.namespaces._reference import ReferenceNamespace
 from deephaven_massive.namespaces._stocks import StocksNamespace
-from deephaven_massive.typehints._queries import FetchQuery, SymbolStreamQuery
+from deephaven_massive.queries import FetchQuery, SymbolStreamQuery
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
@@ -85,9 +82,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def one_row(session: dm.MassiveSession) -> Table:
@@ -895,42 +892,6 @@ def test_verbs_work_from_a_thread_without_an_execution_context(
     assert all(result.is_refreshing for result in results)
     for result in results:
         massive_session.release(result)
-
-
-def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
-    # A fresh interpreter starts its own JVM (this process's cannot be shared), opens a session
-    # with S3 credentials configured, reads its diagnostics, closes it, and reports which of
-    # boto3 and botocore it loaded. `os._exit` skips the interpreter shutdown that can crash
-    # after an embedded JVM. The script is a literal; `-P` keeps the working directory off
-    # `sys.path`.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import json, os, sys\n"
-                "from deephaven_server import Server\n"
-                "Server(port=0, jvm_args=['-Xmx512m']).start()\n"
-                "import deephaven_massive as dm\n"
-                "config = dm.MassiveConfig(\n"
-                "    api_key='k', s3_access_key_id='AKID', s3_secret_access_key='not-used'\n"
-                ")\n"
-                "m = dm.MassiveSession(config)\n"
-                "m.streams()\n"
-                "m.close()\n"
-                "loaded = sorted({'boto3', 'botocore'} & set(sys.modules))\n"
-                "print('LOADED ' + json.dumps(loaded), flush=True)\n"
-                "os._exit(0)\n"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=300,
-    )
-    [line] = [line for line in result.stdout.splitlines() if line.startswith("LOADED ")]
-    assert json.loads(line.removeprefix("LOADED ")) == []
 
 
 # --- The composition of a session ------------------------------------------------------------

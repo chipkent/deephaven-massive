@@ -36,11 +36,14 @@ from deephaven_massive._datasets.column_reference import (
 )
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES, MassiveSession
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import FetchQuery, StreamHistoryQuery, verbs
+from deephaven_massive.queries import FetchQuery, StreamHistoryQuery
+from deephaven_massive.queries._choice import bar_stream_condition, bar_stream_verbs, verbs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from collections.abc import Set as AbstractSet
+
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = ["DATASET_LIST_DESCRIPTIONS", "dataset_calls", "datasets"]
 
@@ -51,8 +54,8 @@ DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Call": "How a session m reaches the dataset, such as m.stocks.trades.",
         "Summary": "What the dataset holds, in one sentence.",
         "Methods": (
-            "The methods its queries have, such as fetch and poll. Bars stream only at some "
-            "timespans, as their docstring says."
+            "The methods its queries have, such as fetch and poll. A bars dataset's stream "
+            "methods name the bars that have them, such as blink (1-second and 1-minute bars)."
         ),
         "Transports": "Where its rows come from: REST, flat files, WebSocket.",
         "Documentation": "The web address of its page in the dataset reference.",
@@ -74,8 +77,10 @@ def datasets() -> Table:
         `Dataset` (String, such as `stocks.trades`), `Call` (String, how a session `m` reaches
         it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Methods` (String[],
         the methods its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
-        `ring`, `last_by`, `history`), `Transports` (String[], where the library reads it from,
-        spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
+        `ring`, `last_by`, `history`; a bars dataset lists `history`, then each stream method
+        with the bars that have it, such as `blink (1-second and 1-minute bars)`),
+        `Transports` (String[], where the library reads it from, spelled `REST`, `flat files`,
+        and `WebSocket`, as `columns()` spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
         Each column carries a description, shown as its tooltip in the Deephaven IDE.
 
@@ -94,7 +99,7 @@ def datasets() -> Table:
             string_col("Dataset", [spec.name for spec in specs]),
             string_col("Call", [call_path(spec) for spec in specs]),
             string_col("Summary", [spec.summary for spec in specs]),
-            _string_arrays("Methods", [verbs(spec) for spec in specs]),
+            _string_arrays("Methods", [_listed_methods(spec) for spec in specs]),
             _string_arrays(
                 "Transports",
                 [
@@ -111,6 +116,21 @@ def datasets() -> Table:
     )
     described = table.j_table.withColumnDescriptions(j_hashmap(dict(DATASET_LIST_DESCRIPTIONS)))
     return Table(j_table=described)
+
+
+def _listed_methods(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return a dataset's entries of the `Methods` column of `datasets()`.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The methods every query of the dataset has (`verbs`), then, for bars that stream at
+        some timespans, each stream method with those bars, such as
+        `"blink (1-second and 1-minute bars)"`.
+    """
+    condition = bar_stream_condition(spec) if bar_stream_verbs(spec) else ""
+    return verbs(spec) + tuple(f"{verb} ({condition})" for verb in bar_stream_verbs(spec))
 
 
 def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
@@ -231,7 +251,9 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         arguments=tuple(param.name for param in parameters),
         typed=tuple(typed),
         descriptions=tuple(_argument_lines(method).get(param.name, "") for param in parameters),
-        methods=tuple(_query_method(verb) for verb in verbs(spec)),
+        methods=tuple(_query_method(verb) for verb in verbs(spec) + bar_stream_verbs(spec)),
+        stream_verbs=bar_stream_verbs(spec),
+        stream_condition=bar_stream_condition(spec) if bar_stream_verbs(spec) else "",
     )
 
 

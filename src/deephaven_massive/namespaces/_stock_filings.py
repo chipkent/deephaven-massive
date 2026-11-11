@@ -41,9 +41,9 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive.queries import FetchQuery
 
 __all__ = [
     "DATASETS",
@@ -374,7 +374,7 @@ def _insider_query(
     core: SessionCore,
     spec: DatasetSpec,
     *,
-    symbols: Symbols | None,
+    symbols: SymbolsLike | None,
     issuer_cik: object,
     owner_cik: object,
     start: DateLike | None,
@@ -445,19 +445,18 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class StocksFilingsNamespace(Namespace):
     """The SEC filing datasets, reached as `m.stocks.filings`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import StocksFilingsNamespace
-
-    Its methods cover the EDGAR filing index, 10-K sections, 8-K text and disclosures, and risk
-    factors. They also cover institutional holdings from Form 13-F, insider ownership and
-    transactions from Forms 3 and 4, and Massive's daily insider summaries. The last two methods
-    return the taxonomies that classify risk factors and disclosures.
-
+    Each method returns a query of one dataset, and together they cover the EDGAR filing index, 10-K
+    sections, 8-K text and disclosures, and risk factors. They also cover institutional holdings
+    from Form 13-F, insider ownership and transactions from Forms 3 and 4, and Massive's daily
+    insider summaries. The last two methods return the taxonomies that classify risk factors and
+    disclosures.
     A `poll()` of a filings dataset adds only rows it hasn't seen, and it needs a `start` or a
     `limit`. The two insider summaries and the two taxonomies replace their rows at each poll
-    instead. Each method only builds a query, so it never blocks, and you can call it from any
+    instead. A method reads nothing, so it never blocks, and you can call it from any
     thread.
+
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import StocksFilingsNamespace` to annotate your own code.
 
     Example:
         ::
@@ -474,7 +473,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query, optional_text)
     def index(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         form_type: str | None = None,
         start: DateLike | None = None,
@@ -536,7 +535,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query)
     def sections_10k(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -597,7 +596,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query)
     def text_8k(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -657,7 +656,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query)
     def disclosures_8k(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -719,7 +718,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query)
     def risk_factors(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -838,7 +837,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(_insider_query)
     def initial_insider_ownership(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         issuer_cik: str | Sequence[str] | None = None,
         owner_cik: str | Sequence[str] | None = None,
@@ -907,7 +906,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(_insider_query)
     def insider_transactions(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         issuer_cik: str | Sequence[str] | None = None,
         owner_cik: str | Sequence[str] | None = None,
@@ -975,7 +974,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(list_query, _ciks)
     def insider_activity(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         issuer_cik: str | Sequence[str] | None = None,
         start: DateLike | None = None,
@@ -1046,7 +1045,7 @@ class StocksFilingsNamespace(Namespace):
     @raises_through(_insider_query)
     def insider_holdings(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         issuer_cik: str | Sequence[str] | None = None,
         owner_cik: str | Sequence[str] | None = None,

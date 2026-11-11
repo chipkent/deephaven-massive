@@ -26,13 +26,13 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
-from deephaven_massive._override import override
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,

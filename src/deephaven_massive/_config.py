@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
 
 import yaml
+from typing_extensions import override
 
 from deephaven_massive._enums import (
     AssetClass,
@@ -64,7 +65,6 @@ from deephaven_massive._massive import (
     without_userinfo,
     without_userinfo_or_query,
 )
-from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator

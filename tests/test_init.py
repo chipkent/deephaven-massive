@@ -1,4 +1,4 @@
-"""Tests for the public surface of `deephaven_massive` and its lazy resolution."""
+"""Tests for the public surface of `deephaven_massive`: its names, and the types they declare."""
 
 import ast
 import builtins
@@ -6,9 +6,7 @@ import functools
 import importlib
 import importlib.metadata
 import inspect
-import json
 import re
-import subprocess
 import sys
 import typing
 from collections.abc import Callable
@@ -19,7 +17,8 @@ from typing import ParamSpec, ParamSpecArgs, ParamSpecKwargs, TypeVar
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import EntitlementError, MassiveError
+from deephaven_massive import _symbols_like
+from deephaven_massive._datasets import dates, filters
 
 EXPECTED_EXPORTS = [
     "MassiveSession",
@@ -65,20 +64,11 @@ EXPECTED_EXPORTS = [
     "disable_debug_logging",
     "enable_debug_logging",
     "LogOutput",
+    "SymbolsLike",
+    "DateLike",
+    "FilterValue",
     "__version__",
 ]
-
-
-def _type_checking_imports(module: ModuleType) -> set[str]:
-    """Return the names a module imports inside its `if TYPE_CHECKING:` block."""
-    tree = ast.parse(inspect.getsource(module))
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING":
-            for statement in node.body:
-                assert isinstance(statement, ast.ImportFrom)
-                names.update(alias.asname or alias.name for alias in statement.names)
-    return names
 
 
 def test_version_is_the_installed_distribution_version() -> None:
@@ -86,22 +76,8 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 44
+    assert len(EXPECTED_EXPORTS) == 47
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
-
-
-def test_every_lazy_name_resolves_to_its_defining_module() -> None:
-    lazy = set(dm.__all__) - {"__version__"}
-    assert set(dm._EXPORTS) == lazy
-    for name, module in dm._EXPORTS.items():
-        assert getattr(dm, name) is getattr(importlib.import_module(module), name), name
-
-
-def test_no_lazy_name_is_bound_in_the_module_namespace() -> None:
-    # Bound names would bypass `__getattr__`; the names resolve on every access instead.
-    for name in dm.__all__:
-        getattr(dm, name)
-    assert set(vars(dm)) & set(dm._EXPORTS) == set()
 
 
 @pytest.mark.parametrize("name", ["TYPE_CHECKING", "annotations", "importlib", "import_module"])
@@ -111,42 +87,27 @@ def test_helper_names_are_not_reachable(name: str) -> None:
 
 
 def test_no_public_names_outside_all() -> None:
-    # Every public name resolves lazily, so the namespace itself holds no public name at all;
-    # anything else would be reachable as `dm.<name>` beyond the exports. The exceptions are
-    # the public packages `typehints` and `namespaces`, which Python binds here once anything
-    # imports them.
-    assert {name for name in vars(dm) if not name.startswith("_")} <= {"typehints", "namespaces"}
+    # Nothing beyond the exports is reachable as `dm.<name>`, except the public packages
+    # `queries` and `namespaces`, which Python binds here once the library imports them.
+    public = {name for name in vars(dm) if not name.startswith("_")}
+    assert public - set(dm.__all__) == {"queries", "namespaces"}
 
 
-def test_type_checking_imports_mirror_all() -> None:
-    assert _type_checking_imports(dm) == set(dm.__all__) - {"__version__"}
-
-
-def test_an_unknown_name_raises_attribute_error() -> None:
-    with pytest.raises(AttributeError, match="module 'deephaven_massive' has no attribute 'nope'"):
-        _ = dm.nope  # type: ignore[attr-defined]  # the missing attribute is the point
-
-
-def test_a_private_module_is_not_a_lazy_name() -> None:
-    # `_EXPORTS` maps public names only; a private name is never imported on request.
-    with pytest.raises(AttributeError):
-        _ = dm._no_such_module  # type: ignore[attr-defined]  # the missing attribute is the point
-
-
-def test_dir_lists_exactly_the_public_names() -> None:
-    assert dir(dm) == sorted(EXPECTED_EXPORTS)
-
-
-def test_from_import_resolves_lazily() -> None:
-    # The module-level `from deephaven_massive import ...` above went through `__getattr__`.
-    assert EntitlementError is dm.EntitlementError
-    assert issubclass(EntitlementError, MassiveError)
+_ALIASES = {"SymbolsLike", "DateLike", "FilterValue"}
+"""The type aliases of the arguments, which are unions and carry no module of their own."""
 
 
 def test_public_names_come_from_private_modules() -> None:
-    public = [getattr(dm, name) for name in dm.__all__ if name not in {"ALL", "__version__"}]
+    skipped = {"ALL", "__version__", *_ALIASES}
+    public = [getattr(dm, name) for name in dm.__all__ if name not in skipped]
     for obj in public:
         assert obj.__module__.startswith("deephaven_massive._"), obj
+
+
+def test_the_argument_aliases_are_the_ones_the_library_reads() -> None:
+    assert dm.SymbolsLike is _symbols_like.SymbolsLike
+    assert dm.DateLike is dates.DateLike
+    assert dm.FilterValue is filters.FilterValue
 
 
 def test_twenty_one_enums_are_exported() -> None:
@@ -164,61 +125,10 @@ def test_exception_hierarchy() -> None:
     assert issubclass(dm.MassiveError, Exception)
 
 
-def _modules_loaded_by(*names: str) -> list[str]:
-    """Import the package in a fresh interpreter (no JVM) and read `names` from it.
-
-    Args:
-        *names: Public names to read after the import.
-
-    Returns:
-        The `deephaven_massive` submodules loaded afterwards, sorted.
-    """
-    # The script is a literal and the names travel as data on stdin; `-P` keeps the working
-    # directory off `sys.path`.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import json, sys\n"
-                "import deephaven_massive as dm\n"
-                "for name in json.load(sys.stdin):\n"
-                "    getattr(dm, name)\n"
-                "loaded = [m for m in sys.modules if m.startswith('deephaven_massive.')]\n"
-                "print(json.dumps(sorted(loaded)))"
-            ),
-        ],
-        input=json.dumps(names),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    loaded: list[str] = json.loads(result.stdout)
-    return loaded
-
-
-def test_importing_the_package_imports_no_private_module() -> None:
-    assert _modules_loaded_by() == []
-
-
-def test_reading_a_name_imports_only_its_defining_module() -> None:
-    assert _modules_loaded_by("Timespan") == ["deephaven_massive._enums"]
-
-
-def test_the_logging_switch_needs_no_other_module() -> None:
-    # It must work before a Deephaven server exists, so it loads nothing that needs the JVM:
-    # only itself and the wire package's lazy interface, for the snapshot date.
-    assert _modules_loaded_by("enable_debug_logging", "disable_debug_logging", "LogOutput") == [
-        "deephaven_massive._debug_log",
-        "deephaven_massive._massive",
-    ]
-
-
 # The public modules, whose `__all__` is the whole public surface.
 _PUBLIC_MODULES = (
     "deephaven_massive",
-    "deephaven_massive.typehints",
+    "deephaven_massive.queries",
     "deephaven_massive.namespaces",
 )
 
@@ -250,7 +160,9 @@ class _PublicApiWalk:
     a sub-namespace returned by a property is checked like a top-level one.
 
     An implementation detail may stay private: a private base class (its members are walked as
-    the public class's own), and the runtime class of a value declared as a public type. A
+    the public class's own), the runtime class of a value declared as a public type, and the
+    enum of a value the package exports whole, such as the type of `dm.ALL`: users name the
+    value and never its type, so an exported enum member stands for its enum. A
     constructor parameter whose name starts with an underscore is internal (a namespace's
     session core), so its type is not checked; on any other method, such a parameter is.
     """
@@ -263,6 +175,8 @@ class _PublicApiWalk:
             for name in module.__all__:
                 value = getattr(module, name)
                 self.public.setdefault(id(value), f"{module.__name__}.{name}")
+                if isinstance(value, Enum):
+                    self.public.setdefault(id(type(value)), f"{module.__name__}.{name}")
                 self.exports[f"{module.__name__}.{name}"] = value
                 self.exports_by_name[name] = value
         self.findings: set[str] = set()
@@ -523,7 +437,7 @@ def test_the_walk_reaches_every_namespace_and_its_dataset_methods() -> None:
     walk = _walk_public_api()
     assert "deephaven_massive.MassiveSession.partners" in walk.methods
     assert "deephaven_massive.namespaces.PartnersBenzingaNamespace.ratings" in walk.methods
-    assert "deephaven_massive.typehints.Query.columns" in walk.methods
+    assert "deephaven_massive.queries.Query.columns" in walk.methods
     # Overloads are filed under each method's renamed path; the walk still finds them.
     assert walk.methods["deephaven_massive.namespaces.StocksNamespace.bars"] == 2
     assert walk.methods["deephaven_massive.namespaces.FuturesNamespace.bars"] == 2
@@ -651,11 +565,10 @@ def test_a_constructor_skips_its_underscore_parameters() -> None:
 def test_the_walk_finds_a_private_type_inside_a_public_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    queries = importlib.import_module("deephaven_massive.typehints")
     alias = importlib.import_module("deephaven_massive._datasets.symbols").NormalizedSymbols
-    monkeypatch.setattr(queries, "Symbols", alias)
+    monkeypatch.setattr(dm, "SymbolsLike", alias)
     walk = _walk_public_api()
-    assert "deephaven_massive.typehints.Symbols: SymbolTable" in walk.findings
+    assert "deephaven_massive.SymbolsLike: SymbolTable" in walk.findings
 
 
 def test_the_walk_fails_on_a_name_nothing_defines(monkeypatch: pytest.MonkeyPatch) -> None:

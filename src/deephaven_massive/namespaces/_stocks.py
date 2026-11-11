@@ -26,7 +26,7 @@ together.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
@@ -55,20 +55,20 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.namespaces._stock_filings import StocksFilingsNamespace
 from deephaven_massive.namespaces._stock_financials import StocksFinancialsNamespace
+from deephaven_massive.queries import (
+    FetchQuery,
+    HistoryQuery,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import (
-        FetchQuery,
-        HistoryQuery,
-        StreamHistoryQuery,
-        SymbolStreamQuery,
-    )
 
 __all__ = [
     "DATASETS",
@@ -378,14 +378,14 @@ its nested namespaces have their own (`stock_financials.py`, `stock_filings.py`)
 class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating method per dataset or dataset namespace, no state beyond the core
     """The US stock datasets, reached as `m.stocks`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import StocksNamespace
-
-    Its methods cover trades, quotes, bars, limit up-limit down bands, imbalances, fair market
-    value, snapshots, movers, dividends, splits, IPOs, short interest, short volume, and free float.
-    `m.stocks.financials` holds the financial statements, and `m.stocks.filings` the SEC filings.
-    Each method only builds a query, so it never blocks, and you can call it from any thread.
+    Each method returns a query of one dataset, and together they cover trades, quotes, bars, each
+    stock's last trade and quote, previous day's bar, and daily open and close, limit up-limit
+    down bands, imbalances, fair market value, snapshots, movers, dividends, splits, IPOs, short
+    interest, short volume, and free float. `m.stocks.financials` holds the financial
+    statements, and `m.stocks.filings` the SEC filings. A method reads nothing, so it never
+    blocks, and you can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import StocksNamespace` to annotate your own code.
 
     Example:
         ::
@@ -421,7 +421,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         return self._filings
 
     @raises_through(build_query)
-    def trades(self, symbols: Symbols) -> StreamHistoryQuery:
+    def trades(self, symbols: SymbolsLike) -> StreamHistoryQuery:
         """Trades of US-listed stocks, tick by tick.
 
         Each row holds one trade reported to the SIP. `Timestamp` is the SIP's time. Streams and
@@ -448,10 +448,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 recent = m.stocks.trades(["AAPL", "MSFT"]).ring(10_000)
                 friday = m.stocks.trades("AAPL").history("2026-10-30", "2026-10-30")
         """
-        return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
+        return build_query(self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def last_trade(self, symbols: Symbols) -> FetchQuery:
+    def last_trade(self, symbols: SymbolsLike) -> FetchQuery:
         """The latest trade of each US-listed stock.
 
         Each row holds one symbol's most recent trade. A symbol with no trade is left out, and the
@@ -478,16 +478,16 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 last = m.stocks.last_trade(["AAPL", "MSFT"]).fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             LAST_TRADE,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
+    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
         Each row holds one NBBO update. `Timestamp` is the SIP's time. Streams and flat-file history
@@ -513,10 +513,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 top = m.stocks.quotes(["AAPL", "SPY"]).last_by()
         """
-        return cast("StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols))
+        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def last_quote(self, symbols: Symbols) -> FetchQuery:
+    def last_quote(self, symbols: SymbolsLike) -> FetchQuery:
         """The latest national best bid and offer of each US-listed stock.
 
         Each row holds one symbol's most recent NBBO. A symbol with no quote is left out, and the
@@ -543,18 +543,18 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 spreads = m.stocks.last_quote(["AAPL", "SPY"]).poll(5)
         """
-        query = build_query(
+        return build_query(
             self._core,
             LAST_QUOTE,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
-        return cast("FetchQuery", query)
 
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
@@ -563,7 +563,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -572,7 +572,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(build_query, require_bool)
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -613,18 +613,18 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 week = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
                 live = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).append_only()
         """
-        query = build_query(
+        return build_query(
             self._core,
             BARS,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
             adjusted=require_bool("adjusted", adjusted),
         )
-        return cast("HistoryQuery", query)
 
     @raises_through(build_query, require_bool)
-    def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> FetchQuery:
+    def previous_day_bar(self, symbols: SymbolsLike, *, adjusted: bool = True) -> FetchQuery:
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
         Each row holds one symbol's bar of the previous completed session. A symbol with no bar is
@@ -651,9 +651,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 previous = m.stocks.previous_day_bar(["AAPL", "MSFT"]).fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             PREVIOUS_DAY_BAR,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
@@ -662,10 +663,9 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def luld(self, symbols: Symbols) -> SymbolStreamQuery:
+    def luld(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
         Each row holds one band update from the SIP, with its upper and lower price limits. The
@@ -690,10 +690,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 bands = m.stocks.luld(dm.ALL).last_by()
         """
-        return cast("SymbolStreamQuery", build_query(self._core, LULD, symbols=symbols))
+        return build_query(self._core, LULD, query_type=SymbolStreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def imbalances(self, symbols: Symbols) -> SymbolStreamQuery:
+    def imbalances(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
         Each row holds one imbalance message, with the auction's type and time and the imbalance
@@ -718,10 +718,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 closing = m.stocks.imbalances(["AAPL", "MSFT"]).append_only()
         """
-        return cast("SymbolStreamQuery", build_query(self._core, IMBALANCES, symbols=symbols))
+        return build_query(self._core, IMBALANCES, query_type=SymbolStreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row holds one fair market value and the time Massive computed it. It streams only on a
@@ -746,10 +746,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 fair = m.stocks.fmv(["AAPL"]).last_by()
         """
-        return cast("SymbolStreamQuery", build_query(self._core, FMV, symbols=symbols))
+        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
 
     @raises_through(build_query, require_bool)
-    def snapshots(self, symbols: Symbols, *, include_otc: bool = False) -> FetchQuery:
+    def snapshots(self, symbols: SymbolsLike, *, include_otc: bool = False) -> FetchQuery:
         """Current market snapshots of US-listed stocks, one row per ticker.
 
         Each row holds a ticker's state now: the day's bar, the previous day's bar, the latest
@@ -776,13 +776,13 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 latest = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).poll(5)
         """
-        query = build_query(
+        return build_query(
             self._core,
             SNAPSHOTS,
+            query_type=FetchQuery,
             symbols=symbols,
             params={"include_otc": require_bool("include_otc", include_otc)},
         )
-        return cast("FetchQuery", query)
 
     @raises_through(require_bool, _require_enum)
     def movers(self, direction: Direction, *, include_otc: bool = False) -> FetchQuery:
@@ -807,19 +807,19 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 gainers = m.stocks.movers(dm.Direction.GAINERS).poll(60)
         """
-        query = build_query(
+        return build_query(
             self._core,
             MOVERS,
+            query_type=FetchQuery,
             params={
                 "direction": _require_enum(direction, Direction, "direction"),
                 "include_otc": require_bool("include_otc", include_otc),
             },
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, require_bool, day_argument)
     def daily_open_close(
-        self, symbols: Symbols, date: DateLike, *, adjusted: bool = True
+        self, symbols: SymbolsLike, date: DateLike, *, adjusted: bool = True
     ) -> FetchQuery:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
@@ -850,9 +850,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 friday = m.stocks.daily_open_close(["AAPL", "MSFT"], "2026-10-30").fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             DAILY_OPEN_CLOSE,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
@@ -861,12 +862,11 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
         )
-        return cast("FetchQuery", query)
 
     @raises_through(list_query)
     def dividends(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -924,7 +924,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(list_query)
     def splits(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -984,7 +984,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(list_query)
     def ipos(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -1041,7 +1041,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(list_query)
     def short_interest(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -1099,7 +1099,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(list_query)
     def short_volume(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -1157,7 +1157,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     @raises_through(list_query)
     def share_float(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,

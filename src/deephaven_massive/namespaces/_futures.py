@@ -36,7 +36,7 @@ instrument: they take no symbols and have no `Symbol` column.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
 
 from deephaven.table import Table
 
@@ -53,6 +53,7 @@ from deephaven_massive.namespaces._query_building import (
     one_or_any_of,
     value_table,
 )
+from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamHistoryQuery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -62,8 +63,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._enums import Order
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery, HistoryQuery, StreamHistoryQuery
+    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["DATASETS", "FuturesNamespace"]
 
@@ -287,14 +287,10 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class FuturesNamespace(Namespace):
     """The US futures datasets, reached as `m.futures`, for CME, CBOT, NYMEX, and COMEX contracts.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import FuturesNamespace
-
-    Its methods cover trades, quotes, bars, snapshots, and the reference datasets of contracts,
-    products, exchanges, market status, and session schedules. Each method only builds a query, so
-    it never blocks, and you can call it from any thread.
-
+    Each method returns a query of one dataset, and together they cover trades, quotes, bars,
+    snapshots, and the reference datasets of contracts, products, exchanges, market status, and
+    session schedules. A method reads nothing, so it never blocks, and you can call it from
+    any thread.
     A symbol is a contract ticker, such as `"ESZ5"` for the December 2025 E-mini S&P 500. A futures
     trading day is a session that ends at 17:00 Chicago time, and `Date` is that session.
 
@@ -302,6 +298,9 @@ class FuturesNamespace(Namespace):
     `contracts()` lists them. The tickers in this namespace's examples have expired. Their live
     calls need a current contract in their place. Their `history()` calls read past dates and work
     as written.
+
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import FuturesNamespace` to annotate your own code.
 
     Example:
         ::
@@ -319,7 +318,7 @@ class FuturesNamespace(Namespace):
 
     @raises_through(build_query)
     def trades(
-        self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+        self, symbols: SymbolsLike, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
     ) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
@@ -350,13 +349,13 @@ class FuturesNamespace(Namespace):
 
                 past = m.futures.trades("ESZ5").history("2025-10-01", "2025-10-03")
         """
-        return cast(
-            "StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols, venues=venues)
+        return build_query(
+            self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols, venues=venues
         )
 
     @raises_through(build_query)
     def quotes(
-        self, symbols: Symbols, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+        self, symbols: SymbolsLike, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
     ) -> StreamHistoryQuery:
         """Best bid and offer quotes of futures contracts, tick by tick.
 
@@ -389,14 +388,14 @@ class FuturesNamespace(Namespace):
                 active = m.futures.contracts(product_code="CL", filters={"active": True}).fetch()
                 book = m.futures.quotes(active).last_by()
         """
-        return cast(
-            "StreamHistoryQuery", build_query(self._core, QUOTES, symbols=symbols, venues=venues)
+        return build_query(
+            self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, venues=venues
         )
 
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
@@ -405,17 +404,8 @@ class FuturesNamespace(Namespace):
     @overload
     def bars(
         self,
-        symbols: Symbols,
-        timespan: Literal[
-            Timespan.SECOND,
-            Timespan.MINUTE,
-            Timespan.HOUR,
-            Timespan.SESSION,
-            Timespan.WEEK,
-            Timespan.MONTH,
-            Timespan.QUARTER,
-            Timespan.YEAR,
-        ],
+        symbols: SymbolsLike,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -423,17 +413,8 @@ class FuturesNamespace(Namespace):
     @raises_through(build_query)
     def bars(
         self,
-        symbols: Symbols,
-        timespan: Literal[
-            Timespan.SECOND,
-            Timespan.MINUTE,
-            Timespan.HOUR,
-            Timespan.SESSION,
-            Timespan.WEEK,
-            Timespan.MONTH,
-            Timespan.QUARTER,
-            Timespan.YEAR,
-        ],
+        symbols: SymbolsLike,
+        timespan: Timespan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -476,20 +457,20 @@ class FuturesNamespace(Namespace):
                     "2025-10-01", "2025-10-31"
                 )
         """
-        query = build_query(
+        return build_query(
             self._core,
             BARS,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
             venues=venues,
         )
-        return cast("HistoryQuery", query)
 
     @raises_through(build_query, list_params, _product_codes)
     def snapshots(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         *,
         product_code: str | Sequence[str] | Table | None = None,
         sort: str | None = None,
@@ -536,9 +517,10 @@ class FuturesNamespace(Namespace):
                 es_curve = m.futures.snapshots(dm.ALL, product_code="ES").poll(5)
         """
         codes, values = _product_codes(product_code)
-        query = build_query(
+        return build_query(
             self._core,
             SNAPSHOTS,
+            query_type=FetchQuery,
             symbols=symbols,
             params={**codes, **list_params(sort=sort, order=order)},
             filters=filters,
@@ -546,12 +528,11 @@ class FuturesNamespace(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
     def contracts(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         product_code: str | Sequence[str] | Table | None = None,
         as_of: DateLike | None = None,
@@ -611,9 +592,10 @@ class FuturesNamespace(Namespace):
             "date": None if as_of is None else day_argument(CONTRACTS, as_of, "as_of"),
             **list_params(sort=sort, order=order),
         }
-        query = build_query(
+        return build_query(
             self._core,
             CONTRACTS,
+            query_type=FetchQuery,
             symbols=symbols,
             symbols_optional=True,
             all_alternative="leave symbols out for every contract",
@@ -623,7 +605,6 @@ class FuturesNamespace(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
     def products(
@@ -680,16 +661,16 @@ class FuturesNamespace(Namespace):
             "date": None if as_of is None else day_argument(PRODUCTS, as_of, "as_of"),
             **list_params(sort=sort, order=order),
         }
-        query = build_query(
+        return build_query(
             self._core,
             PRODUCTS,
+            query_type=FetchQuery,
             params=params,
             filters=filters,
             arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
             values=values,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
     def exchanges(self, *, limit: int | None = None) -> FetchQuery:
@@ -715,7 +696,7 @@ class FuturesNamespace(Namespace):
 
                 venues = m.futures.exchanges().fetch()
         """
-        return cast("FetchQuery", build_query(self._core, EXCHANGES, limit=limit))
+        return build_query(self._core, EXCHANGES, query_type=FetchQuery, limit=limit)
 
     @raises_through(build_query, _product_codes)
     def market_status(
@@ -758,8 +739,14 @@ class FuturesNamespace(Namespace):
                 status = m.futures.market_status(product_code=["ES", "CL"]).poll(30)
         """
         codes, values = _product_codes(product_code)
-        query = build_query(self._core, MARKET_STATUS, params=codes, limit=limit, values=values)
-        return cast("FetchQuery", query)
+        return build_query(
+            self._core,
+            MARKET_STATUS,
+            query_type=FetchQuery,
+            params=codes,
+            limit=limit,
+            values=values,
+        )
 
     @raises_through(build_query, list_params, _product_codes)
     def schedules(
@@ -816,9 +803,10 @@ class FuturesNamespace(Namespace):
                 ).fetch()
         """
         codes, values = _product_codes(product_code)
-        query = build_query(
+        return build_query(
             self._core,
             SCHEDULES,
+            query_type=FetchQuery,
             start=start,
             end=end,
             params={**codes, **list_params(sort=sort, order=order)},
@@ -827,4 +815,3 @@ class FuturesNamespace(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("FetchQuery", query)

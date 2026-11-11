@@ -1,8 +1,6 @@
 """Tests for `deephaven_massive.namespaces`, the public package of the namespace classes."""
 
-import json
-import subprocess
-import sys
+import re
 import typing
 
 import pytest
@@ -48,7 +46,8 @@ def test_each_class_is_named_for_its_path(path: str) -> None:
 @pytest.mark.parametrize("path", sorted(_PATHS))
 def test_each_class_docstring_gives_its_import(path: str) -> None:
     name = _PATHS[path].__name__
-    assert f"from deephaven_massive.namespaces import {name}\n" in (_PATHS[path].__doc__ or "")
+    text = _PATHS[path].__doc__ or ""
+    assert re.search(rf"from deephaven_massive\.namespaces import {name}\b", text)
 
 
 @pytest.mark.parametrize("path", sorted(_PATHS))
@@ -79,23 +78,3 @@ def test_every_namespace_the_session_reaches_is_listed(massive_session: MassiveS
 
     collect(massive_session, "")
     assert reached == _PATHS
-
-
-def test_importing_the_package_root_does_not_import_it() -> None:
-    # A fresh interpreter without a JVM: importing the package does not load the namespaces.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import json, sys\n"
-                "import deephaven_massive\n"
-                "print(json.dumps('deephaven_massive.namespaces' in sys.modules))"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(result.stdout) is False

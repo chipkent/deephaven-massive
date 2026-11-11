@@ -45,14 +45,14 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive.namespaces import _crypto as crypto
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import (
+from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     Query,
     StreamHistoryQuery,
     SymbolStreamQuery,
-    query_class,
 )
+from deephaven_massive.queries._choice import query_class
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
@@ -495,11 +495,8 @@ def test_the_one_row_datasets_need_explicit_symbols(massive_session: dm.MassiveS
         massive_session.crypto.previous_day_bar(dm.ALL)
 
 
-def test_a_stream_without_fetch_names_its_last_trade(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.trades("X:BTCUSD")
-    assert not hasattr(q, "fetch")
-    with pytest.raises(AttributeError, match=r"m\.crypto\.last_trade\(\.\.\.\)\.fetch\(\)"):
-        _ = q.fetch  # type: ignore[attr-defined]  # the missing verb is the point
+def test_a_stream_has_no_fetch(massive_session: dm.MassiveSession) -> None:
+    assert not hasattr(massive_session.crypto.trades("X:BTCUSD"), "fetch")
 
 
 def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession) -> None:

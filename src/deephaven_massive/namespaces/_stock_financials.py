@@ -34,9 +34,9 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive.queries import FetchQuery
 
 __all__ = [
     "DATASETS",
@@ -114,7 +114,7 @@ def _statement_query(
     core: SessionCore,
     spec: DatasetSpec,
     *,
-    symbols: Symbols | None,
+    symbols: SymbolsLike | None,
     timeframe: object,
     start: DateLike | None,
     end: DateLike | None,
@@ -173,13 +173,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class StocksFinancialsNamespace(Namespace):
     """The financial statement datasets, reached as `m.stocks.financials`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import StocksFinancialsNamespace
-
-    Its methods cover the balance sheets, income statements, and cash flow statements that companies
-    file with the SEC, and Massive's valuation ratios. Each method only builds a query, so it never
-    blocks, and you can call it from any thread.
+    Each method returns a query of one dataset, and together they cover the balance sheets, income
+    statements, and cash flow statements that companies file with the SEC, and Massive's valuation
+    ratios. A method reads nothing, so it never blocks, and you can call it from any
+    thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import StocksFinancialsNamespace` to annotate your own code.
 
     Example:
         ::
@@ -197,7 +196,7 @@ class StocksFinancialsNamespace(Namespace):
     @raises_through(_statement_query)
     def balance_sheets(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         timeframe: Timeframe | None = None,
         start: DateLike | None = None,
@@ -267,7 +266,7 @@ class StocksFinancialsNamespace(Namespace):
     @raises_through(_statement_query)
     def income_statements(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         timeframe: Timeframe | None = None,
         start: DateLike | None = None,
@@ -331,7 +330,7 @@ class StocksFinancialsNamespace(Namespace):
     @raises_through(_statement_query)
     def cash_flow_statements(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         timeframe: Timeframe | None = None,
         start: DateLike | None = None,
@@ -393,7 +392,7 @@ class StocksFinancialsNamespace(Namespace):
     @raises_through(list_query)
     def ratios(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,

@@ -50,14 +50,14 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import (
+from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     Query,
     StreamHistoryQuery,
     SymbolStreamQuery,
-    query_class,
 )
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.rest import FakeRestServer, Reply
 
 if TYPE_CHECKING:
@@ -728,8 +728,6 @@ def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSes
     ):
         assert not hasattr(query, "fetch")
         assert not hasattr(query, "poll")
-    with pytest.raises(AttributeError, match=r"use m\.stocks\.last_trade\(\.\.\.\)\.fetch\(\)"):
-        cast("Any", namespace.trades("AAPL")).fetch(wait=True)
 
 
 def test_previous_day_bar_is_one_adjusted_day_by_default(

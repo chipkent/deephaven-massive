@@ -82,10 +82,10 @@ from deephaven.column import InputColumn
 from deephaven.stream import blink_to_append_only
 from deephaven.table import TableDefinition
 from deephaven.table_listener import TableListener, TableListenerHandle
+from typing_extensions import override
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
-from deephaven_massive._override import override
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import (
     StreamKind,

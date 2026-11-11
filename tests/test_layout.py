@@ -51,17 +51,16 @@ wire package.
 
 Then the file enforces the library's layers. Every module under `src/` is in one of six
 layers, lowest first: wire (`_massive/`), vocabulary (the root `_config`, `_enums`, `_errors`,
-`_log_limits`, `_override`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`),
-and API (the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_snapshots`, and the
-public packages `namespaces/` and `typehints/`); a module in no known layer is itself a
+`_log_limits`), datasets (`_datasets/`), tables (`_tables/`), ingest (`_ingest/`), and API
+(the root `__init__`, `_dataset_list`, `_debug_log`, `_session`, `_snapshots`, `_symbols_like`,
+and the public packages `queries/` and `namespaces/`); a module in no known layer is itself a
 violation. Then:
 
 - every import, relative import, resolvable literal dynamic import, and module-name string,
   inside `if TYPE_CHECKING:` or not, targets the module's own layer or a lower one;
-- outside the two lazy `__init__.py` files (the package's and `_massive`'s), every import the
-  rules cannot resolve is a violation: a computed name, a relative literal without a literal
-  package, an `__import__` level other than 0, an import function used other than by a direct
-  call, and a `sys.modules` lookup by a computed key;
+- every import the rules cannot resolve is a violation: a computed name, a relative literal
+  without a literal package, an `__import__` level other than 0, an import function used other
+  than by a direct call, and a `sys.modules` lookup by a computed key;
 - Deephaven: the vocabulary imports only `deephaven.table`, the datasets import `deephaven`
   only for type checking, and nothing imports `deephaven_server`
   (the wire boundary above already keeps Deephaven out of `_massive`);
@@ -96,7 +95,6 @@ text), so it is checked both against the real tree and against a synthetic tree 
 """
 
 import ast
-import json
 import os
 import re
 import subprocess
@@ -193,35 +191,44 @@ def is_helper(test_file: PurePosixPath) -> bool:
     )
 
 
-PUBLIC_MODULES = frozenset(
-    {
-        PurePosixPath("__init__.py"),
-        PurePosixPath("namespaces/__init__.py"),
-        PurePosixPath("typehints/__init__.py"),
-    }
-)
-"""The public modules: the package itself, and the `__init__.py` of the two public packages,
-`namespaces` (the namespace classes) and `typehints` (the query and argument types), whose
-implementation is in their private submodules. A new entry needs owner approval."""
+def _private(part: str) -> bool:
+    """Tell whether a path component is private.
+
+    Args:
+        part: A directory or file name, such as `_massive` or `__init__.py`.
+
+    Returns:
+        True for a leading underscore that is no dunder.
+    """
+    return part.startswith("_") and not part.startswith("__")
 
 
 def public_modules(modules: Iterable[PurePosixPath]) -> list[str]:
-    """Return the modules that break the privacy rule.
+    """Return the modules that break the public-layout rule of `docs/dev/public-api.md`.
+
+    A user imports public names from packages only, so a public package's `__init__.py` is its
+    only public module: every other module in it is private. And a package never holds both a
+    public `x` and a private `_x`, a public twin of a private module or package.
 
     Args:
         modules: Module paths relative to `src/deephaven_massive/`.
 
     Returns:
-        Every module outside `PUBLIC_MODULES` none of whose path components is private: a
-        component is private when it starts with an underscore and is not a dunder name such as
-        `__init__.py`.
+        Every module other than an `__init__.py` none of whose path components is private, and
+        every public package or module beside a private one of the same name.
     """
-    return [
+    found = [
         str(module)
         for module in modules
-        if module not in PUBLIC_MODULES
-        and not any(part.startswith("_") and not part.startswith("__") for part in module.parts)
+        if module.name != "__init__.py" and not any(map(_private, module.parts))
     ]
+    names = {(path.parent, path.stem) for module in modules for path in (module, module.parent)}
+    found.extend(
+        f"{parent / name} and {parent / f'_{name}'}"
+        for parent, name in sorted(names)
+        if name and not _private(name) and (parent, f"_{name}") in names
+    )
+    return found
 
 
 def missing_mirrors(
@@ -384,9 +391,7 @@ def test_a_live_test_without_a_module_is_an_orphan() -> None:
 # The privacy rule.
 
 
-def test_every_module_below_the_package_is_private() -> None:
-    # Every module has a private path component, a leading underscore that is no dunder, so
-    # the public surface is `__init__.py` and the `__init__.py` of `namespaces` and `typehints`.
+def test_only_package_inits_are_public_modules() -> None:
     assert public_modules(_source_modules()) == []
 
 
@@ -394,14 +399,31 @@ def test_a_public_module_is_reported() -> None:
     found = public_modules(
         _paths(
             "__init__.py",
-            "typehints/__init__.py",
-            "typehints/_queries.py",
+            "queries/__init__.py",
+            "queries/_fetch.py",
             "_config.py",
             "config.py",
             "namespaces/stocks.py",
+            "_massive/rest/client.py",
         )
     )
-    assert found == ["config.py", "namespaces/stocks.py"]
+    assert found == ["config.py", "namespaces/stocks.py", "config and _config"]
+
+
+@pytest.mark.parametrize(
+    ("modules", "twin"),
+    [
+        (("queries/__init__.py", "_queries.py"), "queries and _queries"),
+        (("queries/__init__.py", "_queries/__init__.py"), "queries and _queries"),
+        (("namespaces/__init__.py", "_namespaces/stocks.py"), "namespaces and _namespaces"),
+        (("namespaces/__init__.py", "namespaces/_stocks.py", "_tables/stocks.py"), None),
+    ],
+)
+def test_a_public_twin_of_a_private_module_is_reported(
+    modules: tuple[str, ...], twin: str | None
+) -> None:
+    found = public_modules(_paths(*modules))
+    assert found == ([] if twin is None else [twin])
 
 
 # Every module has its mirror.
@@ -1323,7 +1345,7 @@ def test_outside_code_must_not_name_a_wire_submodule(source: str, name: str) -> 
     [
         "x = 'deephaven_massive._massive'\n",
         "x = 'deephaven_massive._massive.WireError'\n",
-        "x = 'deephaven_massive._override'\n",
+        "x = 'deephaven_massive._log_limits'\n",
         "x = 'results'\ny = 'net'\nz = 'stocks/T'\n",
         # A string with a leading dot is a module only as import_module's relative argument.
         "suffix = '.csv.gz'\nkind = '._massive.net'\n",
@@ -1410,24 +1432,19 @@ def test_only_this_file_may_name_the_snapshot_files() -> None:
 # The six layers, lowest first. A module imports only its own layer or lower ones.
 _RANKS = {"wire": 0, "vocabulary": 1, "datasets": 2, "tables": 3, "ingest": 4, "api": 5}
 # The root modules of the vocabulary and of the API; every other root module is in no layer.
-_VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_log_limits", "_override"})
-_API_MODULES = frozenset({"__init__", "_dataset_list", "_debug_log", "_session", "_snapshots"})
+_VOCABULARY_MODULES = frozenset({"_config", "_enums", "_errors", "_log_limits"})
+_API_MODULES = frozenset(
+    {"__init__", "_dataset_list", "_debug_log", "_session", "_snapshots", "_symbols_like"}
+)
 # The packages that are each one layer.
 _LAYER_PACKAGES = {
     "_massive": "wire",
     "_datasets": "datasets",
     "_tables": "tables",
     "_ingest": "ingest",
+    "queries": "api",
     "namespaces": "api",
-    "typehints": "api",
 }
-# The two lazy `__init__.py` files, the only modules that import by a computed name.
-_LAZY_INITS = frozenset(
-    {
-        PurePosixPath("src/deephaven_massive/__init__.py"),
-        PurePosixPath("src/deephaven_massive/_massive/__init__.py"),
-    }
-)
 # The package `__init__.py` files that hold a docstring and nothing else.
 _DOCSTRING_ONLY_INITS = frozenset(
     PurePosixPath(f"src/deephaven_massive/{package}/__init__.py")
@@ -1873,10 +1890,9 @@ def layer_violations(path: PurePosixPath, source: str) -> list[str]:
                 found.append(f"{where}:{line}: only _session.py imports the ingest layer: {name}")
             elif not _inside(name, f"{_INGEST}.clients"):
                 found.append(f"{where}:{line}: _session.py imports only _ingest.clients: {name}")
-    if path not in _LAZY_INITS:
-        found.extend(
-            f"{where}:{line}: a computed import: {text}" for line, text in _computed_imports(tree)
-        )
+    found.extend(
+        f"{where}:{line}: a computed import: {text}" for line, text in _computed_imports(tree)
+    )
     if layer in {"vocabulary", "datasets"}:
         found.extend(
             f"{where}:{line}: the {layer} layer does no I/O and starts no threads: {name}"
@@ -1914,69 +1930,6 @@ def test_the_wire_interface_splits_into_vocabulary_and_clients() -> None:
     assert _interface() == _WIRE_VOCABULARY | _WIRE_CLIENTS
 
 
-# The modules a vocabulary name must never load: the clients and the network stack under them,
-# which the datasets layer, importing only vocabulary, must not reach even indirectly.
-_CLIENT_AND_NETWORK_MODULES = (
-    f"{_WIRE}.rest",
-    f"{_WIRE}.ws",
-    f"{_WIRE}.flatfiles",
-    f"{_WIRE}.net.http",
-    "urllib3",
-    "certifi",
-    "websockets",
-    "boto3",
-    "botocore",
-    "ssl",
-    "socket",
-    "http.client",
-)
-
-
-def _modules_loaded_by(names: list[str]) -> list[str]:
-    """Read names of the wire interface in a fresh interpreter; report client modules loaded.
-
-    Args:
-        names: Attribute names to read from `deephaven_massive._massive`.
-
-    Returns:
-        The modules of `_CLIENT_AND_NETWORK_MODULES` that reading the names added to
-        `sys.modules`, sorted. Whatever importing the package itself loads is left out: the
-        library's front door reads its version through `importlib.metadata`, which on Python
-        before 3.13 imports `email` and with it `socket`, and no name of the interface is to
-        blame for that.
-    """
-    # The script is a literal and the data travels on stdin; `-P` keeps the working directory
-    # off `sys.path`.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import importlib, json, sys\n"
-                "names, watched = json.load(sys.stdin)\n"
-                "wire = importlib.import_module('deephaven_massive._massive')\n"
-                "before = set(sys.modules)\n"
-                "for name in names:\n"
-                "    getattr(wire, name)\n"
-                "print(json.dumps(sorted(set(watched) & (set(sys.modules) - before))))"
-            ),
-        ],
-        input=json.dumps([names, _CLIENT_AND_NETWORK_MODULES]),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    loaded: list[str] = json.loads(result.stdout)
-    return loaded
-
-
-def test_the_wire_vocabulary_loads_no_client_or_network_module() -> None:
-    assert _modules_loaded_by(sorted(_WIRE_VOCABULARY)) == []
-    # The probe sees a client when one is read.
-    assert f"{_WIRE}.rest" in _modules_loaded_by(["RestClient"])
-
-
 def _layer_check(module: str, source: str) -> list[str]:
     return layer_violations(PurePosixPath(f"src/deephaven_massive/{module}"), source)
 
@@ -1989,13 +1942,13 @@ def _layer_check(module: str, source: str) -> list[str]:
     [
         ("_massive/rest/client.py", "wire"),
         ("_config.py", "vocabulary"),
-        ("_override.py", "vocabulary"),
+        ("_log_limits.py", "vocabulary"),
         ("_datasets/catalog.py", "datasets"),
         ("_tables/session_core.py", "tables"),
         ("_ingest/clients.py", "ingest"),
         ("__init__.py", "api"),
         ("_session.py", "api"),
-        ("typehints/_queries.py", "api"),
+        ("queries/_query.py", "api"),
         ("namespaces/_stocks.py", "api"),
     ],
 )
@@ -2025,10 +1978,10 @@ def test_a_module_in_no_known_layer_is_reported(module: str) -> None:
             "from deephaven_massive._tables.session_core import SessionCore\n",
         ),
         (
-            "typehints/_queries.py",
+            "queries/_query.py",
             "from deephaven_massive._tables.execution_context import entered\n",
         ),
-        ("namespaces/_base.py", "from deephaven_massive.typehints._queries import Query\n"),
+        ("namespaces/_base.py", "from deephaven_massive.queries._query import Query\n"),
         ("_tables/liveness.py", "from . import diagnostics\n"),
         ("__init__.py", "_EXPORTS = {'MassiveSession': 'deephaven_massive._session'}\n"),
     ],
@@ -2042,10 +1995,10 @@ def test_a_module_may_import_its_own_layer_and_lower_ones(module: str, source: s
     [
         (
             "_datasets/catalog.py",
-            "if TYPE_CHECKING:\n    from deephaven_massive.typehints._queries import Query\n",
+            "if TYPE_CHECKING:\n    from deephaven_massive.queries._query import Query\n",
             (
                 "2: the datasets layer must not import the api layer: "
-                "deephaven_massive.typehints._queries"
+                "deephaven_massive.queries._query"
             ),
         ),
         (
@@ -2090,7 +2043,7 @@ def test_an_import_must_not_point_up(module: str, source: str, message: str) -> 
     assert found.startswith(f"src/deephaven_massive/{module}:{message}")
 
 
-# No computed imports outside the two lazy `__init__.py` files.
+# No computed imports.
 
 
 @pytest.mark.parametrize(
@@ -2119,12 +2072,6 @@ def test_an_import_must_not_point_up(module: str, source: str, message: str) -> 
 def test_a_computed_import_is_reported(source: str) -> None:
     [found] = _layer_check("_datasets/catalog.py", source)
     assert "a computed import" in found
-
-
-@pytest.mark.parametrize("module", ["__init__.py", "_massive/__init__.py"])
-def test_the_lazy_inits_may_import_by_a_computed_name(module: str) -> None:
-    source = "from importlib import import_module as _import_module\n_import_module(module)\n"
-    assert _layer_check(module, source) == []
 
 
 @pytest.mark.parametrize(
@@ -2178,7 +2125,7 @@ def test_deephaven_where_the_layer_allows_it(module: str, source: str) -> None:
             "1: the vocabulary imports only deephaven.table: deephaven.dtypes",
         ),
         (
-            "_override.py",
+            "_errors.py",
             "if TYPE_CHECKING:\n    from deephaven.execution_context import ExecutionContext\n",
             (
                 "2: the vocabulary imports only deephaven.table: "
@@ -2274,7 +2221,7 @@ def test_the_upper_layers_may_do_io_and_start_threads() -> None:
     ],
 )
 @pytest.mark.parametrize(
-    "module", ["_tables/session_core.py", "typehints/_queries.py", "_datasets/request.py"]
+    "module", ["_tables/session_core.py", "queries/_query.py", "_datasets/request.py"]
 )
 def test_only_ingest_uses_a_wire_client(module: str, source: str) -> None:
     [found] = _layer_check(module, source)
@@ -2306,7 +2253,7 @@ def test_the_session_imports_the_ingest_clients() -> None:
     ("module", "source", "message"),
     [
         (
-            "typehints/_queries.py",
+            "queries/_query.py",
             "from deephaven_massive._ingest.clients import SessionClients\n",
             "only _session.py imports the ingest layer",
         ),
@@ -2644,7 +2591,7 @@ def test_the_tree_keeps_the_logging_rules() -> None:
 
 
 def _logging_check(source: str) -> list[str]:
-    return logging_violations(PurePosixPath("src/deephaven_massive/typehints/_queries.py"), source)
+    return logging_violations(PurePosixPath("src/deephaven_massive/queries/_query.py"), source)
 
 
 @pytest.mark.parametrize(
@@ -2662,7 +2609,7 @@ def _logging_check(source: str) -> list[str]:
 )
 def test_a_logging_call_must_not_name_a_secret(source: str, name: str) -> None:
     assert _logging_check(source) == [
-        f"src/deephaven_massive/typehints/_queries.py:1: a logging call names {name}"
+        f"src/deephaven_massive/queries/_query.py:1: a logging call names {name}"
     ]
 
 
@@ -2692,7 +2639,7 @@ def test_other_calls_and_names_pass_the_logging_rule(source: str) -> None:
 def test_no_logging_call_runs_under_a_leaf_lock(source: str) -> None:
     [found] = _logging_check(source)
     assert re.fullmatch(
-        r"src/deephaven_massive/typehints/_queries\.py:\d: a logging call under the leaf lock .*",
+        r"src/deephaven_massive/queries/_query\.py:\d: a logging call under the leaf lock .*",
         found,
     )
 
@@ -2725,7 +2672,7 @@ def test_logging_outside_a_leaf_lock_passes(source: str) -> None:
     ],
 )
 def test_every_thread_and_pool_must_be_named(source: str, problem: str) -> None:
-    assert _logging_check(source) == [f"src/deephaven_massive/typehints/_queries.py:1: {problem}"]
+    assert _logging_check(source) == [f"src/deephaven_massive/queries/_query.py:1: {problem}"]
 
 
 @pytest.mark.parametrize(

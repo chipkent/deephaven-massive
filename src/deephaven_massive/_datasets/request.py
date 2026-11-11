@@ -6,10 +6,10 @@ pass it, with the dataset's `DatasetSpec`, to the transports. The module also na
 request is built from (`ParamValue`), the identity of a live stream (`StreamKey`), and a table
 passed where a dataset takes one value, such as an option chain's underlying (`ValueTable`).
 
-Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces' shared
-dataset factory builds requests (`build_query` in `namespaces/_query_building.py`), the query
-classes of `typehints/_queries.py` hand them to the transports, and the transport interfaces that
-receive them live in `_tables/transports.py`.
+Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces'
+shared dataset factory builds requests (`build_query` in `namespaces/_query_building.py`), the
+query classes of `deephaven_massive.queries` hand them to the transports, and the transport
+interfaces that receive them live in `_tables/transports.py`.
 """
 
 from __future__ import annotations

@@ -1,35 +1,31 @@
-"""Query building: the shared dataset factory behind every namespace method.
+"""The dataset factory every namespace method calls to turn its arguments into a query.
 
-Each namespace class (`StocksNamespace`, `OptionsNamespace`, ...) is a thin set of typed factory
-methods; this module does the work they share when a dataset method is called:
+A dataset method, such as `m.stocks.bars("AAPL", dm.Timespan.DAY)`, does three things: it
+checks its arguments, it builds an immutable request from them, and it returns the query of
+the class its dataset serves. The namespace classes only declare each method's typed signature
+and documentation; this module does that shared work, synchronously on the caller's thread,
+with no network call and no table created, so a wrong argument fails at the call, before any
+method of the query runs.
 
-- `Namespace` is the base class of the namespace classes; it holds the session core, which
-  each factory method passes to `build_query`, and wraps each factory in `shows_call`.
-- `shows_call` records on each query the call that built it (`QueryCall`), which is the
-  query's `repr`: the method's path and the arguments that differ from their defaults.
-- `build_query` checks symbols (`check_symbols` in `_datasets/symbols.py`, which takes only
-  Massive's exact tickers; a reactive
-  `Table` is checked for its `Symbol` column and boxed in a `SymbolTable` here), rejects
-  `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
-  bounds, and normalizes the typed parameters and the `filters` mapping into a hashable
-  `Request`.
-- The query class `build_query` returns is the one `typehints/_queries.py` chooses for the dataset
-  (`query_class`, and `bar_query_class` for a `bars()` call).
-- `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
-  REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
-  it is a total-row cap, not the endpoint's page-size parameter. `list_query` builds the query
-  of a REST list dataset with them.
-- `require_bool` and `optional_text` check the plain `bool` and optional `str` arguments of
-  dataset methods, and `value_table` boxes a table passed where a dataset takes one value (an
-  underlying, a futures product code) in a `ValueTable`, which `build_query` stores in the
-  `Request` for the verbs to read.
-- `ticker_key` declares the keys of a source whose rows name their instrument in `Ticker`.
-
-Filter keys and value kinds are checked against the generated parameters of the dataset's REST
-paths (`check_filters` in `_datasets/filters.py`) synchronously at construction, so a
-bad filter fails before any verb runs, and the `Request` stores each value as the check parsed
-it (ISO-8601 text of a date parameter becomes a `date`), never the caller's text. Everything
-here runs synchronously on the calling thread, makes no network call, and creates no table.
+- `build_query` checks the symbols (`check_symbols` in `_datasets/symbols.py`; a `Table` must
+  have a `Symbol` column and is boxed in a `SymbolTable`), refuses `dm.ALL` where the dataset
+  can't serve it and names the alternative, parses the time bounds, and normalizes the typed
+  parameters and the `filters` mapping into a hashable `Request`. It builds the class
+  `queries/_choice.py` derives from the dataset (`query_class`, or `bar_query_class` for a
+  `bars()` call) and fails, as a library defect, when that class isn't the one the method
+  declares. Filter keys and values are checked against the dataset's generated REST
+  parameters (`check_filters` in `_datasets/filters.py`), and the `Request` stores each value
+  as the check parsed it, never the caller's text.
+- `list_query` builds the query of a REST list dataset, whose `sort` and `order` arguments
+  `list_params` checks; its `limit` is a cap on the total rows (`Request.limit`), not the
+  endpoint's page size.
+- `Namespace` is the base class of the namespace classes: it holds the session core and wraps
+  each dataset method in `shows_call`, which records the call on the query it returns as the
+  query's `repr`.
+- The small checks of plain arguments (`require_bool`, `optional_text`, `day_argument`,
+  `one_or_any_of`, `futures_venues`), `value_table` for a table passed where a dataset takes
+  one value, and the shared declarations of the namespace modules (`ticker_key`,
+  `adjustment_notes`) live here too, since every namespace uses them.
 """
 
 from __future__ import annotations
@@ -41,10 +37,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from datetime import date, datetime
-from typing import TYPE_CHECKING, ClassVar, Final, TypeVar, cast, get_overloads, overload
+from typing import TYPE_CHECKING, ClassVar, Final, ParamSpec, TypeVar, cast, get_overloads, overload
 
 from deephaven import dtypes
 from deephaven.table import Table
+from typing_extensions import override
 
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import KeySpec, SourceKeys
@@ -64,16 +61,12 @@ from deephaven_massive._datasets.filters import (
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._override import override
 from deephaven_massive._tables.time_text import deephaven_time_text
-from deephaven_massive.typehints._queries import (
-    FetchQuery,
-    Query,
-    QueryCall,
-    bar_query_class,
-    query_class,
-)
+from deephaven_massive.queries import FetchQuery, Query
+from deephaven_massive.queries._call import QueryCall
+from deephaven_massive.queries._choice import bar_query_class, query_class
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -82,8 +75,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import RestPath
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
 
 __all__ = [
     "ADJUSTED_PRICE",
@@ -124,7 +117,8 @@ ADJUSTED_VOLUME: Final = (
 """The note on every volume column of a dataset with a split-adjustment choice."""
 
 
-_F = TypeVar("_F", bound=Callable[..., Query])
+_P = ParamSpec("_P")
+_Q = TypeVar("_Q", bound=Query)
 
 SNAPSHOT_SYMBOLS_PER_REQUEST: Final = 250
 """The most tickers one snapshot request names in its comma-separated ticker list.
@@ -202,7 +196,7 @@ def _frozen(value: object) -> object:
     return value
 
 
-def shows_call(path: str) -> Callable[[_F], _F]:
+def shows_call(path: str) -> Callable[[Callable[_P, _Q]], Callable[_P, _Q]]:
     """Make a dataset method record its call on the query it returns, as the query's `repr`.
 
     The wrapper binds the arguments to the method's signature after the method has returned
@@ -224,7 +218,7 @@ def shows_call(path: str) -> Callable[[_F], _F]:
         `raises_through` helpers (`functools.wraps`).
     """
 
-    def decorate(method: _F) -> _F:
+    def decorate(method: Callable[_P, _Q]) -> Callable[_P, _Q]:
         signature = inspect.signature(method)
         called = f"{path}.{method.__name__}"
         required = frozenset(
@@ -235,7 +229,7 @@ def shows_call(path: str) -> Callable[[_F], _F]:
         )
 
         @functools.wraps(method)
-        def factory(*args: object, **kwargs: object) -> Query:
+        def factory(*args: _P.args, **kwargs: _P.kwargs) -> _Q:
             try:
                 query = method(*args, **kwargs)
             except Exception as error:
@@ -250,7 +244,7 @@ def shows_call(path: str) -> Callable[[_F], _F]:
             )
             return replace(query, _call=QueryCall(called, arguments, required))
 
-        return cast("_F", factory)
+        return factory
 
     return decorate
 
@@ -546,7 +540,7 @@ def _time_value(name: str, value: object) -> object:
         return value
     upper = name.replace(".", "_").rpartition("_")[2] in ("lt", "lte")
     try:
-        return parse_date_like(cast("DateLike", value), name, upper=upper)
+        return parse_date_like(value, name, upper=upper)
     except TypeError:
         return value
 
@@ -691,7 +685,7 @@ def _calendar_axis(core: SessionCore, spec: DatasetSpec) -> str | None:
         return None
     name = spec.time_axis[0]
     for template in spec.rest_paths:
-        rest_path = cast("RestPath", core.catalog.source(Transport.REST, template))
+        rest_path = core.catalog.rest_path(template)
         param = next((p for p in rest_path.params if p.name == name), None)
         if (
             param is not None
@@ -769,7 +763,7 @@ def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
 def _normalized_symbols(
     core: SessionCore,
     spec: DatasetSpec,
-    symbols: Symbols | None,
+    symbols: SymbolsLike | None,
     *,
     symbols_optional: bool,
     all_alternative: str | None,
@@ -863,11 +857,51 @@ def _typed_params(
     return {**params, **library}
 
 
+def _query_class(
+    spec: DatasetSpec, query_type: type[_Q], *, timespan: Timespan | None, multiplier: int
+) -> type[_Q]:
+    """Derive the class of a dataset call's query, and check it against the declared class.
+
+    The class follows from the dataset's spec (`query_class`), and for a `bars()` call from its
+    timespan and multiplier (`bar_query_class`), so no dataset method names it by hand. The
+    method declares the class it returns; a derived class that is neither that class nor a
+    subclass of it means the method's signature and its dataset disagree, a defect of the
+    library that no caller can cause.
+
+    Args:
+        spec: The dataset.
+        query_type: The class the dataset method declares it returns.
+        timespan: The bar timespan, or None for a call without one.
+        multiplier: The bar multiplier.
+
+    Returns:
+        The class to build.
+
+    Raises:
+        TypeError: If `timespan` is neither None nor a `dm.Timespan`.
+        MassiveError: A library defect, if the derived class is not `query_type` or a
+            subclass of it.
+
+    A bars call's timespan or multiplier that the dataset refuses raises the error of
+    `bar_query_class`.
+    """
+    cls = query_class(spec)
+    if timespan is not None:
+        _require_enum(timespan, Timespan, "timespan")
+    if timespan is not None and spec.is_bars:
+        cls = bar_query_class(spec, timespan, multiplier)
+    if not issubclass(cls, query_type):
+        message = f"m.{spec.name} gives a {cls.__name__}, not the {query_type.__name__} it declares"
+        raise MassiveError(library_bug(message), cause=ErrorCause.LIBRARY_DEFECT)
+    return cls
+
+
 def build_query(
     core: SessionCore,
     spec: DatasetSpec,
     *,
-    symbols: Symbols | None = None,
+    query_type: type[_Q],
+    symbols: SymbolsLike | None = None,
     symbols_optional: bool = False,
     all_alternative: str | None = None,
     timespan: Timespan | None = None,
@@ -881,7 +915,7 @@ def build_query(
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
     values: ValueTable | None = None,
-) -> Query:
+) -> _Q:
     """Validate one dataset call and return its query.
 
     The dataset's `fixed_params` (parameters the library sets itself, such as the indicators'
@@ -895,6 +929,9 @@ def build_query(
     Args:
         core: The session core the query will run on.
         spec: The dataset.
+        query_type: The query class the dataset method declares it returns. The class of the
+            query is derived from the spec (`query_class`, or `bar_query_class` for a bars
+            dataset), and must be this class or a subclass of it.
         symbols: The instruments, or None for datasets without them. A Deephaven `Table`
             must have a `Symbol` column; it is boxed by identity in a `SymbolTable` and read
             when a verb runs. None is refused for an instrument dataset
@@ -959,7 +996,8 @@ def build_query(
     raise the `TypeError` or `ValueError` of the helper that checks them (`check_symbols` in
     `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
     `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
-    calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
+    calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`). A `query_type`
+    the dataset can't give is a library defect, the `MassiveError` of `_query_class`.
     """
     normalized = _normalized_symbols(
         core,
@@ -971,11 +1009,7 @@ def build_query(
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     sent = _typed_params(core, spec, params or {})
-    cls = query_class(spec)
-    if timespan is not None:
-        _require_enum(timespan, Timespan, "timespan")
-    if timespan is not None and spec.is_bars:
-        cls = bar_query_class(spec, timespan, multiplier)
+    cls = _query_class(spec, query_type, timespan=timespan, multiplier=multiplier)
     first = None if start is None else parse_date_like(deephaven_time_text(start, "start"), "start")
     last = (
         None if end is None else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
@@ -1007,7 +1041,7 @@ def list_query(
     spec: DatasetSpec,
     *,
     all_alternative: str,
-    symbols: Symbols | None = None,
+    symbols: SymbolsLike | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
     params: Mapping[str, object] | None = None,
@@ -1048,9 +1082,10 @@ def list_query(
         TypeError: If an argument has the wrong type (`list_params`, `build_query`).
         ValueError: If an argument has a value the dataset refuses (`build_query`).
     """
-    query = build_query(
+    return build_query(
         core,
         spec,
+        query_type=FetchQuery,
         symbols=symbols,
         symbols_optional=spec.symbol_param is not None,
         all_alternative=all_alternative,
@@ -1061,8 +1096,6 @@ def list_query(
         filters=filters,
         limit=limit,
     )
-    # A list dataset has only a fetch path, so `build_query` builds its `FetchQuery`.
-    return cast("FetchQuery", query)
 
 
 def ticker_key(time: str | None = None) -> SourceKeys:

@@ -27,13 +27,13 @@ from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 from deephaven.update_graph import shared_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._override import override
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -54,7 +54,8 @@ from deephaven_massive._tables.liveness import (
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.typehints._queries import QueryCall, SymbolStreamQuery
+from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries._call import QueryCall
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
@@ -84,9 +85,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def label(session: dm.MassiveSession) -> str:

@@ -202,13 +202,17 @@ def _resolution_namespace() -> dict[str, object]:
     namespace.update(vars(typing))
     namespace.update(vars(collections.abc))
     for module_name in (
-        "_override",
         "_enums",
         "_errors",
         "_config",
         "_debug_log",
-        "typehints",
-        "typehints._queries",
+        "_symbols_like",
+        "queries",
+        "queries._call",
+        "queries._query",
+        "queries._fetch",
+        "queries._stream",
+        "queries._history",
         "_datasets.filters",
         "_session",
         "_datasets.catalog",
@@ -242,7 +246,7 @@ def _literal_strings(annotation: object) -> list[str]:
 
 def _public_callables() -> list[tuple[str, object]]:
     # Every public function and method reachable from the package and its namespaces.
-    query = importlib.import_module("deephaven_massive.typehints._queries")
+    query = importlib.import_module("deephaven_massive.queries")
     classes: list[type] = [dm.MassiveSession, dm.MassiveConfig]
     classes += [
         getattr(query, name)
@@ -363,14 +367,17 @@ ENUM_PARAMETERS = {
     "ReferenceNamespace.tickers.market": _REFERENCE_ENUMS,
     "ReferenceNamespace.tickers.ticker_type": _REFERENCE_ENUMS,
     "ReferenceNamespace.tickers.order": _REFERENCE_ENUMS,
-    "FetchQuery.poll.mode": "typehints/test_queries.py::test_poll_mode_is_an_enum",
-    "HistoryQuery.history.source": "typehints/test_queries.py::test_history_argument_errors",
-    "StreamHistoryQuery.history.source": "typehints/test_queries.py::test_history_argument_errors",
-    "HistoryQuery.history.reread": "typehints/test_queries.py::test_history_argument_errors",
-    "StreamHistoryQuery.history.reread": "typehints/test_queries.py::test_history_argument_errors",
+    "FetchQuery.poll.mode": "queries/test_fetch.py::test_poll_mode_is_an_enum",
+    "HistoryQuery.history.source": "queries/test_history.py::test_history_argument_errors",
+    "StreamHistoryQuery.history.source": "queries/test_history.py::test_history_argument_errors",
+    "HistoryQuery.history.reread": "queries/test_history.py::test_history_argument_errors",
+    "StreamHistoryQuery.history.reread": "queries/test_history.py::test_history_argument_errors",
     "FuturesNamespace.trades.venues": _FUTURES_ENUMS,
     "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.timespan": (
+        "namespaces/test_futures.py::test_bars_reject_the_day_timespan"
+    ),
     "FuturesNamespace.snapshots.order": _FUTURES_ENUMS,
     "FuturesNamespace.contracts.order": _FUTURES_ENUMS,
     "FuturesNamespace.products.order": _FUTURES_ENUMS,

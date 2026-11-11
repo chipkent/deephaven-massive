@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.typehints._queries import SymbolStreamQuery
+from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -24,9 +24,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def test_stream_ids_come_from_one_allocator(

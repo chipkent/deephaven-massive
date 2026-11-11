@@ -19,7 +19,7 @@ from deephaven_massive._massive import Transport, source, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _economy as economy
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import FetchQuery
+from deephaven_massive.queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply
 
 OWNER = "namespaces/economy"

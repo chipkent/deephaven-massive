@@ -61,13 +61,19 @@ FilterValue: TypeAlias = (
     | np.datetime64
     | Sequence[str | int | float | date | np.datetime64]
 )
-"""A value in the `filters` mapping, keyed by a wire parameter name with its dots written as
-underscores, such as `strike_price_gte` or `ticker_any_of`. A sequence is the value of an
-`_any_of` key: text items, numbers for a list of numbers (`strike_price_any_of`), or dates for
-a list of dates (`date_any_of`). A date or time takes every object `DateLike` names: a `date`,
-an aware `datetime` or `pandas.Timestamp`, a Java `LocalDate`, `Instant`, or `ZonedDateTime`,
-or a `numpy.datetime64`; a sequence of dates takes the day forms. Whether text is a date or
-a time depends on the parameter, so a filter reads only ISO-8601 text as one."""
+"""A value in the `filters` mapping, which narrows a dataset by any of Massive's parameters.
+
+`filters` passes Massive's own query parameters that a dataset method has no argument for, keyed
+by the wire parameter name with its dots written as underscores, such as `strike_price_gte` or
+`ticker_any_of`. Annotate your own code with it, as `dm.FilterValue`, when you build such a
+mapping.
+
+A sequence is the value of an `_any_of` key: text items, numbers for a list of numbers
+(`strike_price_any_of`), or dates for a list of dates (`date_any_of`). A date or time takes
+every object `DateLike` names: a `date`, an aware `datetime` or `pandas.Timestamp`, a Java
+`LocalDate`, `Instant`, or `ZonedDateTime`, or a `numpy.datetime64`; a sequence of dates takes
+the day forms. Whether text is a date or a time depends on the parameter, so a filter reads
+only ISO-8601 text as one."""
 
 
 _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})

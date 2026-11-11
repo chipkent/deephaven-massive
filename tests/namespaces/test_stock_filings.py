@@ -22,7 +22,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._massive import RestPath, Transport, WireType, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _stock_filings as stock_filings
-from deephaven_massive.typehints._queries import FetchQuery, Query
+from deephaven_massive.queries import FetchQuery, Query
 from tests._fakes.rest import FakeRestServer, Reply
 
 R = Transport.REST

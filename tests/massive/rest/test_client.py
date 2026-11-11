@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import urllib3
+from typing_extensions import override
 
 from deephaven_massive._massive.net import USER_AGENT, http
 from deephaven_massive._massive.net.cancel import Cancel
@@ -33,7 +34,6 @@ from deephaven_massive._massive.rest.governor import (
     RequestGovernor,
 )
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
-from deephaven_massive._override import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 

@@ -14,11 +14,12 @@ their `Date` column (ISO `yyyy-MM-dd` text, as every date the library returns), 
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._errors import raises_through
 from deephaven_massive.namespaces._query_building import Namespace, build_query, list_params
+from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = ["DATASETS", "EconomyNamespace"]
 
@@ -91,13 +91,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class EconomyNamespace(Namespace):
     """The US economic datasets, reached as `m.economy`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import EconomyNamespace
-
-    Its methods cover Treasury yields, inflation, inflation expectations, the labor market, and
-    short-term funding conditions. They take no symbols, and each row is one date of the series.
-    Each method only builds a query, so it never blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover Treasury yields, inflation,
+    inflation expectations, the labor market, and short-term funding conditions. They take no
+    symbols, and each row is one date of the series. A method reads nothing, so it never
+    blocks. You can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import EconomyNamespace` to annotate your own code.
 
     Example:
         ::
@@ -142,10 +141,16 @@ class EconomyNamespace(Namespace):
             ValueError: If an argument has a value the dataset refuses (`build_query`).
         """
         params = list_params(sort=sort, order=order)
-        query = build_query(
-            self._core, spec, start=start, end=end, params=params, filters=filters, limit=limit
+        return build_query(
+            self._core,
+            spec,
+            query_type=FetchQuery,
+            start=start,
+            end=end,
+            params=params,
+            filters=filters,
+            limit=limit,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(_query)
     def treasury_yields(

@@ -1,8 +1,10 @@
-"""The dataset namespaces of a session, such as `m.stocks`, and their classes for annotations.
+"""The namespace classes: the objects that hold a session's datasets, such as `m.stocks`.
 
-Each namespace on a session (`m.stocks`, `m.options`, and the rest) is an instance of a class
-from here, named for its path on the session. Import one to annotate your own code, for example
-a helper that takes `m.stocks` and reads one symbol's trades::
+A session groups its datasets by asset class or topic, and each group is a namespace: `m.stocks`
+holds the stock datasets, `m.options` the options datasets, and so on. Each method of a
+namespace is one dataset and returns a query of it. You reach a namespace through a session and
+never construct one; import its class from here only to annotate your own code, such as a
+helper that takes `m.stocks` and reads one symbol's trades::
 
     from deephaven.table import Table
 
@@ -16,6 +18,8 @@ a helper that takes `m.stocks` and reads one symbol's trades::
 
     m = dm.MassiveSession()
     apple = trades(m.stocks, "AAPL")
+
+Each class is named for its path on the session:
 
 | Class | Reached as |
 |---|---|
@@ -36,18 +40,8 @@ a helper that takes `m.stocks` and reads one symbol's trades::
 | `PartnersTmxNamespace` | `m.partners.tmx` |
 | `PartnersFableNamespace` | `m.partners.fable` |
 
-Users never construct a namespace: each session creates its own. Each class's docstring
-describes its datasets or nested namespaces, and `dm.datasets()` lists every dataset with its
-query methods. `import deephaven_massive` does not load this package. Importing it needs a
-running Deephaven JVM, as the session does.
-
-The classes live in the package's private modules, one per namespace (`_stocks.py`, with
-`_stock_financials.py` and `_stock_filings.py` for its nested namespaces, ...,
-`_partners.py`), each with its namespace's `DatasetSpec`s (`DATASETS`), which `_session.py`
-composes into the process's dataset catalog. `_query_building.py` holds `Namespace`, the
-private base class of every namespace class, and the shared dataset factory (`build_query`).
-Layer: API; the modules may import every layer below except the ingest code (`_ingest`), which
-only `_session.py` imports.
+`help()` on a class describes its datasets, and `dm.datasets()` lists every dataset with its
+query methods. The classes of the queries are in `deephaven_massive.queries`.
 """
 
 from __future__ import annotations

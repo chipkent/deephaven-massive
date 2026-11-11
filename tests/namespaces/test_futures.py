@@ -33,13 +33,8 @@ from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _futures as futures
 from deephaven_massive.namespaces._query_building import Namespace, build_query
-from deephaven_massive.typehints._queries import (
-    FetchQuery,
-    HistoryQuery,
-    Query,
-    StreamHistoryQuery,
-    query_class,
-)
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
+from deephaven_massive.queries._choice import query_class
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
@@ -186,7 +181,7 @@ def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSes
 
 def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"no DAY timespan; use dm\.Timespan\.SESSION"):
-        massive_session.futures.bars("ESZ5", cast("Any", dm.Timespan.DAY))
+        massive_session.futures.bars("ESZ5", dm.Timespan.DAY)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         massive_session.futures.bars("ESZ5", cast("Any", "minute"))
     with pytest.raises(ValueError, match="multiplier must be positive"):
@@ -1361,10 +1356,10 @@ def test_history_with_dates_refuses_a_session_end_date_filter(
     q = build_query(
         rest_session._core,
         futures.TRADES,
+        query_type=HistoryQuery,
         symbols=["ESZ4"],
         filters={"session_end_date": "2024-12-17"},
     )
-    assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []

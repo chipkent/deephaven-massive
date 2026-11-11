@@ -55,9 +55,9 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
+    from deephaven_massive._symbols_like import SymbolsLike
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive.queries import FetchQuery
 
 __all__ = [
     "DATASETS",
@@ -373,13 +373,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class PartnersBenzingaNamespace(Namespace):
     """The Benzinga datasets, reached as `m.partners.benzinga`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import PartnersBenzingaNamespace
-
-    Its methods cover analyst profiles and their firms, analyst insights, rating actions and their
-    consensus, bull and bear cases, corporate guidance, earnings, and news. Each method only builds
-    a query, so it never blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover analyst profiles and their
+    firms, analyst insights, rating actions and their consensus, bull and bear cases, corporate
+    guidance, earnings, and news. A method reads nothing, so it never blocks. You can call
+    it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import PartnersBenzingaNamespace` to annotate your own code.
 
     Example:
         ::
@@ -447,7 +446,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def analyst_insights(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -500,7 +499,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def ratings(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -552,7 +551,7 @@ class PartnersBenzingaNamespace(Namespace):
 
     @raises_through(list_query)
     def consensus_ratings(
-        self, symbols: Symbols, *, filters: Mapping[str, FilterValue] | None = None
+        self, symbols: SymbolsLike, *, filters: Mapping[str, FilterValue] | None = None
     ) -> FetchQuery:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
@@ -595,7 +594,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def bulls_bears_say(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -646,7 +645,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def guidance(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -699,7 +698,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def earnings(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -800,7 +799,7 @@ class PartnersBenzingaNamespace(Namespace):
     @raises_through(list_query)
     def news(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -862,16 +861,15 @@ class PartnersBenzingaNamespace(Namespace):
 class PartnersEtfGlobalNamespace(Namespace):
     """The ETF Global datasets, reached as `m.partners.etf_global`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import PartnersEtfGlobalNamespace
-
-    Its methods cover scores, holdings, fund flows, profiles, and classifications of US-listed ETFs.
-    Each row describes one fund, named by its ticker in `Symbol`. `EffectiveDate` is the date the
-    data is valid for. `ProcessedDate` is when ETF Global processed the row. Some issuers publish
-    weeks late, and a later processing can restate an effective date. The datasets have no `start`
-    or `end`, so narrow the dates with `filters`, such as `effective_date_gte`. Each method only
-    builds a query, so it never blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover scores, holdings, fund
+    flows, profiles, and classifications of US-listed ETFs. Each row belongs to one fund, named by
+    its ticker in `Symbol`. `EffectiveDate` is the date the data is valid for. `ProcessedDate` is
+    when ETF Global processed the row. Some issuers publish weeks late, and a later processing can
+    restate an effective date. The datasets have no `start` or `end`, so narrow the dates with
+    `filters`, such as `effective_date_gte`. A method reads nothing, so it never blocks.
+    You can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import PartnersEtfGlobalNamespace` to annotate your own code.
 
     Example:
         ::
@@ -890,7 +888,7 @@ class PartnersEtfGlobalNamespace(Namespace):
     @raises_through(list_query)
     def analytics(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -941,7 +939,7 @@ class PartnersEtfGlobalNamespace(Namespace):
     @raises_through(list_query)
     def constituents(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -995,7 +993,7 @@ class PartnersEtfGlobalNamespace(Namespace):
     @raises_through(list_query)
     def fund_flows(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -1046,7 +1044,7 @@ class PartnersEtfGlobalNamespace(Namespace):
     @raises_through(list_query)
     def profiles(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -1098,7 +1096,7 @@ class PartnersEtfGlobalNamespace(Namespace):
     @raises_through(list_query)
     def taxonomies(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         sort: str | None = None,
         order: Order | None = None,
@@ -1150,14 +1148,12 @@ class PartnersEtfGlobalNamespace(Namespace):
 class PartnersTmxNamespace(Namespace):
     """The TMX dataset, reached as `m.partners.tmx`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import PartnersTmxNamespace
-
-    Its one method reads corporate events from TMX's Wall Street Horizon calendar. The calendar
-    covers companies worldwide: earnings dates and calls, dividends, splits, conferences, and
-    shareholder meetings. The method only builds a query, so it never blocks. You can call it from
-    any thread.
+    Its one method returns a query of corporate events from TMX's Wall Street Horizon calendar. The
+    calendar covers companies worldwide: earnings dates and calls, dividends, splits, conferences,
+    and shareholder meetings. The method reads nothing, so it never blocks. You can call it
+    from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import PartnersTmxNamespace` to annotate your own code.
 
     Example:
         ::
@@ -1176,7 +1172,7 @@ class PartnersTmxNamespace(Namespace):
     @raises_through(list_query)
     def corporate_events(
         self,
-        symbols: Symbols | None = None,
+        symbols: SymbolsLike | None = None,
         *,
         start: DateLike | None = None,
         end: DateLike | None = None,
@@ -1238,17 +1234,15 @@ class PartnersTmxNamespace(Namespace):
 class PartnersFableNamespace(Namespace):
     """The Fable Data datasets, reached as `m.partners.fable`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import PartnersFableNamespace
-
-    Fable Data totals a consumer panel's card and open-banking spending per merchant and day. The
-    panel covers six European countries: the UK, Germany, France, Italy, Spain, and Austria. Fable
-    maps about 3,500 merchants to their parent companies. About 250 of those are US public companies
-    with tickers. To join the two datasets, match an aggregate's `Name` to a hierarchy row's
-    `LookupName`. The tickers are Bloomberg's, such as `"AMZN US"`, not Massive's. So neither
-    dataset takes `symbols`; filter with `filters` instead. Each method only builds a query, so it
-    never blocks. You can call it from any thread.
+    Each method returns a query of one dataset. Fable Data totals a consumer panel's card and
+    open-banking spending per merchant and day. The panel covers six European countries: the UK,
+    Germany, France, Italy, Spain, and Austria. Fable maps about 3,500 merchants to their parent
+    companies. About 250 of those are US public companies with tickers. To join the two datasets,
+    match an aggregate's `Name` to a hierarchy row's `LookupName`. The tickers are Bloomberg's, such
+    as `"AMZN US"`, not Massive's. So neither dataset takes `symbols`; filter with `filters`
+    instead. A method reads nothing, so it never blocks. You can call it from any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import PartnersFableNamespace` to annotate your own code.
 
     Example:
         ::
@@ -1374,18 +1368,17 @@ class PartnersFableNamespace(Namespace):
 class PartnersNamespace(Namespace):
     """The datasets Massive resells from its partners, reached as `m.partners`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import PartnersNamespace
-
-    Each partner has its own namespace:
+    Each partner has its own namespace, whose methods each return a query of one dataset:
 
     - `m.partners.benzinga`: analyst ratings, earnings, guidance, and news.
     - `m.partners.etf_global`: ETF analytics, holdings, flows, and profiles.
     - `m.partners.tmx`: corporate events.
     - `m.partners.fable`: European consumer spending.
 
-    Their methods only build queries, so they never block. You can call them from any thread.
+    Their methods read nothing, so they never block. You can call them from any thread.
+
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import PartnersNamespace` to annotate your own code.
 
     Example:
         ::

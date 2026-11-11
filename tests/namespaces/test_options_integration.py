@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
-    from deephaven_massive.typehints._queries import FetchQuery
+    from deephaven_massive.queries import FetchQuery
     from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration

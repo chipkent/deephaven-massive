@@ -21,13 +21,13 @@ from deephaven.table import Table
 from deephaven.table_factory import InputTable
 from deephaven.table_listener import TableUpdate, listen
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
-from deephaven_massive._override import override
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import (

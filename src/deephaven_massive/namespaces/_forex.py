@@ -20,7 +20,7 @@ declares the symbol as filled from the request, so the row's `Symbol` is the who
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.symbols import is_forex_currency
@@ -40,15 +40,15 @@ from deephaven_massive.namespaces._query_building import (
     accepted_values,
     build_query,
 )
+from deephaven_massive.queries import (
+    FetchQuery,
+    HistoryQuery,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
 
 if TYPE_CHECKING:
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import (
-        FetchQuery,
-        HistoryQuery,
-        StreamHistoryQuery,
-        SymbolStreamQuery,
-    )
+    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["DATASETS", "ForexNamespace"]
 
@@ -251,13 +251,12 @@ def _currency(name: str, value: object) -> str:
 class ForexNamespace(Namespace):
     """The forex datasets, reached as `m.forex`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import ForexNamespace
-
-    Its methods cover quotes, bars, each pair's last quote and previous day's bar, fair market
-    value, snapshots, movers, and currency conversion. Each method only builds a query, so it never
-    blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover quotes, bars, each pair's
+    last quote and previous day's bar, fair market value, snapshots, movers, and currency
+    conversion. A method reads nothing, so it never blocks. You can call it from any
+    thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import ForexNamespace` to annotate your own code.
 
     Example:
         ::
@@ -272,7 +271,7 @@ class ForexNamespace(Namespace):
     _path: ClassVar[str] = "forex"
 
     @raises_through(build_query)
-    def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
+    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
         """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
 
         Each row holds one quote of Massive's feed, which combines prices from banks and trading
@@ -299,11 +298,10 @@ class ForexNamespace(Namespace):
 
                 eur = m.forex.quotes("C:EURUSD").last_by()
         """
-        query = build_query(self._core, QUOTES, symbols=symbols)
-        return cast("StreamHistoryQuery", query)
+        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def last_quote(self, symbols: Symbols) -> FetchQuery:
+    def last_quote(self, symbols: SymbolsLike) -> FetchQuery:
         """The latest best bid and ask of each currency pair.
 
         Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
@@ -330,18 +328,18 @@ class ForexNamespace(Namespace):
 
                 top = m.forex.last_quote(["C:EURUSD", "C:USDJPY"]).poll(5)
         """
-        query = build_query(
+        return build_query(
             self._core,
             LAST_QUOTE,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
         )
-        return cast("FetchQuery", query)
 
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
@@ -349,7 +347,7 @@ class ForexNamespace(Namespace):
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -357,7 +355,7 @@ class ForexNamespace(Namespace):
     @raises_through(build_query)
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -395,17 +393,17 @@ class ForexNamespace(Namespace):
                     "2026-10-01", "2026-10-23"
                 )
         """
-        query = build_query(
+        return build_query(
             self._core,
             BARS,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
         )
-        return cast("HistoryQuery", query)
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: Symbols) -> FetchQuery:
+    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
         Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
@@ -431,9 +429,10 @@ class ForexNamespace(Namespace):
 
                 yesterday = m.forex.previous_day_bar("C:EURUSD").fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             PREVIOUS_DAY_BAR,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
@@ -441,10 +440,9 @@ class ForexNamespace(Namespace):
             ),
             timespan=Timespan.DAY,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
         Each row holds one update of Massive's own real-time price estimate. Only Currencies
@@ -469,10 +467,10 @@ class ForexNamespace(Namespace):
 
                 fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
-        return cast("SymbolStreamQuery", build_query(self._core, FMV, symbols=symbols))
+        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def snapshots(self, symbols: Symbols) -> FetchQuery:
+    def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
         Each row holds one pair's bars for today and the previous UTC day, and its latest minute
@@ -497,7 +495,7 @@ class ForexNamespace(Namespace):
 
                 latest = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
         """
-        return cast("FetchQuery", build_query(self._core, SNAPSHOTS, symbols=symbols))
+        return build_query(self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols)
 
     @raises_through(_require_enum)
     def movers(self, direction: Direction) -> FetchQuery:
@@ -525,7 +523,7 @@ class ForexNamespace(Namespace):
                 losers = m.forex.movers(dm.Direction.LOSERS).poll(60)
         """
         side = _require_enum(direction, Direction, "direction")
-        return cast("FetchQuery", build_query(self._core, MOVERS, params={"direction": side}))
+        return build_query(self._core, MOVERS, query_type=FetchQuery, params={"direction": side})
 
     @raises_through(build_query, _currency)
     def conversion(
@@ -574,4 +572,4 @@ class ForexNamespace(Namespace):
             raise ValueError(f"precision must be one of {sorted(accepted)}, got {precision}")
         # The endpoint's `precision` is an enum of digit strings, so it is sent as text.
         params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
-        return cast("FetchQuery", build_query(self._core, CONVERSION, params=params))
+        return build_query(self._core, CONVERSION, query_type=FetchQuery, params=params)

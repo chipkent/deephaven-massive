@@ -67,10 +67,10 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from typing_extensions import override
 
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
 from deephaven_massive._errors import raises_through
-from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -110,15 +110,12 @@ __all__ = [
 
 
 class AllSymbols(Enum):
-    """The type of `dm.ALL`, for annotations.
+    """The type of `dm.ALL`, the value that asks a dataset for every symbol.
 
-    Import it for annotations::
-
-        from deephaven_massive.typehints import AllSymbols
-
-    Pass `dm.ALL` itself; never construct this class. `dm.ALL` is its only instance, even after
-    copying or unpickling, so test for it with `symbols is dm.ALL`. It is not a `str`, so it is
-    never mistaken for a ticker.
+    A one-member enum gives `dm.ALL` a type of its own, so the symbol checks tell it from a
+    ticker (it is not a `str`) and `dm.SymbolsLike` can name it. Users pass `dm.ALL` and never
+    name this class. `dm.ALL` is its only instance, even after copying or unpickling, so code
+    tests for it with `symbols is dm.ALL`.
     """
 
     ALL = "ALL"

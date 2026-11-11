@@ -40,14 +40,14 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
 from deephaven_massive.namespaces import _forex as forex
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import (
+from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     Query,
     StreamHistoryQuery,
     SymbolStreamQuery,
-    query_class,
 )
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 
@@ -420,13 +420,9 @@ def test_the_one_row_datasets_refuse_every_pair(massive_session: dm.MassiveSessi
         massive_session.forex.previous_day_bar(dm.ALL)
 
 
-def test_a_missing_verb_names_the_dataset_that_has_it(massive_session: dm.MassiveSession) -> None:
-    quotes = massive_session.forex.quotes("C:EURUSD")
-    with pytest.raises(AttributeError, match=r"use m\.forex\.last_quote\(\.\.\.\)\.fetch\(\)"):
-        _ = quotes.fetch  # type: ignore[attr-defined]  # the missing verb is the point
-    day = massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY)
-    with pytest.raises(AttributeError, match=r"m\.forex\.previous_day_bar\(\.\.\.\)\.fetch"):
-        _ = day.fetch  # type: ignore[attr-defined]  # the missing verb is the point
+def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:
+    assert not hasattr(massive_session.forex.quotes("C:EURUSD"), "fetch")
+    assert not hasattr(massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY), "fetch")
 
 
 def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.MassiveSession) -> None:

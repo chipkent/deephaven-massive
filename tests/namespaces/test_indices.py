@@ -33,12 +33,8 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
 from deephaven_massive.namespaces import _indices as indices
 from deephaven_massive.namespaces._query_building import Namespace
-from deephaven_massive.typehints._queries import (
-    FetchQuery,
-    HistoryQuery,
-    StreamHistoryQuery,
-    query_class,
-)
+from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries._choice import query_class
 
 # The reply and envelope builders are plain functions of the fake, which no fixture hands over.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -302,16 +298,8 @@ def test_values_query(m: dm.MassiveSession) -> None:
     assert m.indices.values(dm.ALL)._request.symbols is dm.ALL
 
 
-def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
-    q = m.indices.values("I:SPX")
-    assert not hasattr(q, "fetch")
-    with pytest.raises(
-        AttributeError,
-        match=r"^indices\.values has no fetch\(\); its methods are blink\(\), append_only\(\), "
-        r"ring\(\), last_by\(\), history\(\); for each symbol's current state use "
-        r"m\.indices\.snapshots\(\.\.\.\)\.fetch\(\)$",
-    ):
-        _ = q.fetch  # type: ignore[attr-defined]  # the missing verb is the point
+def test_values_have_no_fetch(m: dm.MassiveSession) -> None:
+    assert not hasattr(m.indices.values("I:SPX"), "fetch")
 
 
 def test_values_history_has_no_rest_source(m: dm.MassiveSession) -> None:

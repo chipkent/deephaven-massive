@@ -17,7 +17,7 @@ around the clock, so a date-only bound is a whole UTC day.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
@@ -38,16 +38,16 @@ from deephaven_massive.namespaces._query_building import (
     day_argument,
     ticker_key,
 )
+from deephaven_massive.queries import (
+    FetchQuery,
+    HistoryQuery,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
-    from deephaven_massive.typehints import Symbols
-    from deephaven_massive.typehints._queries import (
-        FetchQuery,
-        HistoryQuery,
-        StreamHistoryQuery,
-        SymbolStreamQuery,
-    )
+    from deephaven_massive._symbols_like import SymbolsLike
 
 __all__ = ["DATASETS", "CryptoNamespace"]
 
@@ -246,13 +246,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 class CryptoNamespace(Namespace):
     """The crypto datasets, reached as `m.crypto`.
 
-    Import it for annotations::
-
-        from deephaven_massive.namespaces import CryptoNamespace
-
-    Its methods cover trades, quotes, bars, each pair's last trade and previous day's bar, fair
-    market value, snapshots, movers, and each pair's daily open and close. Each method only builds a
-    query, so it never blocks. You can call it from any thread.
+    Each method returns a query of one dataset, and together they cover trades, quotes, bars, each
+    pair's last trade and previous day's bar, fair market value, snapshots, movers, and each pair's
+    daily open and close. A method reads nothing, so it never blocks. You can call it from
+    any thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import CryptoNamespace` to annotate your own code.
 
     Example:
         ::
@@ -270,7 +269,7 @@ class CryptoNamespace(Namespace):
     _path: ClassVar[str] = "crypto"
 
     @raises_through(build_query)
-    def trades(self, symbols: Symbols) -> StreamHistoryQuery:
+    def trades(self, symbols: SymbolsLike) -> StreamHistoryQuery:
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
         Each row holds one trade on one exchange. `Timestamp` is the exchange's own time, and `Date`
@@ -297,10 +296,10 @@ class CryptoNamespace(Namespace):
 
                 live = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).append_only()
         """
-        return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
+        return build_query(self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def last_trade(self, symbols: Symbols) -> FetchQuery:
+    def last_trade(self, symbols: SymbolsLike) -> FetchQuery:
         """The latest trade of each crypto pair.
 
         Each row holds one pair's latest trade. A pair with no trade gets no row, and the library
@@ -328,16 +327,16 @@ class CryptoNamespace(Namespace):
 
                 last = m.crypto.last_trade(["X:BTCUSD", "X:ETHUSD"]).fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             LAST_TRADE,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.crypto.snapshots(dm.ALL).fetch()",
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def quotes(self, symbols: Symbols) -> SymbolStreamQuery:
+    def quotes(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row holds one exchange's best bid and ask for one pair. Massive serves no crypto quote
@@ -363,12 +362,12 @@ class CryptoNamespace(Namespace):
 
                 book = m.crypto.quotes("X:BTCUSD").last_by(["Symbol", "Exchange"])
         """
-        return cast("SymbolStreamQuery", build_query(self._core, QUOTES, symbols=symbols))
+        return build_query(self._core, QUOTES, query_type=SymbolStreamQuery, symbols=symbols)
 
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
@@ -376,7 +375,7 @@ class CryptoNamespace(Namespace):
     @overload
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -384,7 +383,7 @@ class CryptoNamespace(Namespace):
     @raises_through(build_query)
     def bars(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         timespan: Timespan,
         *,
         multiplier: int = 1,
@@ -421,19 +420,17 @@ class CryptoNamespace(Namespace):
                     "2026-10-01", "2026-10-07"
                 )
         """
-        return cast(
-            "HistoryQuery",
-            build_query(
-                self._core,
-                BARS,
-                symbols=symbols,
-                timespan=timespan,
-                multiplier=multiplier,
-            ),
+        return build_query(
+            self._core,
+            BARS,
+            query_type=HistoryQuery,
+            symbols=symbols,
+            timespan=timespan,
+            multiplier=multiplier,
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: Symbols) -> FetchQuery:
+    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
         Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
@@ -459,9 +456,10 @@ class CryptoNamespace(Namespace):
 
                 yesterday = m.crypto.previous_day_bar("X:BTCUSD").fetch()
         """
-        query = build_query(
+        return build_query(
             self._core,
             PREVIOUS_DAY_BAR,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
@@ -469,10 +467,9 @@ class CryptoNamespace(Namespace):
             ),
             timespan=Timespan.DAY,
         )
-        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
         Each row holds one update of Massive's own price estimate. Only Currencies Business includes
@@ -498,10 +495,10 @@ class CryptoNamespace(Namespace):
 
                 fair = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).last_by()
         """
-        return cast("SymbolStreamQuery", build_query(self._core, FMV, symbols=symbols))
+        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def snapshots(self, symbols: Symbols) -> FetchQuery:
+    def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
         """The current state of crypto pairs: today's, the last minute's, and yesterday's bars.
 
         Each row holds one pair's bar for today, its latest minute bar, and its previous day's bar.
@@ -528,7 +525,7 @@ class CryptoNamespace(Namespace):
 
                 latest = m.crypto.snapshots(["X:BTCUSD", "X:ETHUSD"]).poll(5)
         """
-        return cast("FetchQuery", build_query(self._core, SNAPSHOTS, symbols=symbols))
+        return build_query(self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols)
 
     @raises_through(_require_enum)
     def movers(self, direction: Direction) -> FetchQuery:
@@ -556,10 +553,10 @@ class CryptoNamespace(Namespace):
                 trades = m.crypto.trades(gainers).append_only()  # follows the top 20
         """
         side = _require_enum(direction, Direction, "direction")
-        return cast("FetchQuery", build_query(self._core, MOVERS, params={"direction": side}))
+        return build_query(self._core, MOVERS, query_type=FetchQuery, params={"direction": side})
 
     @raises_through(build_query, day_argument)
-    def daily_open_close(self, symbols: Symbols, date: DateLike) -> FetchQuery:
+    def daily_open_close(self, symbols: SymbolsLike, date: DateLike) -> FetchQuery:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
         Each row holds one pair's open and close for the UTC day. `OpenTrades` and `ClosingTrades`
@@ -589,16 +586,14 @@ class CryptoNamespace(Namespace):
 
                 days = m.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02").fetch()
         """
-        return cast(
-            "FetchQuery",
-            build_query(
-                self._core,
-                DAILY_OPEN_CLOSE,
-                symbols=symbols,
-                all_alternative=(
-                    "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                    "every ticker's bar of that day"
-                ),
-                params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+        return build_query(
+            self._core,
+            DAILY_OPEN_CLOSE,
+            query_type=FetchQuery,
+            symbols=symbols,
+            all_alternative=(
+                "use m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
             ),
+            params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
         )

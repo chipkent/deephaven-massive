@@ -279,9 +279,14 @@ class DatasetCall:
             shows it beside the argument's name, which links its shared rule
             (`ARGUMENT_RULES`) on the index. An argument past the end of the tuple has an
             empty line.
-        methods: Its query methods, in the order of `verbs`; a verb without one is shown by
-            its name alone, such as `blink()`. The index's table of query methods lists every
-            method of every dataset once, in the order they first appear.
+        methods: Its query methods, in the order of `verbs` and then `stream_verbs`; a verb
+            without one is shown by its name alone, such as `blink()`. The index's table of
+            query methods lists every method of every dataset once, in the order they first
+            appear.
+        stream_verbs: The stream verbs only some of its queries have, for a `bars` dataset
+            whose 1-second and 1-minute bars stream; empty for every other dataset.
+        stream_condition: Which calls have `stream_verbs`, such as `"1-second and 1-minute
+            bars"`; empty when `stream_verbs` is.
     """
 
     signature: str
@@ -290,6 +295,8 @@ class DatasetCall:
     typed: tuple[str, ...] = ()
     descriptions: tuple[str, ...] = ()
     methods: tuple[QueryMethod, ...] = ()
+    stream_verbs: tuple[str, ...] = ()
+    stream_condition: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,9 +645,30 @@ def _methods(call: DatasetCall) -> str:
         call: The dataset's call.
 
     Returns:
-        Each verb by its name, in the library's order, such as "`fetch()`, `poll()`".
+        Each verb by its name, in the library's order, such as "`fetch()`, `poll()`"; for bars
+        that stream at some timespans, followed by those stream verbs and when they apply.
     """
-    return ", ".join(f"`{verb}()`" for verb in call.verbs)
+    shown = ", ".join(f"`{verb}()`" for verb in call.verbs)
+    return _with_stream_verbs(shown, call, {})
+
+
+def _with_stream_verbs(shown: str, call: DatasetCall, calls: Mapping[str, str]) -> str:
+    """Add the stream verbs that only some of a dataset's queries have to its list of verbs.
+
+    Args:
+        shown: The verbs every query has, as the list shows them.
+        call: The dataset's call.
+        calls: Each verb's call, such as `"ring(capacity)"`; a verb not in it is shown by its
+            name alone.
+
+    Returns:
+        `shown`, followed for a bars dataset that streams by such as "; for 1-second and
+        1-minute bars also `blink()`, `append_only()`, `ring()`, `last_by()`".
+    """
+    if not call.stream_verbs:
+        return shown
+    streams = ", ".join(f"`{calls.get(verb, f'{verb}()')}`" for verb in call.stream_verbs)
+    return f"{shown}; for {call.stream_condition} also {streams}"
 
 
 def _method_calls(call: DatasetCall) -> str:
@@ -651,10 +679,12 @@ def _method_calls(call: DatasetCall) -> str:
 
     Returns:
         Each verb's call, in the library's order, such as "`fetch()`, `poll(interval)`"; a
-        verb without a `QueryMethod` is shown by its name alone.
+        verb without a `QueryMethod` is shown by its name alone. For bars that stream at some
+        timespans, the stream verbs follow with when they apply.
     """
-    shown = {method.name: method.call for method in call.methods}
-    return ", ".join(f"`{shown.get(verb, f'{verb}()')}`" for verb in call.verbs)
+    calls = {method.name: method.call for method in call.methods}
+    shown = ", ".join(f"`{calls.get(verb, f'{verb}()')}`" for verb in call.verbs)
+    return _with_stream_verbs(shown, call, calls)
 
 
 def _type_differences(

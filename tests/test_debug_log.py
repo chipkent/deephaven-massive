@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 LIBRARY = logging.getLogger("deephaven_massive")
-CHILD = logging.getLogger("deephaven_massive.typehints._queries")
-# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive.typehints._queries: a message`
+CHILD = logging.getLogger("deephaven_massive.queries._query")
+# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive.queries._query: a message`
 LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}Z (\w+) \[([^\]]+)\] ([\w.]+): (.*)$")
 
 
@@ -75,7 +75,7 @@ def test_enable_debug_logging_writes_every_level_to_stderr(
         "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
     )
     assert lines[1][3].startswith("deephaven-massive ")  # the process, described once
-    queries = "deephaven_massive.typehints._queries"
+    queries = "deephaven_massive.queries._query"
     assert lines[2:] == [("DEBUG", "MainThread", queries, "call 7 start")]
     # Records still reach the root's handlers, such as pytest's own.
     assert LIBRARY.propagate
@@ -88,7 +88,7 @@ def test_the_line_names_the_thread_that_logged_it(capsys: pytest.CaptureFixture[
     worker.start()
     worker.join()
     assert _lines(capsys.readouterr().err) == [
-        ("DEBUG", "massive #9 reaper", "deephaven_massive.typehints._queries", "from a worker")
+        ("DEBUG", "massive #9 reaper", "deephaven_massive.queries._query", "from a worker")
     ]
 
 
@@ -111,7 +111,7 @@ def test_enable_debug_logging_appends_to_a_file(tmp_path: Path) -> None:
     assert _lines("\n".join(lines[1:]))[-1] == (
         "DEBUG",
         "MainThread",
-        "deephaven_massive.typehints._queries",
+        "deephaven_massive.queries._query",
         "über AAPL",
     )
     assert f"to {path.resolve()} (from enable_debug_logging())" in lines[1]
