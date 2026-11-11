@@ -23,6 +23,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `futures_bar_buckets`: which bucket a futures bar of a session or longer covers, judged
   from the shorter bars inside it;
 - `summary`: the open-questions summary that ends a live run;
+- `same_field`: whether two Massive fields carry one quantity, read back to back and compared
+  within a tolerance;
 - `parallel`: which selected tests are live, and the refusal to run them on parallel workers.
 
 Its subpackage `live_run` holds the live-run program, which a tester runs with their own keys
