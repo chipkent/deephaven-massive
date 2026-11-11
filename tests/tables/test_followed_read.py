@@ -32,7 +32,12 @@ from deephaven_massive._tables import follow_coordinator, followed_read
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
-from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.liveness import (
+    ResultRecord,
+    ResultRegistry,
+    new_scope,
+    release_scope,
+)
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
@@ -315,7 +320,7 @@ def test_never_gives_a_returning_symbol_its_earlier_download(
     wait_rows(dh_to_pylist, result, {"AAPL": 2})
     delete(wl, "AAPL")
     assert counts(dh_to_pylist(result)) == {}
-    add(wl, "AAPL")  # the kept partition row shows in the cycle the row returns
+    add(wl, "AAPL")  # the kept download shows in the cycle the row returns
     assert counts(dh_to_pylist(result)) == {"AAPL": 2}
     assert script.calls == [("AAPL",)]
     massive_session.release(result)
@@ -627,7 +632,7 @@ def test_a_close_racing_the_registration_releases_the_result(
     assert core.follows.thread is None
 
 
-def test_a_partition_row_is_never_published_after_the_table_failed(
+def test_a_download_is_never_published_after_the_table_failed(
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
 ) -> None:
@@ -685,15 +690,15 @@ def test_a_failure_during_the_first_read_is_kept_for_the_coordinator(
 _ = (weakref, exclusive_lock, follow_coordinator)
 
 
-def test_always_hides_an_old_download_before_its_empty_partition_row_lands(
+def test_always_hides_an_old_download_before_its_empty_download_lands(
     *,
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
     dh_to_pylist: ToList,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The symbol leaves and returns while the empty partition row that frees its rows is held
-    # back: the old download is still the symbol's latest partition row, and must not show again.
+    # The symbol leaves and returns while the empty download that frees its rows is held
+    # back: the old download is still the symbol's latest, and must not show again.
     script = Script(massive_session)
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
@@ -701,18 +706,16 @@ def test_always_hides_an_old_download_before_its_empty_partition_row_lands(
     held = threading.Event()
     publish = followed_read.FollowedRead.publish
 
-    def holding(
-        read: followed_read.FollowedRead, *partition_row: object, decided_at_step: int
-    ) -> None:
-        symbol, seq, table = cast("tuple[str, int, Table | None]", partition_row)
-        if table is None:  # the empty partition row of a removal
+    def holding(read: followed_read.FollowedRead, *download: object, decided_at_step: int) -> None:
+        symbol, seq, table = cast("tuple[str, int, Table | None]", download)
+        if table is None:  # the empty download of a removal
             assert held.wait(TIMEOUT)
         publish(read, symbol, seq, table, decided_at_step=decided_at_step)
 
     monkeypatch.setattr(followed_read.FollowedRead, "publish", holding)
     gate = script.gates["AAPL"] = threading.Event()  # and the new download waits too
     delete(wl, "AAPL")
-    add(wl, "AAPL")  # the next cycle: the old partition row is still the latest
+    add(wl, "AAPL")  # the next cycle: the old download is still the latest
     assert counts(dh_to_pylist(result)) == {}
     held.set()
     gate.set()
@@ -728,8 +731,8 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The coordinator has taken the first read's outcome and is publishing it when the symbol
-    # leaves and returns: the removal and the re-add queue behind the outcome, so its partition
-    # row lands after the re-add, and must not show as the returning symbol's rows.
+    # leaves and returns: the removal and the re-add queue behind the outcome, so the stale download
+    # lands after the re-add, and must not show as the returning symbol's rows.
     script = Script(massive_session)
     wl = watchlist()
     result = follow(massive_session, wl, script)
@@ -737,10 +740,8 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
     publishing, go, published, freed = (threading.Event() for _ in range(4))
     publish = followed_read.FollowedRead.publish
 
-    def slow(
-        read: followed_read.FollowedRead, *partition_row: object, decided_at_step: int
-    ) -> None:
-        symbol, seq, table = cast("tuple[str, int, Table | None]", partition_row)
+    def slow(read: followed_read.FollowedRead, *download: object, decided_at_step: int) -> None:
+        symbol, seq, table = cast("tuple[str, int, Table | None]", download)
         if table is None:  # the removal's empty row waits, so the stale row is latest
             assert freed.wait(TIMEOUT)
         elif not publishing.is_set():  # the first download
@@ -759,7 +760,7 @@ def test_always_never_shows_a_download_published_after_its_symbol_left_and_retur
     add(wl, "AAPL")  # and the re-add, a later one
     go.set()
     assert published.wait(TIMEOUT)
-    add(wl, "MSFT")  # later cycles: the old download's partition row has landed
+    add(wl, "MSFT")  # later cycles: the old download has landed
     add(wl, "NVDA")
     assert "AAPL" not in counts(dh_to_pylist(result))
     freed.set()
@@ -917,15 +918,15 @@ def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSes
     assert coordinator.following == 0
 
 
-def test_a_newer_partition_row_replaces_a_seeded_symbol_s_rows(
+def test_a_newer_download_replaces_a_seeded_symbol_s_rows(
     *,
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
     dh_to_pylist: ToList,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The symbol stays in the table, so only the seed's mask keeps its seed row from making a
-    # second partition beside the newer one.
+    # The symbol stays in the table, so only the seed's mask keeps its seed rows from showing
+    # beside the newer download.
     handed: list[followed_read.FollowedRead] = []
     hand_over = follow_coordinator.FollowCoordinator.follow
 
@@ -962,7 +963,7 @@ def test_never_shows_a_seeded_symbol_until_it_leaves(
     assert counts(dh_to_pylist(result)) == {"AAPL": 3}
     delete(wl, "AAPL")
     assert counts(dh_to_pylist(result)) == {}
-    add(wl, "AAPL")  # its seed partition row is still its download: shown again, with no request
+    add(wl, "AAPL")  # its seed row groups are still its download: shown again, with no request
     assert counts(dh_to_pylist(result)) == {"AAPL": 3}
     assert script.calls == []
     massive_session.release(result)
@@ -992,3 +993,79 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
     assert read.shut_down_event.is_set()
     drain()  # the watch's stop ran on the reaper
     assert read.watch_stopped.is_set()
+
+
+# --- The result is an ordinary table ------------------------------------------------------------
+
+
+OPERATIONS: dict[str, Callable[[Table], Table]] = {
+    "view": lambda t: t.view(["Ticker", "Price"]),
+    "update_view": lambda t: t.update_view("Twice = Price * 2"),
+    "where then view": lambda t: t.where("Price >= 0").view(["Ticker"]),
+    "select": lambda t: t.select(["Ticker"]),
+    "update": lambda t: t.update("Twice = Price * 2"),
+    "sort": lambda t: t.sort_descending("Price"),
+    "natural_join": lambda t: t.natural_join(t.last_by("Ticker"), on="Ticker", joins="Last=Price"),
+}
+"""Ordinary operations a user calls on a result, by test id; each keeps every row's `Ticker`."""
+
+
+@pytest.mark.jvm_held  # the operations' formulas hand this frame's locals to the JVM
+@pytest.mark.parametrize("seeded", [False, True], ids=["wait=False", "wait=True"])
+def test_every_ordinary_operation_works_on_the_result_as_symbols_come_and_go(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    seeded: bool,
+) -> None:
+    # `view` and `update_view` refuse a stateful column, which every column of a merged
+    # partitioned table is while it may gain partitions: the result must not be one.
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+    first = first_read(massive_session, AAPL=2) if seeded else None
+    result = follow(massive_session, wl, script, first=first)
+    scope = new_scope()  # the user's own scope, released below
+    with scope.open():
+        derived = {name: operation(result) for name, operation in OPERATIONS.items()}
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+    add(wl, "MSFT")
+    wait_rows(dh_to_pylist, result, {"AAPL": 2, "MSFT": 2})
+    delete(wl, "AAPL")
+    for name, table in derived.items():
+        assert counts(dh_to_pylist(table)) == {"MSFT": 2}, name
+    derived.clear()
+    release_scope(massive_session._core.exec_ctx, scope)
+    massive_session.release(result)
+
+
+def test_a_symbol_of_many_slices_lands_whole_and_a_smaller_download_replaces_it(
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each row group holds at most GROUP_ROWS rows; a download of fewer parts than the one
+    # before must leave none of the earlier parts behind, and an empty one leaves no rows.
+    monkeypatch.setattr(followed_read, "GROUP_ROWS", 2)
+    script = Script(massive_session)
+    script.sizes = {"AAPL": 5}
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script, first=first_read(massive_session, AAPL=3))
+    assert counts(dh_to_pylist(result)) == {"AAPL": 3}
+    delete(wl, "AAPL")
+    add(wl, "AAPL")
+    wait_rows(dh_to_pylist, result, {"AAPL": 5})
+    assert sorted(row["Price"] for row in dh_to_pylist(result)) == [0.0, 1.0, 2.0, 3.0, 4.0]
+    script.sizes["AAPL"] = 1
+    delete(wl, "AAPL")
+    add(wl, "AAPL")
+    wait_rows(dh_to_pylist, result, {"AAPL": 1})
+    script.sizes["AAPL"] = 0
+    delete(wl, "AAPL")
+    add(wl, "AAPL")
+    until(lambda: script.read_of("AAPL") == 3)
+    add(wl, "MSFT")
+    wait_rows(dh_to_pylist, result, {"MSFT": 2})  # AAPL's empty download shows no rows
+    massive_session.release(result)

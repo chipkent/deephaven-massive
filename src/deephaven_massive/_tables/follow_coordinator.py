@@ -3,9 +3,9 @@
 A `history()` or `fetch()` whose `symbols` is a refreshing table follows it
 (`_tables/followed_read.py`): each symbol added to the table is read (by `history()` over the
 call's fixed window, by `fetch()` as Massive answers at that read) and lands in the result
-whole, as one partition of a merged `PartitionedTable`, and each symbol removed leaves it. The
-coordinator adds, replaces, and drops a symbol's partition by publishing its partition row
-(`FollowedRead.publish`); `followed_read.py` explains that model. This module decides, for every
+whole, in one update cycle, and each symbol removed leaves it. The coordinator adds, replaces,
+and frees a symbol's rows by publishing its download (`FollowedRead.publish`);
+`followed_read.py` explains that model. This module decides, for every
 such result of a session, which symbol is read when, what its read's outcome does, and what the
 diagnostics show. It owns:
 
@@ -16,7 +16,7 @@ diagnostics show. It owns:
   queues), each read's start and outcome (from the read pool), and each result's stop (from its
   blink table's shutdown). It is the only thread that reads or changes per-symbol state, so that
   state needs no lock. It makes no request and waits on nothing: it publishes each symbol's
-  partition row (`FollowedRead.publish`, which never waits for an update cycle), times the
+  download (`FollowedRead.publish`, which never waits for an update cycle), times the
   retries, and queues the `m.streams()` and `m.symbol_reads()` rows.
 - **One read pool per session**, a `ThreadPoolExecutor` of `MassiveConfig.max_concurrency`
   threads (`massive #1 follow-read_0`), made and ended with the coordinator thread.
@@ -32,8 +32,8 @@ diagnostics show. It owns:
 `DONE`. A failure that may pass (`FailureKind.TRANSIENT`) makes it `RETRYING`, read again 1, 5, and
 15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
 fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
-an empty partition row replaces its partition row, dropping its partition and freeing its rows, and
-a re-add reads it again; under `Reread.NEVER` its partition row is kept, so a re-add shows the
+an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
+under `Reread.NEVER` its download is kept, so a re-add shows the
 earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
 and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
 dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
@@ -256,8 +256,8 @@ class _Symbol:
         next_attempt_at: The same instant, epoch nanoseconds.
         added_at: When its row last entered the table, epoch nanoseconds.
         read_at: When the download whose rows the result holds began, or None.
-        rows: The rows of its partition in the result (0 for none).
-        kept: Whether the result's newest partition row for it holds rows (is not empty).
+        rows: Its rows in the result (0 for none).
+        kept: Whether the result's newest download of it holds rows (is not empty).
         error: Its latest failure's text, until a read succeeds.
         cause: Its latest failure's cause, which groups it in `Error`.
         transport: The source of its latest read, as `m.symbol_reads()` shows it.
@@ -375,8 +375,8 @@ class _Result:
         queue: The symbols waiting for a read, in the order they began to wait: a dict used as
             an ordered set, so taking a symbol out costs no scan.
         scanning: Whether a flat-file scan of the result is in flight.
-        seq: The number of the result's latest partition row.
-        ended: Whether it failed or stopped: no read starts, and no partition row is published.
+        seq: The number of the result's latest download.
+        ended: Whether it failed or stopped: no read starts, and no download is published.
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
@@ -385,7 +385,7 @@ class _Result:
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
             coordinator has applied (the result's build cycle until the first), stamped on
-            every partition row it publishes; see `FollowedRead.publish`.
+            every download it publishes; see `FollowedRead.publish`.
     """
 
     read: FollowedRead
@@ -827,7 +827,7 @@ class FollowCoordinator:
                     attempts=1,
                 )
                 result.symbols[name] = symbol
-                if isinstance(outcome, SymbolRows):  # its partition row is in the result's seed
+                if isinstance(outcome, SymbolRows):  # its rows are in the result's seed
                     symbol.kept = True
                 self._record(result, name, outcome, began_at=first.began_at, seconds=first.seconds)
         logger.debug(
@@ -885,7 +885,7 @@ class FollowCoordinator:
         """A symbol left the table: drop its pending read and retry, and its rows under `ALWAYS`.
 
         Its rows leave the result in the cycle its row left the table (the result joins the
-        table), so the empty partition row only frees them.
+        table), so the empty download only frees them.
 
         Args:
             result: The result's state.
@@ -973,7 +973,7 @@ class FollowCoordinator:
             outcome: Its rows or failure.
             began_at: When the read began, epoch nanoseconds.
             seconds: How long it took.
-            publish: True to publish its partition row; False for a symbol already in the seed.
+            publish: True to publish its download; False for a symbol already in the seed.
         """
         symbol = result.symbols[name]
         read = result.read
@@ -994,7 +994,7 @@ class FollowCoordinator:
             symbol.error = symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
-                "call %d %s: %d rows in %.1f s from %s (partition row %d, decided at step %d)",
+                "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",
                 read.call,
                 name,
                 symbol.rows,

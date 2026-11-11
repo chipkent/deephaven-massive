@@ -1769,7 +1769,7 @@ class _QuietCore:
 
 
 class _QuietRead:
-    # A followed read with no table: it only takes the coordinator's partition rows.
+    # A followed read with no table: it only takes the coordinator's downloads.
     call = 1
     dataset = "test.trades"
     reread = Reread.ALWAYS
