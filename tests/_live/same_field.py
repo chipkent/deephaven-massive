@@ -1,4 +1,4 @@
-"""Whether two Massive fields carry one quantity: the live checks behind a pending rename.
+"""Whether two Massive fields carry one quantity, read back to back and compared.
 
 Each check reads the two fields from the wire REST client, back to back, records what Massive
 sent through `evidence`, and returns a `Verdict`: `SAME` when every compared case agrees

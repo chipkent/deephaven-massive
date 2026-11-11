@@ -2,7 +2,7 @@
 
 Each check runs with a real `RestClient` against `FakeRestServer`, so every request it builds
 is encoded by the library and sent: a parameter of the wrong form fails here, in CI, rather
-than on the owner's live run. The scripted rows then show each verdict.
+than on a live run. The scripted rows then show each verdict.
 """
 
 from __future__ import annotations

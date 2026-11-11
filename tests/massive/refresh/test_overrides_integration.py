@@ -1,12 +1,11 @@
-"""Live checks of fields that may be one field under two names, for the owner to settle.
+"""Live checks of Massive fields that may be one field under two names.
 
 Each test runs one check of `tests/_live/same_field.py`, which reads the two fields from the
 wire REST client back to back, records what Massive sent (`evidence`), and ends with one line
 that says whether the two carried the same quantity within the stated tolerance (`SAME`), did
 not (`DIFFERENT`), or could not be compared (`INCONCLUSIVE`). The tests are marked `settles`:
-they assert only that the requests worked and returned rows, and the owner reads the verdict
-before an `overrides.SPELLINGS` entry gives the fields one name. How to run these tests is in
-`docs/live-tests.md`.
+they assert only that the requests worked and returned rows, and a person reads the verdict.
+How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
