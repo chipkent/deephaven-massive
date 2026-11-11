@@ -505,3 +505,19 @@ def test_a_decimal_text_column_refuses_what_one_value_refuses(value: object) -> 
         read = column_converter(price, arrow_checks_numbers=arrow)
         for column in ([value], ["7676.5", value], [None, value, "7679"], [value, value]):
             assert read(list(column)) is None, column
+
+
+def test_items_fit_takes_lists_of_items_sent_as_is() -> None:
+    texts = frozenset({str})
+    assert convert_module._items_fit([["a", "b"], None, []], texts, long_items=False)
+    assert not convert_module._items_fit([["a", 1]], texts, long_items=False)
+
+
+def test_items_fit_range_checks_long_items_only_when_asked() -> None:
+    ints = frozenset({int})
+    big: list[object] = [[2**63]]
+    assert convert_module._items_fit(big, ints, long_items=False)
+    assert not convert_module._items_fit(big, ints, long_items=True)
+    assert convert_module._items_fit(
+        [[2**63 - 1, None]], frozenset({int, NoneType}), long_items=True
+    )

@@ -53,6 +53,7 @@ module that uses it is `_ingest/flatfiles.py`.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import functools
 import gzip
@@ -62,7 +63,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, TypeAlias, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, TypeAlias, TypeVar, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -72,14 +73,20 @@ from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
-    from concurrent.futures import Future
+    from collections.abc import Callable, Generator, Iterator, Mapping
+    from concurrent.futures import Executor, Future
     from types import TracebackType
 
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
 
 _SAMPLE_LIMIT: Final = 200
 """How many characters of a value's text a drift sample or a dropped row's reason quotes."""
+
+_READ_FAILURES: Final = (OSError, EOFError, zlib.error)
+"""The failures of reading or decompressing a file, raised after the rows read before them."""
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 def _empty(plan: ReadPlan) -> pa.RecordBatch:
@@ -491,29 +498,20 @@ class FlatFile:
             rows_before += rows  # read only up to the chunk of the first skipped row
             return blocks
 
+        chunks = iter(
+            functools.partial(_chunk, text, size=plan.chunk_size, line_limit=plan.block_size), b""
+        )
         name = f"{threading.current_thread().name} parse"
-        pending: deque[Future[_Parsed]] = deque()
-        failed: Exception | None = None
-        with ThreadPoolExecutor(plan.parse_threads, name) as pool:
-            try:
-                while True:
-                    try:
-                        chunk = _chunk(text, size=plan.chunk_size, line_limit=plan.block_size)
-                    except (OSError, EOFError, zlib.error) as error:
-                        # The rows read before the failure are handed on first, in order.
-                        failed, chunk = error, b""
-                    if not chunk:
-                        break
-                    pending.append(pool.submit(parse, chunk))
-                    if len(pending) > plan.parse_threads:
-                        yield from handed(pending.popleft().result())
-                while pending:
-                    yield from handed(pending.popleft().result())
-            finally:
-                for future in pending:  # ended early: drop the chunks not yet parsed
-                    future.cancel()
-        if failed is not None:
-            raise failed
+        # Closing the read-ahead first cancels the chunks not yet parsed, so the pool's
+        # shutdown waits only for the ones running when this generator ends early.
+        with (
+            ThreadPoolExecutor(plan.parse_threads, name) as pool,
+            contextlib.closing(
+                _in_order(pool, chunks, parse, ahead=plan.parse_threads, deferred=_READ_FAILURES)
+            ) as parsed_chunks,
+        ):
+            for parsed in parsed_chunks:
+                yield from handed(parsed)
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
         """Read and parse the file's header line, and require the plan's key headers.
@@ -700,6 +698,60 @@ class _Malformed:
 _Parsed: TypeAlias = tuple[list[tuple[pa.RecordBatch, DriftReport, int, int]], int, _Malformed]
 """One parsed chunk: what `_apply` returns for each block with the block's row count, the
 chunk's rows Arrow read, and the rows it skipped."""
+
+
+def _in_order(
+    pool: Executor,
+    items: Iterator[_T],
+    work: Callable[[_T], _R],
+    *,
+    ahead: int,
+    deferred: tuple[type[Exception], ...],
+) -> Generator[_R, None, None]:
+    """Run `work` on each item on a pool, and yield the results in the items' order.
+
+    At most `ahead + 1` items are taken before their results are handed on, so a slow consumer
+    holds a bounded number of items and results however many there are. A failure of `work`
+    is raised when its result's turn comes. When the generator ends early, the work not yet
+    started is cancelled; the caller's pool waits for the work running.
+
+    Args:
+        pool: The pool that runs the work.
+        items: The items, read on the calling thread.
+        work: What to run on each item.
+        ahead: How many items to take beyond the one whose result is awaited next.
+        deferred: The failures of reading `items` that wait for the results of every item
+            read before them, as a consumer that reached them in order would; any other
+            failure of reading `items` is raised at once.
+
+    Yields:
+        Each item's result, in the items' order.
+
+    Raises:
+        Exception: The `deferred` failure of reading `items`, once every result before it has
+            been yielded.
+    """
+    end = object()
+    pending: deque[Future[_R]] = deque()
+    failed: Exception | None = None
+    try:
+        while True:
+            try:
+                item = next(items, end)
+            except deferred as error:
+                failed, item = error, end
+            if item is end:
+                break
+            pending.append(pool.submit(work, cast("_T", item)))
+            if len(pending) > ahead:
+                yield pending.popleft().result()
+        while pending:
+            yield pending.popleft().result()
+    finally:
+        for future in pending:  # ended early: drop the work not yet started
+            future.cancel()
+    if failed is not None:
+        raise failed
 
 
 def _chunk(text: gzip.GzipFile, *, size: int, line_limit: int) -> bytes:

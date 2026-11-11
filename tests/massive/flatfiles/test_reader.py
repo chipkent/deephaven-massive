@@ -7,7 +7,8 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
@@ -919,3 +920,71 @@ def test_benchmark_one_large_file(
             f"{seconds:.2f} s, "
             f"{rows / seconds:,.0f} rows/s\n"
         )
+
+
+def _counted(items: list[int], taken: list[int], failure: Exception | None = None) -> Iterator[int]:
+    for item in items:
+        taken.append(item)
+        yield item
+    if failure is not None:
+        raise failure
+
+
+def test_in_order_yields_results_in_item_order_with_bounded_read_ahead() -> None:
+    taken: list[int] = []
+    with ThreadPoolExecutor(3) as pool:
+        results = reader._in_order(
+            pool, _counted([1, 2, 3, 4, 5], taken), lambda n: n * 10, ahead=2, deferred=()
+        )
+        assert next(results) == 10
+        assert taken == [1, 2, 3]  # the awaited item and two ahead of it
+        assert list(results) == [20, 30, 40, 50]
+
+
+def test_in_order_raises_a_deferred_read_failure_after_the_results_before_it() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(OSError, match="truncated"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], OSError("truncated")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == [1, 2]
+
+
+def test_in_order_raises_any_other_read_failure_at_once() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(ValueError, match="bad"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], ValueError("bad")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == []
+
+
+def test_in_order_cancels_the_work_not_started_when_closed_early() -> None:
+    worked: list[int] = []
+    release = threading.Event()
+
+    def work(n: int) -> int:
+        worked.append(n)
+        if n > 1:
+            release.wait(30)
+        return n
+
+    with ThreadPoolExecutor(1) as pool:
+        results = reader._in_order(pool, iter([1, 2, 3, 4]), work, ahead=3, deferred=())
+        assert next(results) == 1
+        results.close()
+        release.set()
+    assert 3 not in worked
+    assert 4 not in worked
