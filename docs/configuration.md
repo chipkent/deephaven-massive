@@ -124,6 +124,9 @@ unreadable_symbols: log  # the default
 # A symbol Massive answers as not found: log, ignore, or raise.
 unavailable_symbols: log  # the default
 
+# A flat-file line that isn't a readable row: log, ignore, or raise.
+malformed_rows: log  # the default
+
 # The WebSocket host per asset class: index values stream only from business.massive.com.
 websocket_hosts:
   indices: business.massive.com
@@ -168,6 +171,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `unlisted_symbols` | Decides what happens when a watchlist or other table you pass holds a crypto pair that isn't on Massive's crypto ticker list, or one the library couldn't look up there. | `log`, `ignore`, or `raise` | `log` |
 | `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read. | `log`, `ignore`, or `raise` | `log` |
 | `unavailable_symbols` | Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't request with the arguments you gave it. | `log`, `ignore`, or `raise` | `log` |
+| `malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
 | `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
 | `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
@@ -313,6 +317,22 @@ also one the poll can't read, such as a crypto pair in an indicator poll with
 `adjusted=False`. Under `log` or `ignore`, a `poll()` table
 lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
 a `dm.PollMode.REPLACE` poll drops its rows.
+
+#### malformed_rows
+
+Set `raise` when a `history()` read from flat files must have every row
+of each file it reads.
+
+- `log` skips the line, keeps the file's other rows, and logs one warning
+  per file with the count of such lines and the first one's row number. The warning
+  never quotes the line.
+- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `raise` makes `history()` raise `MassiveError`, naming the file and the
+  first such line's row. A `history()` of a live table instead marks every symbol
+  of the read `FAILED` in `m.symbol_reads()`.
+
+Only a `history()` that reads flat files meets such a line. Under any setting, a
+file whose every line is malformed fails the read.
 
 #### websocket_hosts
 

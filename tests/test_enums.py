@@ -306,7 +306,7 @@ def test_literal_detection_ignores_enum_members() -> None:
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
 _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
-_SYMBOL_SETTINGS = "test_config.py::test_symbol_settings_are_the_enum"
+_ON_ERROR_SETTINGS = "test_config.py::test_on_error_settings_are_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
@@ -317,10 +317,11 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unlisted_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unavailable_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.noncanonical_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unlisted_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,

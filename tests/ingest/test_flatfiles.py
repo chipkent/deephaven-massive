@@ -47,6 +47,7 @@ from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
+from deephaven_massive._tables.transports import FailureKind, SymbolFailure
 from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
@@ -656,28 +657,107 @@ def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
     )
 
 
-def test_malformed_lines_are_skipped_with_one_warning_per_file(
+MALFORMED_ROWS = (
+    trade(1, 1741012200000000001)
+    + "SECRET,7\n"
+    + trade(2, 1741012200000000002)
+    + "12,,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
+).encode() + trade(4, 1741012200000000004, "SECR\xe9T").encode("latin-1")
+"""Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
+
+MALFORMED_LOG = (
+    f"stocks.trades: skipped 3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: "
+    "row 2 after the header has 2 fields where the header has 13; the file's other rows are kept"
+)
+
+
+@pytest.mark.parametrize(
+    ("setting", "level"), [(dm.OnError.LOG, logging.WARNING), (dm.OnError.IGNORE, logging.DEBUG)]
+)
+def test_malformed_lines_are_skipped_with_one_line_per_file_logged_by_the_setting(
     *,
-    session: dm.MassiveSession,
     fake_s3: FakeS3,
-    make_csv_gz: Callable[[str], bytes],
+    clock: Callable[[datetime], None],
     caplog: pytest.LogCaptureFixture,
+    setting: dm.OnError,
+    level: int,
 ) -> None:
-    # A line with too few fields and one with too many lose only themselves; the warning
-    # names the first one's row and field count, never its text.
-    rows = trade(1, 1741012200000000001) + "SECRET,7\n" + trade(2, 1741012200000000002)
-    rows += "12,,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
-    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with caplog.at_level(logging.WARNING, logger=flatfiles.__name__):
-        t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert pick(t, "Id") == [("1",), ("2",)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == flatfiles.__name__]
-    assert warning == (
-        f"stocks.trades: skipped 2 malformed line(s) of {LOCATION.format(TRADES_0303)} that do "
-        "not split into the header's fields, the first: row 2 after the header has 2 fields "
-        "where the header has 13; the file's other rows are kept"
-    )
+    # Each malformed line loses only itself; the log line names the first one's row and fault,
+    # never its text, at WARNING under LOG and only at DEBUG under IGNORE.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    with (
+        dm.MassiveSession(config(malformed_rows=setting)) as m,
+        caplog.at_level(logging.DEBUG, logger=flatfiles.__name__),
+    ):
+        t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+        assert pick(t, "Id") == [("1",), ("2",)]
+    logged = [(r.levelno, r.getMessage()) for r in caplog.records if "malformed" in r.getMessage()]
+    assert logged == [(level, MALFORMED_LOG)]
     assert "SECRET" not in caplog.text
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warned == ([MALFORMED_LOG] if setting is dm.OnError.LOG else [])
+
+
+def test_a_malformed_line_fails_the_read_under_raise(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    with (
+        dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m,
+        pytest.raises(dm.MassiveError) as info,
+    ):
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    assert str(info.value) == (
+        f"stocks.trades: {LOCATION.format(TRADES_0303)} holds a malformed line, the first: row 2 "
+        "after the header has 2 fields where the header has 13. To skip such lines and keep the "
+        "file's other rows, pass MassiveConfig(malformed_rows=dm.OnError.LOG), or write "
+        "'malformed_rows: log' in the settings file"
+    )
+    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert "SECRET" not in str(info.value)
+
+
+def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The last chunks hold only lines that are not UTF-8 text and no row: each still hands on
+    # an empty block, so the read fails at the first of them.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    good = "".join(trade(n, 1741012200000000000 + n) for n in range(1, 21)).encode()
+    bad = b"".join(trade(n, 1741012200000000000 + n, "\xff").encode("latin-1") for n in range(20))
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + good + bad))
+    with (
+        dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m,
+        pytest.raises(dm.MassiveError, match=r"the first: row 21 after the header is not UTF-8"),
+    ):
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+
+
+def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # A file is read once for every symbol, so its failure is each symbol's, and a retry would
+    # meet the same line.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3))
+    window = whole_days(STOCK_TRADES, "2025-03-03")
+    with dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m:
+        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+        out = transport.history_by_symbol(
+            STOCK_TRADES,
+            asked,
+            window,
+            symbols=["AAPL", "MSFT"],
+            dates=(date(2025, 3, 3),),
+            call=1,
+            forced=True,
+        )
+    for symbol in ("AAPL", "MSFT"):
+        failed = out[symbol]
+        assert isinstance(failed, SymbolFailure)
+        assert "holds a malformed line" in str(failed.error)
+        assert failed.kind is FailureKind.PERMANENT
 
 
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
