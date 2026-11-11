@@ -24,6 +24,7 @@ types for type checking only.
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -32,7 +33,8 @@ from deephaven_massive._massive.refresh import naming
 from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._massive.refresh.hand_input import HandInput
     from deephaven_massive._massive.refresh.overrides import TypeFix
@@ -416,25 +418,16 @@ def _shared_description_problems(hand: HandInput, by_text: _Named) -> Iterator[P
             )
 
 
-def _stale_spellings(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
-    """Report each `SPELLINGS` entry for an object or field its source does not generate.
+def _generated_keys(use: PathUse) -> AbstractSet[str]:
+    """Return the dotted keys of a source's generated fields and objects.
 
     Args:
-        hand: The hand input.
-        uses: What each generated source consumed.
+        use: What the source consumed.
 
-    Yields:
-        One `stale-entry` problem per such entry.
+    Returns:
+        Every wire key and object key, the keys a `SPELLINGS` entry may name.
     """
-    for path, key in hand.spellings:
-        use = uses.get(path)
-        if use is None or key not in use.wire_keys | use.objects:
-            yield Problem(
-                gate=Gate.STALE_ENTRY,
-                source=path,
-                key=key,
-                message="SPELLINGS entry for an object or field the snapshot does not generate",
-            )
+    return use.wire_keys | use.objects
 
 
 def _where(named: Mapping[str, set[str]]) -> str:
@@ -470,46 +463,45 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     Yields:
         One `stale-entry` problem per stale entry.
     """
-    field_tables: list[tuple[str, Iterable[tuple[str, str]]]] = [
-        ("NAMES", hand.names),
-        ("UNITS", hand.units),
-        ("TAG_CONFLICTS", hand.tag_conflicts),
-        ("TYPE_FIXES", hand.type_fixes),
-        ("KEY_FIXES", hand.key_fixes),
-        ("UNDECLARED_FIELDS", hand.undeclared_fields),
-        ("OPTIONAL_FIELDS", hand.optional_fields),
-        ("SAMPLE_ERRORS", [(e.path, e.wire_key) for e in hand.sample_errors]),
-    ]
-    for table, keys in field_tables:
-        for path, wire_key in keys:
-            use = uses.get(path)
-            if use is None or wire_key not in use.wire_keys | use.example_keys:
-                yield Problem(
-                    gate=Gate.STALE_ENTRY,
-                    source=path,
-                    key=wire_key,
-                    message=f"{table} entry for a field the snapshot does not generate",
-                )
+
+    def fields(use: PathUse) -> frozenset[str]:
+        return use.wire_keys | use.example_keys
+
+    absent = "entry for a field the snapshot does not generate"
+    yield from _stale_path_entries(
+        uses,
+        [
+            (hand.names, fields, f"NAMES {absent}"),
+            (hand.units, fields, f"UNITS {absent}"),
+            (hand.tag_conflicts, fields, f"TAG_CONFLICTS {absent}"),
+            (hand.type_fixes, fields, f"TYPE_FIXES {absent}"),
+            (hand.key_fixes, fields, f"KEY_FIXES {absent}"),
+            (hand.undeclared_fields, fields, f"UNDECLARED_FIELDS {absent}"),
+            (hand.optional_fields, fields, f"OPTIONAL_FIELDS {absent}"),
+            ([(e.path, e.wire_key) for e in hand.sample_errors], fields, f"SAMPLE_ERRORS {absent}"),
+        ],
+    )
     yield from _stale_ignored_keys(hand, uses)
-    yield from _stale_spellings(hand, uses)
-    for path, prefix in hand.shapes:
-        use = uses.get(path)
-        if use is None or prefix not in use.objects:
-            yield Problem(
-                gate=Gate.STALE_ENTRY,
-                source=path,
-                key=prefix,
-                message="lexicon shape for an object the snapshot does not generate",
-            )
-    for path, base in hand.param_units:
-        use = uses.get(path)
-        if use is None or base not in use.unit_bases:
-            yield Problem(
-                gate=Gate.STALE_ENTRY,
-                source=path,
-                key=base,
-                message="PARAM_UNITS entry for no string parameter the snapshot generates",
-            )
+    yield from _stale_path_entries(
+        uses,
+        [
+            (
+                hand.spellings,
+                _generated_keys,
+                "SPELLINGS entry for an object or field the snapshot does not generate",
+            ),
+            (
+                hand.shapes,
+                operator.attrgetter("objects"),
+                "lexicon shape for an object the snapshot does not generate",
+            ),
+            (
+                hand.param_units,
+                operator.attrgetter("unit_bases"),
+                "PARAM_UNITS entry for no string parameter the snapshot generates",
+            ),
+        ],
+    )
     used = set().union(*(use.identities for use in uses.values()))
     for key in sorted(set(hand.identity) - used):
         yield Problem(
@@ -526,6 +518,27 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
                 key="",
                 message="RESULT_KEYS entry for a path the snapshot does not generate",
             )
+
+
+def _stale_path_entries(
+    uses: Mapping[str, PathUse],
+    tables: Iterable[tuple[Iterable[tuple[str, str]], Callable[[PathUse], AbstractSet[str]], str]],
+) -> Iterator[Problem]:
+    """Report the hand entries that name a path not generated, or a name its path lacks.
+
+    Args:
+        uses: What each generated path consumed.
+        tables: Each table of entries, as `(path, name)` pairs; the names its path generated,
+            read from the path's use; and the message of a stale entry.
+
+    Yields:
+        One `stale-entry` problem per stale entry, in table order and each table's order.
+    """
+    for entries, generated, message in tables:
+        for path, name in entries:
+            use = uses.get(path)
+            if use is None or name not in generated(use):
+                yield Problem(gate=Gate.STALE_ENTRY, source=path, key=name, message=message)
 
 
 def _stale_ignored_keys(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:

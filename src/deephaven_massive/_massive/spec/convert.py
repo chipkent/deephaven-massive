@@ -84,6 +84,7 @@ library and `spec.types`.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -755,10 +756,6 @@ def column_converter(
     """
     convert = field_converter(field)
     as_sent = None if field.conversion is not None else _AS_SENT.get(field.wire_type)
-    items_as_sent = _ITEMS_AS_SENT.get(field.wire_type)
-    long_values = not arrow_checks_numbers and field.wire_type in {WireType.LONG, WireType.EPOCH}
-    long_items = not arrow_checks_numbers and field.wire_type is WireType.LONG_ARRAY
-    double_values = field.wire_type is WireType.DOUBLE
 
     def converted(values: list[object]) -> list[object] | None:
         try:
@@ -771,28 +768,80 @@ def column_converter(
     if as_sent is None:
         return converted
 
-    def kept(values: list[object]) -> list[object] | None:
-        types = set(map(type, values))
-        if not types <= as_sent:
-            if double_values and types <= _NUMBERS:
-                if arrow_checks_numbers:
-                    return values
-                return _as_floats(values, has_null=NoneType in types)
-            return converted(values)
-        has_null = NoneType in types
-        if items_as_sent is not None:
-            lists = cast("list[list[object]]", filter(None, values))
-            items = list(chain.from_iterable(lists))
-            item_types = set(map(type, items))
-            if not item_types <= items_as_sent or (
-                long_items and not _in_int64(items, has_null=NoneType in item_types)
-            ):
-                return None
-        elif long_values and not _in_int64(values, has_null=has_null):
-            return None
-        return values
+    return functools.partial(
+        _as_sent_column,
+        as_sent=as_sent,
+        items_as_sent=_ITEMS_AS_SENT.get(field.wire_type),
+        converted=converted,
+        double_values=field.wire_type is WireType.DOUBLE,
+        long_values=not arrow_checks_numbers and field.wire_type in {WireType.LONG, WireType.EPOCH},
+        long_items=not arrow_checks_numbers and field.wire_type is WireType.LONG_ARRAY,
+        arrow_checks_numbers=arrow_checks_numbers,
+    )
 
-    return kept
+
+def _as_sent_column(
+    values: list[object],
+    *,
+    as_sent: frozenset[type],
+    items_as_sent: frozenset[type] | None,
+    converted: Callable[[list[object]], list[object] | None],
+    double_values: bool,
+    long_values: bool,
+    long_items: bool,
+    arrow_checks_numbers: bool,
+) -> list[object] | None:
+    """Check and convert a column of a plain wire type, returning it as is where it can.
+
+    Args:
+        values: The field's value in each object, `None` where absent or null.
+        as_sent: The value types the field's converter returns unchanged (`_AS_SENT`).
+        items_as_sent: For a list field, the item types returned unchanged (`_ITEMS_AS_SENT`);
+            None for any other field.
+        converted: Converts the column value by value (`field_converter`), or returns `None`
+            when the converter refuses one.
+        double_values: Whether the field is a `double`.
+        long_values: Whether the column's integers are range-checked as signed 64-bit here.
+        long_items: Whether a list column's integers are range-checked as signed 64-bit here.
+        arrow_checks_numbers: Whether a `double` column that mixes integers in is kept as it
+            is, for Arrow to make floats of.
+
+    Returns:
+        `values` itself when every value is as sent, a new list where some value is converted,
+        or `None` when some value or item is refused.
+    """
+    types = set(map(type, values))
+    if not types <= as_sent:
+        if double_values and types <= _NUMBERS:
+            if arrow_checks_numbers:
+                return values
+            return _as_floats(values, has_null=NoneType in types)
+        return converted(values)
+    if items_as_sent is not None:
+        return values if _items_fit(values, items_as_sent, long_items=long_items) else None
+    if long_values and not _in_int64(values, has_null=NoneType in types):
+        return None
+    return values
+
+
+def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_items: bool) -> bool:
+    """Tell whether every item of a column of lists can be returned as sent.
+
+    Args:
+        values: Each object's list, `None` where absent or null.
+        items_as_sent: The item types the field's converter returns unchanged.
+        long_items: Whether the items are integers range-checked as signed 64-bit here.
+
+    Returns:
+        True when every item's type is in `items_as_sent` and, under `long_items`, every item
+        fits in a signed 64-bit integer.
+    """
+    lists = cast("list[list[object]]", filter(None, values))
+    items = list(chain.from_iterable(lists))
+    item_types = set(map(type, items))
+    return item_types <= items_as_sent and (
+        not long_items or _in_int64(items, has_null=NoneType in item_types)
+    )
 
 
 def unconvertible_message(field: Field, value: object) -> str:

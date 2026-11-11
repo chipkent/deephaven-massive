@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
@@ -38,7 +39,7 @@ from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.dates import DaySpan, TimeRange
@@ -290,6 +291,24 @@ def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[st
     return targets
 
 
+class _Spread(Enum):
+    """How a request's symbols spread over requests of one path (`_symbol_parts`).
+
+    Attributes:
+        PATH: The path or the dataset takes each symbol itself: one request per symbol, and
+            the request must name its symbols.
+        ONE: The symbol parameter takes one value: one request per symbol.
+        LIST: The symbol parameter takes a list: up to `DatasetSpec.symbols_per_request`
+            symbols a request.
+        NONE: The path takes no symbol: one request without symbols.
+    """
+
+    PATH = auto()
+    ONE = auto()
+    LIST = auto()
+    NONE = auto()
+
+
 def _symbol_parts(
     spec: DatasetSpec,
     rest_path: RestPath,
@@ -333,37 +352,75 @@ def _symbol_parts(
     keys = spec.keys_for(Transport.REST, rest_path.template)
     from_request = [key for _, key in keys.declared() if key.from_request]
     param = spec.symbol_param if spec.symbol_param in params else None
-    listed = param is not None and params[param].kind is ParamKind.LIST
-    takes_one = bool(from_request) or slot is not None or pair or spec.per_symbol
-    per_symbol = takes_one or (param is not None and not listed)
+    if bool(from_request) or slot is not None or pair or spec.per_symbol:
+        spread = _Spread.PATH
+    elif param is None:
+        spread = _Spread.NONE
+    elif params[param].kind is ParamKind.LIST:
+        spread = _Spread.LIST
+    else:
+        spread = _Spread.ONE
     if symbols is None or isinstance(symbols, _All):
-        if takes_one:
+        if spread is _Spread.PATH:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]
     explicit = cast("tuple[str, ...]", symbols)
     if not explicit:
         return []
-    if not per_symbol:
-        if param is None:
-            return [(None, {}, {})]
+    if spread is _Spread.NONE:
+        return [(None, {}, {})]
+    if spread is _Spread.LIST:
         size = spec.symbols_per_request or len(explicit)
-        return [(None, {}, {param: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
+        # Only a path with the symbol parameter spreads as a list.
+        listed = cast("str", param)
+        return [(None, {}, {listed: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
-    parts: list[tuple[str | None, dict[str, object], dict[str, object]]] = []
-    for symbol in explicit:
-        path: dict[str, object] = {}
-        query: dict[str, object] = {}
-        for name in targets:
-            if name == "from" and "to" in params:
-                path["from"], path["to"] = _pair(spec, symbol, split)
-            elif params[name].in_path:
-                path[name] = symbol
-            else:
-                query[name] = symbol
-        if param is not None:
-            query[param] = (symbol,) if listed else symbol
-        parts.append((symbol, path, query))
-    return parts
+    return [
+        _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
+        for symbol in explicit
+    ]
+
+
+def _symbol_request(
+    spec: DatasetSpec,
+    symbol: str,
+    rest_path: RestPath,
+    *,
+    targets: Sequence[str],
+    param: str | None,
+    split: CryptoSplit,
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    """Return the parameters of one symbol's request.
+
+    The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
+    path placeholder or a query parameter the symbol itself. The symbol parameter, when the
+    path has one, takes the symbol too: as a one-symbol tuple when it takes a list.
+
+    Args:
+        spec: The dataset, for messages.
+        symbol: The symbol.
+        rest_path: The path.
+        targets: The parameters the symbol fills (`_symbol_targets`), `"from"` standing for
+            the `{from}/{to}` pair.
+        param: The dataset's symbol parameter when the path has it, or None.
+        split: Splits a crypto symbol into its two currencies (`_pair`).
+
+    Returns:
+        `(symbol, path parameters, query parameters)`.
+    """
+    params = {p.name: p for p in rest_path.params}
+    path: dict[str, object] = {}
+    query: dict[str, object] = {}
+    for name in targets:
+        if name == "from" and "to" in params:
+            path["from"], path["to"] = _pair(spec, symbol, split)
+        elif params[name].in_path:
+            path[name] = symbol
+        else:
+            query[name] = symbol
+    if param is not None:
+        query[param] = (symbol,) if params[param].kind is ParamKind.LIST else symbol
+    return symbol, path, query
 
 
 def _caller_params(

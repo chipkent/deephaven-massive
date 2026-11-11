@@ -147,6 +147,50 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
     return any(f.wire_key == base and f.wire_type in INSTANT_WIRE_TYPES for f in rest_path.fields)
 
 
+def _date_text(item: date, kind: ParamKind | None, *, label: str) -> str:
+    """Write one `date` item of a list filter as its ISO-8601 day (`_list_items`).
+
+    Args:
+        item: The day.
+        kind: The kind of the list's base parameter, or None when the list has none.
+        label: The dataset and filter key, which start the message.
+
+    Returns:
+        The day, such as `"2026-10-30"`.
+
+    Raises:
+        ValueError: If the list is not of dates.
+    """
+    if kind is not ParamKind.DATE:
+        raise ValueError(f"{label} takes no dates, not {item!r}")
+    return item.isoformat()
+
+
+def _comma_items(item: str, *, label: str, value: tuple[object, ...]) -> list[str]:
+    """Split one text item of a list filter on its commas (`_list_items`).
+
+    Args:
+        item: The text item, such as `"a,b"`.
+        label: The dataset and filter key, such as `"stocks.trades filter 'ticker.any_of'"`,
+            which start the message.
+        value: The whole filter value, for the message.
+
+    Returns:
+        The item's values, a blank one as `""` for the caller to refuse.
+
+    Raises:
+        ValueError: If a value holds surrounding whitespace (`"a, b"`).
+    """
+    parts = item.split(",")
+    spaced = next((p for p in parts if p != p.strip()), None)
+    if spaced is not None and spaced.strip():
+        raise ValueError(
+            f"{label} has the item {spaced!r} with surrounding whitespace in {value!r}; write "
+            f"{spaced.strip()!r}, items joined by commas alone"
+        )
+    return [p.strip() for p in parts]
+
+
 def _list_items(
     spec: DatasetSpec, key: str, value: ParamValue, *, rest_path: RestPath, name: str
 ) -> ParamValue:
@@ -190,9 +234,7 @@ def _list_items(
     texts: list[str] = []
     for item in value:
         if isinstance(item, date) and not isinstance(item, datetime):
-            if kind is not ParamKind.DATE:
-                raise ValueError(f"{spec.name} filter {key!r} takes no dates, not {item!r}")
-            texts.append(item.isoformat())
+            texts.append(_date_text(item, kind, label=f"{spec.name} filter {key!r}"))
         elif isinstance(item, (int, float)) and not isinstance(item, bool):
             if base is None or kind not in _NUMBER_KINDS:
                 raise ValueError(f"{spec.name} filter {key!r} takes no numbers, not {item!r}")
@@ -201,15 +243,7 @@ def _list_items(
             except TypeError as error:
                 raise ValueError(str(error)) from None
         elif isinstance(item, str):
-            parts = item.split(",")
-            spaced = next((p for p in parts if p != p.strip()), None)
-            if spaced is not None and spaced.strip():
-                raise ValueError(
-                    f"{spec.name} filter {key!r} has the item {spaced!r} with surrounding "
-                    f"whitespace in {value!r}; write {spaced.strip()!r}, items joined by "
-                    "commas alone"
-                )
-            texts.extend(p.strip() for p in parts)  # a blank item becomes empty: refused below
+            texts.extend(_comma_items(item, label=f"{spec.name} filter {key!r}", value=value))
         else:
             return value  # the encoder names the item it cannot send
     if "" in texts:

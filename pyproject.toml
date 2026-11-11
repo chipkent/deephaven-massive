@@ -214,6 +214,9 @@ ignore = [
     "D102",  # test docstrings are optional (any that exist must be well formed)
     "D103",  # test docstrings are optional (any that exist must be well formed)
     "D107",  # test docstrings are optional (any that exist must be well formed)
+    # Complexity limits target library logic; a branchy test is split or parametrized by
+    # judgment, not by a count.
+    "C901",
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
@@ -226,7 +229,7 @@ ignore = [
 "massive".msg = "The library has its own clients; see deephaven_massive._massive"
 
 [tool.ruff.lint.mccabe]
-max-complexity = 12
+max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-positional-args = 3

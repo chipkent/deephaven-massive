@@ -7,7 +7,8 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
@@ -880,6 +881,101 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
             )
 
 
+def _trade_line(n: int, *, ticker: bytes = b"AAPL", tape: bytes = b"1") -> bytes:
+    return b",,4,%d,1,1.5,%d,17410122000000000%02d,10,%s,%s,,\n" % (n, n, n, tape, ticker)
+
+
+def test_a_line_that_is_not_utf8_is_skipped_and_counted(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow refuses a whole chunk for one such line, or hands its handler text it cannot
+    # decode when the line also has the wrong field count: each line costs only itself, a
+    # byte in a header the plan does not read included.
+    rows = (
+        _trade_line(1)
+        + _trade_line(2, ticker=b"AA\xffPL")
+        + b"\n"
+        + _trade_line(3)
+        + _trade_line(4, tape=b"\xe9")
+        + b"SECRET,1\n"
+        + _trade_line(5).replace(b"\n", b",\xffSECRET\n")
+        + _trade_line(6)
+    )
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    result = table(file, plan())
+    assert result["Id"].to_pylist() == ["1", "3", "6"]
+    assert file.rows_read == 3
+    assert file.malformed_lines == 4
+    assert file.malformed_reason == "row 2 after the header is not UTF-8 text"
+
+
+def test_the_first_malformed_line_is_reported_whichever_its_kind(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A line with the wrong field count before a line that is not UTF-8 text: Arrow numbers
+    # the rows of the chunk without the removed line, which comes after, so the number holds.
+    rows = _trade_line(1) + b"SECRET,1\n" + _trade_line(2, ticker=b"\xff") + _trade_line(3)
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    assert table(file, plan())["Id"].to_pylist() == ["1", "3"]
+    assert (file.malformed_lines, file.malformed_reason) == (
+        2,
+        "row 2 after the header has 2 fields where the header has 13",
+    )
+
+
+def test_a_chunk_of_lines_that_are_not_utf8_is_skipped_and_numbered_in_the_file() -> None:
+    # A whole chunk of such lines leaves Arrow nothing to read; the chunks around it are read,
+    # and the first such line is numbered by the rows of every chunk before its own.
+    good = b"".join(_trade_line(n) for n in range(1, 41))
+    bad = b"".join(_trade_line(n, ticker=b"\xff") for n in range(41, 81))
+    after = b"".join(_trade_line(n) for n in range(81, 91))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + good + bad + after))
+    result = table(file, read)
+    assert result["Id"].to_pylist() == [str(n) for n in [*range(1, 41), *range(81, 91)]]
+    assert file.malformed_lines == 40
+    assert file.malformed_reason == "row 41 after the header is not UTF-8 text"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(lambda n: _trade_line(n, ticker=b"\xff"), id="not-utf8"),
+        pytest.param(lambda n: b"SECRET,%d,%s\n" % (n, b"x" * 40), id="wrong-field-count"),
+    ],
+)
+def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(bad: Callable[[int], bytes]) -> None:
+    # The consumer checks for cancellation, and for a skipped line, after every batch: a run of
+    # chunks with no row left must not leave it waiting for the file's end.
+    lines = b"".join(bad(n) for n in range(40))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + lines))
+    seen = []
+
+    def consume() -> None:
+        with file:
+            for batch, _ in file.batches(read):
+                seen.append((batch.num_rows, file.malformed_lines))
+
+    with pytest.raises(WireError, match="every one of its 40 lines is malformed"):
+        consume()
+    assert len(seen) > 1
+    assert all(rows == 0 and skipped for rows, skipped in seen)
+
+
+def test_a_file_whose_every_line_is_not_utf8_fails(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    rows = _trade_line(1, ticker=b"\xff") + _trade_line(2, ticker=b"\xfe")
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
+    assert info.value.message == (
+        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
+        "lines is malformed, so the file's format may have changed; the first: row 1 after "
+        "the header is not UTF-8 text"
+    )
+
+
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
@@ -919,3 +1015,71 @@ def test_benchmark_one_large_file(
             f"{seconds:.2f} s, "
             f"{rows / seconds:,.0f} rows/s\n"
         )
+
+
+def _counted(items: list[int], taken: list[int], failure: Exception | None = None) -> Iterator[int]:
+    for item in items:
+        taken.append(item)
+        yield item
+    if failure is not None:
+        raise failure
+
+
+def test_in_order_yields_results_in_item_order_with_bounded_read_ahead() -> None:
+    taken: list[int] = []
+    with ThreadPoolExecutor(3) as pool:
+        results = reader._in_order(
+            pool, _counted([1, 2, 3, 4, 5], taken), lambda n: n * 10, ahead=2, deferred=()
+        )
+        assert next(results) == 10
+        assert taken == [1, 2, 3]  # the awaited item and two ahead of it
+        assert list(results) == [20, 30, 40, 50]
+
+
+def test_in_order_raises_a_deferred_read_failure_after_the_results_before_it() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(OSError, match="truncated"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], OSError("truncated")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == [1, 2]
+
+
+def test_in_order_raises_any_other_read_failure_at_once() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(ValueError, match="bad"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], ValueError("bad")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == []
+
+
+def test_in_order_cancels_the_work_not_started_when_closed_early() -> None:
+    worked: list[int] = []
+    release = threading.Event()
+
+    def work(n: int) -> int:
+        worked.append(n)
+        if n > 1:
+            release.wait(30)
+        return n
+
+    with ThreadPoolExecutor(1) as pool:
+        results = reader._in_order(pool, iter([1, 2, 3, 4]), work, ahead=3, deferred=())
+        assert next(results) == 1
+        results.close()
+        release.set()
+    assert 3 not in worked
+    assert 4 not in worked

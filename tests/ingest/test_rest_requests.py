@@ -507,3 +507,24 @@ def test_a_path_without_a_documented_maximum_sends_only_the_row_cap() -> None:
         dataclasses.replace(bars, page_size=50_000), path, Request(), fixed={}
     )
     assert query["limit"] == 50_000
+
+
+def test_symbol_request_fills_a_pair_with_its_two_currencies() -> None:
+    path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
+    assert rest_requests._symbol_request(
+        CRYPTO_LAST, "X:BTCUSD", path, targets=["from"], param=None, split=split_pair
+    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {})
+
+
+def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
+    news = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="reference.news",
+        fetch_path="/v2/reference/news",
+        symbol_param="ticker",
+        keys={(R, "/v2/reference/news"): SourceKeys()},
+    )
+    path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
+    assert rest_requests._symbol_request(
+        news, "AAPL", path, targets=[], param="ticker", split=split_pair
+    ) == ("AAPL", {}, {"ticker": "AAPL"})
