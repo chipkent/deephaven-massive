@@ -33,7 +33,7 @@ WINDOWED = [("sma", indicators.SMA), ("ema", indicators.EMA), ("rsi", indicators
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.indicators
-    assert type(namespace) is indicators._Indicators
+    assert type(namespace) is indicators.Indicators
     assert isinstance(namespace, Namespace)
 
 
@@ -118,7 +118,7 @@ def test_a_windowed_indicator_builds_its_query(
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_summary_opens_the_docstring(name: str) -> None:
-    doc = getattr(indicators._Indicators, name).__doc__
+    doc = getattr(indicators.Indicators, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"indicators.{name}"].summary
 
 
@@ -431,7 +431,7 @@ def test_every_signature_default_is_the_default_massive_documents(name: str) -> 
     path = source(R, cast("str", spec.fetch_path))
     assert isinstance(path, RestPath)
     documented = {p.name: p.default for p in path.params}
-    signature = inspect.signature(getattr(indicators._Indicators, name)).parameters
+    signature = inspect.signature(getattr(indicators.Indicators, name)).parameters
     compared = [
         n for n in (*_SIGNATURE_PARAMS, "timespan", "series_type", "adjusted") if n in signature
     ]

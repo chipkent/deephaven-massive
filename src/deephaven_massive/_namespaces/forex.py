@@ -3,7 +3,7 @@
 Datasets: quotes, each pair's last quote, bars, each pair's previous day's bar, fair market
 value, snapshots, movers, and currency conversion.
 
-Each dataset is one factory method on `_Forex` that validates its arguments and returns a query;
+Each dataset is one factory method on `Forex` that validates its arguments and returns a query;
 nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
@@ -48,9 +48,9 @@ if TYPE_CHECKING:
         StreamHistoryQuery,
         SymbolStreamQuery,
     )
-    from deephaven_massive._types import StreamSpan, Symbols
+    from deephaven_massive._types import StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "_Forex"]
+__all__ = ["DATASETS", "Forex"]
 
 
 _REST: Final = Transport.REST
@@ -248,7 +248,7 @@ def _currency(name: str, value: object) -> str:
     raise ValueError(f"{name}={value!r} is not a three-letter upper-case currency code{hint}")
 
 
-class _Forex(Namespace):
+class Forex(Namespace):
     """The forex datasets, reached as `m.forex`.
 
     Its methods cover quotes, bars, each pair's last quote and previous day's bar, fair market
@@ -338,7 +338,7 @@ class _Forex(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...

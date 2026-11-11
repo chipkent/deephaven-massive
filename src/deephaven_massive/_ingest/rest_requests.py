@@ -35,7 +35,7 @@ from deephaven_massive._datasets.symbols import forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._types import _All
+from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -336,7 +336,7 @@ def _symbol_parts(
     listed = param is not None and params[param].kind is ParamKind.LIST
     takes_one = bool(from_request) or slot is not None or pair or spec.per_symbol
     per_symbol = takes_one or (param is not None and not listed)
-    if symbols is None or isinstance(symbols, _All):
+    if symbols is None or isinstance(symbols, AllSymbols):
         if takes_one:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]

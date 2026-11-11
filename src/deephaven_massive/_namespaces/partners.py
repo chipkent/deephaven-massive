@@ -2,12 +2,12 @@
 
 Partner datasets stay nested by vendor, one class each:
 
-- `m.partners.benzinga` (`_Benzinga`): analysts, analyst insights, ratings, consensus
+- `m.partners.benzinga` (`Benzinga`): analysts, analyst insights, ratings, consensus
   ratings, bulls-and-bears summaries, guidance, earnings, firms, and news;
-- `m.partners.etf_global` (`_EtfGlobal`): ETF analytics, constituents, fund flows, profiles,
+- `m.partners.etf_global` (`EtfGlobal`): ETF analytics, constituents, fund flows, profiles,
   and taxonomies;
-- `m.partners.tmx` (`_Tmx`): corporate events;
-- `m.partners.fable` (`_Fable`): European consumer-spending merchant aggregates and hierarchy.
+- `m.partners.tmx` (`Tmx`): corporate events;
+- `m.partners.fable` (`Fable`): European consumer-spending merchant aggregates and hierarchy.
 
 Every partner dataset is a REST list endpoint, so every factory returns a `Query`: `fetch()`
 reads every page once into a static table, and `poll()` re-reads it on an interval into a live
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "_Benzinga", "_EtfGlobal", "_Fable", "_Partners", "_Tmx"]
+__all__ = ["DATASETS", "Benzinga", "EtfGlobal", "Fable", "Partners", "Tmx"]
 
 
 _REST: Final = Transport.REST
@@ -361,7 +361,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every partner dataset, one `DatasetSpec` each, in the order of the namespace tree."""
 
 
-class _Benzinga(Namespace):
+class Benzinga(Namespace):
     """The Benzinga datasets, reached as `m.partners.benzinga`.
 
     Its methods cover analyst profiles and their firms, analyst insights, rating actions and their
@@ -846,7 +846,7 @@ class _Benzinga(Namespace):
         )
 
 
-class _EtfGlobal(Namespace):
+class EtfGlobal(Namespace):
     """The ETF Global datasets, reached as `m.partners.etf_global`.
 
     Its methods cover scores, holdings, fund flows, profiles, and classifications of US-listed ETFs.
@@ -1130,7 +1130,7 @@ class _EtfGlobal(Namespace):
         )
 
 
-class _Tmx(Namespace):
+class Tmx(Namespace):
     """The TMX dataset, reached as `m.partners.tmx`.
 
     Its one method reads corporate events from TMX's Wall Street Horizon calendar. The calendar
@@ -1214,7 +1214,7 @@ class _Tmx(Namespace):
         )
 
 
-class _Fable(Namespace):
+class Fable(Namespace):
     """The Fable Data datasets, reached as `m.partners.fable`.
 
     Fable Data totals a consumer panel's card and open-banking spending per merchant and day. The
@@ -1346,7 +1346,7 @@ class _Fable(Namespace):
         )
 
 
-class _Partners(Namespace):
+class Partners(Namespace):
     """The datasets Massive resells from its partners, reached as `m.partners`.
 
     Each partner has its own namespace:
@@ -1370,34 +1370,34 @@ class _Partners(Namespace):
     __slots__ = ("_benzinga", "_etf_global", "_fable", "_tmx")
     _path: ClassVar[str] = "partners"
 
-    def __init__(self, core: SessionCore) -> None:
+    def __init__(self, _core: SessionCore) -> None:
         """Create the four vendor namespaces.
 
         Args:
-            core: The session's internal core.
+            _core: The session's internal core.
         """
-        super().__init__(core)
-        self._benzinga = _Benzinga(core)
-        self._etf_global = _EtfGlobal(core)
-        self._tmx = _Tmx(core)
-        self._fable = _Fable(core)
+        super().__init__(_core)
+        self._benzinga = Benzinga(_core)
+        self._etf_global = EtfGlobal(_core)
+        self._tmx = Tmx(_core)
+        self._fable = Fable(_core)
 
     @property
-    def benzinga(self) -> _Benzinga:
+    def benzinga(self) -> Benzinga:
         """Every Benzinga dataset: analysts, firms, ratings, insights, guidance, and news."""
         return self._benzinga
 
     @property
-    def etf_global(self) -> _EtfGlobal:
+    def etf_global(self) -> EtfGlobal:
         """Every ETF Global dataset: analytics, constituents, flows, profiles, taxonomies."""
         return self._etf_global
 
     @property
-    def tmx(self) -> _Tmx:
+    def tmx(self) -> Tmx:
         """The TMX datasets: scheduled corporate events."""
         return self._tmx
 
     @property
-    def fable(self) -> _Fable:
+    def fable(self) -> Fable:
         """The Fable Data datasets: European consumer spending by merchant."""
         return self._fable

@@ -53,7 +53,7 @@ Loader = Callable[[str, str], bytes]
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.futures
-    assert type(namespace) is futures._Futures
+    assert type(namespace) is futures.Futures
     assert isinstance(namespace, Namespace)
 
 
@@ -272,7 +272,7 @@ def rest_params(name: str) -> set[str]:
 @pytest.mark.parametrize("name", ["exchanges", "market_status"])
 def test_a_path_without_filters_or_sort_offers_none(name: str) -> None:
     # Every parameter of either path is `limit` or a form of the typed `product_code`.
-    parameters = inspect.signature(getattr(futures._Futures, name)).parameters
+    parameters = inspect.signature(getattr(futures.Futures, name)).parameters
     assert not {"filters", "sort", "order"} & set(parameters)
     assert {p.split(".")[0] for p in rest_params(name)} <= {"limit", "product_code"}
 
@@ -481,7 +481,7 @@ def test_schedule_and_status_times_are_instants_and_sessions_dates() -> None:
 @pytest.mark.parametrize("spec", futures.DATASETS, ids=lambda spec: spec.name)
 def test_docstrings_name_their_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.removeprefix("futures.")
-    doc = getattr(futures._Futures, dataset).__doc__
+    doc = getattr(futures.Futures, dataset).__doc__
     assert doc is not None
     assert f"docs/datasets/{spec.name}.md" in doc
     assert doc.splitlines()[0] == spec.summary

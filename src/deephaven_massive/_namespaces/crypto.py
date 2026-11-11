@@ -3,7 +3,7 @@
 Datasets: trades, each pair's last trade, quotes, bars, each pair's previous day's bar, fair
 market value, snapshots, movers, and daily open/close.
 
-Each dataset is one factory method on `_Crypto` that validates its arguments and returns a query;
+Each dataset is one factory method on `Crypto` that validates its arguments and returns a query;
 nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset
 catalog (`CATALOG` in `_session.py`). A spec names the generated sources that serve its
@@ -42,9 +42,9 @@ from deephaven_massive._namespaces.query_building import (
 
 if TYPE_CHECKING:
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, SymbolStreamQuery
-    from deephaven_massive._types import DateLike, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "_Crypto"]
+__all__ = ["DATASETS", "Crypto"]
 
 
 _R, _W, _F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -238,7 +238,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.crypto`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
 
-class _Crypto(Namespace):
+class Crypto(Namespace):
     """The crypto datasets, reached as `m.crypto`.
 
     Its methods cover trades, quotes, bars, each pair's last trade and previous day's bar, fair
@@ -360,7 +360,7 @@ class _Crypto(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...

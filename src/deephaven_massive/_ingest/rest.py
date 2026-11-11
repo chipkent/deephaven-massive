@@ -191,7 +191,7 @@ from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
-from deephaven_massive._types import _All
+from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -2898,7 +2898,7 @@ def _history_plan(
 
     A parameter the path does not take raises the `ValueError` of `shared_params`.
     """
-    if isinstance(request.symbols, _All):
+    if isinstance(request.symbols, AllSymbols):
         rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
         path, query = shared_params(spec, rest_path, request, fixed={})
         # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.

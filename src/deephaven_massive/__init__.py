@@ -26,6 +26,9 @@ Datasets:
     reads symbols of several asset classes at once. `dm.datasets()` lists every dataset in a
     table, with each one's query methods in its `Methods` column.
 
+    For type annotations, `deephaven_massive.namespaces` exports the namespace classes, such
+    as `Stocks`, and `deephaven_massive.queries` the query classes and argument types.
+
 Query methods:
     A query reads nothing until you call one of its methods. It has only the methods its
     dataset supports:

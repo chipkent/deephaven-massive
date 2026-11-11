@@ -399,3 +399,20 @@ only while a table of a `RECONNECT` session remains, and otherwise closes, showi
 plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT`) and fails at
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
+
+**98. Every type a public signature names is public: `deephaven_massive.namespaces`**
+(2026-11-10). The owner: "A private class shouldn't be a return type in a public API. That is a
+major API failure." The classes of `m.stocks` and the other fifteen namespaces were private
+(`_Stocks`), so API references, IDE hovers, and users' annotations could not name the type that
+holds every dataset method. The namespace classes are now public under the names of their
+properties (`Stocks`, `StockFinancials`, `EtfGlobal`), exported from a second public module,
+`deephaven_massive.namespaces`, which mirrors `queries`: for annotations only, not imported by
+`import deephaven_massive`. `queries` holds what a dataset method returns; `namespaces` holds what
+a session property returns; the root holds what users construct or pass. `queries` also exports
+`AllSymbols` (the type of `dm.ALL`, named by `Symbols`) and `StreamBarTimespan` and
+`FuturesBarTimespan` (the `timespan` types of the `bars()` overloads). Users never construct a
+namespace or a query: a constructor parameter whose name starts with an underscore (`_core`) is
+internal, and its type may be private. Out of scope: private base classes (`Namespace`,
+`QueryBase`), which no signature names, and the private `MassiveError` subclasses raised at run
+time, which users catch as `dm.MassiveError`. A test walks every public name, member, signature,
+overload, default, and alias, and fails on any private type.

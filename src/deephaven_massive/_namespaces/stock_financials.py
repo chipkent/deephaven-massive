@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DATASETS",
-    "_StockFinancials",
+    "StockFinancials",
 ]
 
 _REST: Final = Transport.REST
@@ -168,7 +168,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.stocks.financials`, one `DatasetSpec` each."""
 
 
-class _StockFinancials(Namespace):
+class StockFinancials(Namespace):
     """The financial statement datasets, reached as `m.stocks.financials`.
 
     Its methods cover the balance sheets, income statements, and cash flow statements that companies

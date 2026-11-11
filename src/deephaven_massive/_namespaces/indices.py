@@ -1,6 +1,6 @@
 """The `m.indices` namespace: index values, bars, the previous day's bar, snapshots, and more.
 
-Each dataset is one factory method on `_Indices` that validates its arguments and returns a query;
+Each dataset is one factory method on `Indices` that validates its arguments and returns a query;
 nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
@@ -52,9 +52,9 @@ if TYPE_CHECKING:
         Query,
         StreamHistoryQuery,
     )
-    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "_Indices"]
+__all__ = ["DATASETS", "Indices"]
 
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -165,7 +165,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.indices`, one `DatasetSpec` each, in the order the reference lists them."""
 
 
-class _Indices(Namespace):
+class Indices(Namespace):
     """The index datasets, reached as `m.indices`.
 
     Its methods cover index values, bars, each index's previous day's bar and daily open and close,
@@ -220,7 +220,7 @@ class _Indices(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...

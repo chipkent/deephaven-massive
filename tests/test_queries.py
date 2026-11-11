@@ -4,16 +4,20 @@ import json
 import subprocess
 import sys
 
+import deephaven_massive as dm
 from deephaven_massive import _query, _types, queries
-from deephaven_massive._session import MassiveSession
+from deephaven_massive._session import CATALOG, MassiveSession
 
 
 def test_the_module_exports_the_query_classes_and_argument_types() -> None:
     assert sorted(queries.__all__) == [
+        "AllSymbols",
         "DateLike",
         "FilterValue",
+        "FuturesBarTimespan",
         "HistoryQuery",
         "Query",
+        "StreamBarTimespan",
         "StreamHistoryQuery",
         "StreamQuery",
         "SymbolStreamQuery",
@@ -27,6 +31,19 @@ def test_the_module_exports_the_query_classes_and_argument_types() -> None:
     assert queries.Symbols is _types.Symbols
     assert queries.DateLike is _types.DateLike
     assert queries.FilterValue is _types.FilterValue
+    assert queries.AllSymbols is _types.AllSymbols
+    assert queries.StreamBarTimespan is _types.StreamBarTimespan
+    assert queries.FuturesBarTimespan is _types.FuturesBarTimespan
+
+
+def test_all_is_an_instance_of_the_exported_class() -> None:
+    assert isinstance(dm.ALL, queries.AllSymbols)
+
+
+def test_every_dataset_returns_an_exported_query_class() -> None:
+    exported = {getattr(queries, name) for name in queries.__all__}
+    for spec in CATALOG.by_name.values():
+        assert _query.query_class(spec) in exported, spec.name
 
 
 def test_a_dataset_method_returns_one_of_its_classes(massive_session: MassiveSession) -> None:

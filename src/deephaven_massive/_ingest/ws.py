@@ -106,7 +106,7 @@ from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols
-from deephaven_massive._types import _All
+from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -210,7 +210,7 @@ def _wanted(
         list, the symbols and their topics; for a reactive table, two empty sets, which its
         watch fills once it starts.
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return None, frozenset({wildcard(channel)})
     if isinstance(symbols, SymbolTable):
         return frozenset(), frozenset()

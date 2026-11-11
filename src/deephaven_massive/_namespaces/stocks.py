@@ -3,7 +3,7 @@
 Datasets: trades, quotes, bars, each symbol's last trade, last quote, and previous day's bar, LULD
 bands, net order imbalances, fair market value, snapshots, movers, daily open/close, dividends,
 splits, IPOs, short interest and volume, and share float. The nested `m.stocks.financials` and
-`m.stocks.filings` namespaces are `stock_financials.py` and `stock_filings.py`, which `_Stocks`
+`m.stocks.filings` namespaces are `stock_financials.py` and `stock_filings.py`, which `Stocks`
 creates.
 
 Each dataset is one factory method that validates its arguments and returns a query; nothing
@@ -53,19 +53,19 @@ from deephaven_massive._namespaces.query_building import (
     require_bool,
     ticker_key,
 )
-from deephaven_massive._namespaces.stock_filings import _StockFilings
-from deephaven_massive._namespaces.stock_financials import _StockFinancials
+from deephaven_massive._namespaces.stock_filings import StockFilings
+from deephaven_massive._namespaces.stock_financials import StockFinancials
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, SymbolStreamQuery
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamBarTimespan, Symbols
 
 __all__ = [
     "DATASETS",
-    "_Stocks",
+    "Stocks",
 ]
 
 
@@ -368,7 +368,7 @@ its nested namespaces have their own (`stock_financials.py`, `stock_filings.py`)
 # --- Namespaces ---------------------------------------------------------------------------------
 
 
-class _Stocks(Namespace):
+class Stocks(Namespace):
     """The US stock datasets, reached as `m.stocks`.
 
     Its methods cover trades, quotes, bars, limit up-limit down bands, imbalances, fair market
@@ -389,23 +389,23 @@ class _Stocks(Namespace):
     __slots__ = ("_filings", "_financials")
     _path: ClassVar[str] = "stocks"
 
-    def __init__(self, core: SessionCore) -> None:
+    def __init__(self, _core: SessionCore) -> None:
         """Create the namespace and its two nested namespaces.
 
         Args:
-            core: The session's internal core.
+            _core: The session's internal core.
         """
-        super().__init__(core)
-        self._financials = _StockFinancials(core)
-        self._filings = _StockFilings(core)
+        super().__init__(_core)
+        self._financials = StockFinancials(_core)
+        self._filings = StockFilings(_core)
 
     @property
-    def financials(self) -> _StockFinancials:
+    def financials(self) -> StockFinancials:
         """The financial statements and valuation ratios, reached as `m.stocks.financials`."""
         return self._financials
 
     @property
-    def filings(self) -> _StockFilings:
+    def filings(self) -> StockFilings:
         """The SEC filings and the insider data built from them, reached as `m.stocks.filings`."""
         return self._filings
 
@@ -544,7 +544,7 @@ class _Stocks(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,

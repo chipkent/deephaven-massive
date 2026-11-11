@@ -69,7 +69,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
 from deephaven_massive._errors import raises_through
-from deephaven_massive._types import _All
+from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -200,7 +200,7 @@ class SymbolTable:
         object.__setattr__(self, "table_id", id(self.table))
 
 
-NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
+NormalizedSymbols: TypeAlias = tuple[str, ...] | AllSymbols | SymbolTable
 """A `Symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
 boxed symbol table."""
 
@@ -1210,10 +1210,10 @@ def check_symbol(
 
 def check_symbols(
     asset_class: AssetClass | ClassFromPrefix,
-    symbols: str | Iterable[str] | _All,
+    symbols: str | Iterable[str] | AllSymbols,
     *,
     as_written: bool = False,
-) -> tuple[str, ...] | _All:
+) -> tuple[str, ...] | AllSymbols:
     """Check a `Symbols` argument other than a table when a query is built.
 
     Rules: `dm.ALL` passes through; a `str` is one symbol; any other iterable of strings,
@@ -1238,7 +1238,7 @@ def check_symbols(
         ValueError: If no symbols remain (`ValueError("no symbols")`, for example from an
             exhausted generator), or a symbol is not canonical (`check_symbol`).
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return symbols
     if isinstance(symbols, str):
         items: tuple[object, ...] = (symbols,)

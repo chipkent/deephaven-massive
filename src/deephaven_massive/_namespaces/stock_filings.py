@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DATASETS",
-    "_StockFilings",
+    "StockFilings",
 ]
 
 _REST: Final = Transport.REST
@@ -440,7 +440,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.stocks.filings`, one `DatasetSpec` each."""
 
 
-class _StockFilings(Namespace):
+class StockFilings(Namespace):
     """The SEC filing datasets, reached as `m.stocks.filings`.
 
     Its methods cover the EDGAR filing index, 10-K sections, 8-K text and disclosures, and risk

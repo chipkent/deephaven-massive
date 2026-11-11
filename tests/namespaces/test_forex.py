@@ -84,7 +84,7 @@ FOREX_SOURCES = {
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.forex
-    assert type(namespace) is forex._Forex
+    assert type(namespace) is forex.Forex
     assert isinstance(namespace, Namespace)
 
 
@@ -439,14 +439,14 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
 
 def test_every_docstring_names_its_dataset_page() -> None:
     methods = {
-        "quotes": forex._Forex.quotes,
-        "last_quote": forex._Forex.last_quote,
-        "bars": forex._Forex.bars,
-        "previous_day_bar": forex._Forex.previous_day_bar,
-        "fmv": forex._Forex.fmv,
-        "snapshots": forex._Forex.snapshots,
-        "movers": forex._Forex.movers,
-        "conversion": forex._Forex.conversion,
+        "quotes": forex.Forex.quotes,
+        "last_quote": forex.Forex.last_quote,
+        "bars": forex.Forex.bars,
+        "previous_day_bar": forex.Forex.previous_day_bar,
+        "fmv": forex.Forex.fmv,
+        "snapshots": forex.Forex.snapshots,
+        "movers": forex.Forex.movers,
+        "conversion": forex.Forex.conversion,
     }
     assert {f"forex.{name}" for name in methods} == {spec.name for spec in forex.DATASETS}
     for name, method in methods.items():

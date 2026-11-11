@@ -76,7 +76,7 @@ EACH = pytest.mark.parametrize("series", SERIES, ids=[s.method for s in SERIES])
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.economy
-    assert type(namespace) is economy._Economy
+    assert type(namespace) is economy.Economy
     assert isinstance(namespace, Namespace)
 
 
@@ -139,7 +139,7 @@ def test_sort_and_order_are_kept_for_the_rest_layer(massive_session: dm.MassiveS
 
 @EACH
 def test_the_summary_opens_the_docstring(series: Series) -> None:
-    doc = getattr(economy._Economy, series.method).__doc__
+    doc = getattr(economy.Economy, series.method).__doc__
     assert doc.splitlines()[0] == series.spec.summary
 
 

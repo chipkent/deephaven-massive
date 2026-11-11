@@ -25,12 +25,16 @@ that takes any query whose stream has a `Symbol` column and keeps each symbol's 
 | `HistoryQuery` | A dataset with history only: `history(start, end=None)`. |
 | `StreamHistoryQuery` | The `SymbolStreamQuery` methods and `history()`; a subclass of each. |
 | `Symbols` | What a market-data dataset takes as its instruments. |
+| `AllSymbols` | The type of `dm.ALL`, one of the `Symbols`. |
 | `DateLike` | What a time bound (`start`, `end`, `as_of`, a day) takes. |
 | `FilterValue` | What a value of a `filters` mapping takes. |
+| `StreamBarTimespan` | The `bars()` timespans that stream: `SECOND` and `MINUTE`. |
+| `FuturesBarTimespan` | The timespans `m.futures.bars()` takes: all but `DAY`. |
 
 Every query also has `columns()`, and each class's docstring describes its methods. Users never
 construct a query: the dataset methods do, after checking their arguments. `dm.datasets()`
-lists the methods of every dataset.
+lists the methods of every dataset. The classes of `m.stocks` and the other namespaces are in
+`deephaven_massive.namespaces`.
 
 `import deephaven_massive` does not import this module, so annotating costs nothing until it
 is used. Like the session, it needs a running Deephaven JVM.
@@ -45,13 +49,23 @@ from deephaven_massive._query import (
     StreamQuery,
     SymbolStreamQuery,
 )
-from deephaven_massive._types import DateLike, FilterValue, Symbols
+from deephaven_massive._types import (
+    AllSymbols,
+    DateLike,
+    FilterValue,
+    FuturesBarTimespan,
+    StreamBarTimespan,
+    Symbols,
+)
 
 __all__ = [
+    "AllSymbols",
     "DateLike",
     "FilterValue",
+    "FuturesBarTimespan",
     "HistoryQuery",
     "Query",
+    "StreamBarTimespan",
     "StreamHistoryQuery",
     "StreamQuery",
     "SymbolStreamQuery",

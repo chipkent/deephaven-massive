@@ -3,7 +3,7 @@
 Datasets: treasury yields, inflation, inflation expectations, labor-market indicators, and
 funding conditions, one REST list endpoint each under `/fed/v1/`.
 
-Each dataset is one factory method on `_Economy` that validates its arguments and returns a
+Each dataset is one factory method on `Economy` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. Every row is one
 calendar date of the series, so the datasets have no `Symbol` and no `Timestamp`: they keep
 their `Date` column (ISO `yyyy-MM-dd` text, as every date the library returns), and `start` and
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from deephaven_massive._query import Query
     from deephaven_massive._types import DateLike, FilterValue
 
-__all__ = ["DATASETS", "_Economy"]
+__all__ = ["DATASETS", "Economy"]
 
 
 def _series(name: str, path: str, summary: str) -> DatasetSpec:
@@ -87,7 +87,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.economy`, one `DatasetSpec` each (for example `economy.inflation`)."""
 
 
-class _Economy(Namespace):
+class Economy(Namespace):
     """The US economic datasets, reached as `m.economy`.
 
     Its methods cover Treasury yields, inflation, inflation expectations, the labor market, and

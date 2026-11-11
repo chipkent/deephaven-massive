@@ -32,17 +32,17 @@ from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._namespaces import snapshots
-from deephaven_massive._namespaces.crypto import _Crypto
-from deephaven_massive._namespaces.economy import _Economy
-from deephaven_massive._namespaces.forex import _Forex
-from deephaven_massive._namespaces.futures import _Futures
-from deephaven_massive._namespaces.indicators import _Indicators
-from deephaven_massive._namespaces.indices import _Indices
-from deephaven_massive._namespaces.options import _Options
-from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
+from deephaven_massive._namespaces.crypto import Crypto
+from deephaven_massive._namespaces.economy import Economy
+from deephaven_massive._namespaces.forex import Forex
+from deephaven_massive._namespaces.futures import Futures
+from deephaven_massive._namespaces.indicators import Indicators
+from deephaven_massive._namespaces.indices import Indices
+from deephaven_massive._namespaces.options import Options
+from deephaven_massive._namespaces.partners import Benzinga, EtfGlobal, Fable, Partners, Tmx
 from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._namespaces.reference import _Reference
-from deephaven_massive._namespaces.stocks import _Stocks
+from deephaven_massive._namespaces.reference import Reference
+from deephaven_massive._namespaces.stocks import Stocks
 from deephaven_massive._query import Query, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
@@ -344,24 +344,24 @@ def test_collected_sessions_leave_the_registry() -> None:
 def test_namespaces(massive_session: dm.MassiveSession) -> None:
     m = massive_session
     expected = {
-        "stocks": _Stocks,
-        "options": _Options,
-        "futures": _Futures,
-        "indices": _Indices,
-        "forex": _Forex,
-        "crypto": _Crypto,
-        "reference": _Reference,
-        "indicators": _Indicators,
-        "economy": _Economy,
-        "partners": _Partners,
+        "stocks": Stocks,
+        "options": Options,
+        "futures": Futures,
+        "indices": Indices,
+        "forex": Forex,
+        "crypto": Crypto,
+        "reference": Reference,
+        "indicators": Indicators,
+        "economy": Economy,
+        "partners": Partners,
     }
     for name, cls in expected.items():
         assert type(getattr(m, name)) is cls
     assert m.stocks is m.stocks
-    assert type(m.partners.benzinga) is _Benzinga
-    assert type(m.partners.etf_global) is _EtfGlobal
-    assert type(m.partners.tmx) is _Tmx
-    assert type(m.partners.fable) is _Fable
+    assert type(m.partners.benzinga) is Benzinga
+    assert type(m.partners.etf_global) is EtfGlobal
+    assert type(m.partners.tmx) is Tmx
+    assert type(m.partners.fable) is Fable
 
 
 def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
@@ -644,7 +644,7 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
         q.append_only()
     # Building queries and reaching namespaces never fail.
     assert isinstance(stream_query(massive_session), SymbolStreamQuery)
-    assert isinstance(massive_session.stocks, _Stocks)
+    assert isinstance(massive_session.stocks, Stocks)
 
 
 def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSession) -> None:

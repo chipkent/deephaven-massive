@@ -4,15 +4,16 @@
   sequence of symbols, a Deephaven `Table` with a `Symbol` column (a reactive watchlist), or
   `dm.ALL`.
 - `ALL` (`dm.ALL`) means every symbol on the stream (the `<channel>.*` topic), in the flat file,
-  or in the snapshot. It is the only instance of `_All`.
+  or in the snapshot. It is the only instance of `AllSymbols`.
 - `DateLike` and `FilterValue` type the time-axis bounds and the `filters` mapping.
 - `override` marks the few dunder methods the library overrides, on every supported Python.
-- `StreamSpan` and `FuturesSpan` are the `Literal` timespan sets the typed `bars()`
+- `StreamBarTimespan` and `FuturesBarTimespan` are the `Literal` timespan sets the typed `bars()`
   overloads use to pick a query class statically. They are `Literal`s of enum members, never of
   strings.
 
-Users import `Symbols`, `DateLike`, and `FilterValue` for annotations from the public module
-`deephaven_massive.queries`, and never need to construct anything here except through `dm.ALL`.
+Users import `Symbols`, `AllSymbols`, `DateLike`, `FilterValue`, `StreamBarTimespan`, and
+`FuturesBarTimespan` for annotations from the public module `deephaven_massive.queries`, and
+never need to construct anything here except through `dm.ALL`.
 """
 
 from __future__ import annotations
@@ -29,10 +30,11 @@ from deephaven_massive._enums import Timespan
 
 __all__ = [
     "ALL",
+    "AllSymbols",
     "DateLike",
     "FilterValue",
-    "FuturesSpan",
-    "StreamSpan",
+    "FuturesBarTimespan",
+    "StreamBarTimespan",
     "Symbols",
     "override",
 ]
@@ -52,19 +54,20 @@ else:
         return method
 
 
-class _All(Enum):
-    """The type of `dm.ALL`, the "every symbol" sentinel.
+class AllSymbols(Enum):
+    """The type of `dm.ALL`, the "every symbol" sentinel, for annotations.
 
-    A one-member enum, so exactly one instance exists: copying or unpickling `dm.ALL` returns
-    the same object, `symbols is dm.ALL` is the reliable test, and the value is immutable and
-    hashable. It is deliberately not a `str`, so it can never be mistaken for a symbol.
+    Pass `dm.ALL` itself; never construct this class. A one-member enum, so exactly one
+    instance exists: copying or unpickling `dm.ALL` returns the same object, `symbols is dm.ALL`
+    is the reliable test, and the value is immutable and hashable. It is deliberately not a
+    `str`, so it can never be mistaken for a symbol.
     """
 
     ALL = "ALL"
 
     @override
     def __repr__(self) -> str:
-        """Show the public spelling, so the console prints `dm.ALL`, not the private class.
+        """Show the public spelling, so the console prints `dm.ALL`, not `<AllSymbols.ALL: 'ALL'>`.
 
         Returns:
             `"dm.ALL"`.
@@ -81,7 +84,7 @@ class _All(Enum):
         return "ALL"
 
 
-ALL: Final = _All.ALL
+ALL: Final = AllSymbols.ALL
 """Every symbol: a stream of the whole market, a whole flat file, or a full-market snapshot.
 
 `ALL` is accepted by the stream methods, by every per-class `snapshots()`, and by `history()`
@@ -89,7 +92,7 @@ when a flat file or a grouped-daily REST path exists. Everywhere else it raises 
 naming the alternative.
 """
 
-Symbols: TypeAlias = str | Sequence[str] | Table | _All
+Symbols: TypeAlias = str | Sequence[str] | Table | AllSymbols
 """The instruments of a market-data dataset.
 
 A `str` is one symbol. A `Sequence[str]` is materialized to a tuple when the query is built (an
@@ -156,10 +159,13 @@ an aware `datetime` or `pandas.Timestamp`, a Java `LocalDate`, `Instant`, or `Zo
 or a `numpy.datetime64`; a sequence of dates takes the day forms. Whether text is a date or
 a time depends on the parameter, so a filter reads only ISO-8601 text as one."""
 
-StreamSpan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
-"""Bar timespans that have a WebSocket channel (with `multiplier=1`)."""
+StreamBarTimespan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
+"""The bar timespans that have a live stream: `Timespan.SECOND` and `Timespan.MINUTE`.
 
-FuturesSpan: TypeAlias = Literal[
+A `bars()` call with one of them and `multiplier=1` returns a `StreamHistoryQuery`, which has the
+live methods as well as `history()`; any other timespan returns a `HistoryQuery`."""
+
+FuturesBarTimespan: TypeAlias = Literal[
     Timespan.SECOND,
     Timespan.MINUTE,
     Timespan.HOUR,
@@ -169,4 +175,6 @@ FuturesSpan: TypeAlias = Literal[
     Timespan.QUARTER,
     Timespan.YEAR,
 ]
-"""The bar timespans the futures aggregates endpoint accepts: every unit except `DAY`."""
+"""The bar timespans `m.futures.bars()` accepts: every `Timespan` except `DAY`.
+
+A futures day is a session, so daily bars take `Timespan.SESSION`."""

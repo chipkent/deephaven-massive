@@ -81,7 +81,7 @@ def request_of(query: QueryBase) -> Request:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.crypto
-    assert type(namespace) is crypto._Crypto
+    assert type(namespace) is crypto.Crypto
     assert isinstance(namespace, Namespace)
 
 
@@ -122,7 +122,7 @@ def test_each_dataset_has_the_query_class_of_its_transports(
 
 def test_each_factory_docstring_starts_with_its_summary() -> None:
     for spec in crypto.DATASETS:
-        factory = getattr(crypto._Crypto, spec.name.partition(".")[2])
+        factory = getattr(crypto.Crypto, spec.name.partition(".")[2])
         assert (factory.__doc__ or "").startswith(spec.summary + "\n"), spec.name
 
 

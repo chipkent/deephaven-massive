@@ -56,17 +56,17 @@ from deephaven_massive._namespaces import (
     stock_financials,
     stocks,
 )
-from deephaven_massive._namespaces.crypto import _Crypto
-from deephaven_massive._namespaces.economy import _Economy
-from deephaven_massive._namespaces.forex import _Forex
-from deephaven_massive._namespaces.futures import _Futures
-from deephaven_massive._namespaces.indicators import _Indicators
-from deephaven_massive._namespaces.indices import _Indices
-from deephaven_massive._namespaces.options import _Options
-from deephaven_massive._namespaces.partners import _Partners
+from deephaven_massive._namespaces.crypto import Crypto
+from deephaven_massive._namespaces.economy import Economy
+from deephaven_massive._namespaces.forex import Forex
+from deephaven_massive._namespaces.futures import Futures
+from deephaven_massive._namespaces.indicators import Indicators
+from deephaven_massive._namespaces.indices import Indices
+from deephaven_massive._namespaces.options import Options
+from deephaven_massive._namespaces.partners import Partners
 from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
-from deephaven_massive._namespaces.reference import _Reference
-from deephaven_massive._namespaces.stocks import _Stocks
+from deephaven_massive._namespaces.reference import Reference
+from deephaven_massive._namespaces.stocks import Stocks
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
@@ -310,16 +310,16 @@ class MassiveSession:
         core.attach(SessionClients(core))
         _register(core)
         self._core = core
-        self._stocks = _Stocks(core)
-        self._options = _Options(core)
-        self._futures = _Futures(core)
-        self._indices = _Indices(core)
-        self._forex = _Forex(core)
-        self._crypto = _Crypto(core)
-        self._reference = _Reference(core)
-        self._indicators = _Indicators(core)
-        self._economy = _Economy(core)
-        self._partners = _Partners(core)
+        self._stocks = Stocks(core)
+        self._options = Options(core)
+        self._futures = Futures(core)
+        self._indices = Indices(core)
+        self._forex = Forex(core)
+        self._crypto = Crypto(core)
+        self._reference = Reference(core)
+        self._indicators = Indicators(core)
+        self._economy = Economy(core)
+        self._partners = Partners(core)
 
     @override
     def __repr__(self) -> str:
@@ -337,52 +337,52 @@ class MassiveSession:
         return f"<{core.label} {state}>"
 
     @property
-    def stocks(self) -> _Stocks:
+    def stocks(self) -> Stocks:
         """US equities: trades, quotes, bars, snapshots, fundamentals, and filings."""
         return self._stocks
 
     @property
-    def options(self) -> _Options:
+    def options(self) -> Options:
         """US options: trades, quotes, bars, chains, snapshots, and contracts."""
         return self._options
 
     @property
-    def futures(self) -> _Futures:
+    def futures(self) -> Futures:
         """US futures: trades, quotes, bars, snapshots, contracts, products, and schedules."""
         return self._futures
 
     @property
-    def indices(self) -> _Indices:
+    def indices(self) -> Indices:
         """Indices: values, bars, and snapshots."""
         return self._indices
 
     @property
-    def forex(self) -> _Forex:
+    def forex(self) -> Forex:
         """Forex: quotes, bars, snapshots, movers, and currency conversion."""
         return self._forex
 
     @property
-    def crypto(self) -> _Crypto:
+    def crypto(self) -> Crypto:
         """Crypto: trades, quotes, bars, fair market value, snapshots, and movers."""
         return self._crypto
 
     @property
-    def reference(self) -> _Reference:
+    def reference(self) -> Reference:
         """Reference data: tickers, news, exchanges, conditions, market status, and holidays."""
         return self._reference
 
     @property
-    def indicators(self) -> _Indicators:
+    def indicators(self) -> Indicators:
         """Technical indicators: SMA, EMA, RSI, and MACD."""
         return self._indicators
 
     @property
-    def economy(self) -> _Economy:
+    def economy(self) -> Economy:
         """US economic data: treasury yields, inflation, labor market, and funding conditions."""
         return self._economy
 
     @property
-    def partners(self) -> _Partners:
+    def partners(self) -> Partners:
         """Datasets from Massive's partners: `benzinga`, `etf_global`, `tmx`, and `fable`."""
         return self._partners
 

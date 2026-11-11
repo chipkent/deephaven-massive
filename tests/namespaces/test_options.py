@@ -94,7 +94,7 @@ def request_of(query: QueryBase) -> dict[str, Any]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.options
-    assert type(namespace) is options._Options
+    assert type(namespace) is options.Options
     assert isinstance(namespace, Namespace)
     assert repr(namespace).endswith(" options>")
 
@@ -667,7 +667,7 @@ def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession)
 
 
 def _factory(name: str) -> Callable[..., object]:
-    return cast("Callable[..., object]", getattr(options._Options, name))
+    return cast("Callable[..., object]", getattr(options.Options, name))
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -679,7 +679,7 @@ def test_docstrings_name_their_dataset_page(name: str) -> None:
 def test_every_factory_has_a_dataset() -> None:
     public = {
         name
-        for name, member in vars(options._Options).items()
+        for name, member in vars(options.Options).items()
         if callable(member) and not name.startswith("_")
     }
     assert public == set(NAMES)

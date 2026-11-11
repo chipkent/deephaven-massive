@@ -13,5 +13,6 @@
 Layer: API, the top layer with `__init__.py`, `_session.py`, and `_query.py`; it may import
 every layer below except the ingest code (`_ingest`), which only `_session.py` imports. These
 are plain modules, not a namespace package. The package defines no names of its own: import
-the module that owns a name.
+the module that owns a name. Users import the namespace classes from the public module
+`deephaven_massive.namespaces`, which re-exports them.
 """

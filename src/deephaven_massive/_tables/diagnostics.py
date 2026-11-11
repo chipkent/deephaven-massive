@@ -91,7 +91,7 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     symbol_read_values,
 )
-from deephaven_massive._types import _All
+from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -769,7 +769,7 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
         commas with a `(+N more)` suffix when truncated; for `dm.ALL`, `(None, "ALL")`; for
         a reactive table, `(None, "reactive table")`.
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return None, "ALL"
     if isinstance(symbols, SymbolTable):
         return None, "reactive table"

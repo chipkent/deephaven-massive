@@ -59,7 +59,7 @@ def m(massive_session: dm.MassiveSession) -> dm.MassiveSession:
 
 def test_namespace_is_reached_from_the_session(m: dm.MassiveSession) -> None:
     namespace = m.indices
-    assert type(namespace) is indices._Indices
+    assert type(namespace) is indices.Indices
     assert isinstance(namespace, Namespace)
 
 
@@ -500,7 +500,7 @@ def test_factories_return_the_class_of_their_dataset() -> None:
 @pytest.mark.parametrize("spec", indices.DATASETS, ids=lambda spec: spec.name)
 def test_each_docstring_names_its_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.split(".", 1)[1]
-    doc = getattr(indices._Indices, dataset).__doc__
+    doc = getattr(indices.Indices, dataset).__doc__
     assert doc.splitlines()[0] == spec.summary
     assert f"docs/datasets/{spec.name}.md" in doc
 

@@ -220,10 +220,10 @@ def columns(name: str) -> dict[str, ColumnType]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.stocks
-    assert type(namespace) is stocks._Stocks
+    assert type(namespace) is stocks.Stocks
     assert isinstance(namespace, Namespace)
-    assert type(namespace.financials) is stock_financials._StockFinancials
-    assert type(namespace.filings) is stock_filings._StockFilings
+    assert type(namespace.financials) is stock_financials.StockFinancials
+    assert type(namespace.filings) is stock_filings.StockFilings
     assert namespace.financials is namespace.financials
     label = massive_session._core.label
     assert repr(namespace.financials) == f"<{label} stocks.financials>"

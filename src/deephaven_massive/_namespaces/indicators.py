@@ -26,7 +26,7 @@ session, since which day it covers is not known. `fetch()` and `poll()` return w
 reports now, the current period's still-changing value included; a row whose `TimestampEnd`
 is after its `TimestampInsert` was read before its period ended.
 
-Each dataset is one factory method on `_Indicators` that validates its arguments and returns a
+Each dataset is one factory method on `Indicators` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "_Indicators"]
+__all__ = ["DATASETS", "Indicators"]
 
 
 def _indicator(name: str, summary: str) -> DatasetSpec:
@@ -173,7 +173,7 @@ def _check_window(name: str, value: object) -> int:
     return require_positive_int(name, value)
 
 
-class _Indicators(Namespace):
+class Indicators(Namespace):
     """The technical indicator datasets, reached as `m.indicators`.
 
     Its methods cover the simple and exponential moving averages, the relative strength index, and

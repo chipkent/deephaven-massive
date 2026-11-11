@@ -4,7 +4,7 @@ Datasets: `trades`, `quotes`, and `bars` (streamed over the `/futures` WebSocket
 REST and flat-file history), `snapshots` (the current state of contracts), and the reference
 datasets `contracts`, `products`, `exchanges`, `market_status`, and `schedules`.
 
-Each dataset is one factory method on `_Futures` that validates its arguments through
+Each dataset is one factory method on `Futures` that validates its arguments through
 `build_query` (`_namespaces/query_building.py`) and returns a query; nothing touches the network
 until a verb is called on the query. This module owns the namespace's `DatasetSpec`s, exported as
 `DATASETS` and composed into the dataset catalog (`CATALOG` in `_session.py`). A spec names the
@@ -61,9 +61,15 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._enums import Order
     from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery
-    from deephaven_massive._types import DateLike, FilterValue, FuturesSpan, StreamSpan, Symbols
+    from deephaven_massive._types import (
+        DateLike,
+        FilterValue,
+        FuturesBarTimespan,
+        StreamBarTimespan,
+        Symbols,
+    )
 
-__all__ = ["DATASETS", "_Futures"]
+__all__ = ["DATASETS", "Futures"]
 
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -282,7 +288,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.futures`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
 
-class _Futures(Namespace):
+class Futures(Namespace):
     """The US futures datasets, reached as `m.futures`, for CME, CBOT, NYMEX, and COMEX contracts.
 
     Its methods cover trades, quotes, bars, snapshots, and the reference datasets of contracts,
@@ -391,7 +397,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -400,7 +406,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesSpan,
+        timespan: FuturesBarTimespan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -409,7 +415,7 @@ class _Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesSpan,
+        timespan: FuturesBarTimespan,
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),

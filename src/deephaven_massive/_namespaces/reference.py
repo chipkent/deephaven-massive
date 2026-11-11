@@ -5,7 +5,7 @@ exchanges, condition codes, market status, and market holidays. They declare no 
 the reference endpoints span every class, and a symbol's prefix selects its class (`X:`
 crypto, `C:` forex, `I:` indices, `O:` options, none for stocks).
 
-Each dataset is one factory method on `_Reference` that validates its arguments and returns a
+Each dataset is one factory method on `Reference` that validates its arguments and returns a
 `Query`; nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._types import DateLike, FilterValue, Symbols
 
-__all__ = ["DATASETS", "_Reference"]
+__all__ = ["DATASETS", "Reference"]
 
 
 _REST: Final = Transport.REST
@@ -254,7 +254,7 @@ def _event_types(types: object) -> str | None:
     return ",".join(cast("tuple[str, ...]", items))
 
 
-class _Reference(Namespace):
+class Reference(Namespace):
     """The reference datasets across asset classes, reached as `m.reference`.
 
     Its methods cover tickers and their details, types, events, and related companies, news, the

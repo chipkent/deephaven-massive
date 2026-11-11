@@ -82,7 +82,7 @@ def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.reference
-    assert type(namespace) is reference._Reference
+    assert type(namespace) is reference.Reference
     assert isinstance(namespace, Namespace)
 
 
@@ -203,7 +203,7 @@ def test_market_holidays_hours_are_instants() -> None:
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> None:
-    doc = getattr(reference._Reference, name).__doc__
+    doc = getattr(reference.Reference, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"reference.{name}"].summary
     assert f"docs/datasets/reference.{name}.md" in doc
 

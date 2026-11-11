@@ -117,11 +117,11 @@ def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[d
 
 def test_vendors_are_nested(massive_session: dm.MassiveSession) -> None:
     vendors = massive_session.partners
-    assert type(vendors) is partners._Partners
-    assert type(vendors.benzinga) is partners._Benzinga
-    assert type(vendors.etf_global) is partners._EtfGlobal
-    assert type(vendors.tmx) is partners._Tmx
-    assert type(vendors.fable) is partners._Fable
+    assert type(vendors) is partners.Partners
+    assert type(vendors.benzinga) is partners.Benzinga
+    assert type(vendors.etf_global) is partners.EtfGlobal
+    assert type(vendors.tmx) is partners.Tmx
+    assert type(vendors.fable) is partners.Fable
     for vendor in (vendors.benzinga, vendors.etf_global, vendors.tmx, vendors.fable):
         assert isinstance(vendor, Namespace)
         assert vendor._core is massive_session._core
@@ -361,10 +361,10 @@ def test_datasets_without_instruments_take_no_symbols(name: str) -> None:
 def _class_of(name: str) -> str:
     vendor = name.split(".")[1]
     return {
-        "benzinga": "_Benzinga",
-        "etf_global": "_EtfGlobal",
-        "tmx": "_Tmx",
-        "fable": "_Fable",
+        "benzinga": "Benzinga",
+        "etf_global": "EtfGlobal",
+        "tmx": "Tmx",
+        "fable": "Fable",
     }[vendor]
 
 
@@ -425,7 +425,7 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
     with pytest.raises(ValueError, match="takes one ticker per request"):
         massive_session.partners.benzinga.consensus_ratings(dm.ALL)
     # One row per stock: no sort, order, or limit; filters choose the ratings aggregated.
-    assert list(inspect.signature(partners._Benzinga.consensus_ratings).parameters) == [
+    assert list(inspect.signature(partners.Benzinga.consensus_ratings).parameters) == [
         "self",
         "symbols",
         "filters",

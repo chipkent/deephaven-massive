@@ -1,6 +1,6 @@
 """Query building: the shared dataset factory behind every namespace method.
 
-Each namespace class (`_Stocks`, `_Options`, ...) is a thin set of typed factory methods; this
+Each namespace class (`Stocks`, `Options`, ...) is a thin set of typed factory methods; this
 module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
@@ -67,7 +67,7 @@ from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enu
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._query import Query, QueryBase, QueryCall, bar_query_class, query_class
 from deephaven_massive._tables.time_text import deephaven_time_text
-from deephaven_massive._types import _All, override
+from deephaven_massive._types import AllSymbols, override
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -267,10 +267,10 @@ class Namespace:
         """Name each public method by its path, such as `stocks.bars`, and wrap it in `shows_call`.
 
         Python names a function by its `__qualname__` in the `TypeError` of a wrong call
-        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). The class
-        name, such as `_Stocks`, is private and means nothing to a user who reached the method
-        as `m.stocks.bars`, so each public function the class defines itself is renamed to its
-        path from the session when the class is created, at import. `typing` files a
+        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). A user
+        reached the method as `m.stocks.bars`, so that path, not the class name `Stocks`, is
+        the name the message should show: each public function the class defines itself is
+        renamed to its path from the session when the class is created, at import. `typing` files a
         function's overloads under its `__qualname__`, so each overload is renamed too and
         registered again under the new name, which keeps `typing.get_overloads` finding them.
 
@@ -292,13 +292,15 @@ class Namespace:
                 member.__qualname__ = path
                 setattr(cls, name, record(member))
 
-    def __init__(self, core: SessionCore) -> None:
+    def __init__(self, _core: SessionCore) -> None:
         """Bind the namespace to its session.
 
         Args:
-            core: The session's internal core.
+            _core: The session's internal core. The leading underscore marks it, and its
+                private type, as no part of the public signature: users never construct a
+                namespace.
         """
-        self._core = core
+        self._core = _core
 
     @override
     def __repr__(self) -> str:
@@ -882,7 +884,7 @@ def build_query(
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
-    if isinstance(normalized, _All) and all_alternative is not None:
+    if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")

@@ -61,7 +61,7 @@ from deephaven_massive._query import (
     query_class,
 )
 from deephaven_massive._session import CATALOG
-from deephaven_massive._types import StreamSpan
+from deephaven_massive._types import StreamBarTimespan
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
@@ -613,7 +613,7 @@ def _factories(owner: type, path: str) -> Iterator[tuple[str, Callable[..., obje
         path: The dotted path of `owner` from the session, empty for the session.
 
     Yields:
-        `(dataset path, factory)` pairs, such as `("stocks.trades", _Stocks.trades)`.
+        `(dataset path, factory)` pairs, such as `("stocks.trades", Stocks.trades)`.
     """
     for name, member in vars(owner).items():
         if name.startswith("_"):
@@ -749,7 +749,9 @@ class _Good(Namespace):
     _path: ClassVar[str] = "stocks"
 
     @overload
-    def bars(self, timespan: StreamSpan, *, multiplier: Literal[1] = 1) -> StreamHistoryQuery: ...
+    def bars(
+        self, timespan: StreamBarTimespan, *, multiplier: Literal[1] = 1
+    ) -> StreamHistoryQuery: ...
     @overload
     def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery: ...
     def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery:

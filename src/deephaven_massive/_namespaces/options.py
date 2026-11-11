@@ -6,7 +6,7 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
 reference data), and `daily_open_close`.
 
-Each dataset is one factory method on `_Options`. The method validates its arguments and returns
+Each dataset is one factory method on `Options`. The method validates its arguments and returns
 a query; nothing touches the network until a verb is called on the query. This module owns the
 namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its
@@ -82,9 +82,9 @@ if TYPE_CHECKING:
         StreamQuery,
         SymbolStreamQuery,
     )
-    from deephaven_massive._types import DateLike, FilterValue, StreamSpan, Symbols
+    from deephaven_massive._types import DateLike, FilterValue, StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "_Options"]
+__all__ = ["DATASETS", "Options"]
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +395,7 @@ def _expired(value: object) -> bool | None:
     return True if value else None
 
 
-class _Options(Namespace):
+class Options(Namespace):
     """The US options datasets, reached as `m.options`.
 
     Its methods cover trades, quotes, bars, each contract's last trade and previous day's bar, fair
@@ -521,7 +521,7 @@ class _Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamSpan,
+        timespan: StreamBarTimespan,
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
