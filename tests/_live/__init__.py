@@ -14,6 +14,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `calendar`: the US exchanges' holidays and half days, and the recent days the tests read;
 - `contracts`: the front futures contract of a day, by each product's roll rule;
 - `events`: the choice of recent splits and special dividends to check;
+- `bad_values`: the requests that send Massive a value the library refuses before sending,
+  and the verdict on what Massive answers;
 - `ticker_lists`: the forms of futures spread tickers, and the crypto pairs whose currencies
   do not join to their ticker;
 - `streams`: when a stream on a delayed plan must have delivered rows;
