@@ -457,7 +457,7 @@ def _query(
 class _Fetches(Protocol):
     """A query with `fetch()`."""
 
-    def fetch(self) -> Table:
+    def fetch(self, *, wait: bool) -> Table:
         """Return the dataset's current rows."""
         ...
 
@@ -465,7 +465,7 @@ class _Fetches(Protocol):
 class _Histories(Protocol):
     """A query with `history()`."""
 
-    def history(self, start: date | datetime, end: date | datetime) -> Table:
+    def history(self, start: date | datetime, end: date | datetime, *, wait: bool) -> Table:
         """Return the dataset's rows over a range."""
         ...
 
@@ -478,12 +478,12 @@ def _run(query: QueryBase, verb: str, *, bars: bool, day: date) -> Table:
         time for ticks.
     """
     if verb == "fetch":
-        return cast("_Fetches", query).fetch()
+        return cast("_Fetches", query).fetch(wait=True)
     histories = cast("_Histories", query)
     if bars:
-        return histories.history(day, day)
+        return histories.history(day, day, wait=True)
     start = datetime(day.year, day.month, day.day, 15, tzinfo=_NEW_YORK)
-    return histories.history(start, start + timedelta(minutes=5))
+    return histories.history(start, start + timedelta(minutes=5), wait=True)
 
 
 @dataclass(frozen=True)

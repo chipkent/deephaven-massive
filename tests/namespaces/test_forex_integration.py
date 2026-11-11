@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -216,11 +217,10 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         evidence("Currencies on Basic: the library's previous_day_bar is not read")
     else:
         prev_bar = live_session.forex.previous_day_bar(_PAIR)
-        evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
-    evidence(
-        "library history(REST): "
-        f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
-    )
+        prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
+        evidence(f"library previous_day_bar (/prev): {prev_rows}")
+    rest = partial(bars.history, day, day, source=dm.HistorySource.REST, wait=True)
+    evidence(f"library history(REST): {_library_rows(rest, table_rows)}")
     assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
     assert len(same_day) == 1, f"range bars of {day}: {same_day}"
@@ -357,7 +357,9 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
             )
     flat = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(
+            recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
+        ),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -471,7 +473,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
         evidence(line)
     first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.forex.bars(_PAIR, dm.Timespan.WEEK).history(
-        first, last, source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST, wait=True
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")

@@ -82,7 +82,7 @@ class StreamHandle:
 
     The transport creates the stream's publisher (`BlinkPublisher`) and blink table inside `scope`
     (the stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
-    registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
+    registry record is dropped (`SharedStreams.shut_down`) and topic reference counts are
     released. The session's registry record holds the handle until the record is deleted (its holds
     released and its blink table shut down), and releases `scope` when the last result is released.
     Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist listener,
@@ -282,19 +282,25 @@ class RestTransport(Protocol):
         """
         ...
 
-    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
-        """Check, with no request, that `fetch` can plan its requests for the request.
+    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
+        """Check that `fetch` can plan its requests for the request, before any data request.
 
-        A background `fetch(wait=False)` calls it on the caller thread, so a parameter a path
-        does not take raises there, at the call, as `fetch` raises it before its first request.
-        The plan splits no crypto pair (that may read Massive's ticker list): the read does.
+        A background `fetch()` calls it on the caller thread, so a parameter a path does not
+        take raises there, at the call, as `fetch` raises it before its first request.
 
         Args:
             spec: The dataset.
             request: The normalized arguments, with static symbols.
+            split_pairs: True for crypto pairs passed in code: each is split by Massive's
+                crypto ticker list, as the read splits it, which may read that list once per
+                session, so a pair the list does not hold raises at the call. False for a
+                table's pairs, which follow `MassiveConfig.unlisted_symbols` in the read:
+                nothing is requested.
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
+            MassiveError: With `split_pairs`, Massive's crypto ticker list can't be read, or
+                does not hold a pair (`UnlistedPairError`).
         """
         ...
 
@@ -449,19 +455,25 @@ class RestTransport(Protocol):
         """
         ...
 
-    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
-        """Check, with no request, that `history` can plan its requests over `window`.
+    def check_history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
+    ) -> None:
+        """Check that `history` can plan its REST requests over `window`, before any data request.
 
-        The `check_fetch` of a background `history(..., source=REST or AUTO, wait=False)` that
-        chose REST.
+        The `check_fetch` of a background `history()` that REST serves or may serve: one that
+        chose REST, or one that reads flat files under `AUTO` and reads from REST the days the
+        files lack.
 
         Args:
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
+            split_pairs: As `check_fetch` takes it.
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
+            MassiveError: With `split_pairs`, Massive's crypto ticker list can't be read, or
+                does not hold a pair (`UnlistedPairError`).
         """
         ...
 
@@ -513,10 +525,10 @@ class StreamTransport(Protocol):
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
         session's registry lock while calling Deephaven. The session has already registered the
         stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
-        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
+        `SharedStreams.shut_down(stream_id)` may be called from the moment the publisher
         exists, even before this method returns. The publisher is named
         `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
-        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
+        call `SharedStreams.shut_down(stream_id)` and only then release the stream's topics.
         The returned handle carries `stream_id`. If the open raises anything, even
         `KeyboardInterrupt`, the transport has released the stream scope and the stream's
         references (its connection lease and topics) before the exception propagates.

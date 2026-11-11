@@ -95,9 +95,9 @@ even an empty one.
 
 **Its row in `m.streams()`.** `Kind=read`, keyed by the call's id: `LOADING` while a symbol is
 queued, loading, or waiting to retry, and `RUNNING` once every symbol has landed or failed. The
-coordinator keeps it current (`SessionCore.update_followed_read`); each symbol's own row is in
+coordinator keeps it current (`WorkerTables.update_followed_read`); each symbol's own row is in
 `m.symbol_reads()`. The result is a worker table of the session core
-(`SessionCore.track_worker`), so its record keeps the session alive while the result is in
+(`WorkerTables.track`), so its record keeps the session alive while the result is in
 use, and `m.close()` fails it.
 
 **Lifetime.** Releasing the result (`m.release`, garbage collection) marks its row `RELEASED`;
@@ -399,7 +399,7 @@ class FollowedRead:
     def fail(self, error: MassiveError) -> bool:
         """Stop following and fail the table, once: the session closed, or a thread died.
 
-        The session's hook (`SessionCore.track_worker`), called outside every lock. The
+        The session's hook (`WorkerTables.track`), called outside every lock. The
         coordinator is told to stop the result's symbols.
 
         Args:
@@ -414,7 +414,7 @@ class FollowedRead:
         return failed
 
     def abandon(self) -> None:
-        """Stop a result that will never be followed (`SessionCore.track_worker`)."""
+        """Stop a result that will never be followed (`WorkerTables.track`)."""
         self.stop_token.set()
 
     def release(self) -> None:
@@ -423,7 +423,7 @@ class FollowedRead:
         Runs on the reaper as the result record's `on_released` callback. A table derived from
         the result may still use it; it stops when the blink table shuts down.
         """
-        self.core.release_worker(self.call)
+        self.core.workers.release(self.call)
 
     def stop_watch(self) -> None:
         """Stop the watch's listener: a Deephaven call, so the reaper runs it."""
@@ -551,7 +551,7 @@ def _shut_down(
         core_ref: The session's core, weakly.
         read_ref: The result, weakly.
         worker_shut_down: The session's shutdown callback of the result's worker table
-            (`SessionCore.worker_shutdown_callback`), run last.
+            (`WorkerTables.shutdown_callback`), run last.
     """
     # Alive: the session's record of the result holds it until `worker_shut_down` below.
     read = cast("FollowedRead", read_ref())
@@ -843,7 +843,7 @@ def _build(
                 _shut_down,
                 weakref.ref(core),
                 weakref.ref(read),
-                worker_shut_down=core.worker_shutdown_callback(read.call, read.stop_token),
+                worker_shut_down=core.workers.shutdown_callback(read.call, read.stop_token),
             ),
             release_later=core.release_later,
         )
@@ -987,7 +987,7 @@ def open_followed_read(
             )
             return read, row
 
-        core.track_worker(result, scope, make)
+        core.workers.track(result, scope, make)
         try:
             core.follows.follow(read, first)
             with entered(core.exec_ctx):

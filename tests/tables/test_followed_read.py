@@ -577,7 +577,7 @@ def test_a_failed_registration_undoes_everything(
     monkeypatch.setattr(ResultRegistry, "track", interrupted)
     with pytest.raises(KeyboardInterrupt):
         follow(massive_session, wl, script)
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     assert script.calls == []
     assert massive_session._core.follows.thread is None
 
@@ -599,7 +599,7 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
     with pytest.raises(KeyboardInterrupt):
         follow(massive_session, wl, script)
     drain()
-    until(lambda: massive_session._core._workers == {})
+    until(lambda: massive_session._core.workers._workers == {})
     until(lambda: massive_session._core.follows.following == 0)
     assert script.calls == []
 
@@ -641,7 +641,10 @@ def test_a_download_is_never_published_after_the_table_failed(
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
     until(lambda: script.calls == [("AAPL",)])
-    read = cast("Any", massive_session._core._workers[next(iter(massive_session._core._workers))])
+    read = cast(
+        "Any",
+        massive_session._core.workers._workers[next(iter(massive_session._core.workers._workers))],
+    )
     handle = read.fail.__self__
     assert handle.fail_table(MassiveError("stop now")) is True
     assert handle.fail_table(MassiveError("again")) is False
@@ -998,7 +1001,7 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
     followed_read._shut_down(
         weakref.ref(core),
         weakref.ref(cast("Any", read)),
-        worker_shut_down=core.worker_shutdown_callback(12_345, read.stop_token),
+        worker_shut_down=core.workers.shutdown_callback(12_345, read.stop_token),
     )
     assert read.stop_token.is_set()
     assert read.shut_down_event.is_set()

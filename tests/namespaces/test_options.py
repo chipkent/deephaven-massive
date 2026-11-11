@@ -769,7 +769,7 @@ def test_last_trade_fetch_reads_the_last_trade(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
-    out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch())
+    out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch(wait=True))
     assert fake_rest.get_queries() == [(f"/v2/last/trade/{TSLA}", {})]
     assert len(out) == 1
     row = out[0]
@@ -793,7 +793,9 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     day = date(2014, 6, 2)
     midnight = int(datetime(2014, 6, 2, 4, tzinfo=UTC).timestamp()) * NS  # New York midnight
     trades = rows(
-        rest_session.options.trades(contract).history(day, day, source=HistorySource.REST)
+        rest_session.options.trades(contract).history(
+            day, day, source=HistorySource.REST, wait=True
+        )
     )
     assert fake_rest.get_queries() == [
         (
@@ -816,7 +818,9 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     fake_rest.reply(wire(f"/v3/quotes/{quote_contract}"), Reply(body(load_fixture, "quotes.json")))
     day = date(2022, 2, 17)
     quotes = rows(
-        rest_session.options.quotes(quote_contract).history(day, day, source=HistorySource.REST)
+        rest_session.options.quotes(quote_contract).history(
+            day, day, source=HistorySource.REST, wait=True
+        )
     )
     path, query = fake_rest.get_queries()[-1]
     assert path == f"/v3/quotes/{quote_contract}"
@@ -835,7 +839,7 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
-    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert fake_rest.get_queries() == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it.
@@ -860,7 +864,7 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     fake_rest.reply(wire(path), Reply({**ranged, "adjusted": False}))
     bars = rows(
         rest_session.options.bars(contract, dm.Timespan.DAY, adjusted=False).history(
-            date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST
+            date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST, wait=True
         )
     )
     assert fake_rest.get_queries()[-1] == (
@@ -894,13 +898,13 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
         Reply({"status": "OK", "results": [{"T": TSLA, "t": early, "c": 1.0}]}),
         Reply({"status": "OK", "results": [{"T": TSLA, "t": afternoon, "c": 1.0}]}),
     )
-    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"]) for r in prev] == [
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
     assert not stamp_warnings(caplog)
     # 14:30 is served too, as sent: its stamp, a day later its end, no Date, one WARNING.
-    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd] == [
         (None, afternoon * 10**6, (afternoon + 86_400_000) * 10**6)
     ]
@@ -927,7 +931,7 @@ def test_chain_reads_one_underlying(
             sort="strike_price",
             order=dm.Order.ASC,
             filters={"expiration_date_lte": date(2022, 1, 21), "strike_price_gte": 150},
-        ).fetch()
+        ).fetch(wait=True)
     )
     assert fake_rest.get_queries() == [
         (
@@ -962,7 +966,7 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     contracts = [f"O:NCLH221014C{strike:08d}" for strike in range(1000, 1000 + 251)]
-    rest_session.options.snapshots(contracts).fetch()
+    rest_session.options.snapshots(contracts).fetch(wait=True)
     requests = fake_rest.get_queries()
     # The two requests run concurrently, so they arrive in either order.
     chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
@@ -979,7 +983,7 @@ def test_snapshots_send_no_type_beside_tickers(
     # Massive answers `type` beside `ticker.any_of` with HTTP 400 "Cannot specify tickers and
     # type.", so only `dm.ALL` sends it; this is the exact query sent for one contract.
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
-    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch()
+    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch(wait=True)
     assert [r.target for r in fake_rest.requests if r.method == "GET"] == [
         "/v3/snapshot?limit=250&ticker.any_of=O%3ANCLH221014C00005000"
     ]
@@ -992,7 +996,7 @@ def test_snapshots_keep_the_error_row_of_a_contract(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
-    out = rows(rest_session.options.snapshots(dm.ALL).fetch())
+    out = rows(rest_session.options.snapshots(dm.ALL).fetch(wait=True))
     assert fake_rest.get_queries() == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
     found, missing = out
     assert (found["Symbol"], found["Underlying"], found["Error"]) == (
@@ -1022,7 +1026,7 @@ def test_contracts_list_or_read_each_contract(
             sort="strike_price",
             order=dm.Order.DESC,
             filters={"strike_price_lte": 90},
-        ).fetch()
+        ).fetch(wait=True)
     )
     assert fake_rest.get_queries() == [
         (
@@ -1050,7 +1054,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
-    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch())
+    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch(wait=True))
     assert fake_rest.get_queries()[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},
@@ -1072,7 +1076,7 @@ def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
     reply = Reply(body(load_fixture, "contracts_index.json"))
     fake_rest.reply("/v3/reference/options/contracts", reply)
-    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
     ]
@@ -1099,7 +1103,7 @@ def test_a_table_of_index_underlyings_lists_each_one_s_contracts_by_its_bare_tic
     reply = Reply(body(load_fixture, "contracts_index.json"))
     fake_rest.reply("/v3/reference/options/contracts", reply)
     underlyings = new_table([string_col("Symbol", ["I:SPX"])])
-    listed = rows(rest_session.options.contracts(underlying=underlyings).fetch())
+    listed = rows(rest_session.options.contracts(underlying=underlyings).fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
     ]
@@ -1116,7 +1120,7 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
         reply = Reply(body(load_fixture, "chain.json"))
         fake_rest.reply(f"/v3/snapshot/options/{underlying}", reply)
     underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
-    out = rows(rest_session.options.chain(underlyings).fetch())
+    out = rows(rest_session.options.chain(underlyings).fetch(wait=True))
     assert [path for path, _ in fake_rest.get_queries()] == [
         "/v3/snapshot/options/AAPL",
         "/v3/snapshot/options/MSFT",
@@ -1146,7 +1150,7 @@ def test_rows_of_another_instrument_keep_their_underlying_and_warn_once(
     reply = Reply(body={"status": "OK", "request_id": "r", "results": [stock]})
     fake_rest.reply("/v3/reference/options/contracts", reply)
     for _ in range(2):
-        listed = rows(rest_session.options.contracts(underlying="I:DJT").fetch())
+        listed = rows(rest_session.options.contracts(underlying="I:DJT").fetch(wait=True))
         assert [(r["Symbol"], r["Underlying"]) for r in listed] == [("O:DJT261120C00020000", "DJT")]
     assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
     assert warnings_of(caplog) == [
@@ -1174,9 +1178,9 @@ def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_on
     empty = Reply(body={"status": "OK", "request_id": "r", "results": []})
     both = Reply(body={"status": "OK", "request_id": "r", "results": [coded, bare]})
     fake_rest.reply(path, empty, both)
-    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch()) == []
+    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True)) == []
     for _ in range(2):
-        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
         assert [(r["Symbol"], r["Underlying"]) for r in listed] == [
             ("O:SPX261120C00400000", "I:SPX"),
             ("O:SPX261120C00600000", "SPX"),
@@ -1196,7 +1200,7 @@ def test_a_list_argument_with_named_contracts_fails_before_any_request(
     # The per-contract path takes only `as_of`; a list-only argument cannot be honored there.
     q = rest_session.options.contracts(symbols=[CONTRACT], underlying="AAPL")
     with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
-        q.fetch()
+        q.fetch(wait=True)
     assert fake_rest.get_queries() == []
 
 
@@ -1209,7 +1213,9 @@ def test_daily_open_close_reads_one_day_per_contract(
     path = f"/v1/open-close/{TSLA}/2023-01-09"
     fake_rest.reply(wire(path), Reply(body(load_fixture, "open_close.json")))
     out = rows(
-        rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch()
+        rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch(
+            wait=True
+        )
     )
     assert fake_rest.get_queries() == [(path, {"adjusted": ["false"]})]
     assert [(r["Symbol"], r["Date"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
@@ -1611,7 +1617,7 @@ def test_a_flat_file_of_each_prefix_round_trips(
 ) -> None:
     key = f"{prefix}/2023/03/2023-03-13.csv.gz"
     fake_s3.put(key, make_csv_gz("\n".join([header, *lines]) + "\n"))
-    out = rows(build(s3_session).history(DAY, DAY, source=HistorySource.FLAT_FILES))
+    out = rows(build(s3_session).history(DAY, DAY, source=HistorySource.FLAT_FILES, wait=True))
     assert fake_s3.requests == [("flatfiles", key)]
     (row,) = out  # the other contract's row is filtered out
     assert row["Symbol"] == PUT

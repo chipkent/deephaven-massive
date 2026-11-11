@@ -372,8 +372,8 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
             logging.WARNING,
             (
                 "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
-                "command will pause every live table on the server for at least 49 min: pass "
-                "wait=False to read in the background"
+                "command will pause every live table on the server for at least 49 min: leave "
+                "out wait=True to read in the background"
             ),
         )
     ]
@@ -493,8 +493,8 @@ def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock
         == CONSOLE_ADVICE
         == (
             "this read ran inside a Deephaven console command, which waits out only 90 s of "
-            "pauses; pass wait=False to fetch() or history() to read in the background, which "
-            "waits out 10 min"
+            "pauses; leave out wait=True to let fetch() or history() read in the background, "
+            "which waits out 10 min"
         )
     )
     assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read

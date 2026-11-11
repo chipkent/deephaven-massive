@@ -233,10 +233,9 @@ max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-positional-args = 3
-# A namespace class has one public factory method per dataset, so its size is the API's: the
-# stocks namespace holds 21, its two nested namespaces included. The limit still catches any
-# other class that grows past it.
-max-public-methods = 24
+# Ruff's default. Only a class whose size is the API's (`MassiveSession` and the stocks
+# namespace) passes it, through a `noqa` that says so; any other class splits instead.
+max-public-methods = 20
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
