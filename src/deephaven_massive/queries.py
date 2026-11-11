@@ -25,10 +25,10 @@ that takes any query whose stream has a `Symbol` column and keeps each symbol's 
 | `HistoryQuery` | A dataset with history only: `history(start, end=None)`. |
 | `StreamHistoryQuery` | The `SymbolStreamQuery` methods and `history()`; a subclass of each. |
 | `Symbols` | What a market-data dataset takes as its instruments. |
-| `AllSymbols` | The type of `dm.ALL`, one of the `Symbols`. |
+| `AllSymbols` | The type of `dm.ALL`, one of the types `Symbols` accepts. |
 | `DateLike` | What a time bound (`start`, `end`, `as_of`, a day) takes. |
 | `FilterValue` | What a value of a `filters` mapping takes. |
-| `StreamBarTimespan` | The `bars()` timespans that stream: `SECOND` and `MINUTE`. |
+| `StreamBarTimespan` | The `bars()` timespans with a live stream, at `multiplier=1`. |
 | `FuturesBarTimespan` | The timespans `m.futures.bars()` takes: all but `DAY`. |
 
 Every query also has `columns()`, and each class's docstring describes its methods. Users never

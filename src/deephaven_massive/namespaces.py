@@ -1,8 +1,8 @@
-"""The classes of a session's dataset namespaces, public for type annotations.
+"""The classes of a session's namespaces, such as `m.stocks`, for type annotations.
 
-Each dataset is a method of a namespace on the session, such as `m.stocks.trades`, and each
-namespace is an instance of one class from here. Import a class to annotate code of your own,
-such as a helper that takes `m.stocks` and reads one symbol's trades::
+Each namespace on a session (`m.stocks`, `m.options`, and the rest) is an instance of a class
+from here. Import one to annotate your own code, for example a helper that takes `m.stocks` and
+reads one symbol's trades::
 
     from deephaven.table import Table
 
@@ -36,12 +36,13 @@ such as a helper that takes `m.stocks` and reads one symbol's trades::
 | `Tmx` | `m.partners.tmx` |
 | `Fable` | `m.partners.fable` |
 
-Users never construct a namespace: each session creates its own. Each class's docstring lists
-its datasets, and `dm.datasets()` lists every dataset with its query methods. The classes of
-the queries the methods return are in `deephaven_massive.queries`.
+Users never construct a namespace: each session creates its own. Each class's docstring
+describes its datasets or nested namespaces, and `dm.datasets()` lists every dataset with its
+query methods. The classes of the queries these methods return are in
+`deephaven_massive.queries`.
 
-`import deephaven_massive` does not import this module, so annotating costs nothing until it
-is used. Like the session, it needs a running Deephaven JVM.
+`import deephaven_massive` does not load this module. Importing it needs a running Deephaven
+JVM, as the session does.
 """
 
 from __future__ import annotations

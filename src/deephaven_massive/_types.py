@@ -55,12 +55,11 @@ else:
 
 
 class AllSymbols(Enum):
-    """The type of `dm.ALL`, the "every symbol" sentinel, for annotations.
+    """The type of `dm.ALL`, for annotations.
 
-    Pass `dm.ALL` itself; never construct this class. A one-member enum, so exactly one
-    instance exists: copying or unpickling `dm.ALL` returns the same object, `symbols is dm.ALL`
-    is the reliable test, and the value is immutable and hashable. It is deliberately not a
-    `str`, so it can never be mistaken for a symbol.
+    Pass `dm.ALL` itself; never construct this class. `dm.ALL` is its only instance, even after
+    copying or unpickling, so test for it with `symbols is dm.ALL`. It is not a `str`, so it is
+    never mistaken for a ticker.
     """
 
     ALL = "ALL"
@@ -163,7 +162,7 @@ StreamBarTimespan: TypeAlias = Literal[Timespan.SECOND, Timespan.MINUTE]
 """The bar timespans that have a live stream: `Timespan.SECOND` and `Timespan.MINUTE`.
 
 A `bars()` call with one of them and `multiplier=1` returns a `StreamHistoryQuery`, which has the
-live methods as well as `history()`; any other timespan returns a `HistoryQuery`."""
+`SymbolStreamQuery` methods as well as `history()`; any other call returns a `HistoryQuery`."""
 
 FuturesBarTimespan: TypeAlias = Literal[
     Timespan.SECOND,

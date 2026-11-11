@@ -235,12 +235,15 @@ def _in_package(module: str | None) -> bool:
 class _PublicApiWalk:
     """Walk everything reachable from the public modules and record each private type named.
 
-    A type is private when it is defined in the package and no public module exports it. The walk
-    covers each public name; each public member of each class reached, inherited ones included;
-    each signature and overload, with its parameters, defaults, and return; and each annotated
-    attribute. A class or alias reached through an annotation is walked in turn, so a sub-namespace
-    returned by a property is checked like a top-level one. A parameter whose name starts with an
-    underscore is internal (a constructor's session core), so its type is not checked.
+    A type is private when the package defines it and no public module exports it: a class or
+    function whose `__module__` is a package module, or an alias a package module assigns at
+    its top level. The walk covers each public name; each member of each class reached,
+    inherited ones included: methods, dunders, properties, cached properties, class-level
+    values, and annotated attributes; and each signature and overload, with its parameters,
+    defaults, and return. A class or alias reached through an annotation is walked in turn, so
+    a sub-namespace returned by a property is checked like a top-level one. A constructor
+    parameter whose name starts with an underscore is internal (a namespace's session core),
+    so its type is not checked; on any other method, such a parameter is checked.
     """
 
     def __init__(self, modules: tuple[ModuleType, ...]) -> None:
@@ -251,32 +254,36 @@ class _PublicApiWalk:
         self.findings: set[str] = set()
         self.walked: set[int] = set()
         self.methods: dict[str, int] = {}
-        self._package_values: set[int] = set()
-        self._foreign_values: set[int] = set()
+        self._aliases: set[int] = set()
         for name, loaded in list(sys.modules.items()):
-            # An entry can be None at run time (a blocked import), whatever its annotation says.
-            namespace: dict[str, object] = getattr(loaded, "__dict__", {})
-            values = self._package_values if _in_package(name) else self._foreign_values
-            values.update(id(value) for value in namespace.values())
+            if _in_package(name) and getattr(loaded, "__file__", None):
+                namespace = dict(vars(loaded))
+                self._aliases.update(
+                    id(namespace[assigned])
+                    for assigned in _top_level_assignments(loaded)
+                    if assigned in namespace and typing.get_origin(namespace[assigned]) is not None
+                )
         for module in modules:
             for name in module.__all__:
-                self.check_object(getattr(module, name), f"{module.__name__}.{name}")
+                self.check_object(getattr(module, name), f"{module.__name__}.{name}", name)
 
     def defined_here(self, obj: object) -> bool:
-        """Say whether `obj` is a class, function, or alias the package defines.
+        """Say whether the package defines `obj`.
 
         Returns:
-            True when a package module defines it: by `__module__` for a class or function, and
-            for an alias by being bound in a package module and in no other module.
+            True for a class or function whose `__module__` is a package module, and for a
+            typing construct (a union or `Literal`) a package module assigns at its top level.
         """
-        if isinstance(obj, Enum):
-            obj = type(obj)
         if inspect.isclass(obj) or inspect.isroutine(obj):
             return _in_package(getattr(obj, "__module__", None))
-        return id(obj) in self._package_values and id(obj) not in self._foreign_values
+        return id(obj) in self._aliases
 
-    def check_object(self, obj: object, where: str) -> None:
-        """Record `obj` if it is private, and walk what it names."""
+    def check_object(self, obj: object, where: str, name: str | None = None) -> None:
+        """Record `obj` if it is private, under the name the annotation used, and walk it."""
+        if isinstance(obj, list | tuple):
+            for item in obj:
+                self.check_object(item, where)
+            return
         if inspect.ismodule(obj) or isinstance(
             obj, TypeVar | ParamSpec | ParamSpecArgs | ParamSpecKwargs
         ):
@@ -288,7 +295,7 @@ class _PublicApiWalk:
                 self.check_object(arg, where)
             return
         if id(obj) not in self.public:
-            self.findings.add(f"{where}: {getattr(obj, '__qualname__', obj)!r}")
+            self.findings.add(f"{where}: {name or getattr(obj, '__qualname__', repr(obj))}")
         if id(obj) in self.walked:
             return
         self.walked.add(id(obj))
@@ -298,29 +305,25 @@ class _PublicApiWalk:
         elif inspect.isroutine(obj):
             self.check_callable(obj, sys.modules[obj.__module__], where)
         elif typing.get_args(obj):
-            for arg in typing.get_args(obj):
-                self.check_object(arg, where)
+            self.check_object(typing.get_args(obj), where)
         else:
             self.check_object(type(obj), where)
 
     def walk_class(self, cls: type, where: str) -> None:
-        """Check each public member of `cls`, inherited ones included."""
+        """Check each member of `cls` a package class defines, inherited ones included."""
         for name in dir(cls):
-            if name.startswith("_") and name not in _PUBLIC_DUNDERS:
-                continue
             owner = next((klass for klass in cls.__mro__ if name in vars(klass)), None)
             if owner is None or not _in_package(owner.__module__):
                 continue
-            member = vars(owner)[name]
-            module = sys.modules[owner.__module__]
-            path = f"{where}.{name}"
-            if isinstance(member, property):
-                if member.fget is not None:
-                    self.check_callable(member.fget, module, path)
-            elif isinstance(member, staticmethod | classmethod):
-                self.check_callable(member.__func__, module, path)
-            elif inspect.isfunction(member):
-                self.check_callable(member, module, path)
+            is_dunder = name.startswith("__") and name.endswith("__")
+            if name.startswith("_") and not is_dunder:
+                continue
+            self.check_member(
+                vars(owner)[name],
+                sys.modules[owner.__module__],
+                f"{where}.{name}",
+                is_dunder=is_dunder,
+            )
         for klass in cls.__mro__:
             if _in_package(klass.__module__):
                 for name, annotation in inspect.get_annotations(klass).items():
@@ -329,6 +332,22 @@ class _PublicApiWalk:
                             annotation, sys.modules[klass.__module__], f"{where}.{name}"
                         )
 
+    def check_member(
+        self, member: object, module: ModuleType, path: str, *, is_dunder: bool
+    ) -> None:
+        """Check one member a package class defines: a method, a property, or a value."""
+        if isinstance(member, property):
+            if member.fget is not None:
+                self.check_callable(member.fget, module, path)
+        elif isinstance(member, functools.cached_property):
+            self.check_callable(member.func, module, path)
+        elif isinstance(member, staticmethod | classmethod):
+            self.check_callable(member.__func__, module, path)
+        elif inspect.isfunction(member):
+            self.check_callable(member, module, path)
+        elif not is_dunder:
+            self.check_object(type(member), path)
+
     def check_callable(
         self, function: Callable[..., object], module: ModuleType, where: str
     ) -> None:
@@ -336,10 +355,13 @@ class _PublicApiWalk:
         function = inspect.unwrap(function)
         variants = [function, *typing.get_overloads(function)]
         self.methods[where] = len(variants) - 1
+        constructor = where.endswith(".__init__")
         for variant in variants:
             signature = inspect.signature(variant)
             for parameter in signature.parameters.values():
-                if parameter.name.startswith("_") or parameter.name in {"self", "cls"}:
+                if parameter.name in {"self", "cls"}:
+                    continue
+                if constructor and parameter.name.startswith("_"):
                     continue
                 self.check_annotation(parameter.annotation, module, f"{where}({parameter.name})")
                 if parameter.default is not inspect.Parameter.empty:
@@ -355,14 +377,37 @@ class _PublicApiWalk:
             return
         names = _annotation_namespace(module)
         for node in ast.walk(ast.parse(annotation, mode="eval")):
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                head = _resolve(names, node.value.id, where)
-                if inspect.ismodule(head):
-                    self.check_object(getattr(head, node.attr), where)
-            elif isinstance(node, ast.Name):
-                obj = _resolve(names, node.id, where)
-                if not inspect.ismodule(obj):
-                    self.check_object(obj, where)
+            if isinstance(node, ast.Name | ast.Attribute):
+                self.check_object(_resolve(names, node, where), where, ast.unparse(node))
+
+
+def _top_level_assignments(module: ModuleType) -> frozenset[str]:
+    """Return the names a module assigns at its top level, such as a type alias.
+
+    Returns:
+        Each name an assignment statement at the module's top level binds.
+    """
+    return _assignments_in(inspect.getsource(module))
+
+
+@functools.cache
+def _assignments_in(source: str) -> frozenset[str]:
+    """Return the names the top-level assignment statements of `source` bind.
+
+    Returns:
+        The names.
+    """
+    names: set[str] = set()
+    for node in ast.parse(source).body:
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return frozenset(names)
 
 
 def _annotation_namespace(module: ModuleType) -> dict[str, object]:
@@ -395,10 +440,20 @@ def _type_checking_namespace(module: ModuleType) -> dict[str, object]:
     return names
 
 
-def _resolve(names: dict[str, object], name: str, where: str) -> object:
-    """Return what `name` means in an annotation, failing on a name nothing defines."""
-    assert name in names, f"{where}: the annotation names {name!r}, which nothing defines"
-    return names[name]
+def _resolve(names: dict[str, object], node: ast.expr, where: str) -> object:
+    """Return what a name or dotted name in an annotation means.
+
+    Returns:
+        The object, found through each attribute of a dotted name in turn.
+
+    Raises:
+        AssertionError: If nothing defines the name.
+    """
+    if isinstance(node, ast.Attribute):
+        return getattr(_resolve(names, node.value, where), node.attr)
+    assert isinstance(node, ast.Name), f"{where}: an annotation holds {ast.unparse(node)!r}"
+    assert node.id in names, f"{where}: the annotation names {node.id!r}, which nothing defines"
+    return names[node.id]
 
 
 def _walk_public_api() -> _PublicApiWalk:
@@ -432,64 +487,86 @@ class _Hidden:
 _Hidden.__module__ = "deephaven_massive._session"
 
 
-# Each planted annotation is text the walk resolves in `_session`, as `from __future__ import
-# annotations` leaves the library's own: the names are not defined in this file.
-def _private_return(self: object) -> None:
-    raise NotImplementedError
+def _planted(annotations: dict[str, str], *parameters: str) -> Callable[..., object]:
+    """Return a method whose annotations are text resolved in `_session`, as the library's are.
 
+    Returns:
+        A method taking `self` and `parameters`, annotated with `annotations`.
+    """
 
-_private_return.__annotations__ = {"return": "SessionCore"}
+    def method(self: object, *args: object) -> object:
+        raise NotImplementedError
 
-
-def _private_alias_parameter(self: object, span: object) -> None:
-    raise NotImplementedError
-
-
-_private_alias_parameter.__annotations__ = {"span": "PrivateSpan", "return": "None"}
+    method.__signature__ = inspect.Signature(  # type: ignore[attr-defined]  # read by inspect
+        [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        + [
+            inspect.Parameter(
+                name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotations[name]
+            )
+            for name in parameters
+        ],
+        return_annotation=annotations.get("return", inspect.Signature.empty),
+    )
+    return method
 
 
 def _private_default(self: object, value: object = _Hidden()) -> None:
     raise NotImplementedError
 
 
-def _undefined_name(self: object) -> None:
-    raise NotImplementedError
-
-
-_undefined_name.__annotations__ = {"return": "NoSuchName"}
-
-
 @pytest.mark.parametrize(
     ("member", "finding"),
     [
-        (property(_private_return), "deephaven_massive.MassiveSession.planted ->: 'SessionCore'"),
-        (_private_alias_parameter, "deephaven_massive.MassiveSession.planted(span): "),
-        (_private_default, "deephaven_massive.MassiveSession.planted(value=): '_Hidden'"),
+        (property(_planted({"return": "SessionCore"})), "planted ->: SessionCore"),
+        (
+            functools.cached_property(_planted({"return": "SessionCore"})),
+            "planted ->: SessionCore",
+        ),
+        (_planted({"span": "NormalizedSymbols"}, "span"), "planted(span): NormalizedSymbols"),
+        (_planted({"_core": "SessionCore"}, "_core"), "planted(_core): SessionCore"),
+        (
+            _planted({"return": "planted_tables.session_core.SessionCore"}),
+            "planted ->: planted_tables.session_core.SessionCore",
+        ),
+        (_private_default, "planted(value=): _Hidden"),
+        (_Hidden(), "planted: _Hidden"),
     ],
 )
 def test_the_walk_finds_a_private_type_planted_in_a_public_class(
     monkeypatch: pytest.MonkeyPatch, member: object, finding: str
 ) -> None:
     session_module = importlib.import_module("deephaven_massive._session")
-    monkeypatch.setattr(
-        session_module, "PrivateSpan", typing.Literal[dm.Timespan.SECOND], raising=False
-    )
+    alias = importlib.import_module("deephaven_massive._datasets.symbols").NormalizedSymbols
+    monkeypatch.setattr(session_module, "NormalizedSymbols", alias, raising=False)
+    # A test module that imports a private alias does not make it look foreign.
+    monkeypatch.setattr(sys.modules[__name__], "NormalizedSymbols", alias, raising=False)
+    tables = importlib.import_module("deephaven_massive._tables")
+    monkeypatch.setattr(session_module, "planted_tables", tables, raising=False)
     monkeypatch.setattr(session_module.MassiveSession, "planted", member, raising=False)
     walk = _walk_public_api()
-    assert [found for found in walk.findings if found.startswith(finding)] != []
+    assert f"deephaven_massive.MassiveSession.{finding}" in walk.findings
+
+
+def test_a_constructor_skips_its_underscore_parameters() -> None:
+    # `_core` of a namespace's constructor is a private `SessionCore`, and nothing is reported.
+    walk = _walk_public_api()
+    assert "deephaven_massive.namespaces.Stocks.__init__" in walk.methods
+    assert walk.findings == set()
 
 
 def test_the_walk_finds_a_private_type_inside_a_public_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queries = importlib.import_module("deephaven_massive.queries")
-    monkeypatch.setattr(queries, "Symbols", str | _Hidden)
+    alias = importlib.import_module("deephaven_massive._datasets.symbols").NormalizedSymbols
+    monkeypatch.setattr(queries, "Symbols", alias)
     walk = _walk_public_api()
-    assert "deephaven_massive.queries.Symbols: '_Hidden'" in walk.findings
+    assert "deephaven_massive.queries.Symbols: SymbolTable" in walk.findings
 
 
 def test_the_walk_fails_on_a_name_nothing_defines(monkeypatch: pytest.MonkeyPatch) -> None:
     session_module = importlib.import_module("deephaven_massive._session")
-    monkeypatch.setattr(session_module.MassiveSession, "planted", _undefined_name, raising=False)
+    planted = _planted({"return": "NoSuchName"})
+    monkeypatch.setattr(session_module.MassiveSession, "planted", planted, raising=False)
     with pytest.raises(AssertionError, match="names 'NoSuchName', which nothing defines"):
         _walk_public_api()
