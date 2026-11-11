@@ -634,10 +634,10 @@ class SharedStreams:
                     spec, request, channel, stream_id=stream_id
                 )
             with self._lock:
+                closed = core.closed  # before the store, which `stored` must follow at once
                 state = self._streams[stream_id]
                 row = replace(state.row, host=opened.host, path=opened.path, recency=opened.recency)
                 self._streams[stream_id] = replace(state, handle=opened, row=row)
-                closed = core.closed  # read before the store: no checkpoint after it
                 stored = True  # from here on, releasing the opener's hold releases the stream
                 self._diagnostics.write(row)
                 if state.shut_down and opened.stop_watch is not None:

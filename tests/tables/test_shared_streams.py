@@ -50,6 +50,7 @@ from deephaven_massive._tables.liveness import (
     ResultRegistry,
     make_result,
     new_scope,
+    release_scope,
 )
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamHandle
@@ -683,7 +684,7 @@ def test_close_during_an_open_writes_no_row_for_the_opening_stream(
         assert isinstance(opener.exception(TIMEOUT), dm.MassiveError)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert dh_arrow.to_arrow(streams).to_pylist() == []  # m.streams() has no OPENING state
-    keeper.release()
+    release_scope(core.exec_ctx, keeper)
 
 
 # --- Record lifetime: holds and the shutdown callback, in any order --------------------------
@@ -793,7 +794,7 @@ def test_record_lifetime_in_any_order(
                 assert core.streams._streams[1].row.state.value == state, event
                 assert core.streams._streams[1].shut_down is shut, event
         assert written == ([(1, state)] if expect_row else []), event
-    user_scope.release()
+    release_scope(core.exec_ctx, user_scope)
     del derived
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     assert core.streams._streams == {}
@@ -1017,7 +1018,7 @@ def test_a_failure_after_the_last_release_is_shown(
     assert len(fake_streams.opened) == 2
     assert list(fake_streams.shutdown) == [1, 2]  # the new verb opened stream 2
     massive_session.release(again)
-    user_scope.release()
+    release_scope(massive_session._core.exec_ctx, user_scope)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     # The stream has shut down and left the registry: a failure now is only logged.
     massive_session._core.fail_stream(1, "later")
