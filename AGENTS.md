@@ -132,8 +132,10 @@ These protect the owner's repository, money, and secrets.
   and telling the user clearly what happened. So:
   - **Massive's answer is the error.** The library sends the request and reports Massive's
     refusal as Massive's (its status and text), naming the call that caused it; it never
-    reinterprets or guesses. A ticker Massive has no data for is reported, never a silent
-    empty table.
+    reinterprets or guesses. A ticker Massive has no data for is not an error: it gives no
+    rows, as Massive answered, and `m.symbol_reads()` shows it; the library never looks a
+    ticker up to second-guess it. Users check Massive's lists (`m.reference.tickers()`,
+    `m.options.contracts()`, `m.futures.contracts()`).
   - **The library refuses a value itself only** when it is the wrong Python type, when the
     library cannot express it in a request, or when sending it would return wrong data with no
     error (each such check says which, with its evidence). It never encodes the shape of
