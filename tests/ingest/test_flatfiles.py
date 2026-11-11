@@ -720,8 +720,8 @@ def test_a_malformed_line_fails_the_read_under_raise(
 def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The last chunks hold only lines that are not UTF-8 text: no block follows them, so the
-    # read fails once the file ends.
+    # The last chunks hold only lines that are not UTF-8 text and no row: each still hands on
+    # an empty block, so the read fails at the first of them.
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
     monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
     good = "".join(trade(n, 1741012200000000000 + n) for n in range(1, 21)).encode()

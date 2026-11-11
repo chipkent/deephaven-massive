@@ -1422,7 +1422,7 @@ class FlatFileHistory:
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
         read again is counted once. A file with malformed lines (not UTF-8 text, or not the
-        header's fields) follows `MassiveConfig.malformed_rows` (`_malformed`): under `LOG`, it
+        header's fields) follows `MassiveConfig.malformed_rows` (`_log_malformed`): under `LOG`, it
         logs one WARNING with their count and the first one's row number and fault
         (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
         one DEBUG line with the rows after each step: read, of the requested symbols, kept by
@@ -1442,8 +1442,8 @@ class FlatFileHistory:
 
         Raises:
             RowDataError: Under `malformed_rows=RAISE`, at the first block handed on after the
-                file's first malformed line, or once the file is read when no block came after
-                it (`_malformed_message`).
+                file's first malformed line (`_malformed_message`); every chunk hands on one,
+                so a run of such lines fails the read before the file ends.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
@@ -1476,7 +1476,7 @@ class FlatFileHistory:
                 tables.append(_convert(pending, transform))
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
-            _malformed(transform.dataset, file, setting)
+            _log_malformed(transform.dataset, file, setting)
         logger.debug(
             "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
             "whole bars",
@@ -1490,24 +1490,18 @@ class FlatFileHistory:
         return tables
 
 
-def _malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
-    """Apply `MassiveConfig.malformed_rows` to a file read to its end with malformed lines.
+def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
+    """Log the malformed lines of a file read to its end, under `malformed_rows` `LOG` or `IGNORE`.
 
-    The log line gives the lines' count and the first one's row number and fault
-    (`FlatFile.malformed_reason`), never a line's text.
+    The line gives the lines' count and the first one's row number and fault
+    (`FlatFile.malformed_reason`), never a line's text. Under `RAISE`, the read failed at the
+    first block after such a line, so no file with one is read to its end.
 
     Args:
         dataset: The dataset read, such as `stocks.trades`.
         file: The file, with at least one malformed line.
-        setting: The session's `malformed_rows`.
-
-    Raises:
-        RowDataError: Under `OnError.RAISE` (`_malformed_message`). `_gather` raises it at the
-            first block handed on after such a line; here, the file's last chunks held the
-            lines and no row after them, so no block did.
+        setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
     """
-    if setting is OnError.RAISE:
-        raise RowDataError(_malformed_message(dataset, file))
     logger.log(
         logging.WARNING if setting is OnError.LOG else logging.DEBUG,
         "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",

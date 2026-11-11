@@ -936,6 +936,32 @@ def test_a_chunk_of_lines_that_are_not_utf8_is_skipped_and_numbered_in_the_file(
     assert file.malformed_reason == "row 41 after the header is not UTF-8 text"
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param(lambda n: _trade_line(n, ticker=b"\xff"), id="not-utf8"),
+        pytest.param(lambda n: b"SECRET,%d,%s\n" % (n, b"x" * 40), id="wrong-field-count"),
+    ],
+)
+def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(bad: Callable[[int], bytes]) -> None:
+    # The consumer checks for cancellation, and for a skipped line, after every batch: a run of
+    # chunks with no row left must not leave it waiting for the file's end.
+    lines = b"".join(bad(n) for n in range(40))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + lines))
+    seen = []
+
+    def consume() -> None:
+        with file:
+            for batch, _ in file.batches(read):
+                seen.append((batch.num_rows, file.malformed_lines))
+
+    with pytest.raises(WireError, match="every one of its 40 lines is malformed"):
+        consume()
+    assert len(seen) > 1
+    assert all(rows == 0 and skipped for rows, skipped in seen)
+
+
 def test_a_file_whose_every_line_is_not_utf8_fails(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:

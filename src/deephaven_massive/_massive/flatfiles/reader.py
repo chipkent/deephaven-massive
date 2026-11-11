@@ -530,23 +530,26 @@ class FlatFile:
             options: How Arrow reads the file's rows: its read and convert options.
 
         Returns:
-            What `_apply` returns for each block with the block's row count, the rows Arrow
-            read, and the lines skipped.
+            What `_apply` returns for each block with the block's row count, or one empty
+            block when the chunk has no row left, so the consumer still checks for cancellation
+            and sees the chunk's skipped lines; the rows Arrow read; and the lines skipped.
         """
         read_options, convert_options = options
         malformed = _Malformed()
         if not _is_text(chunk):
             chunk = _text_lines(chunk, malformed)
-            if not chunk:  # every line was removed, and Arrow refuses an empty body
-                return [], 0, malformed
-        table = pacsv.read_csv(
-            pa.py_buffer(chunk),
-            read_options=read_options,
-            parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
-            convert_options=convert_options,
-        )
-        blocks = [(*self._apply(block, plan), block.num_rows) for block in table.to_batches()]
-        return blocks, table.num_rows, malformed
+        blocks = []
+        rows = 0
+        if chunk:  # Arrow refuses an empty body: every line was removed
+            table = pacsv.read_csv(
+                pa.py_buffer(chunk),
+                read_options=read_options,
+                parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
+                convert_options=convert_options,
+            )
+            blocks = [(*self._apply(b, plan), b.num_rows) for b in table.to_batches()]
+            rows = table.num_rows
+        return blocks or [(_empty(plan), DriftReport(), 0, 0)], rows, malformed
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
         """Read and parse the file's header line, and require the plan's key headers.
