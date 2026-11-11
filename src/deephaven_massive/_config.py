@@ -422,9 +422,9 @@ class MassiveConfig:
               per file with the count of such lines and the first one's row number. The warning
               never quotes the line.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes `history()` raise `MassiveError` at the first such line,
-              naming the file and the row. A `history()` of a live table instead marks every
-              symbol of the read `FAILED` in `m.symbol_reads()`.
+            - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
+              first such line's row. A `history()` of a live table instead marks every symbol
+              of the read `FAILED` in `m.symbol_reads()`.
 
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.
