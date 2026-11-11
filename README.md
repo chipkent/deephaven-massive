@@ -216,7 +216,7 @@ from deephaven import agg
 
 m = dm.MassiveSession()
 year = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
-    "2025-11-03", "2026-10-30"
+    "2025-11-03", "2026-10-30", wait=False
 )
 returns = year.agg_by(
     [agg.sorted_first("Date", "Start = Close"), agg.sorted_last("Date", "End = Close")],
@@ -225,7 +225,10 @@ returns = year.agg_by(
 ```
 
 `returns` has one row per stock, with its close on the first and last day and its percent
-return.
+return. It starts empty and fills in when the download finishes.
+
+With `wait=False`, `history()` hands back `year` at once and reads its rows in the background,
+so the console stays free while Basic's request limit paces the download.
 
 Dates are `yyyy-MM-dd` text in every table, so they sort by day and join across tables. A range
 includes both of its dates, and for stocks a date is the trading day in New York.

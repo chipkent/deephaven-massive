@@ -320,9 +320,11 @@ def _check_history_examples(
     assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
     assert len(table_rows(market["busiest"])) == 20
 
-    returns = table_rows(ran["compare-stocks"]["returns"])
-    evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}")
-    assert _symbols(returns) == _STOCKS
+    compared = ran["compare-stocks"]["returns"]  # read in the background (wait=False)
+    filled = _wait(lambda: _symbols(table_rows(compared)) == _STOCKS, _FILL_WAIT)
+    returns = table_rows(compared)
+    evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}, filled: {filled}")
+    assert filled, f"Example 3's returns did not fill within {_FILL_WAIT:.0f} s"
 
     nvda = table_rows(ran["chart-closes"]["nvda"])
     evidence(f"example 4: {len(nvda)} daily bars of NVDA")
