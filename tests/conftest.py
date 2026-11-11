@@ -1,9 +1,9 @@
 """Test-suite configuration: the embedded Deephaven JVM and the shared fixtures.
 
-The embedded server starts in `pytest_configure`, before collection, so test modules can import
-`deephaven` at module level, exactly as the library does. This module itself is imported
-before `pytest_configure` runs, so it reaches `deephaven` only through `importlib` inside
-fixtures, never through a module-level import.
+The embedded server is started by the `-p` plugin `tests/embedded_server.py`, which pytest
+imports before this module, so this module and every test module can import `deephaven` and the
+library at module level, exactly as users do; `pytest_configure` checks the server before
+collection.
 
 Test modules never import from this file; they request its fixtures by name. Fakes from
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
@@ -51,7 +51,6 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
-from deephaven_server import Server
 
 from deephaven_massive._errors import EntitlementError, MassiveError
 from deephaven_massive._massive import (
@@ -80,6 +79,7 @@ from tests._live import (
     week_windows,
 )
 from tests._live.live_run import stream_units
+from tests.embedded_server import CYCLE_MILLIS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
@@ -100,81 +100,27 @@ if TYPE_CHECKING:
 
 _DATA_DIR = Path(__file__).parent / "data"
 
-_CYCLE_MILLIS = 25
-"""The update-graph cycle of the test JVM, in milliseconds (Deephaven's default is 1000)."""
 
-_JVM_ARGS = [
-    "-Xmx2g",
-    # A short update-graph cycle keeps ticking-table tests fast. pytest_configure checks that
-    # the JVM applied it: an unknown property is silently ignored.
-    f"-DPeriodicUpdateGraph.targetCycleDurationMillis={_CYCLE_MILLIS}",
-    # A JVM crash writes its hs_err log to the repository root, where CI collects it, instead
-    # of the working directory or, if that is not writable, the temporary directory.
-    f"-XX:ErrorFile={Path(__file__).resolve().parent.parent}/hs_err_pid%p.log",
-]
+def pytest_configure() -> None:
+    """Check the embedded Deephaven server before collection, and set up the run's records.
 
-
-def _is_xdist_controller(config: pytest.Config) -> bool:
-    """Tell whether this process hands tests to pytest-xdist workers instead of running them.
-
-    The first part is xdist's own condition for starting its distributed session: a
-    distribution mode other than `no` and at least one worker (`-n 0` leaves none), in a run
-    that is more than `--collect-only`, under which xdist stays out entirely. Under `--fixtures`
-    and `--fixtures-per-test` xdist does start its workers, but pytest lists the fixtures by
-    collecting the tests in the main process itself, which imports the test modules and so
-    needs a JVM; such a run counts as no controller here. Workers carry `workerinput`.
-
-    Args:
-        config: The pytest configuration.
-
-    Returns:
-        True only in the xdist controller of a distributed run.
-    """
-    option = config.option
-    return (
-        getattr(option, "dist", "no") != "no"
-        and bool(getattr(option, "tx", None))
-        and not option.collectonly
-        and not option.showfixtures
-        and not option.show_fixtures_per_test
-        and not hasattr(config, "workerinput")
-    )
-
-
-# `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
-# `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
-# faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
-# Started first, the JVM's handlers would be replaced and the first such signal would kill
-# the process.
-@pytest.hookimpl(trylast=True)
-def pytest_configure(config: pytest.Config) -> None:
-    """Start the embedded Deephaven server once per process, before collection.
-
-    Then check that the update graph runs the 25 ms cycle the tests are written for. Under
-    pytest-xdist (`-n`), only the worker processes start a server.
-
-    Args:
-        config: The pytest configuration, read to tell an xdist controller from a worker.
+    The `-p` plugin `tests/embedded_server.py` has already started the server, in every
+    process of the run. This checks that the update graph runs the cycle the tests are written
+    for, then records Deephaven's fatal errors (`_record_jvm_fatal_errors`) and the library's
+    liveness-scope releases made without the update graph's lock
+    (`_record_unlocked_library_releases`).
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
-    # The xdist controller only hands tests to its workers and reports their results; it never
-    # imports a test module or runs a test. Each worker is its own process that runs this hook
-    # and starts its own JVM, so a JVM in the controller would cost only startup time and
-    # memory.
-    if _is_xdist_controller(config):
-        return
-    # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
-    Server(port=0, jvm_args=_JVM_ARGS).start()
     atexit.register(_final_jvm_exit)
     jpy = importlib.import_module("jpy")
     execution_context = importlib.import_module("deephaven.execution_context")
     periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
     j_update_graph = execution_context.get_exec_ctx().update_graph.j_update_graph
     cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
-    if cycle != _CYCLE_MILLIS:
-        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
+    if cycle != CYCLE_MILLIS:
+        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {CYCLE_MILLIS} ms")
     _record_jvm_fatal_errors()
     _record_unlocked_library_releases()
 

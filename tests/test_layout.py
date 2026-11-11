@@ -14,8 +14,9 @@ pytest collects a test module wherever it lies, so one inside a helper package m
 mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
 `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
-The only other test files that mirror no module are `conftest.py`, this file, and
-`test_docs.py`, all at the top of `tests/`. Fixtures under `tests/data/` follow the test
+The only other test files that mirror no module are `conftest.py`, `embedded_server.py` (the
+`-p` plugin that starts the test JVM), this file, and `test_docs.py`, all at the top of
+`tests/`. Fixtures under `tests/data/` follow the test
 paths, so none of their directories starts with `_` either.
 
 The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
@@ -113,7 +114,8 @@ _DATA = _TESTS / "data"
 # Test files that mirror no source module. A new entry needs owner approval.
 APPROVED_EXCEPTIONS = frozenset(
     {
-        PurePosixPath("conftest.py"),  # embedded JVM and fixtures
+        PurePosixPath("conftest.py"),  # embedded JVM checks and fixtures
+        PurePosixPath("embedded_server.py"),  # the -p plugin that starts the embedded JVM
         PurePosixPath("test_layout.py"),  # this file
         PurePosixPath("test_docs.py"),  # the user docs: README.md and the docstrings' links
     }
@@ -2327,10 +2329,8 @@ def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: s
     # The refusal reads the tests a worker selected, whatever `-m` expression selected them,
     # and ends the run before the controller hands out any test. `CI` and the missing key
     # are a second guard: a live test that did start would skip before reaching Massive. The
-    # controller starts no JVM: only the workers' output would say "Server started", and
-    # xdist does not pass it on. The `-m` option goes through PYTEST_ADDOPTS, which pytest
-    # reads after the configured `addopts`, so it replaces the default expression as a
-    # command-line `-m` would.
+    # `-m` option goes through PYTEST_ADDOPTS, which pytest reads after the configured
+    # `addopts`, so it replaces the default expression as a command-line `-m` would.
     env = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
     env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option}
     result = subprocess.run(
@@ -2357,7 +2357,6 @@ def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: s
     assert "live tests run in one process" in output
     assert "tests/datasets/test_timestamps_integration.py::" in output
     assert "no tests ran" in output
-    assert "Server started" not in output
 
 
 _NETWORK_BLOCK = """
