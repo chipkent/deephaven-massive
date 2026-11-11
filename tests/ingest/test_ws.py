@@ -596,7 +596,7 @@ def test_a_row_received_while_a_stream_opens_reaches_its_first_result(
     # arrive after it exists. This test thread holds no update-graph lock, as a script's does
     # not, so the cycles run.
     core = ws_session.session._core
-    check = core._require_unfailed
+    check = core.streams._require_unfailed
 
     def row_first(spec: DatasetSpec, stream_id: int) -> None:
         ws_session.subscribed("T.AAPL")
@@ -604,7 +604,7 @@ def test_a_row_received_while_a_stream_opens_reaches_its_first_result(
         cycles_passed(ws_session, 2)
         check(spec, stream_id)
 
-    monkeypatch.setattr(core, "_require_unfailed", row_first)
+    monkeypatch.setattr(core.streams, "_require_unfailed", row_first)
     latest = ws_session.query(TRADES, ["AAPL"]).last_by()
     rows_when(latest, lambda rows: [(r["Symbol"], r["Price"]) for r in rows] == [("AAPL", 3.0)])
     ws_session.session.release(latest)
@@ -759,7 +759,7 @@ def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_follow
 
 def stream_blink(ws_session: WsSession) -> Table:
     # The blink table of the session's only stream, which no result exposes.
-    (state,) = ws_session.session._core._streams.values()
+    (state,) = ws_session.session._core.streams._streams.values()
     assert state.handle is not None
     return state.handle.blink
 
@@ -992,7 +992,7 @@ def test_a_failing_shutdown_is_logged(
     def broken(stream_id: int) -> None:
         raise RuntimeError(f"registry {stream_id}")
 
-    monkeypatch.setattr(ws_session.session._core, "stream_shut_down", broken)
+    monkeypatch.setattr(ws_session.session._core.streams, "shut_down", broken)
     ws_session.connections._shut_down(42)
     assert "the shutdown of stream 42 failed" in caplog.text
 
@@ -1050,7 +1050,7 @@ def test_stress_concurrent_verbs_and_releases(ws_session: WsSession) -> None:
     connection = ws_session.connection()
     assert ws_session.on_loop(connection, lambda: connection.subscriptions.wanted) is False
     assert connection.leases == 0
-    wait_for(lambda: core._streams == {})
+    wait_for(lambda: core.streams._streams == {})
 
 
 # --- Edge cases of the connection's callbacks -------------------------------------------------
