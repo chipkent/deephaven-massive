@@ -402,6 +402,8 @@ class _Result:
             a call that waited, and once settled (`_call_time_outcome`).
         awaits_call_time: True from the start of a call that did not wait until the watch's
             first set of symbols arrives.
+        call_time_open: How many symbols of `call_time` have not failed yet, so each outcome
+            updates the check in constant time.
     """
 
     read: FollowedRead
@@ -419,6 +421,7 @@ class _Result:
     shown: object = None
     call_time: dict[str, MassiveError | None] | None = None
     awaits_call_time: bool = False
+    call_time_open: int = 0
 
 
 def _now_ns() -> int:
@@ -797,6 +800,7 @@ class FollowCoordinator:
             if result.awaits_call_time:
                 result.awaits_call_time = False
                 result.call_time = dict.fromkeys(sorted(message.symbols)) or None
+                result.call_time_open = len(message.symbols)
         else:
             added, removed = message.added, message.removed
         result.decided_at_step = max(result.decided_at_step, message.step)
@@ -1136,18 +1140,11 @@ class FollowCoordinator:
                 name,
             )
             return
-        pending[name] = error
-        self._call_time_settled(result)
-
-    def _call_time_settled(self, result: _Result) -> None:
-        """Fail the table if every call-time symbol still in it has failed.
-
-        Args:
-            result: The result's state, whose `call_time` is not None.
-        """
-        pending = cast("dict[str, MassiveError | None]", result.call_time)
-        if any(error is None for error in pending.values()):
+        pending[name] = error  # final: the symbol's next outcome needs a re-add, which drops it
+        result.call_time_open -= 1
+        if result.call_time_open:
             return
+        # Every call-time symbol still in the table has failed.
         result.call_time = None
         first = next(iter(pending.values()))
         logger.debug(

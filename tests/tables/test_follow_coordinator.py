@@ -14,7 +14,8 @@ import gc
 import logging
 import threading
 import weakref
-from collections.abc import Callable, Mapping
+from collections import UserDict
+from collections.abc import Callable, Mapping, ValuesView
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -1871,6 +1872,9 @@ class _QuietRead:
     def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
         raise AssertionError(names, stop)  # the pool has stopped: nothing is read
 
+    def fail_table(self, error: MassiveError) -> None:
+        self.failed = error
+
     def publish(
         self, name: str, seq: int, table: object, *, decided_at_step: int, parts_before: int
     ) -> int:
@@ -1883,6 +1887,46 @@ def _stopped_pool() -> ReadPool:
     pool = ReadPool("stopped", 1)
     pool.stop()
     return pool
+
+
+class _CountedScans(UserDict[str, MassiveError | None]):
+    # The call-time symbols' failures, counting each pass over them.
+    scans = 0
+
+    @override
+    def values(self) -> ValuesView[MassiveError | None]:
+        _CountedScans.scans += 1
+        return super().values()
+
+
+def test_the_call_time_check_does_not_rescan_its_symbols(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: each final failure scanned every call-time symbol, so a plan without the
+    # dataset failing 20,000 symbols in name order cost 20,000 passes over a growing prefix.
+    count = 2_000
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "scan test", _stopped_pool())
+    read = _QuietRead()
+    handle = coordinator._handle
+    names = [f"S{i:04}" for i in range(count)]
+    handle([follow_coordinator._Follow(cast("FollowedRead", read), None)])
+    result = coordinator._results[id(read)]
+    handle([follow_coordinator._Baseline(cast("FollowedRead", read), frozenset(names), 1)])
+    counted = _CountedScans(cast("dict[str, MassiveError | None]", result.call_time))
+    result.call_time = cast("dict[str, MassiveError | None]", counted)
+    monkeypatch.setattr(_CountedScans, "scans", 0)
+    for name in names:
+        outcome = refused(403, f"{name} not in the plan")
+        handle([follow_coordinator._Began(cast("FollowedRead", read), {name: 1})])
+        handle(
+            [
+                follow_coordinator._Outcome(
+                    cast("FollowedRead", read), {name: 1}, {name: outcome}, 0, 0.0
+                )
+            ]
+        )
+    assert str(read.failed) == "HTTP 403: S0000 not in the plan"
+    assert _CountedScans.scans <= 1
 
 
 def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
