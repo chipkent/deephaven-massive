@@ -14,8 +14,10 @@
 # count; pre-commit hides unstaged edits to tracked files while the hook runs.
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
 # workers; when CI would not, full runs only the documentation tests if a user page, an image
-# under docs/, or the tester guide changed, and no tests otherwise. It prints the scope it
-# chose and why.
+# under docs/, an API reference page, the site configuration, or the tester guide changed, and
+# no tests otherwise. It also builds the documentation site in strict mode, in an environment
+# of its own (.venv-site), when one of the site's sources changed, as CI's site job does. It
+# prints the scope it chose and why.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
 # failing step and exits non-zero.
@@ -83,11 +85,12 @@ step "mypy" uv run mypy src tests scripts
 
 if [[ "$tier" == "full" ]]; then
     scope=full
+    site=site
     if ((all)); then
-        echo "check.sh: scope full: --all runs the whole suite"
+        echo "check.sh: scope full: --all runs the whole suite and builds the documentation site"
     else
         step "check_scope.py doctests" uv run python -m doctest scripts/check_scope.py
-        scope=$(uv run python scripts/check_scope.py)
+        read -r scope site <<< "$(uv run python scripts/check_scope.py)"
     fi
     case "$scope" in
         # -n stays out of addopts, so a plain `uv run pytest` runs in one process for debuggers.
@@ -99,7 +102,19 @@ if [[ "$tier" == "full" ]]; then
             exit 1
             ;;
     esac
-    tier="full ($scope)"
+    case "$site" in
+        # The site generator is not a dev dependency, so it gets an environment of its own,
+        # synced here to the newest releases like the project's; the site reads the package
+        # source without importing it.
+        site) step "build_site.sh" env -u UV_NO_SYNC UV_PROJECT_ENVIRONMENT=.venv-site \
+            scripts/build_site.sh --quiet --upgrade --only-group site ;;
+        no-site) ;;
+        *)
+            echo "check.sh: unknown site decision '$site' from scripts/check_scope.py" >&2
+            exit 1
+            ;;
+    esac
+    tier="full ($scope, $site)"
 fi
 
 echo "==> check.sh $tier: all steps passed"

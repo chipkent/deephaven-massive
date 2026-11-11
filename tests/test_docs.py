@@ -26,18 +26,27 @@ page as `docs/datasets/<dataset>.md`, a README section as `README.md#<anchor>`. 
 an explicit `<a id>`, unique across the user pages. The tests check that every citation is a
 URL, that every cited page and anchor exists, and that every relative link of a user page (and
 of the tester guide) resolves.
+
+The documentation site renders an API reference from the docstrings, through the `:::`
+directives of the pages under `docs/api/`. The tests check that every public name has a
+directive, that each namespace's private class is headed by the path users type, such as
+`m.stocks.financials`, that no other private object has one, and that every page is in the
+site's navigation (`zensical.toml`). The contributing guide, which the site publishes, links
+the developer guides it leaves out by full GitHub URL, and every such page and anchor must
+exist. The site's own build, in CI, checks every link of the pages it publishes.
 """
 
 import dataclasses
 import json
 import re
 import runpy
+import sys
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 from zoneinfo import ZoneInfo
 
 import deephaven
@@ -52,6 +61,8 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Source, WsClient
+from deephaven_massive._namespaces.query_building import Namespace
+from deephaven_massive._session import MassiveSession
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
@@ -73,6 +84,9 @@ TROUBLESHOOTING = ROOT / "docs" / "troubleshooting.md"
 CONFIGURATION = ROOT / "docs" / "configuration.md"
 USER_PAGES = [README, TROUBLESHOOTING, CONFIGURATION]
 TESTER_GUIDE = ROOT / "docs" / "tester-guide.md"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
+API_PAGES = ROOT / "docs" / "api"
+SITE_CONFIG = ROOT / "zensical.toml"
 SOURCE = ROOT / "src" / "deephaven_massive"
 
 SKIPPED_BLOCKS: frozenset[tuple[str, str]] = frozenset()
@@ -93,6 +107,7 @@ _BARE_CITATION = re.compile(
     r"|docs/datasets/[A-Za-z0-9_.]+?\.md\b)"
 )
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
+_API_DIRECTIVE = re.compile(r"^(?:## (m(?:\.\w+)+)\n\n)?::: ([\w.]+)$", re.MULTILINE)
 
 
 def _name(page: Path) -> str:
@@ -342,6 +357,21 @@ def test_every_page_and_section_a_docstring_cites_exists() -> None:
     assert missing == []
 
 
+def test_every_page_and_section_the_contributing_guide_cites_exists() -> None:
+    # The contributing guide is on the documentation site, which leaves out the developer
+    # guides, so it links them by full GitHub URL; each linked page and anchor must exist.
+    text = CONTRIBUTING.read_text(encoding="utf-8")
+    citations = _CITATION.findall(text)
+    missing = [
+        f"{page}#{anchor}" if anchor else page
+        for page, anchor in citations
+        if not (ROOT / page).is_file()
+        or (anchor and anchor not in {*_anchors(ROOT / page), *_heading_slugs(ROOT / page)})
+    ]
+    assert citations
+    assert missing == []
+
+
 def test_the_citations_are_found() -> None:
     # A guard on the patterns above: a typo in either would find nothing and pass.
     text = (
@@ -382,6 +412,72 @@ def test_every_relative_link_resolves(page: Path) -> None:
         if not file.exists() or (anchor and file.suffix == ".md" and anchor not in known):
             broken.append(target)
     assert broken == []
+
+
+# --- The documentation site's API reference ----------------------------------------------------
+
+
+def _api_directives() -> list[tuple[str, str]]:
+    """Return each API reference directive's object path, and the `## m...` heading above it.
+
+    The heading is empty for a directive with none, such as one of a public name.
+    """
+    text = "\n".join(page.read_text(encoding="utf-8") for page in sorted(API_PAGES.glob("*.md")))
+    return [(found[2], found[1] or "") for found in _API_DIRECTIVE.finditer(text)]
+
+
+def _namespaces(owner: type, path: str) -> dict[str, str]:
+    """Return every namespace reachable from a class's properties, by the path users type.
+
+    A property whose return type is a `Namespace` is one, such as `m.stocks`, and so is each of
+    its own, such as `m.stocks.financials`. Each maps to its class's object path.
+    """
+    found: dict[str, str] = {}
+    for name, member in vars(owner).items():
+        if not isinstance(member, property) or member.fget is None:
+            continue
+        kind = get_type_hints(member.fget, vars(sys.modules[owner.__module__]))["return"]
+        if isinstance(kind, type) and issubclass(kind, Namespace):
+            found[f"{path}.{name}"] = f"{kind.__module__}.{kind.__qualname__}"
+            found.update(_namespaces(kind, f"{path}.{name}"))
+    return found
+
+
+def _public_objects() -> set[str]:
+    """Return the object path of each public name, and of the public `queries` module."""
+    return {f"deephaven_massive.{name}" for name in dm.__all__} | {"deephaven_massive.queries"}
+
+
+def test_the_api_reference_documents_every_public_name() -> None:
+    documented = {target for target, _ in _api_directives()}
+    assert sorted(_public_objects() - documented) == []
+
+
+def test_the_api_reference_names_each_namespace_by_the_path_users_type() -> None:
+    # A namespace's class is private, so its section is headed by its path from the session,
+    # such as `m.stocks`, and no other private object has a directive.
+    namespaces = _namespaces(MassiveSession, "m")
+    directives = _api_directives()
+    assert {heading: target for target, heading in directives if heading} == namespaces
+    others = {target for target, _ in directives} - _public_objects() - set(namespaces.values())
+    assert sorted(others) == []
+
+
+def test_the_namespaces_are_found() -> None:
+    # A guard on the walk above: it must find the nested namespaces, not only the top level.
+    found = _namespaces(MassiveSession, "m")
+    assert found["m.stocks.financials"].endswith("._StockFinancials")
+    assert found["m.partners.benzinga"].endswith("._Benzinga")
+
+
+def test_every_api_reference_page_is_in_the_site_navigation() -> None:
+    navigation = SITE_CONFIG.read_text(encoding="utf-8")
+    missing = [
+        _name(page)
+        for page in sorted(API_PAGES.glob("*.md"))
+        if f'= "{_name(page)}" }}' not in navigation
+    ]
+    assert missing == []
 
 
 # --- Five sections, against scripted data ------------------------------------------------------

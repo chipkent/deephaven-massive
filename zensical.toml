@@ -1,0 +1,110 @@
+# The documentation site: the user pages and an API reference generated from the docstrings,
+# built by Zensical (https://zensical.org). docs/dev/docs-site.md explains how to build it and
+# how it is published.
+
+[project]
+site_name = "deephaven-massive"
+site_description = "Live and static Deephaven tables for Massive.com (formerly Polygon.io) market data."
+# Every absolute URL of the built site, its 404 page's included, starts with this; it changes
+# with a custom domain.
+site_url = "https://chipkent.github.io/deephaven-massive/"
+repo_url = "https://github.com/chipkent/deephaven-massive"
+repo_name = "chipkent/deephaven-massive"
+# The site reads the pages where they are, from the repository root, so every relative link
+# works the same on GitHub and on the site. exclude_docs, in .gitignore syntax, publishes only
+# the pages below; a link from one of them to any other page fails the strict build.
+docs_dir = "."
+site_dir = "site"
+exclude_docs = """
+/*
+!/README.md
+!/CONTRIBUTING.md
+!/docs/
+/docs/*
+!/docs/troubleshooting.md
+!/docs/configuration.md
+!/docs/datasets/
+!/docs/images/
+!/docs/api/
+"""
+nav = [
+  { "Home" = "README.md" },
+  { "Troubleshooting" = "docs/troubleshooting.md" },
+  { "Configuration" = "docs/configuration.md" },
+  { "Datasets" = "docs/datasets/README.md" },
+  { "API reference" = [
+    { "Session" = "docs/api/session.md" },
+    { "Stocks" = "docs/api/stocks.md" },
+    { "Options" = "docs/api/options.md" },
+    { "Futures" = "docs/api/futures.md" },
+    { "Indices" = "docs/api/indices.md" },
+    { "Forex" = "docs/api/forex.md" },
+    { "Crypto" = "docs/api/crypto.md" },
+    { "Reference data" = "docs/api/reference.md" },
+    { "Indicators" = "docs/api/indicators.md" },
+    { "Economy" = "docs/api/economy.md" },
+    { "Partners" = "docs/api/partners.md" },
+    { "Queries" = "docs/api/queries.md" },
+    { "Settings" = "docs/api/config.md" },
+    { "Errors" = "docs/api/errors.md" },
+    { "Enums" = "docs/api/enums.md" },
+    { "Symbols" = "docs/api/symbols.md" },
+    { "Dataset list, logging, and version" = "docs/api/other.md" },
+  ] },
+  { "Contributing" = "CONTRIBUTING.md" },
+]
+
+[project.theme]
+features = ["navigation.sections", "navigation.top", "search.highlight", "content.code.copy"]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+# The pages are GitHub Markdown, so the extensions are the ones that render it as GitHub does,
+# in place of Zensical's defaults.
+[project.markdown_extensions]
+tables = {}
+attr_list = {}
+# Renders the Markdown inside the generated dataset pages' <details markdown="1"> folds.
+md_in_html = {}
+# GitHub's heading anchors: lowercase, punctuation dropped, spaces to hyphens.
+toc.permalink = true
+toc.slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
+pymdownx.highlight = {}
+# relaxed_headers accepts the fences the docs tests read, such as ```python continues, which
+# would otherwise not open a code block.
+pymdownx.superfences.relaxed_headers = true
+pymdownx.magiclink = {}
+# GitHub strikes ~~text~~ through and has no subscript.
+pymdownx.tilde.subscript = false
+
+[project.plugins.mkdocstrings.handlers.python]
+# Griffe reads the source without importing it, so the build needs no Deephaven server.
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+# A Returns section is one value; its bullets describe it rather than list several.
+docstring_options = { returns_multiple_items = false }
+# Renders the docstrings' reST literal blocks (a `::` line and the indented block after it)
+# as Python code blocks.
+extensions = ["scripts/site_literal_blocks.py"]
+show_root_heading = true
+show_root_full_path = false
+members_order = "source"
+filters = ["!^_"]
+show_source = false
+show_bases = false
+separate_signature = true
+show_signature_annotations = true
+merge_init_into_class = true
+overloads_only = true

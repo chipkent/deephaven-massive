@@ -762,7 +762,7 @@ Massive's pages state them.
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't \
 carry the column, or the library computes it. `request` marks a value the library fills from \

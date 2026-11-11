@@ -381,10 +381,11 @@ def render(
     (**Column**, **Type**, the `ColumnType` value such as `Instant`, **Description**, and, for
     a dataset read from more than one transport, **Read from**), and, folded in `<details>`,
     the Massive field behind each column per transport the dataset reads (`request` for a key
-    filled from the request). Last come the sorted, distinct vendor pages, each a link to the
-    web page (the fetched URL without its `.md`) labeled with the page's title and
-    documentation area (`Provenance.titles`), and a footer with the date Massive's
-    documentation was fetched.
+    filled from the request). The fold carries `markdown="1"`, which tells a Python-Markdown
+    site generator to render the table inside it, as GitHub does without the attribute. Last
+    come the sorted, distinct vendor pages, each a link to the web page (the fetched URL
+    without its `.md`) labeled with the page's title and documentation area
+    (`Provenance.titles`), and a footer with the date Massive's documentation was fetched.
 
     A `|` in a table cell is escaped with a backslash, no line has trailing whitespace, and
     every page ends in exactly one newline, so the pages pass the repository's commit hooks
@@ -955,7 +956,7 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
             "",
             f'<a id="{_WIRE_ANCHOR}"></a>',
             "",
-            "<details><summary>Massive fields</summary>",
+            '<details markdown="1"><summary>Massive fields</summary>',
             "",
             _wire_guide(schema.columns, wire),
             "",
@@ -1109,7 +1110,7 @@ def _columns_by_dataset(pages: Mapping[str, str]) -> dict[str, dict[str, str]]:
             heading = _HEADING.match(line)
             if heading:
                 current = found.setdefault(heading[1], {})
-            elif line.startswith(("#", "<details>")):
+            elif line.startswith(("#", "<details")):
                 reading = line == _COLUMNS_HEADING and current is not None
             elif reading and current is not None and (row := _COLUMN_ROW.match(line)):
                 current[row[1]] = row[2]

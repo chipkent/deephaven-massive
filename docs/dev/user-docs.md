@@ -113,10 +113,17 @@ Each fact has one home, and other pages link to it:
 | `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
 | `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
 | Docstrings, read with `help()` | What a caller needs to use each method, setting, enum, and exception correctly |
+| `docs/api/` | Nothing of its own: each page only places docstrings in the documentation site's API reference |
 | `docs/tester-guide.md` | What release-candidate testers do and report |
 
 Installing and running Deephaven belongs to Deephaven's docs, and Massive's plans to Massive's
 site: link them, never copy them. Contributor material goes in `CONTRIBUTING.md` or `docs/dev/`.
+
+The documentation site publishes the README, the troubleshooting and settings pages, the
+dataset pages, `CONTRIBUTING.md`, and an API reference rendered from the docstrings
+([docs-site.md](docs-site.md)). It renders each page as GitHub does, so a page is written once,
+for GitHub; a link from a published page to one the site leaves out, such as a page under
+`docs/dev/`, is a full GitHub URL.
 
 <a id="install-decision"></a>
 

@@ -1,8 +1,10 @@
 # Contributing to deephaven-massive
 
 Thank you for helping. This page gets a development checkout running and points to the rules
-every change follows. [`AGENTS.md`](AGENTS.md) holds those rules in full, for people and coding
-agents alike; read it before your first pull request.
+every change follows.
+[`AGENTS.md`](https://github.com/chipkent/deephaven-massive/blob/main/AGENTS.md)
+holds those rules in full, for people and coding agents alike; read it before your first pull
+request.
 
 ## Set up
 
@@ -24,16 +26,20 @@ environment.
 ## Propose a change
 
 Every change lands through a pull request; only the owner merges. Branch names, commit and
-title wording, and the pull request description follow [`AGENTS.md`](AGENTS.md) and
-[`docs/dev/pull-requests.md`](docs/dev/pull-requests.md). The full check must pass, with 100%
-coverage of statements and branches.
+title wording, and the pull request description follow
+[`AGENTS.md`](https://github.com/chipkent/deephaven-massive/blob/main/AGENTS.md) and
+[`docs/dev/pull-requests.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/pull-requests.md).
+The full check must pass, with 100% coverage of statements and branches.
 
 A release is one manual run of the Release workflow on `main`;
-[`docs/dev/releasing.md`](docs/dev/releasing.md) gives the steps.
+[`docs/dev/releasing.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/releasing.md)
+gives the steps.
 
 ## Documentation
 
-User documentation has three parts:
+User documentation has three parts, which the documentation site publishes with an API
+reference rendered from the docstrings
+([`docs/dev/docs-site.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/docs-site.md)):
 
 - [`README.md`](README.md): the landing page, which takes a new user from "what is this?"
   through install and configuration to a tutorial of thirteen examples.
@@ -45,33 +51,36 @@ User documentation has three parts:
   share come from `src/deephaven_massive/_datasets/argument_rules.py`, and each dataset's own
   line for an argument from its method's docstring.
 
-[`docs/dev/user-docs.md`](docs/dev/user-docs.md) is the standard for every user page: the project
-section (readers and their pains, owner requirements, page map, install facts, teaching plan),
-the rules (sources for every fact, scope, the hook, headings, teaching, sentences, AI tells,
-terminology), the section models, and the pass bar the `writing-user-docs` skill's editor
-grades against.
+[`docs/dev/user-docs.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/user-docs.md)
+is the standard for every user page: the project section (readers and their pains, owner
+requirements, page map, install facts, teaching plan), the rules (sources for every fact,
+scope, the hook, headings, teaching, sentences, AI tells, terminology), the section models, and
+the pass bar the `writing-user-docs` skill's editor grades against.
 `tests/test_docs.py` runs every Python block on the user pages against the fake Massive servers.
 Docstrings cite a page or section by its full GitHub URL, so the link opens from an IDE or
 the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed by the page,
 such as `docs/datasets/<dataset>.md` or `README.md#<anchor>`. The same test checks that every
 citation is a URL and that every cited page and anchor exists.
 
-When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
+When Massive changes its documentation,
+[`docs/dev/spec-refresh.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.
 
 The owner's decisions behind the public contract, and why, are in
-[`docs/dev/decisions.md`](docs/dev/decisions.md). A change to a public signature, default,
-column, or failure behavior adds an entry there. The facts about Massive that the documentation
-does not settle, and the live tests that settle them, are in
-[`docs/dev/verification-items.md`](docs/dev/verification-items.md).
+[`docs/dev/decisions.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/decisions.md).
+A change to a public signature, default, column, or failure behavior adds an entry there. The
+facts about Massive that the documentation does not settle, and the live tests that settle
+them, are in
+[`docs/dev/verification-items.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/dev/verification-items.md).
 
 ## Agent instructions and skills
 
 The repository carries every rule a coding agent needs; no agent should depend on notes kept
 outside it.
 
-- [`AGENTS.md`](AGENTS.md) holds only what every agent needs on every task. A rule for one kind
-  of work goes in the skill for that work (`.claude/skills/`) or on a `docs/dev/` page.
+- [`AGENTS.md`](https://github.com/chipkent/deephaven-massive/blob/main/AGENTS.md)
+  holds only what every agent needs on every task. A rule for one kind of work goes in the skill
+  for that work (`.claude/skills/`) or on a `docs/dev/` page.
 - A skill states general rules. The facts of this project sit in one labeled place in the skill
   or its standard, never woven into the rules or fitted to the wording of its eval prompts.
 - Skill evals are expensive. Weigh each round against what it gains: stop once the outputs meet
@@ -81,5 +90,6 @@ outside it.
 ## Live integration tests
 
 The tests in `tests/**/test_*_integration.py` call Massive itself with a real key, so
-neither `./scripts/check.sh` nor CI ever runs them. [`docs/live-tests.md`](docs/live-tests.md)
+neither `./scripts/check.sh` nor CI ever runs them.
+[`docs/live-tests.md`](https://github.com/chipkent/deephaven-massive/blob/main/docs/live-tests.md)
 says how to run them and what each plan can verify.

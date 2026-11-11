@@ -9,7 +9,7 @@ jobs on a test the hook skipped. CI also builds the package and tests other Pyth
 the lowest dependency versions, which the local check does not.
 
 The path rules are not copied here. The script reads them from the `Decide which jobs the
-change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `docs`,
+change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `docs`, `site`,
 `unread`, and `workflows` (`lint` and `build` too, which a path must match or be unread), and
 applies them exactly as that step does, one changed path at a time:
 
@@ -17,13 +17,18 @@ applies them exactly as that step does, one changed path at a time:
 - A path that no rule covers runs everything, so a new kind of input fails closed.
 - A path the `test` pattern matches runs the whole suite.
 - A path the `docs` pattern matches (the user pages `README.md` and `docs/troubleshooting.md`,
-  any image under `docs/`, the tester guide, and its examples) runs the documentation tests,
+  any image under `docs/`, the API reference pages under `docs/api/` and `zensical.toml`, which
+  lists them, the tester guide, and its examples) runs the documentation tests,
   `tests/test_docs.py` and `tests/live/tester/test_examples.py`, as CI's `docs` job does.
   `docs/configuration.md` is a test input instead: `tests/test_config.py` compares its
   generated settings reference with the code.
 - Otherwise CI runs no tests, and the local check runs ruff, format, and mypy. CI runs ruff
   and mypy on every change it lints, and the local check runs them on every change, so it
   never does less.
+
+Separately, a path the `site` pattern matches (the documentation site's configuration, the
+pages it publishes, and the package source its API reference reads), a changed workflow, or a
+path no rule covers builds the documentation site in strict mode, as CI's `site` job does.
 
 The changed files are those `git diff --no-renames --name-only` lists between a base commit and
 the working tree (so staged and unstaged edits count), plus untracked files git does not ignore.
@@ -45,8 +50,9 @@ Like CI's list, a path git quotes (one holding a tab, a newline, or a non-ASCII 
 matches no rule and runs everything. Without `origin/main` or a merge base, the script runs
 everything.
 
-It prints the scope, one of `full`, `docs`, or `lint`, on standard output, and one line on
-standard error that says which scope it chose and why. It uses only the standard library.
+It prints the scope, one of `full`, `docs`, or `lint`, and then `site` or `no-site`, on one line
+of standard output, and one line on standard error that says which scope it chose and why. It
+uses only the standard library.
 
     uv run python scripts/check_scope.py
 
@@ -57,6 +63,7 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 ...     test=r"^(src|tests|scripts|vendor)/|^docs/datasets/|^pyproject\.toml$",
 ...     build=r"^(src|tests)/|^docs/datasets/|^README\.md$",
 ...     docs=r"^README\.md$|^docs/troubleshooting\.md$|^docs/.+\.(png|webp)$",
+...     site=r"^zensical\.toml$|^README\.md$|^docs/troubleshooting\.md$|^src/",
 ...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
 ...     workflows=r"^\.github/(workflows|actions)/",
 ... )
@@ -80,6 +87,16 @@ Decision(scope='full', reason='2 changed files; no rule covers docs/tester-examp
 Decision(scope='full', reason='1 changed file; no rule covers "docs/dev/caf\\303\\251.md"')
 >>> decide([], rules)
 Decision(scope='lint', reason='no changed files')
+>>> builds_site(["AGENTS.md", "README.md"], rules)
+True
+>>> builds_site(["docs/dev/x.md", "tests/conftest.py"], rules)
+False
+>>> builds_site(["zensical.toml"], rules)
+True
+>>> builds_site(["docs/dev/x.md", ".github/workflows/ci.yml"], rules)
+True
+>>> builds_site(["docs/tester-examples/x.py"], rules)
+True
 >>> pushed_branch(
 ...     {
 ...         "PRE_COMMIT_FROM_REF": "1f0c2e9",
@@ -123,7 +140,9 @@ WORKFLOW = pathlib.Path(".github/workflows/ci.yml")
 #: The branch CI compares a pull request with.
 BASE = "origin/main"
 
-_ASSIGNMENT = re.compile(r"^\s*(lint|test|build|docs|unread|workflows)='(.*)'\s*$", re.MULTILINE)
+_ASSIGNMENT = re.compile(
+    r"^\s*(lint|test|build|docs|site|unread|workflows)='(.*)'\s*$", re.MULTILINE
+)
 
 
 class PathRules(NamedTuple):
@@ -133,6 +152,7 @@ class PathRules(NamedTuple):
     test: str
     build: str
     docs: str
+    site: str
     unread: str
     workflows: str
 
@@ -158,7 +178,7 @@ def read_rules(workflow_text: str) -> PathRules:
         workflow_text: The contents of `.github/workflows/ci.yml`.
 
     Returns:
-        The six patterns, exactly as the step assigns them.
+        The seven patterns, exactly as the step assigns them.
 
     Raises:
         ValueError: The text assigns one of the patterns not at all, or more than once, so the
@@ -183,6 +203,11 @@ def _plural(count: int) -> str:
     return f"{count} changed file{'' if count == 1 else 's'}"
 
 
+def _covered(rules: PathRules) -> str:
+    """Return the pattern of every path some rule covers, as CI's decision step joins them."""
+    return f"{rules.lint}|{rules.test}|{rules.build}|{rules.docs}|{rules.site}|{rules.unread}"
+
+
 def decide(paths: list[str], rules: PathRules) -> Decision:
     """Return the scope a change needs, by the rules CI's decision step applies.
 
@@ -198,7 +223,7 @@ def decide(paths: list[str], rules: PathRules) -> Decision:
     if not paths:
         return Decision("lint", "no changed files")
     count = _plural(len(paths))
-    covered = f"{rules.lint}|{rules.test}|{rules.build}|{rules.docs}|{rules.unread}"
+    covered = _covered(rules)
     checks = (
         (rules.workflows, True, "is a workflow"),
         (covered, False, None),
@@ -213,6 +238,25 @@ def decide(paths: list[str], rules: PathRules) -> Decision:
         if re.search(rules.docs, path):
             return Decision("docs", f"{count}; {path} is documentation")
     return Decision("lint", f"{count}, none of which the tests read")
+
+
+def builds_site(paths: list[str], rules: PathRules) -> bool:
+    """Return whether a change needs the documentation site built, by CI's rules for its job.
+
+    Args:
+        paths: The changed paths, relative to the repository root, as git lists them.
+        rules: CI's path patterns, from `read_rules`.
+
+    Returns:
+        True when a path is a workflow, matches no rule, or is one of the site's sources.
+    """
+    covered = _covered(rules)
+    return any(
+        re.search(rules.workflows, path)
+        or not re.search(covered, path)
+        or re.search(rules.site, path)
+        for path in paths
+    )
 
 
 def _git(*args: str) -> str | None:
@@ -292,20 +336,26 @@ def changed_paths() -> tuple[list[str], str] | str:
 
 
 def main() -> int:
-    """Print the scope on standard output and the summary line on standard error.
+    """Print the scope and the site decision on standard output, and a summary on standard error.
 
     Returns:
-        0 always: a failure to list the changes selects the full scope instead.
+        0 always: a failure to list the changes selects the full scope and the site build
+        instead.
     """
     rules = read_rules(WORKFLOW.read_text(encoding="utf-8"))
     found = changed_paths()
     if isinstance(found, str):
-        decision, against = Decision("full", found), ""
+        decision, against, site = Decision("full", found), "", True
     else:
         paths, base = found
         decision, against = decide(paths, rules), f" ({base})"
-    sys.stdout.write(f"{decision.scope}\n")
-    sys.stderr.write(f"check.sh: scope {decision.scope}{against}: {decision.reason}\n")
+        site = builds_site(paths, rules)
+    site_word = "site" if site else "no-site"
+    sys.stdout.write(f"{decision.scope} {site_word}\n")
+    sys.stderr.write(
+        f"check.sh: scope {decision.scope}{against}: {decision.reason}; "
+        f"{'builds' if site else 'does not build'} the documentation site\n"
+    )
     return 0
 
 

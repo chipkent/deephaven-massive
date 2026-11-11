@@ -157,13 +157,16 @@ code: a one-line docstring on anything with behavior worth knowing is a defect. 
 four parts: `README.md`, the landing page from install to everyday use; `docs/troubleshooting.md`,
 looked up by message or symptom; `docs/configuration.md`, every `MassiveConfig` setting and the
 settings file, its settings generated from the class docstring; and `docs/datasets/`, generated,
-one page per dataset with its arguments, plans, and columns. A rule several datasets share lives
-once in code (`_datasets/argument_rules.py`) and is printed on each dataset page; a dataset
-docstring gives each argument one line and links its page. Follow the `writing-user-docs` skill
-for any user page, or a change to behavior one describes, and the `writing-docstrings` skill for
-docstrings and other text in code. A docstring cites a page or section by its full GitHub URL,
-`https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the link opens from
-an IDE or the console; `tests/test_docs.py` rejects a bare path.
+one page per dataset with its arguments, plans, and columns. The documentation site publishes
+them with an API reference rendered from the docstrings (`docs/dev/docs-site.md`); a link from
+a published page to an unpublished one, such as under `docs/dev/`, is a full GitHub URL, and a
+new public name or namespace gets a `:::` directive under `docs/api/`. A rule several datasets
+share lives once in code (`_datasets/argument_rules.py`) and is printed on each dataset page; a
+dataset docstring gives each argument one line and links its page. Follow the `writing-user-docs`
+skill for any user page, or a change to behavior one describes, and the `writing-docstrings`
+skill for docstrings and other text in code. A docstring cites a page or section by its full
+GitHub URL, `https://github.com/chipkent/deephaven-massive/blob/main/<page>#<anchor>`, so the
+link opens from an IDE or the console; `tests/test_docs.py` rejects a bare path.
 
 ## Deephaven invariants
 
