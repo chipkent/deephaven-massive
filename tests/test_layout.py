@@ -14,9 +14,9 @@ pytest collects a test module wherever it lies, so one inside a helper package m
 mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
 `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
-The only other test files that mirror no module are `conftest.py`, `embedded_server.py` (the
-`-p` plugin that starts the test JVM), this file, and `test_docs.py`, all at the top of
-`tests/`. Fixtures under `tests/data/` follow the test
+The only other test files that mirror no module are a `conftest.py` in any test folder, and
+`embedded_server.py` (the `-p` plugin that starts the test JVM), this file, and `test_docs.py`,
+all at the top of `tests/`. Fixtures under `tests/data/` follow the test
 paths, so none of their directories starts with `_` either.
 
 The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
@@ -290,6 +290,7 @@ def orphans(modules: Iterable[PurePosixPath], test_files: Iterable[PurePosixPath
         for test_file in test_files
         if not is_helper(test_file)
         and test_file not in APPROVED_EXCEPTIONS
+        and not (test_file.name == "conftest.py" and test_file.parts[0] not in HELPER_PACKAGES)
         and unit_test_of(test_file) not in mirrors
     ]
 
@@ -489,11 +490,15 @@ def test_the_approved_exceptions_need_no_module() -> None:
 
 
 def test_an_approved_exception_counts_only_at_the_top_of_tests() -> None:
-    test_files = _paths("namespaces/conftest.py", "namespaces/test_docs.py")
+    test_files = _paths("namespaces/test_docs.py", "namespaces/embedded_server.py")
     assert orphans([], test_files) == [
-        "tests/namespaces/conftest.py",
         "tests/namespaces/test_docs.py",
+        "tests/namespaces/embedded_server.py",
     ]
+
+
+def test_a_conftest_needs_no_module_in_any_test_folder() -> None:
+    assert orphans([], _paths("conftest.py", "queries/conftest.py")) == []
 
 
 # Helper packages.

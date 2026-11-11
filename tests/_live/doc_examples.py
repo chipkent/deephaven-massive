@@ -271,8 +271,8 @@ def recorded_sessions() -> Iterator[None]:
 
     The examples open their sessions as a reader does, through `dm.MassiveSession`; inside the
     block, that name makes a real session and remembers it weakly, so a session the examples
-    no longer reach can still be collected, as in a reader's console. The package resolves
-    the name lazily, so the stand-in is bound in the package only for the block, then removed.
+    no longer reach can still be collected, as in a reader's console. The stand-in is bound in
+    the package only for the block, and the real class is bound again at its end.
 
     Yields:
         Nothing; the examples run in between.
@@ -289,7 +289,7 @@ def recorded_sessions() -> Iterator[None]:
     try:
         yield
     finally:
-        vars(dm).pop("MassiveSession", None)
+        vars(dm)["MassiveSession"] = real
         for core in (ref() for ref in opened):
             if core is not None:
                 core.close()

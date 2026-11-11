@@ -11,6 +11,7 @@ import pytest
 from deephaven import empty_table, ui
 
 import deephaven_massive as dm
+from deephaven_massive import _session
 from tests._live import doc_examples
 from tests._live.calendar import NEW_YORK
 
@@ -167,7 +168,7 @@ def test_recorded_sessions_close_every_session_the_examples_open(
         dm.MassiveSession(config)  # unreachable at once, as a console's replaced `m` is
         assert "open" in repr(first)
     assert "closed" in repr(first)
-    assert "MassiveSession" not in vars(dm)
+    assert dm.MassiveSession is _session.MassiveSession
 
 
 def test_dashboard_panels_read_each_panels_title_and_content() -> None:
