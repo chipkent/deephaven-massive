@@ -1819,7 +1819,7 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
             instant, instant, wait=True
         )  # no row can lie in the range: nothing is read, no warning
         assert caplog.messages == []
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
         q.history("2025-03-04", "2025-03-04", wait=True)  # once per session
     warning = (
         "stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold "
@@ -2088,7 +2088,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     assert rest.calls == []
     # AUTO chose the flat files (60 symbols), and serves the read from REST instead, warning.
     with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert [c[0] for c in rest.calls] == ["history"]
     assert caplog.messages[-1] == (
         "stocks.trades history: AUTO read REST because S3 refused the flat files (the plan does "
