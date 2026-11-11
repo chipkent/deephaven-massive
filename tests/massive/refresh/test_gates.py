@@ -319,7 +319,8 @@ _BID = "The bid price."
 def test_field_spelling_two_long_names_for_one_description() -> None:
     uses = {
         "/quotes": PathUse(),
-        "/a": _described(bid_price=(_BID, "bid_price", "BidPrice")),
+        # An empty description proves nothing, so the two `ask` names stand.
+        "/a": _described(bid_price=(_BID, "bid_price", "BidPrice"), ask=("", "ask_price", "A")),
         "/b": _described(last__bid=(_BID, "bid", "LastBid"), ask=("", "ask", "Ask")),
     }
     problems = list(field_spellings(_EMPTY, uses))

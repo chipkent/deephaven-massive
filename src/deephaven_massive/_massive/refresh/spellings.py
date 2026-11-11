@@ -102,8 +102,8 @@ _QUOTE = (
 )
 _FUTURES_QUOTE = (
     'The futures snapshot\'s `last_quote.{key}` is "The {text}", the {side} price, beside '
-    "`{key}_size` and `{key}_timestamp`, which `/futures/v1/quotes/{{ticker}}` spells alike; "
-    "there the same price is `{key}_price`, a number like this one."
+    "`{key}_size` and `{key}_timestamp`, which `/futures/v1/quotes/{{ticker}}` spells alike. "
+    "That endpoint names the price itself `{key}_price`, a number, as here."
 )
 _FUTURES_TIME = (
     "The futures snapshot documents `last_{event}.last_updated` with the text and unit of "
