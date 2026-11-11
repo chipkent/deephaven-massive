@@ -762,7 +762,7 @@ Massive's pages state them.
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't \
 carry the column, or the library computes it. `request` marks a value the library fills from \
@@ -1023,7 +1023,7 @@ def test_the_column_report_names_added_removed_and_retyped_columns() -> None:
         # The facts and the folded wire fields have rows that start like column rows too.
         return (
             f"# {call}\n\nSummary.\n\n| `sort` | `ticker` |\n\n## Columns\n\n"
-            f"| Column | Deephaven type |\n{rows}\n<details><summary>x</summary>\n\n"
+            f'| Column | Deephaven type |\n{rows}\n<details markdown="1"><summary>x</summary>\n\n'
             "| `Wire` | `w` |\n\n</details>\n\n## Later\n\n| `After` | long |\n"
         )
 
