@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from deephaven_massive._massive import RequestGovernor, RestClient, WireError
+from deephaven_massive._massive import (
+    RequestGovernor,
+    RestClient,
+    WireAuthError,
+    WireEntitlementError,
+    WireError,
+)
 
 # The governor's fake clock, so no pacing wait sleeps, and the reply and envelope builders are
 # plain values of the fakes, which no fixture hands over; the server comes from `fake_rest`.
@@ -259,7 +265,25 @@ def test_an_unreadable_200_is_recorded_and_raises(
     with pytest.raises(WireError) as raised:
         bad_values.ask_all(client, bad_values.LIMIT, lines.append, today=_DAY)
     assert raised.value.unreadable
-    assert "no verdict, the reply is unreadable" in lines[-1]
+    assert "no verdict on the value" in lines[-1]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        Reply({"status": "ERROR", "request_id": "r", "error": "unknown key"}, status=401),
+        Reply({"status": "NOT_AUTHORIZED", "request_id": "r", "message": "upgrade"}, status=403),
+        Reply({"status": "NOT_AUTHORIZED", "request_id": "r", "message": "upgrade"}),
+    ],
+)
+def test_a_refusal_of_the_key_or_plan_is_recorded_and_raises(
+    fake_rest: FakeRestServer, client: RestClient, reply: Reply
+) -> None:
+    fake_rest.reply(_DIVIDENDS, reply)
+    lines: list[str] = []
+    with pytest.raises((WireAuthError, WireEntitlementError)):
+        bad_values.ask_all(client, bad_values.LIMIT, lines.append, today=_DAY)
+    assert "no verdict on the value" in lines[-1]
 
 
 def test_no_response_is_no_answer_and_raises(client: RestClient) -> None:

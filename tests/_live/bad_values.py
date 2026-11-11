@@ -28,7 +28,14 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._massive import ParamKind, Transport, WireError, source
+from deephaven_massive._massive import (
+    ParamKind,
+    Transport,
+    WireAuthError,
+    WireEntitlementError,
+    WireError,
+    source,
+)
 from tests._live.contracts import front_contract
 
 if TYPE_CHECKING:
@@ -195,8 +202,9 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     Raises:
         WireError: If the request got no answer about its value: no HTTP response (a
             transport failure after retries, or a closed client), a server failure (5xx)
-            after retries, a rate limit (429) the governor gave up waiting out, or a 200
-            whose body the client cannot read, which it records first.
+            after retries, a rate limit (429) the governor gave up waiting out, a refusal
+            of the key or the plan (401, 403, or a `NOT_AUTHORIZED` envelope), or a 200
+            whose body the client cannot read. It records the last two first.
     """
     rest_path = _text_path(source(Transport.REST, request.path), request.as_text)
     names, query = _shown(request.names), _shown(request.query)
@@ -206,9 +214,11 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     except WireError as error:
         if error.status is None or error.status in _NO_JUDGMENT:
             raise
-        if error.unreadable:
-            # A 200 the client cannot read: recorded for the owner, but no refusal.
-            evidence(f"{request.label}: no verdict, the reply is unreadable: {error.message}")
+        if error.unreadable or isinstance(error, WireAuthError | WireEntitlementError):
+            # A reply that judges the key or the plan, or cannot be read: recorded for the
+            # owner, but no refusal of the value. The live fixtures turn a plan refusal into
+            # a skip or a failure.
+            evidence(f"{request.label}: no verdict on the value: {error.message}")
             raise
         evidence(f"{request.label}: verdict ERROR (HTTP {error.status}: {error.message})")
         return Answer("ERROR", error.status, 0, None)
