@@ -93,11 +93,16 @@ These protect the owner's repository, money, and secrets.
   from a private base are part of it. A public signature that already declares a private type
   (#560) is a known defect: fix it at its source when the request names it, and never hide it
   with tool configuration.
+- **A public name is defined in the package users import it from.** Never give a private
+  module a public twin that only re-exports it: make the implementing package public, with
+  private submodules for its internals and an `__init__.py` that names the public names. Name
+  a public package for what the user does with it, checked against what numpy, pandas, and
+  Deephaven call the same thing.
 - **A public change needs the owner's request or approval**: a new or changed public name,
-  signature, default, column, setting, or failure behavior. It ships with its user docs,
-  docstrings, and tests. `docs/dev/decisions.md` records broad decisions only: a rule or
-  contract set or changed, a break, or a design choice worth remembering; not each new name. When the request
-  leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
+  signature, module, package, default, column, setting, or failure behavior, even in a `fix:`
+  PR. It ships with its user docs, docstrings, and tests. `docs/dev/decisions.md` records
+  broad decisions only: a rule or contract set or changed, a break, or a design choice worth
+  remembering; not each new name. When the request leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
   under Decisions, and list it under Check before merging, where the owner judges it; no list
   of public modules decides it. A fix that makes code do what its docs say is not a public
   change.

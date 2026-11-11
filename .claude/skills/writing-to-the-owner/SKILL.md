@@ -106,7 +106,10 @@ out incomplete, and a long list of questions goes unread.
 4. **Not built on thin evidence.** One symbol or a few days that disagree may be bad vendor data
    (`AGENTS.md`, Supply Massive's data), not a reason to change behavior for everything: measure
    broadly first, with a live test the owner runs.
-5. **Held to the project's design rules.** Closed sets are enums, never magic strings. The
+5. **Held to the project's design rules.** A public API design shows the import line a user
+   types and the path `help()` prints; a public twin that re-exports a private module, or a
+   name chosen for the library's convenience instead of the user's, fails. Closed sets are
+   enums, never magic strings. The
    user's code works on any Massive plan, with no tier-specific configuration. Every API
    accepts a live table and follows it, and history and live calls never mix (decisions 82 and
    83). Bad input from the caller is refused consistently, never silently cleaned or passed

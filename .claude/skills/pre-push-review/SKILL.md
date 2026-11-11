@@ -71,7 +71,7 @@ same property. Then look for:
   with the module's subject line and this test.
 - **Design smells.** Assume a simpler design exists until you have looked: a workaround layer
   where a fix at the source would do, a second mechanism beside an existing one, an option
-  nobody asked for, a helper that duplicates one elsewhere (`git grep` the concept, not only the
+  nobody asked for, a public module that only re-exports a private one (a public twin), a helper that duplicates one elsewhere (`git grep` the concept, not only the
   name), an import of another module's private name, a guard test that pins configuration text
   instead of behavior, a standard file (the GitHub `.gitignore` template above its marked
   project section, a tool's documented default) trimmed or rewritten without a stated purpose,
