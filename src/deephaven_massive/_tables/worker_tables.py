@@ -1,13 +1,13 @@
 """`WorkerTables`, a session's worker tables, from registration until both their clocks run out.
 
-A *worker table* is a table one library thread of its own fills: a `poll()` table's poller, a
-background read's thread for `fetch(wait=False)` and `history(..., wait=False)`, or the follow
-coordinator for a `history()` or `fetch()` of a refreshing symbol table. The registry keeps the
-`m.streams()` row of each from its creation until its result is released and its blink table
-has shut down, which happen on different clocks, in either order; a background read's record
-leaves as soon as it is `DONE` and its result released, since nothing of it needs the session
-then. Every diagnostics row is queued while `registry_lock` is held, so rows reach the tables in
-the order the registry changed.
+A *worker table* is a table a library thread fills: a `poll()` table's poller, a background
+read's task on the session's read pool for a `fetch()` or `history()` without `wait=True`, or the
+follow coordinator for a `history()` or `fetch()` of a refreshing symbol table. The registry
+keeps the `m.streams()` row of each from its creation until its result is released and its
+blink table has shut down, which happen on different clocks, in either order; a background
+read's record leaves as soon as it is `DONE` and its result released, since nothing of it needs
+the session then. Every diagnostics row is queued while `registry_lock` is held, so rows reach
+the tables in the order the registry changed.
 
 The registry belongs to one `SessionCore`, which creates it and alone holds it; it refers to the
 core weakly. Every entry point that can change what keeps the session alive (`track`, `release`,
@@ -365,7 +365,7 @@ class WorkerTables:
 
         The listener on the read's result calls it in the update cycle that adds the rows, on
         an update-graph thread holding the update graph's lock, so `DONE` reaches `m.streams()`
-        only after the rows are in the result; the read's thread calls it for an empty result,
+        only after the rows are in the result; the read's task calls it for an empty result,
         which adds no rows, and a close's hook for a read that has published, outside every
         lock. `DONE` replaces `LOADING`, `RELEASED` (a derived
         table kept the read going after its result was released), and `CLOSED` (a close that

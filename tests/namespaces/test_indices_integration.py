@@ -132,7 +132,7 @@ def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     which excludes SPX. Passes when the library's `fetch()` returns one row for the index. A
     failure (no row, or a 404) means a colon must be sent unencoded.
     """
-    rows = table_rows(live_session.indices.previous_day_bar(index_symbol).fetch())
+    rows = table_rows(live_session.indices.previous_day_bar(index_symbol).fetch(wait=True))
     evidence(f"library fetch() of /prev for {index_symbol} (sent encoded): {rows}")
     assert [row["Symbol"] for row in rows] == [index_symbol]
 
@@ -190,15 +190,21 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         if page.rows:
             evidence(f"    first row keys and values: {page.rows[0]}")
     queries = {
-        "indices.previous_day_bar fetch()": live_session.indices.previous_day_bar(
-            index_symbol
-        ).fetch,
-        "indices.snapshots fetch()": live_session.indices.snapshots(index_symbol).fetch,
-        "indices.daily_open_close fetch()": live_session.indices.daily_open_close(
-            index_symbol, recent_monday
-        ).fetch,
-        "snapshots (unified) fetch()": live_session.snapshots(index_symbol).fetch,
-        "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
+        "indices.previous_day_bar fetch()": partial(
+            live_session.indices.previous_day_bar(index_symbol).fetch, wait=True
+        ),
+        "indices.snapshots fetch()": partial(
+            live_session.indices.snapshots(index_symbol).fetch, wait=True
+        ),
+        "indices.daily_open_close fetch()": partial(
+            live_session.indices.daily_open_close(index_symbol, recent_monday).fetch, wait=True
+        ),
+        "snapshots (unified) fetch()": partial(
+            live_session.snapshots(index_symbol).fetch, wait=True
+        ),
+        "indicators.sma fetch()": partial(
+            live_session.indicators.sma(index_symbol, 10, limit=2).fetch, wait=True
+        ),
     }
     misspelled: dict[str, list[object]] = {}
     for name, call in queries.items():
@@ -408,15 +414,18 @@ def _record_library_index_stamps(
     daily = session.indices.bars(index, dm.Timespan.DAY)
     evidence(
         f"library {index} history(REST): "
-        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest, wait=True))
     )
     prev_bar = session.indices.previous_day_bar(index)
-    evidence(f"library {index} previous_day_bar (/prev): {library_stamps(prev_bar.fetch)}")
+    prev_stamps = library_stamps(partial(prev_bar.fetch, wait=True))
+    evidence(f"library {index} previous_day_bar (/prev): {prev_stamps}")
     refused: list[dm.EntitlementError] = []
     for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)
         try:
-            outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
+            outcome = library_stamps(
+                partial(query.history, *stamp_days[span.value], source=rest, wait=True)
+            )
         except dm.EntitlementError as error:
             outcome = f"refused ({error})"
             refused.append(error)
@@ -529,7 +538,9 @@ def test_index_day_bar_stamps_of_the_day_file(
     for index, by_day in files.items():
         day_bar_report(index, days, {_DAY_FILE: by_day})
         daily = live_session.indices.bars(index, dm.Timespan.DAY)
-        outcome = library_stamps(partial(daily.history, *days, source=dm.HistorySource.FLAT_FILES))
+        outcome = library_stamps(
+            partial(daily.history, *days, source=dm.HistorySource.FLAT_FILES, wait=True)
+        )
         evidence(f"library {index} history(FLAT_FILES): {outcome}")
     missing = [(i, d) for i in _STAMP_INDICES for d in days if not files[i].get(d)]
     assert not missing, f"the day files lack {missing}"

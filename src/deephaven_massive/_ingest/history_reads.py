@@ -24,7 +24,7 @@ and decides what the call returns when they cannot serve all of it:
   (`RestTransport.history_by_symbol`), so one symbol's REST failure fails only that symbol. A
   failure of the files themselves, which serve every symbol at once, is every symbol's.
 
-Runs on the calling thread (a background read's own thread for `wait=False`); the REST reads go
+Runs on the calling thread (a read pool thread for a background read); the REST reads go
 through the session's REST transport (`SessionCore.rest_transport`).
 """
 

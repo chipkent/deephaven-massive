@@ -38,10 +38,14 @@ The verbs delegate the transport work to three interfaces, one per transport, de
 static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id from the session's
 stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows> rows in <s> s`
 or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their worker threads after it
-(`massive #1 call-7 rest_0`), so every line of one call can be found. With `wait=False` a static
-verb checks its arguments on the calling thread, then returns at once a refreshing table that a
-library thread of its own fills in one update when the download completes (`open_read` in
-`_tables/background_read.py`); that thread logs the call's outcome. A `history()` or `fetch()` whose
+(`massive #1 call-7 rest_0`), so every line of one call can be found. By default a static verb
+does not wait: it checks its arguments on the calling thread, where an argument error raises,
+and so does a crypto pair passed in code that Massive does not list, for a path that takes the
+pair as its two currencies; it then returns at once a refreshing
+table that a task on the session's read pool fills in one update when the download completes
+(`open_read` in `_tables/background_read.py`); that task logs the call's outcome, and an error
+Massive answers fails the table. With `wait=True` it reads on the calling thread and returns a
+static table, or raises. A `history()` or `fetch()` whose
 symbols are a refreshing table follows it instead: the result is always refreshing, each symbol
 added to the table is read (by `history()` over the call's fixed window, by `fetch()` as Massive
 answers then) and lands whole, and each symbol removed leaves it (`open_followed_read` in
@@ -805,9 +809,9 @@ class QueryBase:
             verb: The verb and its arguments, for the start line, such as `"fetch()"`.
             run: Runs the verb's work, given the call id; the id names the transport's worker
                 threads.
-            background: True for `wait=False`: `run` returns the table a background read
-                fills, and the read's thread logs the call's outcome, so no `done` line is
-                logged here.
+            background: True for a call that does not wait: `run` returns the table a
+                background read fills, and the read logs the call's outcome, so no `done` line
+                is logged here.
 
         Returns:
             What `run` returns.
@@ -828,6 +832,15 @@ class QueryBase:
             elapsed = time.monotonic() - started
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
+
+    @property
+    def _in_code(self) -> bool:
+        """True when the query's symbols were passed in code, not as a table.
+
+        A crypto pair passed in code that Massive does not list raises at the call; a table's
+        follows `MassiveConfig.unlisted_symbols`.
+        """
+        return not isinstance(self._request.symbols, SymbolTable)
 
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
@@ -954,7 +967,7 @@ def _symbols_per_read(spec: DatasetSpec) -> int:
 
 
 class Query(QueryBase):
-    """A query with `fetch()` for a static table and `poll()` for a live one.
+    """A query with `fetch()`, which reads its rows once, and `poll()`, which reads them again.
 
     You get the query from a dataset method, such as `m.stocks.dividends(...)`. It reads nothing
     until you call one of its methods. You can call them as often as you like.
@@ -976,25 +989,32 @@ class Query(QueryBase):
         _read_value_table,
         _merged,
         RestTransport.fetch,
+        RestTransport.check_fetch,
         RestTransport.fetch_by_symbol,
         RestTransport.fetch_by_value,
         open_followed_read,
         _wait,
     )
-    def fetch(self, *, wait: bool = True) -> Table:
+    def fetch(self, *, wait: bool = False) -> Table:
         """Return a table of every row Massive has now, up to the query's `limit`.
+
+        By default the call returns a live table with no rows at once, and the rows arrive in the
+        background. Deephaven updates the table, and every table built on it, as they land. For
+        symbols passed in code or in a static table, they land all in one update, and
+        `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass `wait=True` to wait
+        for the rows; without a watchlist, you then get a static table.
 
         A static table of symbols is read once, when you call. A watchlist is followed: a symbol you
         add is read, and one you delete leaves. One symbol's failure leaves the watchlist's other
         symbols in place, and `m.symbol_reads()` shows each symbol's read.
 
         Args:
-            wait: True, the default, waits for the rows. For a watchlist, it waits until each symbol
-                has been read once. False returns a live table at once and fills it in the
-                background. A failed request then fails the table instead of raising.
+            wait: False, the default, returns at once and fills the table in the background. True
+                waits for the rows; for a watchlist, until each symbol has been read once.
 
         Returns:
-            A table with the dataset's columns: static, or live for `wait=False` or a watchlist.
+            A table with the dataset's columns: live, or static for `wait=True` without a
+            watchlist.
 
         Raises:
             TypeError: If `wait` isn't a `bool`.
@@ -1003,24 +1023,36 @@ class Query(QueryBase):
                 - the endpoint doesn't take one of the query's parameters or filters;
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
                 - no row of a table of symbols is Massive's exact ticker.
-            AuthenticationError: If Massive rejects your API key.
-            EntitlementError: If your plan doesn't include the data, or Massive delays current data
-                whose subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
-                the setting to change.
-            MassiveError: If:
+            AuthenticationError: With `wait=True`, if Massive rejects your API key. For
+                `m.crypto.last_trade` and `m.crypto.daily_open_close`, also at the call, if Massive
+                rejects it while the call reads Massive's list of crypto tickers.
+            EntitlementError: With `wait=True`, if your plan doesn't include the data, or Massive
+                delays current data whose subscription isn't in
+                `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
+                For those two crypto datasets, also at the call, if your plan doesn't include
+                Massive's list of crypto tickers.
+            MassiveError: At the call, if:
                 - the session is closed;
+                - for those two crypto datasets, Massive's list of crypto tickers can't be read,
+                  or lacks a crypto pair passed as a `str` or list.
+                With `wait=True`, also if:
                 - a rate limit outlasts the retries;
                 - a request fails in any other way;
                 - for a watchlist, every symbol's read failed.
 
+        Without `wait=True`, an error from Massive fails the table instead of raising: it is
+        logged and shows in `Error` of `m.streams()`. A watchlist's table fails when every symbol
+        it held at the call fails for good, such as on a plan without the dataset.
+
         Example:
             ::
 
-                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch(wait=False)
+                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
+                now = m.stocks.dividends(["AAPL", "MSFT"]).fetch(wait=True)
         """
         background = not _wait(wait)
         return self._logged_call(
-            "fetch(wait=False)" if background else "fetch()",
+            "fetch()" if background else "fetch(wait=True)",
             functools.partial(self._fetch, wait=wait),
             background=background,
         )
@@ -1053,8 +1085,8 @@ class Query(QueryBase):
         )
         request = self._static_request()
         rest = self._core.rest_transport()
-        if not wait:  # a parameter error raises now, as it would before the first request
-            rest.check_fetch(spec, request)
+        if not wait:  # a parameter error and a pair passed in code raise now, as they would
+            rest.check_fetch(spec, request, split_pairs=self._in_code)
         return self._result(
             call,
             request,
@@ -1087,7 +1119,7 @@ class Query(QueryBase):
         request = replace(self._request, symbols=call_time)
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, the first read checks them
-            rest.check_fetch(spec, request)
+            rest.check_fetch(spec, request, split_pairs=False)
         plan = FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -1136,8 +1168,8 @@ class Query(QueryBase):
         names = _read_value_table(core, spec, values, query=repr(self))
         request = self._static_request()
         rest = core.rest_transport()
-        if not wait:  # a parameter error raises now, as it would before the first request
-            rest.check_fetch(spec, request.for_value(names[0]))
+        if not wait:  # a parameter error and a pair passed in code raise now, as they would
+            rest.check_fetch(spec, request.for_value(names[0]), split_pairs=self._in_code)
         return self._result(
             call,
             request,
@@ -1181,7 +1213,7 @@ class Query(QueryBase):
         request = self._static_request()
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, each read checks them
-            rest.check_fetch(spec, request.for_value(call_time[0]))
+            rest.check_fetch(spec, request.for_value(call_time[0]), split_pairs=self._in_code)
         plan = FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -1731,6 +1763,7 @@ class HistoryQuery(QueryBase):
         choose_source,
         _check_rest_history,
         RestTransport.history,
+        RestTransport.check_history,
         FlatFileTransport.history,
         RestTransport.history_by_symbol,
         FlatFileTransport.history_by_symbol,
@@ -1744,9 +1777,15 @@ class HistoryQuery(QueryBase):
         *,
         source: HistorySource = HistorySource.AUTO,
         reread: Reread = Reread.ALWAYS,
-        wait: bool = True,
+        wait: bool = False,
     ) -> Table:
         """Return the dataset's rows over a range of days or of exact times.
+
+        By default the call returns a live table with no rows at once, and the rows arrive in the
+        background. Deephaven updates the table, and every table built on it, as they land. For
+        symbols passed in code or in a static table, they land all in one update, and
+        `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass `wait=True` to wait
+        for the rows; without a watchlist, you then get a static table.
 
         Dates, such as `"2025-03-03"`, read whole days in the market's time zone, both ends
         included. Times, such as a `datetime` with a time zone, read from `start` up to `end`, which
@@ -1773,13 +1812,12 @@ class HistoryQuery(QueryBase):
             reread: For a watchlist, whether a symbol you delete and add back is downloaded again
                 (`dm.Reread.ALWAYS`, the default) or gets its earlier rows back without a request
                 (`dm.Reread.NEVER`).
-            wait: True, the default, waits for the rows. For a watchlist, it waits until each symbol
-                has been read once. False returns a live table at once and fills it in the
-                background. A failed request then fails the table instead of raising.
+            wait: False, the default, returns at once and fills the table in the background. True
+                waits for the rows; for a watchlist, until each symbol has been read once.
 
         Returns:
-            A table with the dataset's columns, empty when no row is in the range: static, or live
-            for `wait=False` or a watchlist.
+            A table with the dataset's columns, with no row when none is in the range: live, or
+            static for `wait=True` without a watchlist.
 
         Raises:
             TypeError: If `source` isn't a `dm.HistorySource`, `reread` isn't a `dm.Reread`, `wait`
@@ -1791,27 +1829,34 @@ class HistoryQuery(QueryBase):
                 - `start` is after `end`, or in the future when `end` is left out;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - no source can serve the request; the message gives each reason.
-            AuthenticationError: If Massive or its flat-file server rejects your keys.
-            EntitlementError: If your plan doesn't include the data from any source the call can
-                use.
-            MassiveError: If:
-                - the session is closed, or a request fails;
+                - no source can serve the request; the message gives each reason;
+                - the endpoint doesn't take one of the query's parameters or filters.
+            AuthenticationError: With `wait=True`, if Massive or its flat-file server rejects your
+                keys.
+            EntitlementError: With `wait=True`, if your plan doesn't include the data from any
+                source the call can use.
+            MassiveError: At the call, if the session is closed. With `wait=True`, also if:
+                - a request fails;
                 - adjusted bars come back unadjusted, or the reverse;
                 - a trading day's flat file is missing and REST can't serve that day;
                 - for a watchlist, every symbol's read failed.
+
+        Without `wait=True`, an error from Massive fails the table instead of raising: it is
+        logged and shows in `Error` of `m.streams()`. A watchlist's table fails when every symbol
+        it held at the call fails for good, such as on a plan without the dataset.
 
         Example:
             ::
 
                 day = m.crypto.trades("X:BTCUSD").history("2026-01-02", "2026-01-02")
+                rows = m.crypto.trades("X:BTCUSD").history("2026-01-02", "2026-01-02", wait=True)
         """
         background = not _wait(wait)
         again = _require_enum(reread, Reread, "reread")
         rereads = "" if again is Reread.ALWAYS else f", reread={again!r}"
         return self._logged_call(
             f"history({start!r}, {end!r}, source={source!r}{rereads}"
-            f"{', wait=False' if background else ''})",
+            f"{'' if background else ', wait=True'})",
             lambda call: self._history(
                 start, end, source=source, reread=again, call=call, wait=wait
             ),
@@ -1996,7 +2041,7 @@ class HistoryQuery(QueryBase):
         spec = self._spec
         rest = self._core.rest_transport()
         if not window.empty:  # a parameter error raises now, with symbols or without
-            rest.check_history(spec, request, window)
+            rest.check_history(spec, request, window, split_pairs=False)
         return FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -2056,6 +2101,9 @@ class HistoryQuery(QueryBase):
             source = note if served is None else served
             return self._described(table, note=source if lacks is None else f"{source} {lacks}")
         if not forced and rest_history_problem(spec, request) is None:
+            # REST may read the days the files lack: its parameter errors raise now, as a read
+            # that waits raises them before it reads those days.
+            self._core.rest_transport().check_history(spec, request, window, split_pairs=False)
             # The description is written before the read: it can only say what may happen.
             note = f"{note} A day the flat files cannot serve is read from REST; the log names it."
         return self._result(
@@ -2086,8 +2134,8 @@ class HistoryQuery(QueryBase):
         """
         spec = self._spec
         rest = self._core.rest_transport()
-        if not wait and not window.empty:  # a parameter error raises now
-            rest.check_history(spec, request, window)
+        if not wait and not window.empty:  # a parameter error and a pair in code raise now
+            rest.check_history(spec, request, window, split_pairs=self._in_code)
         return self._result(
             call,
             request,

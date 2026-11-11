@@ -257,7 +257,7 @@ def test_each_symbol_class_is_served_by_its_own_path(
         order=dm.Order.ASC,
         limit=10,
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     shared = {
         "timespan": ["hour"],
         "window": ["50"],
@@ -299,7 +299,7 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
 
     fake_rest.reply("/v1/indicators/sma/AAPL", values(datetime(2025, 1, 1, 5, tzinfo=UTC)))
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", values(datetime(2025, 1, 2, tzinfo=UTC)))
-    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch())
+    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch(wait=True))
     windows = {r["Symbol"]: (r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out}
     new_york = timedelta(hours=5)  # UTC-5 in January
     assert windows == {
@@ -338,7 +338,7 @@ def test_a_range_of_dates_follows_each_symbols_class_days(
     query = rest_session.indicators.sma(
         ["AAPL", "X:BTCUSD"], 20, start=date(2025, 1, 2), end=date(2025, 1, 3)
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     assert sorted((r["Symbol"], r["Date"]) for r in out) == [
         ("AAPL", "2025-01-02"),
         ("X:BTCUSD", "2025-01-02"),
@@ -394,7 +394,7 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warn
     stamp = int(moment.timestamp() * 1000)
     reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
     fake_rest.reply("/v1/indicators/sma/AAPL", reply)
-    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch())
+    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Value"]) for r in out] == [
         (*window, 1.0)
     ]
@@ -413,11 +413,11 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
-    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
+    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch(wait=True)
     assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
     # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
     with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch()
+        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch(wait=True)
 
 
 _SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")
@@ -454,7 +454,7 @@ def test_macd_returns_its_three_lines(
     query = rest_session.indicators.macd(
         "X:BTCUSD", short_window=12, long_window=26, signal_window=9
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     params = dict(fake_rest.get_queries())["/v1/indicators/macd/X:BTCUSD"]
     assert (params["short_window"], params["long_window"], params["signal_window"]) == (
         ["12"],
@@ -476,7 +476,7 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
     fake_rest.reply("/v1/indicators/sma/C%3AEURUSD", empty)
     day = date(2025, 1, 2)
     symbols = ["AAPL", "X:BTCUSD", "C:EURUSD"]
-    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch()
+    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch(wait=True)
     requests = dict(fake_rest.get_queries())
     # A crypto or forex day is a UTC day; a stock day is a New York day (UTC-5 in January).
     # Forex takes the stock template, so its zone comes from the symbol, not the path.

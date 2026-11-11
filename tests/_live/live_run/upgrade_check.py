@@ -46,13 +46,13 @@ if TYPE_CHECKING:
 SUBSCRIPTIONS: Final = ("stocks", "options", "indices", "currencies", "futures")
 
 CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
-    "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(),
+    "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(wait=True),
     # Options Basic includes a contract's bars, not the chain; an expired contract answers 404,
     # which counts against the minute the same.
-    "options": lambda m: m.options.previous_day_bar("O:SPY261218C00600000").fetch(),
-    "indices": lambda m: m.indices.previous_day_bar("I:NDX").fetch(),
-    "currencies": lambda m: m.forex.previous_day_bar("C:EURUSD").fetch(),
-    "futures": lambda m: m.futures.market_status(product_code="ES", limit=1).fetch(),
+    "options": lambda m: m.options.previous_day_bar("O:SPY261218C00600000").fetch(wait=True),
+    "indices": lambda m: m.indices.previous_day_bar("I:NDX").fetch(wait=True),
+    "currencies": lambda m: m.forex.previous_day_bar("C:EURUSD").fetch(wait=True),
+    "futures": lambda m: m.futures.market_status(product_code="ES", limit=1).fetch(wait=True),
 }
 """One call of each subscription that sends exactly one request."""
 

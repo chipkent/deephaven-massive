@@ -200,6 +200,7 @@ class Recorder:
         self.call_ids: list[int] = []
         # The request checks a background read made on the calling thread.
         self.checks: list[tuple[str, DatasetSpec, Request]] = []
+        self.split_pairs: list[bool] = []
         # Each read by symbol (a followed history()): its symbols, window, and thread.
         self.by_symbol: list[tuple[tuple[str, ...], HistoryWindow, str]] = []
         # The outcome of a symbol's read by symbol, by symbol; rows of none otherwise.
@@ -275,11 +276,15 @@ class Recorder:
         empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
         return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
 
-    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
+    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
         self.checks.append(("fetch", spec, request))
+        self.split_pairs.append(split_pairs)
 
-    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
+    def check_history(
+        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
+    ) -> None:
         self.checks.append(("history", spec, request))
+        self.split_pairs.append(split_pairs)
 
     def poll(
         self,
@@ -637,7 +642,7 @@ def test_fetch_and_poll_delegate(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
     q = feed(massive_session)
-    q.fetch()
+    q.fetch(wait=True)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         q.poll(30)
         q.poll(30, mode=PollMode.AUTO)
@@ -683,7 +688,7 @@ def test_a_feed_without_start_refuses_to_poll(
     # The error is the user's report; the log has the decision and the refusal, at DEBUG.
     assert [r.levelno for r in caplog.records] == [logging.DEBUG, logging.DEBUG]
     assert caplog.messages[1] == f"m.economy.inflation().poll() raised ValueError: {message}"
-    news(massive_session).fetch()  # fetch() reads the whole range, as asked
+    news(massive_session).fetch(wait=True)  # fetch() reads the whole range, as asked
     assert [c[0] for c in rest.calls] == ["fetch"]
 
 
@@ -757,18 +762,20 @@ def test_each_static_verb_is_one_logged_call(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
-        news(massive_session).fetch()
-        last_trade(massive_session).fetch()
-        trades(massive_session).history("2025-03-03", "2025-03-04", source=HistorySource.REST)
+        news(massive_session).fetch(wait=True)
+        last_trade(massive_session).fetch(wait=True)
+        trades(massive_session).history(
+            "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=True
+        )
     query = repr(trades(massive_session))
     assert _calls(caplog) == [
-        f"call 1 start: {news(massive_session)!r}.fetch()",
+        f"call 1 start: {news(massive_session)!r}.fetch(wait=True)",
         "call 1 done: 0 rows in <s> s",
-        f"call 2 start: {last_trade(massive_session)!r}.fetch()",
+        f"call 2 start: {last_trade(massive_session)!r}.fetch(wait=True)",
         "call 2 done: 0 rows in <s> s",
         (
             f"call 3 start: {query}.history('2025-03-03', '2025-03-04', "
-            "source=<HistorySource.REST: 'rest'>)"
+            "source=<HistorySource.REST: 'rest'>, wait=True)"
         ),
         "call 3 done: 0 rows in <s> s",
     ]
@@ -784,11 +791,11 @@ def test_a_failed_call_logs_its_error(
         caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
         pytest.raises(ValueError, match="needs explicit symbols") as info,
     ):
-        every.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        every.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert _calls(caplog) == [
         (
             f"call 1 start: {every!r}.history('2025-03-03', '2025-03-03', "
-            "source=<HistorySource.REST: 'rest'>)"
+            "source=<HistorySource.REST: 'rest'>, wait=True)"
         ),
         f"call 1 failed after <s> s: ValueError: {info.value}",
     ]
@@ -812,7 +819,7 @@ def test_an_expected_failure_is_logged_once_at_debug(
         caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
         pytest.raises(dm.EntitlementError),
     ):
-        news(massive_session).fetch()
+        news(massive_session).fetch(wait=True)
     # The caller receives the refusal, so the call logs it only at DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     failed = [r for r in caplog.records if "failed after" in r.getMessage()]
@@ -843,7 +850,7 @@ def test_a_defect_is_logged_at_error_even_though_it_is_raised(
 
     monkeypatch.setattr(rest, "fetch", broken)
     with pytest.raises(dm.MassiveError):
-        news(massive_session).fetch()
+        news(massive_session).fetch(wait=True)
     # A broad except in the caller must never hide a defect, so it is an ERROR that says whose.
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [_ELAPSED.sub("<s> s", r.getMessage()) for r in errors] == [
@@ -860,14 +867,14 @@ def test_a_history_call_through_flat_files_passes_its_id(
     )
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
-    values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert flat.call_ids == [1]
 
 
 def test_a_one_row_fetch_passes_its_symbols(
     massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
-    last_trade(massive_session).fetch()
+    last_trade(massive_session).fetch(wait=True)
     assert [(c[0], c[1], c[2].symbols) for c in rest.calls] == [
         ("fetch", LAST_TRADE_SPEC, ("AAPL",))
     ]
@@ -877,7 +884,9 @@ def test_a_one_row_fetch_passes_its_symbols(
 
 
 def test_history_rest_passes_the_window(massive_session: dm.MassiveSession, rest: Recorder) -> None:
-    trades(massive_session).history("2025-03-03", "2025-03-04", source=HistorySource.REST)
+    trades(massive_session).history(
+        "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=True
+    )
     verb, _, request, extra = rest.calls[0]
     window = extra["window"]
     assert verb == "history"
@@ -894,12 +903,12 @@ def test_history_reads_through_now_by_default(
 ) -> None:
     now = datetime(2025, 3, 5, 15, tzinfo=UTC)
     monkeypatch.setattr(history_source, "_now", lambda: now)
-    trades(massive_session).history("2025-03-03", source=HistorySource.REST)
+    trades(massive_session).history("2025-03-03", source=HistorySource.REST, wait=True)
     _, _, request, extra = rest.calls[0]
     assert request.end is None
     assert extra["window"].span == DaySpan(date(2025, 3, 3), date(2025, 3, 5))
     start = datetime(2025, 3, 5, 14, tzinfo=UTC)
-    trades(massive_session).history(start, source=HistorySource.REST)
+    trades(massive_session).history(start, source=HistorySource.REST, wait=True)
     assert rest.calls[1][3]["window"].times == TimeRange(start, now)
 
 
@@ -908,7 +917,7 @@ def test_an_empty_history_range_calls_no_transport(
 ) -> None:
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
     for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
-        table = trades(massive_session).history(moment, moment, source=source)
+        table = trades(massive_session).history(moment, moment, source=source, wait=True)
         assert table.size == 0
         assert "Timestamp" in table.column_names
     assert rest.calls == []
@@ -920,7 +929,7 @@ def test_history_of_futures_dates_passes_sessions(
 ) -> None:
     q = make(massive_session, FUTURES_SPEC, symbols=["ESZ5"])
     assert isinstance(q, HistoryQuery)
-    q.history("2025-03-03", "2025-03-05", source=HistorySource.REST)
+    q.history("2025-03-03", "2025-03-05", source=HistorySource.REST, wait=True)
     window = rest.calls[0][3]["window"]
     assert window.sessions == DaySpan(date(2025, 3, 3), date(2025, 3, 5))
     assert window.requested is None  # requested one session at a time
@@ -929,11 +938,11 @@ def test_history_of_futures_dates_passes_sessions(
 def test_history_day_zone_per_class(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     q = make(massive_session, BARS_SPEC, symbols=["C:EURUSD"], timespan=Timespan.HOUR)
     assert isinstance(q, HistoryQuery)
-    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[0][3]["window"].times.start == datetime(2025, 3, 3, tzinfo=UTC)
     yields = make(massive_session, HISTORY_SPEC)
     assert isinstance(yields, HistoryQuery)
-    yields.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    yields.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[1][3]["window"].times.start == datetime(2025, 3, 3, 5, tzinfo=UTC)
 
 
@@ -942,19 +951,19 @@ def test_history_rest_rejects_all_except_grouped_daily(
 ) -> None:
     with pytest.raises(ValueError, match="needs explicit symbols"):
         trades(massive_session, dm.ALL).history(
-            "2025-03-03", "2025-03-03", source=HistorySource.REST
+            "2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True
         )
     minute = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.MINUTE)
     assert isinstance(minute, HistoryQuery)
     with pytest.raises(ValueError, match="FLAT_FILES"):
-        minute.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        minute.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     five = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY, multiplier=5)
     assert isinstance(five, HistoryQuery)
     with pytest.raises(ValueError, match="needs explicit symbols"):
-        five.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        five.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     daily = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY)
     assert type(daily) is HistoryQuery
-    daily.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    daily.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert len(rest.calls) == 1
 
 
@@ -964,7 +973,7 @@ def test_history_rest_needs_a_rest_endpoint(
     values = make(massive_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with pytest.raises(ValueError, match=r"indices\.values has no REST history"):
-        values.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        values.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
 
 
 @pytest.fixture
@@ -992,9 +1001,11 @@ def test_history_dispatches_by_the_source_choice(
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
-        values.history("2025-03-03", "2025-03-04")  # AUTO: flat files are the only source
-        values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
-        trades(s3_session).history("2025-03-03", "2025-03-03")  # AUTO: no flat files
+        values.history(
+            "2025-03-03", "2025-03-04", wait=True
+        )  # AUTO: flat files are the only source
+        values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+        trades(s3_session).history("2025-03-03", "2025-03-03", wait=True)  # AUTO: no flat files
     assert [c[3]["dates"] for c in flat.calls] == [
         (date(2025, 3, 3), date(2025, 3, 4)),
         (date(2025, 3, 3),),
@@ -1018,9 +1029,11 @@ def test_history_with_no_possible_source_raises_before_any_transport(
 ) -> None:
     every = trades(massive_session, dm.ALL)  # no flat files, and REST needs explicit symbols
     with pytest.raises(ValueError, match=r"stocks\.trades history has no possible source"):
-        every.history("2025-03-03", "2025-03-03")
+        every.history("2025-03-03", "2025-03-03", wait=True)
     with pytest.raises(ValueError, match=r"stocks\.trades cannot be read from flat files"):
-        trades(massive_session).history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        trades(massive_session).history(
+            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
+        )
     assert rest.calls == []
     assert flat.calls == []
 
@@ -1028,15 +1041,15 @@ def test_history_with_no_possible_source_raises_before_any_transport(
 def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recorder) -> None:
     q = trades(massive_session)
     with pytest.raises(TypeError, match=r"source must be dm\.HistorySource"):
-        q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"))
+        q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"), wait=True)
     with pytest.raises(TypeError, match=r"reread must be dm\.Reread"):
-        q.history("2025-03-03", "2025-03-03", reread=cast("dm.Reread", "never"))
+        q.history("2025-03-03", "2025-03-03", reread=cast("dm.Reread", "never"), wait=True)
     with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
-        q.history("2025-03-03T09:30", "2025-03-04")
+        q.history("2025-03-03T09:30", "2025-03-04", wait=True)
     with pytest.raises(ValueError, match="must not be after end"):
-        q.history("2025-03-04", "2025-03-03")
+        q.history("2025-03-04", "2025-03-03", wait=True)
     with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
-        q.history("2025-03-03", datetime(2025, 3, 4, tzinfo=UTC))
+        q.history("2025-03-03", datetime(2025, 3, 4, tzinfo=UTC), wait=True)
     assert flat.calls == []
 
 
@@ -1061,12 +1074,12 @@ def test_history_reads_a_static_symbol_table_once_for_every_source(
     q = trades(massive_session, watchlist)
 
     def forced_rest() -> None:  # from a thread with no execution context of its own
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
 
     worker = threading.Thread(target=forced_rest)
     worker.start()
     worker.join(TIMEOUT)
-    q.history("2025-03-03", "2025-03-03")
+    q.history("2025-03-03", "2025-03-03", wait=True)
     # Each verb read the table once, inside the session's context, and every source received
     # the same sorted tuple, never the table itself.
     assert reads == [True, True]
@@ -1094,7 +1107,7 @@ def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
             ValueError,
             match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
         ):
-            q.history("2025-03-03", "2025-03-03", source=source)
+            q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
 
@@ -1103,7 +1116,7 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
-    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[0][2].symbols == ("AAPL",)
     assert flat.calls == []
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
@@ -1111,7 +1124,7 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
         ValueError,
         match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
     ):
-        only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
+        only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
 
 
 def test_history_rejects_a_symbol_table_without_symbols(
@@ -1123,7 +1136,7 @@ def test_history_rejects_a_symbol_table_without_symbols(
             with pytest.raises(
                 ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
             ):
-                q.history("2025-03-03", "2025-03-03", source=source)
+                q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
 
@@ -1358,7 +1371,7 @@ def test_a_refused_static_verb_logs_nothing(
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         verbs: list[Callable[[], Table]] = [
             one_row.fetch,
-            lambda: q.history("2025-03-03", source=HistorySource.REST),
+            lambda: q.history("2025-03-03", source=HistorySource.REST, wait=True),
         ]
         for verb in verbs:
             with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1434,10 +1447,10 @@ def test_every_static_verb_is_described(
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     cases = [
-        (NEWS_SPEC, news(s3_session).fetch()),
-        (LAST_TRADE_SPEC, last_trade(s3_session).fetch()),
-        (TRADES_SPEC, trades(s3_session).history("2025-03-03", "2025-03-04")),  # REST
-        (VALUES_SPEC, values.history("2025-03-03", "2025-03-04")),  # flat files
+        (NEWS_SPEC, news(s3_session).fetch(wait=True)),
+        (LAST_TRADE_SPEC, last_trade(s3_session).fetch(wait=True)),
+        (TRADES_SPEC, trades(s3_session).history("2025-03-03", "2025-03-04", wait=True)),  # REST
+        (VALUES_SPEC, values.history("2025-03-03", "2025-03-04", wait=True)),  # flat files
     ]
     for spec, table in cases:
         assert_described(s3_session, spec, table)
@@ -1731,11 +1744,11 @@ def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
     if isinstance(query, Query):
-        yield "fetch()", query.fetch()
+        yield "fetch()", query.fetch(wait=True)
         for mode in PollMode:
             yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
     if isinstance(query, HistoryQuery):
-        yield "history()", query.history("2025-03-03", "2025-03-04")
+        yield "history()", query.history("2025-03-03", "2025-03-04", wait=True)
 
 
 @pytest.mark.parametrize("name", list(_session.CATALOG.by_name))
@@ -1764,11 +1777,11 @@ def test_a_history_table_names_its_source(
         s3_session._core, "flat_file_transport", lambda: FlatFiles(flat, s3_session._core)
     )
     days = ("2025-03-03", "2025-03-04")
-    ticks = trades(s3_session).history(*days)
-    forced = trades(s3_session).history(*days, source=HistorySource.REST)
+    ticks = trades(s3_session).history(*days, wait=True)
+    forced = trades(s3_session).history(*days, source=HistorySource.REST, wait=True)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
-    files = values.history(*days, source=HistorySource.FLAT_FILES)
+    files = values.history(*days, source=HistorySource.FLAT_FILES, wait=True)
     summary = "A dataset for the tests."
     assert [t.attributes()["TableDescription"] for t in (ticks, forced, files)] == [
         (
@@ -1802,10 +1815,12 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
     assert isinstance(q, HistoryQuery)
     instant = datetime(2025, 3, 3, 15, tzinfo=UTC)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
-        q.history(instant, instant)  # no row can lie in the range: nothing is read, no warning
+        q.history(
+            instant, instant, wait=True
+        )  # no row can lie in the range: nothing is read, no warning
         assert caplog.messages == []
-        q.history("2025-03-03", "2025-03-03")
-        q.history("2025-03-04", "2025-03-04")  # once per session
+        q.history("2025-03-03", "2025-03-03", wait=True)
+        q.history("2025-03-04", "2025-03-04", wait=True)  # once per session
     warning = (
         "stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold "
         "50); the read leaves DecimalSize null, which the other source, REST, fills: pass "
@@ -1829,7 +1844,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     many = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(many, HistoryQuery)
     with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
-        many.history("2025-03-03", "2025-03-04")
+        many.history("2025-03-03", "2025-03-04", wait=True)
     [(verb, _, request, extra)] = rest.calls
     assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
     assert extra["window"].span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
@@ -1844,14 +1859,14 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
         "publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
     )
     with pytest.raises(dm.MassiveError) as forced:
-        many.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+        many.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert str(forced.value) == note + (
         "Retry later, or read REST with source=dm.HistorySource.REST"
     )
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with pytest.raises(dm.MassiveError) as unserved:
-        values.history("2025-03-03", "2025-03-04")
+        values.history("2025-03-03", "2025-03-04", wait=True)
     assert files.inferred == [False, True, True]
     assert str(unserved.value) == note.replace("stocks.trades", "indices.values") + (
         "Retry later; REST cannot serve this read: indices.values has no REST history"
@@ -1870,7 +1885,7 @@ def _futures(count: int) -> list[str]:
 def _join_reads(session: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end, then for its row to be written.
     for state in list(session._core.workers._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+        cast("Any", state.fail).__self__.join(TIMEOUT)
 
 
 def _released(session: dm.MassiveSession, *tables: Table) -> None:
@@ -1887,15 +1902,15 @@ def test_wait_false_reads_in_the_background(
 ) -> None:
     q = news(massive_session)
     with caplog.at_level(logging.DEBUG):
-        fetched = q.fetch(wait=False)
+        fetched = q.fetch()  # the default reads in the background
         history = trades(massive_session).history(
-            "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=False
+            "2025-03-03", "2025-03-04", source=HistorySource.REST
         )
         _join_reads(massive_session)
     assert fetched.is_refreshing
     assert history.is_refreshing
     # The parameters were checked on the calling thread, in call order, then each read ran on
-    # its own background thread with a token, so the reads may finish in either order.
+    # the session's read pool with a token, so the reads may finish in either order.
     assert [check[0] for check in rest.checks] == ["fetch", "history"]
     assert sorted(call[0] for call in rest.calls) == ["fetch", "history"]
     assert all(isinstance(call[3]["stop"], threading.Event) for call in rest.calls)
@@ -1907,11 +1922,11 @@ def test_wait_false_reads_in_the_background(
     # Each read logs its own outcome, from its thread; the call logs no `done` line.
     assert sorted(_calls(caplog)) == [
         "call 1 published: 0 rows in <s> s",
-        f"call 1 start: {q!r}.fetch(wait=False)",
+        f"call 1 start: {q!r}.fetch()",
         "call 2 published: 0 rows in <s> s",
         (
             f"call 2 start: {trades(massive_session)!r}.history('2025-03-03', '2025-03-04', "
-            "source=<HistorySource.REST: 'rest'>, wait=False)"
+            "source=<HistorySource.REST: 'rest'>)"
         ),
     ]
     _released(massive_session, fetched, history)
@@ -1955,7 +1970,7 @@ def test_wait_false_raises_argument_errors_at_the_call(
     with pytest.raises(ValueError, match=r"history has no possible source"):
         every.history("2025-03-03", "2025-03-03", wait=False)
 
-    def refuse(*_: object) -> None:
+    def refuse(*_: object, **__: object) -> None:
         raise ValueError("/fed/v1/inflation does not take adjusted")
 
     monkeypatch.setattr(rest, "check_fetch", refuse)  # a path that refuses a parameter
@@ -2001,6 +2016,48 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     _released(s3_session, files, forced, landed)
 
 
+def test_a_background_flat_file_read_checks_the_rest_it_may_read_at_the_call(
+    *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under AUTO, REST reads the days the files lack, so its parameter errors raise at the
+    # call, as a read that waits raises them; FLAT_FILES never reads REST, and checks nothing.
+    rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
+    monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
+    monkeypatch.setattr(
+        s3_session._core, "flat_file_transport", lambda: FlatFiles(flat, s3_session._core)
+    )
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
+    assert isinstance(q, HistoryQuery)
+    auto = q.history("2025-03-03", "2025-03-03")
+    forced = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    _join_reads(s3_session)
+    assert [check[0] for check in rest.checks] == ["history"]
+    assert rest.split_pairs == [False]  # a parameter check: the files read the pairs whole
+    assert [call[0] for call in flat.calls] == ["history", "history"]
+
+    def refuse(*_: object, **__: object) -> None:
+        raise ValueError("the path does not take adjusted")
+
+    monkeypatch.setattr(rest, "check_history", refuse)
+    with pytest.raises(ValueError, match="does not take adjusted"):
+        q.history("2025-03-03", "2025-03-03")
+    _released(s3_session, auto, forced)
+
+
+def test_only_symbols_in_code_have_their_crypto_pairs_split_at_the_call(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # A pair in code is code: one Massive does not list raises at the call. A table's pairs
+    # are data, which the read takes as MassiveConfig.unlisted_symbols says.
+    in_code = news(massive_session).fetch()
+    table = new_table([string_col("Symbol", ["AAPL"])])
+    from_table = trades(massive_session, table).history("2025-03-03", source=HistorySource.REST)
+    listed = trades(massive_session).history("2025-03-03", source=HistorySource.REST)
+    _join_reads(massive_session)
+    assert rest.split_pairs == [True, False, True]
+    _released(massive_session, in_code, from_table, listed)
+
+
 def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     *,
     s3_session: dm.MassiveSession,
@@ -2021,7 +2078,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     assert isinstance(q, HistoryQuery)
     # FLAT_FILES raises, naming REST.
     with pytest.raises(dm.EntitlementError) as info:
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert str(info.value) == (
         "the plan does not include these flat files; REST serves this read too: pass "
         "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
@@ -2031,7 +2088,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     assert rest.calls == []
     # AUTO chose the flat files (60 symbols), and serves the read from REST instead, warning.
     with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert [c[0] for c in rest.calls] == ["history"]
     assert caplog.messages[-1] == (
         "stocks.trades history: AUTO read REST because S3 refused the flat files (the plan does "
@@ -2045,8 +2102,8 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     # came under FLAT_FILES.
     monkeypatch.setattr(flat, "history", rejected)
     with pytest.raises(dm.AuthenticationError, match=r"^S3 rejected the flat-file credentials$"):
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
-    described = q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+    described = q.history("2025-03-03", "2025-03-03", wait=True)
     assert [c[0] for c in rest.calls] == ["history", "history"]
     assert described.attributes()["TableDescription"].endswith(
         "Read from REST: AUTO chose flat files, which S3 refused."
@@ -2056,7 +2113,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
     with pytest.raises(dm.EntitlementError, match=r"^the plan does not include these flat files$"):
-        values.history("2025-03-03", "2025-03-03")
+        values.history("2025-03-03", "2025-03-03", wait=True)
 
 
 FF = Transport.FLAT_FILES
@@ -2226,7 +2283,7 @@ def test_history_follows_a_refreshing_table_from_rest_under_auto(
     many = [f"S{i:02d}" for i in range(60)]  # past the flat-file threshold of a static call
     q = make(s3_session, TRADES_FILES_SPEC, symbols=live(*many))
     assert isinstance(q, HistoryQuery)
-    result = q.history("2025-03-03", "2025-03-03")
+    result = q.history("2025-03-03", "2025-03-03", wait=True)
     assert result.is_refreshing
     assert flat.by_symbol == []
     assert [names for names, _, _ in rest.by_symbol] == [tuple(many)]  # the call's own read
@@ -2237,7 +2294,7 @@ def test_history_follows_a_refreshing_table_from_rest_under_auto(
     s3_session.release(result)
     few = make(s3_session, TRADES_FILES_SPEC, symbols=live("AAPL", "MSFT", "NVDA"))
     assert isinstance(few, HistoryQuery)
-    s3_session.release(few.history("2025-03-03", "2025-03-03"))
+    s3_session.release(few.history("2025-03-03", "2025-03-03", wait=True))
     assert [names for names, _, _ in rest.by_symbol][1] == ("AAPL", "MSFT", "NVDA")
     assert flat.by_symbol == []
     follows(s3_session)
@@ -2271,7 +2328,7 @@ def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
     )
     q = make(s3_session, TRADES_FILES_SPEC, symbols=live("AAPL", "MSFT"))
     assert isinstance(q, HistoryQuery)
-    result = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    result = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert [names for names, _, _ in flat.by_symbol] == [("AAPL", "MSFT")]
     assert (
         "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES."
@@ -2285,7 +2342,7 @@ def test_history_forced_to_rest_follows_from_rest(
     live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live("AAPL")).history(
-        "2025-03-03", "2025-03-03", source=HistorySource.REST
+        "2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True
     )
     assert (
         "Read from REST: requested with source=dm.HistorySource.REST."
@@ -2300,14 +2357,16 @@ def test_an_added_symbol_is_read_over_the_call_s_window(
     live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     watchlist = live("AAPL")
-    result = trades(massive_session, watchlist).history("2025-03-03")  # through the call instant
+    result = trades(massive_session, watchlist).history(
+        "2025-03-03", wait=True
+    )  # through the call instant
     cast("Any", watchlist).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(rest.by_symbol) == 2)
     (first, window, caller), (added, later, reader) = rest.by_symbol
     assert (first, added) == (("AAPL",), ("MSFT",))
     assert later is window  # the same window, fixed at the call: the same end and cutoff
     assert caller == threading.current_thread().name
-    assert "follow-read" in reader
+    assert " read_" in reader
     end = window.now.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert f"over 2025-03-03 through {end}." in result.attributes()["TableDescription"]
     massive_session.release(result)
@@ -2334,7 +2393,7 @@ def test_wait_false_returns_at_once_and_reads_in_the_background(
     result = trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03", wait=False)
     assert result.is_refreshing
     _until(lambda: len(rest.by_symbol) == 1)
-    assert "follow-read" in rest.by_symbol[0][2]
+    assert " read_" in rest.by_symbol[0][2]
     massive_session.release(result)
     follows(massive_session)
 
@@ -2342,7 +2401,7 @@ def test_wait_false_returns_at_once_and_reads_in_the_background(
 def test_an_empty_refreshing_table_returns_an_empty_following_result(
     live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
-    result = trades(massive_session, live()).history("2025-03-03", "2025-03-03")
+    result = trades(massive_session, live()).history("2025-03-03", "2025-03-03", wait=True)
     assert result.is_refreshing
     assert result.size == 0
     assert rest.by_symbol == []
@@ -2360,12 +2419,12 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
         "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other"), FailureKind.PERMANENT),
     }
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
-        trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
+        trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03", wait=True)
     assert massive_session._core.workers._workers == {}
     rest.outcomes = {}
     rest.raises = dm.AuthenticationError("HTTP 401: wrong key")  # the read fails as a unit
     with pytest.raises(dm.AuthenticationError, match="wrong key"):
-        trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03")
+        trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03", wait=True)
     follows(massive_session)
 
 
@@ -2382,7 +2441,9 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
         )
     }
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
-        result = trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
+        result = trades(massive_session, live("AAPL", "MSFT")).history(
+            "2025-03-03", "2025-03-03", wait=True
+        )
     assert caplog.messages == [
         (
             "stocks.trades history: 1 of the 2 symbols of the call failed and are left out of the "
@@ -2400,26 +2461,26 @@ def test_reread_is_ignored_for_a_static_symbol_table(
     static = new_table([string_col("Symbol", ["AAPL"])])
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
         result = trades(massive_session, static).history(
-            "2025-03-03", "2025-03-03", reread=dm.Reread.NEVER
+            "2025-03-03", "2025-03-03", reread=dm.Reread.NEVER, wait=True
         )
     assert not result.is_refreshing
     assert rest.by_symbol == []
     assert any(
         "history('2025-03-03', '2025-03-03', source=<HistorySource.AUTO: 'auto'>, "
-        "reread=<Reread.NEVER: 'never'>)" in message
+        "reread=<Reread.NEVER: 'never'>, wait=True)" in message
         for message in caplog.messages
     )
 
 
-def test_a_static_call_logs_its_start_as_before(
+def test_a_call_that_waits_names_wait_true_in_its_start(
     *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
-        trades(massive_session).history("2025-03-03", "2025-03-03")
+        trades(massive_session).history("2025-03-03", "2025-03-03", wait=True)
     starts = [m for m in caplog.messages if " start: " in m]
     assert len(starts) == 1
     assert starts[0].endswith(
-        ".history('2025-03-03', '2025-03-03', source=<HistorySource.AUTO: 'auto'>)"
+        ".history('2025-03-03', '2025-03-03', source=<HistorySource.AUTO: 'auto'>, wait=True)"
     )
 
 
@@ -2432,10 +2493,10 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
 ) -> None:
     only_bad = live("msft")
     with pytest.raises(ValueError, match="no row of the symbol table is a ticker"):
-        trades(massive_session, only_bad).history("2025-03-03", "2025-03-03")
+        trades(massive_session, only_bad).history("2025-03-03", "2025-03-03", wait=True)
     strict(massive_session, monkeypatch)
     with pytest.raises(ValueError, match="a symbol table holds 'msft'"):
-        trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03")
+        trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03", wait=True)
     assert rest.by_symbol == []
 
 
@@ -2512,8 +2573,8 @@ def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
     static = new_table([string_col("Symbol", ["AAPL"])])
     q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
     assert isinstance(q, Query)
-    assert not q.fetch().is_refreshing
-    assert not last_trade(massive_session).fetch().is_refreshing
+    assert not q.fetch(wait=True).is_refreshing
+    assert not last_trade(massive_session).fetch(wait=True).is_refreshing
     # A symbol table's crypto pairs follow the session's setting; symbols in code always raise.
     assert rest.unlisted == [OnError.LOG, OnError.RAISE]
     assert rest.fetched == []
@@ -2531,7 +2592,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     wl = live("AAPL")
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
     assert isinstance(q, Query)
-    result = q.fetch()
+    result = q.fetch(wait=True)
     assert result.is_refreshing
     assert result.size == 1  # the call-time read is in the result when the call returns
     assert [(names, thread) for names, _, thread in rest.fetched] == [
@@ -2543,7 +2604,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     rest.outcomes["MSFT"] = rows_of(massive_session, LAST_TRADE_SPEC, 2)
     cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(dh_to_pylist(result)) == 3)
-    assert "follow-read" in rest.fetched[1][2]
+    assert " read_" in rest.fetched[1][2]
     _until(lambda: symbol_reads(massive_session, drain, dh_to_pylist)["MSFT"]["State"] == "DONE")
     reads = symbol_reads(massive_session, drain, dh_to_pylist)
     # Each symbol's rows are Massive's answer as of its own read.
@@ -2575,7 +2636,7 @@ def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
     wl = live()
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
     assert isinstance(q, Query)
-    result = q.fetch()
+    result = q.fetch(wait=True)
     cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(rest.fetched) == 1)
     cast("Any", wl).delete(new_table([string_col("Symbol", ["MSFT"])]))
@@ -2595,7 +2656,7 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
     result = q.fetch(wait=False)
     assert result.is_refreshing
     _until(lambda: len(rest.fetched) == 1)
-    assert "follow-read" in rest.fetched[0][2]
+    assert " read_" in rest.fetched[0][2]
     assert rest.checks == [("fetch", LAST_TRADE_SPEC, rest.checks[0][2])]  # checked at the call
     massive_session.release(result)
     follows(massive_session)
@@ -2613,11 +2674,11 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, Query)
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
-        q.fetch()
+        q.fetch(wait=True)
     both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
     assert isinstance(both, Query)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
-        result = both.fetch()
+        result = both.fetch(wait=True)
     assert caplog.messages == [
         (
             "stocks.last_trade fetch: 1 of the 2 symbols of the call failed and are left out "
@@ -2649,10 +2710,10 @@ def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
         if setting is OnError.RAISE:
             with pytest.raises(UnlistedPairError, match="does not list it"):
-                q.fetch()
+                q.fetch(wait=True)
             rest.outcomes = {}  # the raised error's traceback holds the session
             return
-        result = q.fetch()
+        result = q.fetch(wait=True)
     assert len(caplog.messages) == (1 if setting is OnError.LOG else 0)
     massive_session.release(result)
     follows(massive_session)
@@ -2675,7 +2736,7 @@ def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_row
     # row goes to its symbol by its ticker.
     rows = [{"ticker": "AAPL", "type": "stocks"}, {"ticker": "MSFT", "type": "stocks"}]
     fake_rest.reply("/v3/snapshot", Reply(envelope(rows)))
-    result = rest_session.snapshots(live("AAPL", "MSFT")).fetch()
+    result = rest_session.snapshots(live("AAPL", "MSFT")).fetch(wait=True)
     assert sorted(r["Symbol"] for r in dh_to_pylist(result)) == ["AAPL", "MSFT"]
     ((path, query),) = fake_rest.get_queries()
     assert path == "/v3/snapshot"
@@ -2689,7 +2750,7 @@ def test_a_followed_fetch_sends_its_limit_on_its_request(
 ) -> None:
     # `limit` is Massive's own cap on a request's rows, sent as the caller gave it.
     fake_rest.reply("/v3/snapshot", Reply(envelope([{"ticker": "AAPL", "type": "stocks"}])))
-    result = rest_session.snapshots(live("AAPL"), limit=1).fetch()
+    result = rest_session.snapshots(live("AAPL"), limit=1).fetch(wait=True)
     ((_, query),) = fake_rest.get_queries()
     assert (query["ticker.any_of"], query["limit"]) == (["AAPL"], ["1"])
     rest_session.release(result)
@@ -2707,7 +2768,7 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     wl = live()
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
     assert isinstance(q, Query)
-    result = q.fetch()
+    result = q.fetch(wait=True)
     assert result.is_refreshing
     assert result.size == 0
     assert (rest.fetched, rest.checks) == ([], [])  # the first read checks the parameters
@@ -2738,7 +2799,7 @@ def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     for ticker in ("AAPL", "MSFT"):
         fake_rest.reply(f"/v2/reference/news?limit=1000&ticker={ticker}", Reply(envelope([shared])))
     wl = live("AAPL", "MSFT")
-    result = rest_session.reference.news(symbols=wl).fetch()
+    result = rest_session.reference.news(symbols=wl).fetch(wait=True)
     assert [r["Id"] for r in dh_to_pylist(result)] == ["both", "both"]
     assert sorted(query["ticker"][0] for _, query in fake_rest.get_queries()) == ["AAPL", "MSFT"]
     cast("Any", wl).delete(new_table([string_col("Symbol", ["AAPL"])]))
@@ -2782,7 +2843,9 @@ def test_a_followed_range_no_row_can_lie_in_checks_nothing(
     live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
-    result = trades(massive_session, live("AAPL")).history(moment, moment)  # an empty range
+    result = trades(massive_session, live("AAPL")).history(
+        moment, moment, wait=True
+    )  # an empty range
     assert rest.checks == []  # nothing can be asked: no request, no parameter to check
     massive_session.release(result)
     follows(massive_session)
@@ -2814,7 +2877,7 @@ def test_a_static_table_of_underlyings_reads_each_chain_once(
     underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL", "MSFT"])])
     q = massive_session.options.chain(underlyings)
     assert repr(q) == "m.options.chain(<table>)"
-    result = q.fetch()
+    result = q.fetch(wait=True)
     assert not result.is_refreshing
     assert result.size == 3
     [(values, request, _)] = rest.valued
@@ -2830,7 +2893,7 @@ def test_a_static_table_of_values_fails_when_one_value_fails(
     rest.outcomes = {"NQ": SymbolFailure(refusal, FailureKind.PERMANENT)}
     codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
-        massive_session.futures.products(product_code=codes).fetch()
+        massive_session.futures.products(product_code=codes).fetch(wait=True)
     rest.outcomes = {}  # the raised error's traceback holds the session
 
 
@@ -2851,11 +2914,11 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
 ) -> None:
     empty = new_table([string_col("ProductCode", [None])])
     with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
-        massive_session.futures.products(product_code=empty).fetch()
+        massive_session.futures.products(product_code=empty).fetch(wait=True)
     options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
     q = massive_session.options.chain(options)
     with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
-        q.fetch()
+        q.fetch(wait=True)
     with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
         q.poll(5)
     assert rest.valued == []
@@ -2871,7 +2934,7 @@ def test_fetch_follows_a_refreshing_table_of_product_codes(
 ) -> None:
     rest.outcomes = {"ES": rows_of(massive_session, futures.PRODUCTS, 1)}
     codes = live_codes("ES")
-    result = massive_session.futures.products(product_code=codes).fetch()
+    result = massive_session.futures.products(product_code=codes).fetch(wait=True)
     assert result.is_refreshing
     assert result.size == 1  # the call-time code is in the result when the call returns
     assert result.attributes()["TableDescription"].endswith(
@@ -2882,7 +2945,7 @@ def test_fetch_follows_a_refreshing_table_of_product_codes(
     cast("Any", codes).add(new_table([string_col("ProductCode", ["NQ"])]))
     _until(lambda: len(dh_to_pylist(result)) == 3)
     assert [values for values, _, _ in rest.valued] == [("ES",), ("NQ",)]
-    assert "follow-read" in rest.valued[1][2]
+    assert " read_" in rest.valued[1][2]
     assert set(symbol_reads(massive_session, drain, dh_to_pylist)) == {"ES", "NQ"}
     cast("Any", codes).delete(new_table([string_col("ProductCode", ["ES"])]))
     _until(lambda: len(dh_to_pylist(result)) == 2)
@@ -2921,10 +2984,12 @@ def test_fetch_follows_one_refreshing_table_at_a_time(
         r"which reads both at every cycle, or pass one of them as a static snapshot, such as "
         r"product_code=table\.snapshot\(\)$",
     ):
-        q.fetch()
+        q.fetch(wait=True)
     # A static symbol table beside it is read once, and the codes are followed.
     contracts = new_table([string_col("Symbol", ["ESZ6"])])
-    result = massive_session.futures.snapshots(contracts, product_code=live_codes("ES")).fetch()
+    result = massive_session.futures.snapshots(contracts, product_code=live_codes("ES")).fetch(
+        wait=True
+    )
     [(_, request, _)] = rest.valued
     assert request.symbols == ("ESZ6",)
     massive_session.release(result)

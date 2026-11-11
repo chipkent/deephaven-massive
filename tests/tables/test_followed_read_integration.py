@@ -153,7 +153,9 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
     with shared_lock(get_exec_ctx().update_graph):  # created before any cycle can refresh it
         wl = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     query = m.stocks.bars(wl, dm.Timespan.DAY, adjusted=False)
-    never = query.history(_START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER)
+    never = query.history(
+        _START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER, wait=True
+    )
     seen = _Diagnostics(m, table_rows)
     held = [never, seen.streams, seen.symbol_reads]
     try:
@@ -191,7 +193,7 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
             assert back[column] == first["AAPL"][column], column
         assert back["ReadAt"] < back["AddedAt"]
 
-        always = query.history(_START, _END, source=dm.HistorySource.REST)
+        always = query.history(_START, _END, source=dm.HistorySource.REST, wait=True)
         held.append(always)
         always_id = seen.newest_read(never_id)
         before = _wait_for(

@@ -27,14 +27,18 @@ A `...` in a message stands for more words in the text you see.
 
 ### Reads
 
-These come from `fetch()` and `history()`:
+These come from `fetch()` and `history()`. By default a read runs in the background: Massive's
+error fails its table, and shows in the `Error` column of its row in `m.streams()`. A call with
+`wait=True` raises the error instead.
 
 | You see | Why | What to do |
 |---|---|---|
+| A `fetch()` or `history()` table has no rows | The download is still running, it failed, or Massive had no rows. | Find the read's row in `m.streams()`. `LOADING` means its rows are on their way, `FAILED` has the reason in `Error`, and `DONE` means Massive had no rows, as "No rows for a symbol" explains. A watchlist's read shows `RUNNING` once each symbol has been read, and `m.symbol_reads()` shows each symbol's result. |
+| `try`/`except` around `fetch()` or `history()` doesn't catch Massive's error | The call returned before Massive answered, and the error went to the table. | Pass `wait=True` to wait for Massive's answer, so its error raises in the call. |
 | No rows for a symbol | Massive has no data for it in that range, or the company changed its ticker. | List the ticker's changes with `m.reference.ticker_events("META").fetch()`. |
 | `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The plan table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
-| A read is slow | A Basic plan allows five requests a minute, and the read waits between them. | Read fewer symbols, or pass `wait=False` to read in the background. |
-| A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads all of it, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". Pass `wait=False` to read in the background. |
+| A read is slow | A Basic plan allows five requests a minute, and the read waits between them. | Read fewer symbols. |
+| A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads all of it, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". |
 | Prices jump at a stock split | Live bars, flat files, and bars read with `adjusted=False` are as traded. | Read bars with `history()` and leave `adjusted` at `True`, the default, for split-adjusted prices. The [stock bars page](datasets/stocks.bars.md#arguments) explains `adjusted`. |
 
 <a id="live-table-messages"></a>
@@ -47,7 +51,7 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | You see | Why | What to do |
 |---|---|---|
 | A stock table stays empty | No stock trades while the market is closed. | Check whether the market is open with `m.reference.market_status().fetch()`. |
-| Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. For a long read, pass `wait=False` to `fetch()` or `history()`: the call returns at once, and its table fills in the background. |
+| Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. Leave out `wait=True` from `fetch()` and `history()`: the call returns at once, and its table fills in the background. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
 | A symbol on your watchlist never appears | The table skips a row that isn't Massive's exact ticker, or a crypto pair Massive doesn't list. `Error` lists the skipped rows. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class, and `help(dm.canonicalize_symbols)` shows how to convert a table of other spellings to it. |
 | `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
@@ -66,7 +70,7 @@ checking:
 
 | Table | One row for each | Look here when |
 |---|---|---|
-| `m.streams()` | Live table, and each `fetch()` or `history()` that has `wait=False` or follows a watchlist | A live table looks wrong |
+| `m.streams()` | Live table, and each `fetch()` or `history()` that runs in the background or follows a watchlist | A live table looks wrong |
 | `m.connections()` | Streaming connection, and each real-time or delayed feed the session chose | A stream gets no data |
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
 | `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |

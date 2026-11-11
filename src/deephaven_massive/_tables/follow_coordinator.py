@@ -18,8 +18,10 @@ diagnostics show. It owns:
   state needs no lock. It makes no request and waits on nothing: it publishes each symbol's
   download (`FollowedRead.publish`, which never waits for an update cycle), times the
   retries, and queues the `m.streams()` and `m.symbol_reads()` rows.
-- **One read pool per session**, a `ThreadPoolExecutor` of `MassiveConfig.max_concurrency`
-  threads (`massive #1 follow-read_0`), made and ended with the coordinator thread.
+- **The session's read pool** (`_tables/read_pool.py`), at most `MassiveConfig.max_concurrency`
+  threads (`massive #1 read_0`), shared with the background reads, so every download of the
+  session counts against one limit. The session owns and stops it; the coordinator only submits
+  to it.
   A read's outcome that arrives once its result's stop token is set is dropped: the result was
   released and is unused, or failed. Each task
   reads some symbols of one result (`FollowPlan.read`) in the session's execution context,
@@ -45,7 +47,12 @@ changes nothing.
 the read, or a defect) and a symbol table that fails or, under
 `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
 the coordinator records the failure and publishes it, never the listener. So does a crypto pair
-Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`.
+Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`. So does a call that
+did not wait whose call-time symbols (the table's symbols when the watch started) all end
+`FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
+with the first symbol's error, in name order, as a call that waits raises it
+(`_call_time_outcome`). One of them with rows, or one deleted from the table before it failed,
+settles the check: from then on a symbol's failure is its own.
 
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
@@ -70,7 +77,6 @@ import itertools
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
@@ -106,6 +112,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._tables.followed_read import FollowedRead
     from deephaven_massive._tables.poll import PollClock
+    from deephaven_massive._tables.read_pool import ReadPool
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["CLOCK", "RETRY_DELAYS", "FirstRead", "FollowCoordinator"]
@@ -389,6 +396,14 @@ class _Result:
         decided_at_step: The latest update cycle of the symbol table whose change the
             coordinator has applied (the result's build cycle until the first), stamped on
             every download it publishes; see `FollowedRead.publish`.
+        call_time: For a call that did not wait, until its call-time symbols settle: each of
+            them still in the table, in name order, with its final failure once it has
+            one. None until the watch's first set of symbols arrives (`awaits_call_time`), for
+            a call that waited, and once settled (`_call_time_outcome`).
+        awaits_call_time: True from the start of a call that did not wait until the watch's
+            first set of symbols arrives.
+        call_time_open: How many symbols of `call_time` have not failed yet, so each outcome
+            updates the check in constant time.
     """
 
     read: FollowedRead
@@ -404,6 +419,9 @@ class _Result:
     skipped: str | None = None
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
+    call_time: dict[str, MassiveError | None] | None = None
+    awaits_call_time: bool = False
+    call_time_open: int = 0
 
 
 def _now_ns() -> int:
@@ -472,7 +490,6 @@ class FollowCoordinator:
         "_exec_ctx",
         "_following",
         "_lock",
-        "_max_workers",
         "_pool",
         "_results",
         "_retries",
@@ -481,23 +498,22 @@ class FollowCoordinator:
         "_worker",
     )
 
-    def __init__(self, exec_ctx: ExecutionContext, thread_prefix: str, max_workers: int) -> None:
+    def __init__(self, exec_ctx: ExecutionContext, thread_prefix: str, pool: ReadPool) -> None:
         """Prepare the coordinator; no thread starts yet.
 
         Args:
             exec_ctx: The session's execution context, entered by the coordinator thread and by
-                each pool thread.
+                each of its reads.
             thread_prefix: The session's thread prefix, such as `"massive #1"`.
-            max_workers: The read pool's size, the session's `max_concurrency`.
+            pool: The session's read pool, which runs the reads.
         """
         self._exec_ctx = exec_ctx
         self._thread_prefix = thread_prefix
-        self._max_workers = max_workers
-        # Guards the thread, the pool, the followed reads, and the stop. Held only
-        # around a queue put or a pool submit, which never waits on another thread's lock.
+        self._pool = pool
+        # Guards the thread, the followed reads, and the stop. Held only around a queue put
+        # or a pool submit, which never waits on another thread's lock.
         self._lock = threading.Lock()
         self._worker: QueueWorker[_Message] | None = None
-        self._pool: ThreadPoolExecutor | None = None
         # Every followed read handed over (`follow`) and not yet forgotten, by `id`: what a
         # dying thread fails, including a read whose start never reached it.
         self._following: dict[int, FollowedRead] = {}
@@ -539,9 +555,6 @@ class FollowCoordinator:
             if self._closed:  # the session closed: the result's own check refuses it
                 return
             if self._worker is None:
-                self._pool = ThreadPoolExecutor(
-                    self._max_workers, thread_name_prefix=f"{self._thread_prefix} follow-read"
-                )
                 self._worker = QueueWorker(
                     self._exec_ctx,
                     f"{self._thread_prefix} follow",
@@ -558,19 +571,17 @@ class FollowCoordinator:
             logger.debug("%s follow: a followed read starts", self._thread_prefix)
 
     def stop(self) -> None:
-        """End the coordinator thread and its pool, without waiting; idempotent.
+        """End the coordinator thread, without waiting; idempotent.
 
         Called by `SessionCore.close` and, through the reaper, by the collection of a session
         never closed. The events queued before it are handled first; later ones are dropped.
         """
         with self._lock:
             self._closed = True
-            worker, pool = self._worker, self._pool
-            self._worker = self._pool = None
+            worker = self._worker
+            self._worker = None
         if worker is not None:
             worker.stop()
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def post(self, message: _Message) -> None:
         """Queue an event for the coordinator; never blocks. Dropped when no result follows.
@@ -786,6 +797,10 @@ class FollowCoordinator:
         if isinstance(message, _Baseline):
             held = {name for name, symbol in result.symbols.items() if symbol.in_table}
             added, removed = message.symbols - held, frozenset(held - message.symbols)
+            if result.awaits_call_time:
+                result.awaits_call_time = False
+                result.call_time = dict.fromkeys(sorted(message.symbols)) or None
+                result.call_time_open = len(message.symbols)
         else:
             added, removed = message.added, message.removed
         result.decided_at_step = max(result.decided_at_step, message.step)
@@ -814,7 +829,9 @@ class FollowCoordinator:
             logger.debug("call %d follow: the session closed before it started", read.call)
             return
         first = message.first
-        if first is not None:
+        if first is None:  # the call did not wait: its call-time symbols come with the watch
+            result.awaits_call_time = True
+        else:
             # The call warned of its failed symbols already: once per result and cause.
             result.warned.update(
                 _cause(outcome.error)
@@ -898,6 +915,11 @@ class FollowCoordinator:
         symbol.in_table = False
         symbol.generation += 1
         symbol.state = SymbolReadState.REMOVED
+        # A call-time symbol deleted before it failed settles the check; a failed one only
+        # leaves it.
+        pending = result.call_time
+        if pending is not None and name in pending and (pending.pop(name) is None or not pending):
+            result.call_time = None
         symbol.due = symbol.next_attempt_at = None
         result.dirty.add(name)
         if symbol.waiting:
@@ -1000,6 +1022,7 @@ class FollowCoordinator:
                     decided_at_step=result.decided_at_step,
                     parts_before=symbol.parts,
                 )
+            self._call_time_outcome(result, name, None)
             symbol.state = SymbolReadState.DONE
             symbol.kept = True
             symbol.rows = outcome.table.size
@@ -1090,6 +1113,47 @@ class FollowCoordinator:
             outcome.kind.value,
             symbol.error,
         )
+        self._call_time_outcome(result, name, error)
+
+    def _call_time_outcome(self, result: _Result, name: str, error: MassiveError | None) -> None:
+        """Take a symbol's outcome toward the call-time check of a call that did not wait.
+
+        The check fails the table when every call-time symbol ends `FAILED`, as a call that
+        waits raises when every one of them failed (`_query.QueryBase._first_read`). Rows
+        settle the check without failing; a failure read again later counts only once it is
+        final.
+
+        Args:
+            result: The result's state.
+            name: The symbol.
+            error: Its final failure, or None for rows.
+        """
+        pending = result.call_time
+        if pending is None or name not in pending:
+            return
+        if error is None:
+            result.call_time = None
+            logger.debug(
+                "call %d follow %s: a call-time symbol has rows; the table no longer fails "
+                "for its call-time symbols alone",
+                result.read.call,
+                name,
+            )
+            return
+        pending[name] = error  # final: the symbol's next outcome needs a re-add, which drops it
+        result.call_time_open -= 1
+        if result.call_time_open:
+            return
+        # Every call-time symbol still in the table has failed.
+        result.call_time = None
+        first = next(iter(pending.values()))
+        logger.debug(
+            "call %d follow: all %d call-time symbols failed; the table fails, as a call "
+            "that waits raises",
+            result.read.call,
+            len(pending),
+        )
+        self._fail(result, cast("MassiveError", first))
 
     def _retry_due(self, touched: dict[int, _Result] | None = None) -> None:
         """Queue every retry whose time has come, taking each off the heap of retries.
@@ -1186,21 +1250,21 @@ class FollowCoordinator:
             self._submit(result.read, generations)
 
     def _submit(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
-        """Hand one read to the pool, or drop it once `stop` has ended the pool.
+        """Hand one read to the session's read pool, or drop it once the session stopped.
 
-        `stop` may end the pool while this thread still handles the events queued before it;
-        a read of those is dropped, since every result is failed or about to fail. The submit
-        runs under the lock, so `stop` never shuts the pool down between the check and the
-        submit; a submit only queues the task and at most starts a pool thread.
+        `stop`, or the pool's own stop, may come while this thread still handles the events
+        queued before it; a read of those is dropped, since every result is failed or about to
+        fail. A submit only queues the task and at most starts a pool thread.
 
         Args:
             read: The result.
             generations: The symbols to read, at their generations.
         """
         with self._lock:
-            if self._pool is not None:
-                self._pool.submit(self._read, read, dict(generations))
-                return
+            closed = self._closed
+        task = functools.partial(self._read, read, dict(generations))
+        if not closed and self._pool.submit(task):
+            return
         logger.debug(
             "call %d follow: the coordinator stopped; the read of %s is dropped",
             read.call,
@@ -1448,10 +1512,7 @@ class FollowCoordinator:
         with self._lock:
             reads = list(self._following.values())
             self._following.clear()
-            pool = self._pool  # None when a stop came first
-            self._worker = self._pool = None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+            self._worker = None
         logger.debug("follow: the coordinator died; failing %d followed reads", len(reads))
         for read in reads:
             read.fail_table(error)
