@@ -253,9 +253,14 @@ class _PublicApiWalk:
 
     def __init__(self, modules: tuple[ModuleType, ...]) -> None:
         self.public: dict[int, str] = {}
+        self.exports: dict[str, object] = {}
+        self.exports_by_name: dict[str, object] = {}
         for module in modules:
             for name in module.__all__:
-                self.public.setdefault(id(getattr(module, name)), f"{module.__name__}.{name}")
+                value = getattr(module, name)
+                self.public.setdefault(id(value), f"{module.__name__}.{name}")
+                self.exports[f"{module.__name__}.{name}"] = value
+                self.exports_by_name[name] = value
         self.findings: set[str] = set()
         self.walked: set[int] = set()
         self.methods: dict[str, int] = {}
@@ -375,20 +380,16 @@ class _PublicApiWalk:
         self.check_raises(function, where)
 
     def check_raises(self, function: Callable[..., object], where: str) -> None:
-        """Check that each exception a `Raises:` section documents is builtin or public."""
-        public_paths = set(self.public.values())
-        public_names = {path.rpartition(".")[2] for path in public_paths}
+        """Check that each exception a `Raises:` section documents is a builtin or public one."""
         for name in _documented_raises(function):
             module, _, short = name.rpartition(".")
             if module:
                 # A path names the public module it comes from; `dm` is the package's alias.
                 module = "deephaven_massive" if module == "dm" else module
-                if f"{module}.{short}" not in public_paths:
-                    self.findings.add(f"{where} raises: {name}")
-                continue
-            builtin = getattr(builtins, name, None)
-            is_builtin = isinstance(builtin, type) and issubclass(builtin, BaseException)
-            if not is_builtin and name not in public_names:
+                found = self.exports.get(f"{module}.{short}")
+            else:
+                found = self.exports_by_name.get(name, getattr(builtins, name, None))
+            if not (isinstance(found, type) and issubclass(found, BaseException)):
                 self.findings.add(f"{where} raises: {name}")
 
     def check_annotation(self, annotation: object, module: ModuleType, where: str) -> None:
@@ -569,6 +570,15 @@ def _documents_a_private_error(self: object) -> None:
     raise NotImplementedError
 
 
+def _documents_a_value(self: object) -> None:
+    """Fail.
+
+    Raises:
+        dm.ALL: Never; a public value, not an exception.
+    """
+    raise NotImplementedError
+
+
 def _documents_a_private_path(self: object) -> None:
     """Fail.
 
@@ -602,6 +612,7 @@ _Stocks.__module__ = "deephaven_massive._session"
         (_private_default, "planted(value=): _Hidden"),
         (property(_planted({"return": "_Stocks"})), "planted ->: _Stocks"),
         (_documents_a_private_error, "planted raises: RowDataError"),
+        (_documents_a_value, "planted raises: dm.ALL"),
         (
             _documents_a_private_path,
             "planted raises: deephaven_massive._errors.MassiveError",
