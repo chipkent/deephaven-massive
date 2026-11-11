@@ -79,7 +79,7 @@ same property. Then look for:
 - **The library doing Massive's job.** A check that refuses a value Massive could judge (a
   ticker's shape, an allowed parameter value, a valid combination) is a finding unless it is a
   wrong Python type, a value the library cannot express, or one with evidence that Massive
-  would return wrong data silently (`AGENTS.md`, Massive judges its own values).
+  would return wrong data silently (`AGENTS.md`, Massive owns its data and its rules); and an error that reinterprets or hides Massive's answer instead of reporting it with the call that caused it.
 - **Docstrings that inventory.** Read the first paragraph of every docstring the diff adds or
   changes: it must say what the thing is for and when to use it, not list what it contains
   (`writing-docstrings`).
