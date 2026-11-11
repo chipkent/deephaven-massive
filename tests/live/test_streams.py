@@ -171,3 +171,33 @@ def test_a_delayed_feed_is_in_the_session_of_its_own_time() -> None:
     assert streams.stock_session(_new_york(10, 9, 44), delay) == streams.PRE_MARKET
     assert streams.stock_session(_new_york(10, 9, 45), delay) == streams.REGULAR
     assert streams.stock_session(_new_york(10, 20, 14), delay) == streams.AFTER_HOURS
+
+
+_EVENING = datetime(2026, 11, 10, 18, 40, tzinfo=NEW_YORK)
+_DELAYED = timedelta(minutes=15)
+
+
+@pytest.mark.parametrize(
+    ("market", "family", "now", "delay", "quiet"),
+    [
+        ("stocks", "quotes", _EVENING, timedelta(0), True),
+        ("stocks", "trades", datetime(2026, 11, 10, 8, 0, tzinfo=NEW_YORK), timedelta(0), True),
+        ("stocks", "quotes", _MORNING, timedelta(0), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 20, 0, tzinfo=NEW_YORK), timedelta(0), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 16, 14, tzinfo=NEW_YORK), _DELAYED, False),
+        ("stocks", "trades", datetime(2026, 11, 10, 16, 15, tzinfo=NEW_YORK), _DELAYED, True),
+        ("stocks", "bars", _EVENING, timedelta(0), False),
+        ("options", "trades", _EVENING, timedelta(0), False),
+    ],
+)
+def test_one_stocks_ticks_may_go_quiet_only_in_the_extended_hours_of_its_feed(
+    market: str, family: str, *, now: datetime, delay: timedelta, quiet: bool
+) -> None:
+    assert streams.may_go_quiet(market, family, now=now, delay=delay) is quiet
+
+
+@pytest.mark.parametrize(
+    ("declared", "delay"), [("stocks=starter", _DELAYED), ("stocks=advanced", timedelta(0))]
+)
+def test_a_feed_lags_by_its_plans_delay(declared: str, delay: timedelta) -> None:
+    assert streams.feed_delay(plans.declared_plans(declared), "stocks") == delay

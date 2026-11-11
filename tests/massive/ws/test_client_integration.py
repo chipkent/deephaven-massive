@@ -398,11 +398,24 @@ def target(live_plans: plans.LivePlans, rows_due: RowsDue) -> Callable[..., _Tar
                     f"not exercised: the stock market is {status}, or within the feed delay, "
                     "and the key streams no currencies"
                 )
-        host = _DELAYED_HOST if RECENCY.get(("stocks", tier)) == DELAYED else _HOST
-        busy = "AM" if tier == "business" else "A"
-        return _Target("stocks", host, "AAPL", busy, "AM", "Symbol")
+        return _stocks_target(tier)
 
     return pick
+
+
+def _stocks_target(tier: str) -> _Target:
+    """Return the stocks cluster on the feed of a Stocks plan that streams.
+
+    Args:
+        tier: The key's Stocks plan, any but `"basic"`.
+
+    Returns:
+        The stocks target: the delayed host on a delayed plan, and `AM` as the busy channel on
+        the base Business plan, which has no second bars.
+    """
+    host = _DELAYED_HOST if RECENCY.get(("stocks", tier)) == DELAYED else _HOST
+    busy = "AM" if tier == "business" else "A"
+    return _Target("stocks", host, "AAPL", busy, "AM", "Symbol")
 
 
 @pytest.mark.needs("currencies:starter")
@@ -501,19 +514,25 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
     probe: OpenProbe,
     *,
     target: Callable[..., _Target],
+    live_plans: plans.LivePlans,
     live_rest: RestClient,
     evidence: Evidence,
 ) -> None:
     """Whether Massive accepts one subscribe frame of 1,000 topics.
 
     The library sends at most 1,000 topics per frame. Subscribes 1,000 minute-bar topics (a
-    light channel) of crypto pairs (`XA.<pair>`), or, on a key that streams stocks but no
-    currencies, of stocks (`AM.<ticker>`), in one frame, and records the acknowledgements and
-    any other status, stopping as soon as every topic is answered; an acknowledgement needs no
-    open market. Reading it: all 1,000 acknowledged confirms the frame size; a refusal or a
-    closed connection means the per-frame cap must be lower.
+    light channel) in one frame, and records the acknowledgements and any other status,
+    stopping as soon as every topic is answered; an acknowledgement needs no open market. The
+    topics are stocks (`AM.<ticker>`) on the feed of a key's Stocks plan that streams, since
+    Massive lists thousands of stocks; on a key without one, crypto pairs (`XA.<pair>`), which
+    skip when Massive lists fewer than 1,000 (624 on 2026-11-10). The test opens one
+    connection, and every other live test closes its connections when it ends, so the frame
+    competes with no other connection for the class's slot. Reading it: all 1,000 acknowledged
+    confirms the frame size; a refusal or a closed connection means the per-frame cap must be
+    lower.
     """
-    chosen = target(rows=False)
+    tier = live_plans.tiers["stocks"]
+    chosen = target(rows=False) if tier == "basic" else _stocks_target(tier)
     market = "crypto" if chosen.cluster == "crypto" else "stocks"
     listed = live_rest.get(
         source(Transport.REST, "/v3/reference/tickers"),

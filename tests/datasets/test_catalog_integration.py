@@ -15,7 +15,9 @@ columns. No human reads anything:
   quotes in the extended hours too) and has been open longer than the plan's feed delay
   (`streams`). A minute bar stream waits until just past the next minute boundary. When rows
   need not flow, the case skips after the acknowledgement, "not exercised: market closed
-  (acknowledged)" or the like, so a pass always means rows reached the table.
+  (acknowledged)" or the like, so a pass always means rows reached the table. A stock's trades
+  or quotes that send no row in the extended hours skip too: one stock can go a minute
+  without a tick then. In the regular session, no row fails the case.
 
 A dataset the key's plan does not include is a skip, "not entitled: needs <plan>", never a
 failure. Each case also notes every WARNING the library logged and every `SchemaDrift` the
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._query import QueryBase
+    from tests._live.plans import LivePlans
 
 pytestmark = [pytest.mark.integration, pytest.mark.integration_smoke]
 
@@ -98,10 +101,19 @@ _CASE_TIMEOUT = 100.0
 """Seconds a fetch or poll case may take, before any growth for paced requests."""
 
 _HISTORY_TIMEOUT = 200.0
-"""Seconds a history case may take, before any growth for paced requests. A history read from
-flat files downloads the whole day's file, however short its window: the `indices.values` case
-took about 94 s to read one index from a day's `us_indices/values_v1` file. This is about
-twice that."""
+"""Seconds a history case may take, before any growth for paced requests. Every history case
+but `indices.values` reads one symbol from REST, a few requests at most."""
+
+_DAY_FILE_TIMEOUT = 900.0
+"""Seconds the `indices.values` history case may take, before any growth for paced requests.
+
+Massive has no REST history of index values, so the case reads the flat files, and a flat-file
+read downloads the whole day's file, however short its window: for 2026-11-09,
+`us_indices/values_v1/2026/11/2026-11-09.csv.gz` was 2,938,190,238 bytes. One run read it in
+about 94 s; another, on 2026-11-10, was still downloading at 252 s. The time is the network's,
+so the limit assumes a modest 30 Mbit/s (3.75 MB/s): 2.94 GB / 3.75 MB/s = 784 s for the
+download, and about 100 s more for the read that follows, 900 s in all. It guards against a
+hang, not a slow connection."""
 
 _STREAM_SETUP = 60.0
 """Seconds a stream case may spend outside its designed waits: building its query (a REST
@@ -114,6 +126,9 @@ A slot lost during the case then ends in the slot message or a pass, never in a 
 
 _TIMEOUTS = {"history": _HISTORY_TIMEOUT, "stream": _STREAM_TIMEOUT}
 """The verbs whose cases may take longer than `_CASE_TIMEOUT`, and their limits."""
+
+_CASE_TIMEOUTS = {("indices.values", "history"): _DAY_FILE_TIMEOUT}
+"""The cases whose limit is not their verb's, and their limits."""
 
 _SOURCE_CHOICE = re.compile(r" history: AUTO read .+? \(.*\); the read leaves .* null")
 """The library's once-per-session notice that an `AUTO` history read chose the source that
@@ -237,7 +252,8 @@ def _params() -> list[Any]:
     stream, which only Business serves; the `needs` marker skips it before any call when
     the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
     left on Basic, whose five requests a minute pace it. A fetch or poll case gets
-    `_CASE_TIMEOUT` before that growth, a history case `_HISTORY_TIMEOUT`, and a stream case
+    `_CASE_TIMEOUT` before that growth, a history case `_HISTORY_TIMEOUT` (`_DAY_FILE_TIMEOUT`
+    for `indices.values`, whose read downloads a whole day's flat file), and a stream case
     `_STREAM_TIMEOUT`, which covers its designed waits. The timeout is set here alone: a
     `timeout` mark on the test function would win over these, since pytest finds the
     function's marks before a parameter's.
@@ -249,7 +265,7 @@ def _params() -> list[Any]:
     for name, verb in _cases():
         spec = CATALOG.by_name[name]
         subscription = _subscription(spec)
-        timeout = _TIMEOUTS.get(verb, _CASE_TIMEOUT)
+        timeout = _CASE_TIMEOUTS.get((name, verb), _TIMEOUTS.get(verb, _CASE_TIMEOUT))
         marks = [pytest.mark.requests(_REQUESTS[verb]), pytest.mark.timeout(timeout)]
         if subscription is not None:
             plan = "starter" if verb == "stream" else "basic"
@@ -544,6 +560,7 @@ def _call(case: _Case, query: QueryBase, verb: str, *, day: date) -> tuple[list[
         ValueError: When the verb refuses its arguments for any reason but missing S3
             credentials.
     """
+    started = time.monotonic()
     try:
         table = _run(query, verb, bars=case.spec.is_bars, day=day)
     except dm.EntitlementError as error:
@@ -555,7 +572,8 @@ def _call(case: _Case, query: QueryBase, verb: str, *, day: date) -> tuple[list[
             raise
         pytest.skip(f"needs S3 credentials for flat files ({error})")
     columns = list(table.column_names)
-    case.evidence(f"{case.name} {verb}: {table.size} rows; columns {columns}")
+    took = time.monotonic() - started
+    case.evidence(f"{case.name} {verb}: {table.size} rows in {took:.0f} s; columns {columns}")
     return columns, case.drift()
 
 
@@ -657,6 +675,17 @@ def _record_bar_lag(case: _Case, row: dict[str, Any]) -> None:
     )
 
 
+def _may_go_quiet(asset_class: dm.AssetClass, family: str, live_plans: LivePlans) -> bool:
+    """Tell whether a stream of one symbol may send no row in its wait, though rows are due.
+
+    Returns:
+        True for a stock's trades or quotes while the plan's feed is in the extended hours
+        (`streams.may_go_quiet`).
+    """
+    delay = streams.feed_delay(live_plans, _SUBSCRIPTIONS[asset_class])
+    return streams.may_go_quiet(_MARKETS[asset_class], family, now=datetime.now(UTC), delay=delay)
+
+
 def _stream_case(
     case: _Case,
     query: QueryBase,
@@ -664,6 +693,7 @@ def _stream_case(
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     wait_rows: WaitRows,
     rows_due: RowsDue,
+    live_plans: LivePlans,
 ) -> tuple[list[str], list[str]]:
     """Run a stream case: Massive must acknowledge it, and rows must arrive when they are due.
 
@@ -671,7 +701,11 @@ def _stream_case(
     session's close for a stream that needs it, and has been open longer than the plan's feed
     delay (`rows_due`), unless the stream is one of `_RARE`. A
     minute bar stream waits until just past the next minute boundary, any other for
-    `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement.
+    `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement. A stock
+    trade or quote stream that gets no row while the plan's feed is in the extended hours skips
+    too, since one stock can go that long without a tick then (`streams.may_go_quiet`), when
+    the feed is in the extended hours both as the wait starts and as it ends; a wait that
+    reaches the regular session fails.
 
     Another client on the key can take the class's connection slot during the wait: the
     connection then waits for the slot (`WAITING_SLOT`) or reconnects. When no row came and
@@ -689,19 +723,23 @@ def _stream_case(
     before = _reconnects(_socket_rows(case))
     acked = wait_acked(case.session, 1, time.monotonic() + _STREAM_WAIT)
     family = case.name.rpartition(".")[2]
-    status, due = rows_due(_MARKETS[cast("dm.AssetClass", case.spec.asset_class)], family)
+    asset_class = cast("dm.AssetClass", case.spec.asset_class)
+    status, due = rows_due(_MARKETS[asset_class], family)
     due = due and case.name not in _RARE
+    quiet = due and _may_go_quiet(asset_class, family, live_plans)
     wait = _row_wait(family)
     rows = wait_rows(case.session, table, time.monotonic() + wait) if due else []
     taken = due and not rows and _slot_taken(case, before)
     if taken:
         wait = _row_wait(family)
         rows = wait_rows(case.session, table, time.monotonic() + wait)
+    quiet = quiet and _may_go_quiet(asset_class, family, live_plans)  # and still, at the end
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     _STREAM_CLOSED[0] = time.monotonic()
     case.evidence(
-        f"{case.name} stream: acknowledged {acked}; {status}; due {due}; {len(rows)} rows"
+        f"{case.name} stream: acknowledged {acked}; {status}; due {due}; "
+        f"may go quiet {quiet}; {len(rows)} rows"
     )
     if family == "bars" and rows:
         _record_bar_lag(case, rows[0])
@@ -712,6 +750,10 @@ def _stream_case(
         why = _RARE.get(case.name, f"market {status}, past the close, or in the feed delay")
         pytest.skip(f"not exercised: {why} (acknowledged)")
     assert rows or not taken, f"{case.name}: {_SLOT_TAKEN}"
+    if not rows and quiet:
+        pytest.skip(
+            f"not exercised: no row in {wait:.0f} s of the extended-hours session (acknowledged)"
+        )
     assert rows, f"{case.name}: no row arrived in {wait:.0f} s, though rows were due"
     return columns, drift
 
@@ -730,6 +772,7 @@ def test_every_dataset_and_verb_returns_its_columns(
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     wait_rows: WaitRows,
     rows_due: RowsDue,
+    live_plans: LivePlans,
     skip_if_not_entitled: SkipIfNotEntitled,
     record_property: Callable[[str, object], None],
     caplog: pytest.LogCaptureFixture,
@@ -743,8 +786,9 @@ def test_every_dataset_and_verb_returns_its_columns(
     Massive acknowledged its topic and rows reached its table; it skips after the
     acknowledgement when rows need not flow (a closed market, a stock, option, or index stream
     after the regular session's close, the feed delay of a delayed plan, a stream of rare
-    events). "Not entitled: needs <plan>" is a skip, and so is a history the
-    request cannot be served without S3 credentials; anything else fails. Every library
+    events), and when a stock's trades or quotes sent no row in the extended hours. "Not
+    entitled: needs <plan>" is a skip, and so is a history the request cannot be served
+    without S3 credentials; anything else fails. Every library
     WARNING and every `SchemaDrift` the case saw is recorded, and counted in the coverage.
     """
     spec = CATALOG.by_name[name]
@@ -780,7 +824,12 @@ def test_every_dataset_and_verb_returns_its_columns(
         columns, drift = _poll_case(case, query)
     else:
         columns, drift = _stream_case(
-            case, query, wait_acked=wait_acked, wait_rows=wait_rows, rows_due=rows_due
+            case,
+            query,
+            wait_acked=wait_acked,
+            wait_rows=wait_rows,
+            rows_due=rows_due,
+            live_plans=live_plans,
         )
     if drift:
         record_property("drift", "; ".join(drift))
