@@ -71,9 +71,11 @@ def test_todays_change_tells_a_difference_from_missing_data(
     fake_rest: FakeRestServer, client: RestClient
 ) -> None:
     wrong = [_stock(t) for t in same_field.STOCKS[1:]] + [_stock("AAPL", percent=0.01)]
-    fake_rest.reply(same_field.V2_STOCKS, _snapshot(wrong), _snapshot([_stock("AAPL")]))
+    fake_rest.reply(
+        same_field.V2_STOCKS, _snapshot(wrong), _snapshot([_stock("AAPL"), {"ticker": "MSFT"}])
+    )
     assert same_field.todays_change(client, _ignore).verdict == "DIFFERENT"
-    # One of five stocks compared settles nothing.
+    # One of five stocks compared settles nothing; a stock without its fields is not compared.
     assert same_field.todays_change(client, _ignore).verdict == "INCONCLUSIVE"
 
 
@@ -86,7 +88,7 @@ def _contract(close: float, change: float, percent: float) -> dict[str, Any]:
 def test_chain_day_change_reads_one_page_of_the_chain(
     fake_rest: FakeRestServer, client: RestClient
 ) -> None:
-    same = envelope([_contract(11.0, 1.0, 10.0), {"day": {}}])
+    same = envelope([_contract(11.0, 1.0, 10.0), {"day": {}}, {"day": {"previous_close": 10.0}}])
     differ = envelope([_contract(11.0, 1.0, 0.1)])
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(same), Reply(differ), Reply(envelope([])))
     verdicts = [same_field.chain_day_change(client, _ignore).verdict for _ in range(3)]
@@ -140,10 +142,16 @@ def test_updated_times_in_milliseconds_are_compared_in_nanoseconds(
     assert outcome.verdict == "DIFFERENT"
 
 
-def _quotes(fake_rest: FakeRestServer, *, conversion: dict[str, Any], last: dict[str, Any]) -> None:
+def _quotes(
+    fake_rest: FakeRestServer,
+    *,
+    conversion: dict[str, Any],
+    last: dict[str, Any],
+    snapshot_time: int = 5,
+) -> None:
     fake_rest.reply("/v1/conversion/AUD/USD", Reply({"status": "success", "last": conversion}))
     fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply({"status": "success", "last": last}))
-    snapped = {"ticker": "C:AUDUSD", "lastQuote": {"b": 0.731, "a": 0.732, "t": 5}}
+    snapped = {"ticker": "C:AUDUSD", "lastQuote": {"b": 0.731, "a": 0.732, "t": snapshot_time}}
     fake_rest.reply(same_field.V2_FOREX, _snapshot([snapped]))
 
 
@@ -160,6 +168,14 @@ def test_conversion_quote_sends_the_pair_and_its_snapshot_ticker_as_a_list(
         (same_field.V2_FOREX, {"tickers": "C:AUDUSD"}),
     ]
     assert len(fake_rest.get_queries()) == 3 * same_field.QUOTE_TRIES
+
+
+def test_conversion_quote_compares_the_snapshot_only_at_the_same_time(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    quote = {"bid": 0.731, "ask": 0.732, "timestamp": 5}
+    _quotes(fake_rest, conversion=quote, last=quote, snapshot_time=6)
+    assert same_field.conversion_quote(client, _ignore, base="AUD", quote="USD").verdict == "SAME"
 
 
 @pytest.mark.parametrize(
