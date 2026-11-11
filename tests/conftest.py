@@ -35,6 +35,7 @@ import gzip
 import importlib
 import inspect
 import os
+import queue
 import re
 import sys
 import threading
@@ -509,21 +510,26 @@ time. One percent keeps a wide margin on both sides.
 """
 
 
-def _thread_cpu_seconds(java_thread_id: int) -> float:
-    """Return how long, in seconds of CPU time, a JVM thread has run; 0 before it has an id.
+def _thread_cpu_seconds(java_thread_id: int | None) -> float | None:
+    """Return how long, in seconds of CPU time, a JVM thread has run.
 
     Args:
-        java_thread_id: The thread's `java.lang.Thread` id, or 0 before it is known.
+        java_thread_id: The thread's `java.lang.Thread` id, or None before the thread has
+            published it.
 
     Returns:
-        Its CPU time; 0.0 for 0, for a thread the JVM no longer has, or on a JVM that does not
-        measure thread CPU time, where a slow command then counts as stuck after 30 seconds.
+        Its CPU time, or None once the JVM no longer has the thread, which has then ended.
+        0.0 before the id is known, and on a JVM that does not measure thread CPU time, where
+        a slow command then counts as stuck after one window.
     """
-    if not java_thread_id:
+    if java_thread_id is None:
         return 0.0
     jpy = importlib.import_module("jpy")
     beans = jpy.get_type("java.lang.management.ManagementFactory").getThreadMXBean()
-    return float(max(beans.getThreadCpuTime(java_thread_id), 0)) / 1e9
+    if not (beans.isThreadCpuTimeSupported() and beans.isThreadCpuTimeEnabled()):
+        return 0.0
+    nanos = int(beans.getThreadCpuTime(java_thread_id))
+    return None if nanos < 0 else nanos / 1e9
 
 
 @pytest.fixture
@@ -546,7 +552,9 @@ def console_command(
     pytest-xdist passes on to the whole run); the thread is a daemon, so it cannot keep the
     process alive. A command still running after 30 seconds is slow, not stuck: on a loaded
     machine a first formula compile can take a minute, so the function waits another 30
-    seconds and looks again, and the test's own time limit bounds the whole.
+    seconds and looks again. The test's own time limit bounds the whole; when it interrupts
+    the wait with the command still running, the function stops the run too, since the
+    command still holds the lock.
 
     Returns:
         The function; it takes the command and returns once the command has returned. Its
@@ -559,11 +567,12 @@ def console_command(
 
     def run(command: Callable[[], None], *, timeout: float = _CONSOLE_COMMAND_TIMEOUT) -> None:
         returned = threading.Event()
-        java_thread_id = [0]  # set by the thread itself, read here after each window
+        # The command's thread puts its Java thread id here once, for the CPU time checks.
+        published: queue.SimpleQueue[int] = queue.SimpleQueue()
 
         def body() -> None:
             with execution_context.entered(dh_exec_ctx):
-                java_thread_id[0] = java_thread.currentThread().getId()
+                published.put(int(java_thread.currentThread().getId()))
                 lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
                 lock.lock()
                 try:
@@ -574,22 +583,35 @@ def console_command(
 
         thread = threading.Thread(target=body, name="console command", daemon=True)
         thread.start()
+        java_thread_id: int | None = None
         ran = 0.0
-        while True:
-            thread.join(timeout)
-            if not thread.is_alive():
-                break
-            window = _thread_cpu_seconds(java_thread_id[0]) - ran
-            ran += window
-            if window < timeout * _CONSOLE_COMMAND_RUNNING_SHARE:
-                deadlock = (
-                    f"a console command deadlocked: in {timeout:.0f} s its thread ran on the "
-                    f"CPU for {window:.3f} s and otherwise waited, for something that needs the "
-                    "update graph's lock, which it holds; no update cycle can run in this "
-                    "process again"
+        deadlock: str | None = None
+        try:
+            while True:
+                thread.join(timeout)
+                if not thread.is_alive():
+                    break
+                if java_thread_id is None and not published.empty():
+                    java_thread_id = published.get()
+                total = _thread_cpu_seconds(java_thread_id)
+                if total is None:
+                    continue  # its Java thread has ended, so the next join returns at once
+                window, ran = total - ran, total
+                if window < timeout * _CONSOLE_COMMAND_RUNNING_SHARE:
+                    deadlock = (
+                        f"a console command deadlocked: in {timeout:.0f} s its thread ran on "
+                        f"the CPU for {window:.3f} s and otherwise waited, for something that "
+                        "needs the update graph's lock, which it holds; no update cycle can run "
+                        "in this process again"
+                    )
+                    pytest.fail(deadlock)
+        finally:
+            if thread.is_alive():
+                request.session.shouldstop = deadlock or (
+                    "a console command was interrupted while it still runs and holds the "
+                    "update graph's lock; no update cycle can run in this process until it "
+                    "returns"
                 )
-                request.session.shouldstop = deadlock
-                pytest.fail(deadlock)
         if not returned.is_set():
             pytest.fail("the console command raised; its traceback is reported with this test")
 
