@@ -195,7 +195,8 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     Raises:
         WireError: If the request got no answer about its value: no HTTP response (a
             transport failure after retries, or a closed client), a server failure (5xx)
-            after retries, or a rate limit (429) the governor gave up waiting out.
+            after retries, a rate limit (429) the governor gave up waiting out, or a 200
+            whose body the client cannot read, which it records first.
     """
     rest_path = _text_path(source(Transport.REST, request.path), request.as_text)
     names, query = _shown(request.names), _shown(request.query)
@@ -204,6 +205,10 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
         page = client.get(rest_path, request.names, request.query, bucket=request.bucket)
     except WireError as error:
         if error.status is None or error.status in _NO_JUDGMENT:
+            raise
+        if error.unreadable:
+            # A 200 the client cannot read: recorded for the owner, but no refusal.
+            evidence(f"{request.label}: no verdict, the reply is unreadable: {error.message}")
             raise
         evidence(f"{request.label}: verdict ERROR (HTTP {error.status}: {error.message})")
         return Answer("ERROR", error.status, 0, None)

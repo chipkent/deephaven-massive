@@ -251,6 +251,17 @@ def test_no_row_of_a_range_that_holds_no_day_matches(
     assert [(a.rows, a.matched) for a in answers] == [(1, 0), (1, 0)]
 
 
+def test_an_unreadable_200_is_recorded_and_raises(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    fake_rest.reply(_DIVIDENDS, Reply(b"not json"))
+    lines: list[str] = []
+    with pytest.raises(WireError) as raised:
+        bad_values.ask_all(client, bad_values.LIMIT, lines.append, today=_DAY)
+    assert raised.value.unreadable
+    assert "no verdict, the reply is unreadable" in lines[-1]
+
+
 def test_no_response_is_no_answer_and_raises(client: RestClient) -> None:
     client.close()
     with pytest.raises(WireError) as raised:
