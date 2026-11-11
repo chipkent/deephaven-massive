@@ -803,9 +803,9 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     monkeypatch.setattr(diagnostics, "_release_later", handing)
     held = massive_session.connections()
     assert not held.j_table.isFailed()
-    publisher.go.set()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.diagnostics"):
-        result = stream_query(massive_session).append_only()  # its row kills the writer
+        result = stream_query(massive_session).append_only()  # its row waits for `go`
+        publisher.go.set()  # the row kills the writer only now, after the call returned
         writer.join(TIMEOUT)
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
