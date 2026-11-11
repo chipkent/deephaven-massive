@@ -22,7 +22,7 @@ from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables import background_read
+from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
 from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
@@ -103,7 +103,7 @@ def open_test_read(m: dm.MassiveSession, run: Run, *, note: str | None = None) -
 
 def the_read(m: dm.MassiveSession) -> BackgroundRead:
     # The one read the session registered: its fail hook is the read's bound method.
-    (state,) = m._core._workers.values()
+    (state,) = m._core.workers._workers.values()
     return cast("BackgroundRead", cast("Any", state.fail).__self__)
 
 
@@ -157,7 +157,7 @@ def test_a_read_fills_its_table_in_one_update(
     massive_session.release(result)
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("DONE", 0)  # final: a release keeps it
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_read_without_a_note_says_only_that_it_reads_in_the_background(
@@ -279,7 +279,7 @@ def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
     assert (row["State"], row["HeldResults"], row["RowsPublished"]) == ("RELEASED", 0, 0)
     assert [r.getMessage() for r in caplog.records if "stopped" in r.getMessage()] != []
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
@@ -296,7 +296,7 @@ def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
 
     result = open_test_read(massive_session, run)
     read = the_read(massive_session)
-    (call,) = massive_session._core._workers
+    (call,) = massive_session._core.workers._workers
     landed = background_read._RowsLanded(weakref.ref(massive_session._core), call)
     added = SimpleNamespace(size=lambda: 3)
     update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
@@ -312,7 +312,7 @@ def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
     gate.set()
     read.thread.join(TIMEOUT)
     massive_session.release(result)
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_derived_table_keeps_the_read_going_after_release(
@@ -345,7 +345,7 @@ def test_a_derived_table_keeps_the_read_going_after_release(
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
     derived.clear()
     release_scope(massive_session._core.exec_ctx, scope)
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_closing_the_session_fails_a_loading_read(
@@ -447,14 +447,14 @@ def test_a_read_racing_close_after_registering_never_starts(
     (read,) = reads
     assert read.stopped
     assert read.thread.ident is None  # never started
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_read_on_a_closed_session_is_refused(massive_session: dm.MassiveSession) -> None:
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         open_test_read(massive_session, returning(static_rows(massive_session)))
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_a_failed_registration_releases_everything(
@@ -467,7 +467,7 @@ def test_a_failed_registration_releases_everything(
     with pytest.raises(KeyboardInterrupt):
         open_test_read(massive_session, returning(static_rows(massive_session)))
     monkeypatch.undo()
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
 
@@ -490,7 +490,7 @@ def test_a_read_opened_in_a_console_command_lands_after_it(
         read = the_read(massive_session)
         read.thread.join(TIMEOUT)  # it published without the lock
         assert results[0].size == 0
-        (state,) = massive_session._core._workers.values()
+        (state,) = massive_session._core.workers._workers.values()
         assert state.row.state == StreamState.LOADING
 
     console_command(command)
@@ -892,7 +892,7 @@ def test_a_done_read_with_a_released_result_no_longer_holds_its_session(
     # The session leaves the live set once the read's record is gone and the reaper has let go
     # of this test's own `m.streams()` views. Other threads make both changes, and each
     # updates the live set last, so the test waits for the live set itself.
-    until(lambda: not core._in_live)
+    until(lambda: id(core) not in live_set._live)
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", count)
     assert [tickers(table, dh_to_pylist) for table in derived] == [["AAPL"][:count]] * 2
@@ -910,7 +910,7 @@ def test_a_derived_table_outliving_its_freed_session_shuts_the_read_down_quietly
     result = open_test_read(m, returning(static_rows(m, "AAPL")))
     read = the_read(m)
     stream_id = read._call
-    workers = core._workers  # read after the core is gone too
+    workers = core.workers._workers  # read after the core is gone too
     until(lambda: workers[stream_id].row.state == StreamState.DONE)
     scope = new_scope()
     with scope.open():

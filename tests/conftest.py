@@ -1250,11 +1250,11 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
         The labels of the sessions in the live set, the labels of every session not yet
         freed, the connection groups, and the alive library threads (`_LIBRARY_THREADS`).
     """
-    core = importlib.import_module("deephaven_massive._tables.session_core")
+    live_set = importlib.import_module("deephaven_massive._tables.live_set")
     session = importlib.import_module("deephaven_massive._session")
     ws_connection = importlib.import_module("deephaven_massive._ingest.ws_connection")
-    with core._live_lock:
-        live: set[str] = {each.label for each in core._live.values()}
+    with live_set._live_lock:
+        live: set[str] = {each.label for each in live_set._live.values()}
     with session._keys_lock:
         cores = [ref() for ref in session._open_sessions]
     alive = {each.label for each in cores if each is not None}
@@ -1271,11 +1271,11 @@ def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
 
     Stream ids are process-unique in the library (a module-level counter in
-    `_tables/session_core.py`); each test gets a fresh counter.
+    `_tables/stream_ids.py`); each test gets a fresh counter.
     """
-    core = importlib.import_module("deephaven_massive._tables.session_core")
+    stream_ids = importlib.import_module("deephaven_massive._tables.stream_ids")
     itertools = importlib.import_module("itertools")
-    monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
+    monkeypatch.setattr(stream_ids, "_stream_numbers", itertools.count(1))
 
 
 @pytest.fixture(autouse=True)

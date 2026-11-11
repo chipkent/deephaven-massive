@@ -3561,7 +3561,7 @@ def test_a_background_history_lands_the_files_rows(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     table = q.history("2025-03-03", "2025-03-03", wait=False)
-    for state in list(session._core._workers.values()):
+    for state in list(session._core.workers._workers.values()):
         cast("Any", state.fail).__self__.thread.join(TIMEOUT)
     # The read's row shows DONE only after the update cycle that added the rows, so the
     # table holds them from then on.
@@ -3583,7 +3583,7 @@ def test_a_background_read_rest_could_complete_says_so_in_its_description(
         "A day the flat files cannot serve is read from REST; the log names it."
         in (table.attributes()["TableDescription"])
     )
-    for state in list(session._core._workers.values()):
+    for state in list(session._core.workers._workers.values()):
         cast("Any", state.fail).__self__.thread.join(TIMEOUT)
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
     assert row["State"] == "DONE"
