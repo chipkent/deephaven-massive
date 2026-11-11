@@ -118,6 +118,21 @@ dev = [
     # or later; 0.20.0 and later ask for 42.2, above the deephaven-core floor).
     "deephaven-plugin-ui>=0.40.0",
     "deephaven-plugin-plotly-express>=0.19.0",
+    # The documentation site's griffe extension, under scripts/, subclasses griffe.Extension,
+    # which mypy checks with this package's types. 2.0.0 is the first release of griffe's
+    # library under this name; Extension and the on_instance hook are older.
+    "griffelib>=2.0.0",
+]
+# The documentation site's generator, which `uv run --only-group site` installs without the
+# project or the dev tools; docs/dev/docs-site.md describes the site.
+site = [
+    # 0.0.70 is the first release that reads exclude_docs, which keeps every page but the
+    # published ones out of a site built from the repository root.
+    "zensical>=0.0.70",
+    # The API reference plugin, which reads the docstrings with griffe without importing the
+    # package. 2.0.0 is the first release whose mkdocstrings Zensical loads; 1.x needs an
+    # mkdocstrings without the mkdocstrings.handlers module Zensical imports.
+    "mkdocstrings-python>=2.0.0",
 ]
 
 [tool.hatch.version]
