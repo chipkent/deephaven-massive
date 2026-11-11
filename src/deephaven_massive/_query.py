@@ -39,8 +39,9 @@ static verb (`fetch()`, `history()`) is one *call*: it takes a process-unique id
 stream-id counter and logs `call 7 start: <query>.<verb>`, then `call 7 done: <rows> rows in <s> s`
 or `call 7 failed after <s> s: <error>`, at DEBUG; the transports name their worker threads after it
 (`massive #1 call-7 rest_0`), so every line of one call can be found. By default a static verb
-does not wait: it checks its arguments on the calling thread, where an argument error and a
-crypto pair passed in code that Massive does not list raise, then returns at once a refreshing
+does not wait: it checks its arguments on the calling thread, where an argument error raises,
+and so does a crypto pair passed in code that Massive does not list, for a path that takes the
+pair as its two currencies; it then returns at once a refreshing
 table that a task on the session's read pool fills in one update when the download completes
 (`open_read` in `_tables/background_read.py`); that task logs the call's outcome, and an error
 Massive answers fails the table. With `wait=True` it reads on the calling thread and returns a
@@ -996,10 +997,11 @@ class Query(QueryBase):
     def fetch(self, *, wait: bool = False) -> Table:
         """Return a table of every row Massive has now, up to the query's `limit`.
 
-        By default the call returns at once a live table with no rows, and the rows arrive in the
-        background, all in one update. Deephaven updates the table and everything derived from it
-        when they land, and `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass
-        `wait=True` to wait for the rows and get a static table.
+        By default the call returns a live table with no rows at once, and the rows arrive in the
+        background. Deephaven updates the table, and every table built on it, as they land. For
+        symbols passed in code or in a static table, they land all in one update, and
+        `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass `wait=True` to wait
+        for the rows; without a watchlist, you then get a static table.
 
         A static table of symbols is read once, when you call. A watchlist is followed: a symbol you
         add is read, and one you delete leaves. One symbol's failure leaves the watchlist's other
@@ -1020,14 +1022,18 @@ class Query(QueryBase):
                 - the endpoint doesn't take one of the query's parameters or filters;
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
                 - no row of a table of symbols is Massive's exact ticker.
-            AuthenticationError: With `wait=True`, if Massive rejects your API key.
+            AuthenticationError: With `wait=True`, if Massive rejects your API key. For
+                `m.crypto.last_trade` and `m.crypto.daily_open_close`, also at the call, if Massive
+                rejects it while the call reads Massive's list of crypto tickers.
             EntitlementError: With `wait=True`, if your plan doesn't include the data, or Massive
                 delays current data whose subscription isn't in
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
+                For those two crypto datasets, also at the call, if your plan doesn't include
+                Massive's list of crypto tickers.
             MassiveError: At the call, if:
                 - the session is closed;
-                - for a crypto dataset, Massive's list of crypto tickers can't be read, or lacks
-                  a crypto pair passed as a `str` or list.
+                - for those two crypto datasets, Massive's list of crypto tickers can't be read,
+                  or lacks a crypto pair passed as a `str` or list.
                 With `wait=True`, also if:
                 - a rate limit outlasts the retries;
                 - a request fails in any other way;
@@ -1774,10 +1780,11 @@ class HistoryQuery(QueryBase):
     ) -> Table:
         """Return the dataset's rows over a range of days or of exact times.
 
-        By default the call returns at once a live table with no rows, and the rows arrive in the
-        background, all in one update. Deephaven updates the table and everything derived from it
-        when they land, and `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass
-        `wait=True` to wait for the rows and get a static table.
+        By default the call returns a live table with no rows at once, and the rows arrive in the
+        background. Deephaven updates the table, and every table built on it, as they land. For
+        symbols passed in code or in a static table, they land all in one update, and
+        `m.streams()` shows the read `LOADING`, then `DONE` or `FAILED`. Pass `wait=True` to wait
+        for the rows; without a watchlist, you then get a static table.
 
         Dates, such as `"2025-03-03"`, read whole days in the market's time zone, both ends
         included. Times, such as a `datetime` with a time zone, read from `start` up to `end`, which
@@ -1827,11 +1834,7 @@ class HistoryQuery(QueryBase):
                 keys.
             EntitlementError: With `wait=True`, if your plan doesn't include the data from any
                 source the call can use.
-            MassiveError: At the call, if:
-                - the session is closed;
-                - for a crypto dataset, Massive's list of crypto tickers can't be read, or lacks
-                  a crypto pair passed as a `str` or list.
-                With `wait=True`, also if:
+            MassiveError: At the call, if the session is closed. With `wait=True`, also if:
                 - a request fails;
                 - adjusted bars come back unadjusted, or the reverse;
                 - a trading day's flat file is missing and REST can't serve that day;

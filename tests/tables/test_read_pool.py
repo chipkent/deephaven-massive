@@ -31,12 +31,16 @@ def test_no_thread_starts_before_the_first_task() -> None:
     pool.stop()
 
 
-def test_tasks_beyond_the_limit_wait_for_a_free_thread() -> None:
+def test_tasks_beyond_the_limit_wait_for_a_free_thread(caplog: pytest.LogCaptureFixture) -> None:
     pool = ReadPool("massive #1", 2)
     release = threading.Event()
     started = [threading.Event() for _ in range(3)]
-    for event in started:
-        assert pool.submit(_task(event, release))
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.read_pool"):
+        for event in started:
+            assert pool.submit(_task(event, release))
+    assert caplog.messages == [
+        "massive #1 read pool: all 2 threads are busy; a read waits its turn"
+    ]
     assert started[0].wait(TIMEOUT)
     assert started[1].wait(TIMEOUT)
     assert not started[2].is_set()  # both threads are busy: the third waits its turn

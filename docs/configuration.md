@@ -196,10 +196,10 @@ Leave out Advanced and Business plans, which are real-time. Never list
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
-Leave a delayed subscription out, and a stream or a `fetch()` of its current data
-raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
-table of it fails with the same message. `history()` and other past data don't
-depend on this setting.
+Leave a delayed subscription out, and a stream of its current data raises
+`EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
+`poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+`history()` and other past data don't depend on this setting.
 
 #### rest_basic_subscriptions
 
@@ -245,8 +245,10 @@ of a live table reads REST whenever REST can serve it.
 #### max_concurrency
 
 Raise it to run more at once, or lower it to open fewer connections. Both limits
-cover all the session's calls together. A Basic subscription still keeps to five
-requests a minute.
+cover all the session's calls together. It also sets how many downloads of
+`fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
+the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
+subscription still keeps to five requests a minute.
 
 #### noncanonical_symbols
 
@@ -270,8 +272,9 @@ Set `raise` when a stream must not run without every pair you asked for.
 
 - `log` skips the pair and logs a warning naming it.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` makes a stream or `fetch()` fail with `MassiveError` at the
-  call, and fails a `poll()` table, or a live table when such a pair is added later.
+- `raise` makes a stream fail with `MassiveError` at the call, and fails
+  a `fetch()` or `poll()` table, or a live table when such a pair is added later.
+  `fetch(wait=True)` raises it at the call.
 
 It applies to streams and to calls for a pair's last trade or daily open and close. A
 pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
@@ -280,8 +283,9 @@ pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls 
 Under `log` or `ignore`, a stream keeps its other pairs. A
 stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
 until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
-of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
-pairs are all skipped raises `MassiveError` at the call.
+of a live table marks it `FAILED` in `m.symbol_reads()`. A stream whose pairs are all
+skipped raises `MassiveError` at the call, and a `fetch()` whose pairs are all
+skipped fails its table, or raises with `wait=True`.
 
 #### unreadable_symbols
 
@@ -304,9 +308,10 @@ should stop.
 - `log` leaves the symbol out, keeps the others, and logs a warning
   naming it.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` fails a `poll()` table and makes a `fetch()` or `history()`
-  raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
-  symbol `FAILED` in `m.symbol_reads()` and reads the others.
+- `raise` fails a `poll()`, `fetch()`, or `history()` table with
+  `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
+  A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
+  `m.symbol_reads()` and reads the others.
 
 Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
 also one the poll can't read, such as a crypto pair in an indicator poll with

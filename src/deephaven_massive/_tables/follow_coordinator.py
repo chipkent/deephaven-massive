@@ -48,11 +48,11 @@ the read, or a defect) and a symbol table that fails or, under
 `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
 the coordinator records the failure and publishes it, never the listener. So does a crypto pair
 Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`. So does a call that
-did not wait whose call-time symbols (the table's symbols when the watch started) all fail
-their first read for good (`FailureKind.PERMANENT`), such as a plan without the dataset, which
-refuses every symbol: the table fails with the first symbol's error, in name order, as a call
-that waits raises it (`_call_time_outcome`). One of them with rows, or with a failure that may
-pass and is read again, settles it: from then on a symbol's failure is its own.
+did not wait whose call-time symbols (the table's symbols when the watch started) all end
+`FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
+with the first symbol's error, in name order, as a call that waits raises it
+(`_call_time_outcome`). One of them with rows, or one deleted from the table before it failed,
+settles the check: from then on a symbol's failure is its own.
 
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
@@ -397,7 +397,7 @@ class _Result:
             coordinator has applied (the result's build cycle until the first), stamped on
             every download it publishes; see `FollowedRead.publish`.
         call_time: For a call that did not wait, until its call-time symbols settle: each of
-            them still in the table, in name order, with its permanent failure once it has
+            them still in the table, in name order, with its final failure once it has
             one. None until the watch's first set of symbols arrives (`awaits_call_time`), for
             a call that waited, and once settled (`_call_time_outcome`).
         awaits_call_time: True from the start of a call that did not wait until the watch's
@@ -911,9 +911,11 @@ class FollowCoordinator:
         symbol.in_table = False
         symbol.generation += 1
         symbol.state = SymbolReadState.REMOVED
-        if result.call_time is not None and name in result.call_time:
-            del result.call_time[name]
-            self._call_time_settled(result)
+        # A call-time symbol deleted before it failed settles the check; a failed one only
+        # leaves it.
+        pending = result.call_time
+        if pending is not None and name in pending and (pending.pop(name) is None or not pending):
+            result.call_time = None
         symbol.due = symbol.next_attempt_at = None
         result.dirty.add(name)
         if symbol.waiting:
@@ -1068,7 +1070,6 @@ class FollowCoordinator:
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
         if outcome.kind is FailureKind.TRANSIENT and attempts <= len(RETRY_DELAYS):
-            self._call_time_outcome(result, name, None)
             delay = RETRY_DELAYS[attempts - 1]
             symbol.state = SymbolReadState.RETRYING
             symbol.due = CLOCK.monotonic() + delay
@@ -1108,20 +1109,20 @@ class FollowCoordinator:
             outcome.kind.value,
             symbol.error,
         )
-        if outcome.kind is FailureKind.PERMANENT:  # a retried one settled the check already
-            self._call_time_outcome(result, name, error)
+        self._call_time_outcome(result, name, error)
 
     def _call_time_outcome(self, result: _Result, name: str, error: MassiveError | None) -> None:
         """Take a symbol's outcome toward the call-time check of a call that did not wait.
 
-        The check fails the table when every call-time symbol's first read failed for good, as
-        a call that waits raises when every one of them failed (`_query.QueryBase._first_read`).
-        Rows, or a failure that may pass and is read again, settle the check without failing.
+        The check fails the table when every call-time symbol ends `FAILED`, as a call that
+        waits raises when every one of them failed (`_query.QueryBase._first_read`). Rows
+        settle the check without failing; a failure read again later counts only once it is
+        final.
 
         Args:
             result: The result's state.
             name: The symbol.
-            error: Its permanent failure, or None for rows or a failure that may pass.
+            error: Its final failure, or None for rows.
         """
         pending = result.call_time
         if pending is None or name not in pending:
@@ -1129,8 +1130,8 @@ class FollowCoordinator:
         if error is None:
             result.call_time = None
             logger.debug(
-                "call %d follow %s: a call-time symbol read, or will be read again; the "
-                "table no longer fails for its call-time symbols alone",
+                "call %d follow %s: a call-time symbol has rows; the table no longer fails "
+                "for its call-time symbols alone",
                 result.read.call,
                 name,
             )
@@ -1139,22 +1140,19 @@ class FollowCoordinator:
         self._call_time_settled(result)
 
     def _call_time_settled(self, result: _Result) -> None:
-        """Fail the table if every call-time symbol still in it failed for good.
+        """Fail the table if every call-time symbol still in it has failed.
 
         Args:
             result: The result's state, whose `call_time` is not None.
         """
         pending = cast("dict[str, MassiveError | None]", result.call_time)
-        if not pending:  # every call-time symbol left before it failed
-            result.call_time = None
-            return
         if any(error is None for error in pending.values()):
             return
         result.call_time = None
         first = next(iter(pending.values()))
         logger.debug(
-            "call %d follow: all %d call-time symbols failed for good; the table fails, as "
-            "a call that waits raises",
+            "call %d follow: all %d call-time symbols failed; the table fails, as a call "
+            "that waits raises",
             result.read.call,
             len(pending),
         )

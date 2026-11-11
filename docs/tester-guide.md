@@ -345,9 +345,9 @@ print(daily.size)
 ```
 
 `wait=True` makes `history()` wait for the rows, so `daily.size` counts them. You should see a
-number from 24 to 30, and a `daily` panel with eight to ten bars per stock,
-oldest first. Its `Date` column holds each trading day as text, such as `2026-10-30`. Hover
-over the `Close` header to see the column's description.
+number from 24 to 30, and a `daily` panel with eight to ten bars per stock, oldest first. Its
+`Date` column holds each trading day as text, such as `2026-10-30`. Hover over the `Close`
+header to see the column's description.
 
 #### 4. Summarize bars with table operations
 
@@ -465,8 +465,8 @@ Then close the `paced` panel. The table stops, and the `stocks` row returns to `
 
 #### 8. Read history in the background
 
-Start reading a year of two stocks. Without `wait=True`, `history()` returns at once and fills
-the table when the read is done:
+Start reading a year of two stocks. `history()` returns at once and fills the table when the
+read is done:
 
 ```python
 from datetime import datetime, timedelta
@@ -580,9 +580,7 @@ On the free plan, you should see three lines:
 | Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` reads `FAILED`. |
 | Bars from 2015 | `EntitlementError`: your plan's history doesn't reach 2015 |
 
-Without `wait=True`, the same refusal fails the table instead, and its row in `streams` reads
-`FAILED`, with the refusal in `Error`. A line says `no error` on a paid plan that includes that
-data. An `EntitlementError` that names
+A line says `no error` on a paid plan that includes that data. An `EntitlementError` that names
 `delayed_subscriptions` means your plan is delayed, and the README's settings example shows the
 setting.
 

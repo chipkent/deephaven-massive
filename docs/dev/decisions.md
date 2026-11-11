@@ -409,8 +409,8 @@ the data to show up and how they want the program to wait." `wait=True` keeps th
 and its static table. What raises at the call, whatever `wait` is: an argument error
 (`TypeError`, `ValueError`), a closed session, and, as decisions 66 and 81 and `poll()` and the
 streams already have it, a crypto pair passed in code that Massive's crypto ticker list does
-not hold, or a failed read of that list (`fetch(wait=False)` failed its table instead, a
-defect). What Massive answers later fails the table, logged and shown in `m.streams()` `Error`,
+not hold, or a failed read of that list, for the paths that take a pair as its two currencies
+(`fetch(wait=False)` failed its table instead, a defect). What Massive answers later fails the table, logged and shown in `m.streams()` `Error`,
 as for `poll()` and the streams. No `with`-block waiting: `close()` and `__exit__` keep their
 behavior, so a read still loading when its session closes fails. Made consistent on the way,
 since the default path now runs them: every background and watchlist read runs on the session's

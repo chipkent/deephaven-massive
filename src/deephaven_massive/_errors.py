@@ -36,10 +36,11 @@ Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` 
 synchronously on the calling thread.
 
 Static verbs (`fetch()`, `history()`) read in the background by default: a failure after the
-call has returned fails the verb's table instead of raising (a parameter mistake still raises
-at the call). With `wait=True` they raise these exceptions directly. A live table fails with
-one (its publisher's `publish_failure`), so the failure shows where Deephaven users look; it is
-also logged, at the level its cause gives, and shown in `m.streams()`.
+call has returned fails the verb's table instead of raising, while a parameter mistake or a
+closed session still raises at the call. With `wait=True` they raise these exceptions
+directly. A live table fails with one (its publisher's `publish_failure`), so the failure shows
+where Deephaven users look; it is also logged, at the level its cause gives, and shown in
+`m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
 fix, which is not exported; its subclass `RowDataError`, which the ingest layer raises and
@@ -453,10 +454,10 @@ class RowDataError(PermanentError):
     A page whose every row was dropped because a key could not be read (one odd row is dropped
     and counted, never raised), a symbol spelling the library cannot read under
     `unreadable_symbols=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
-    dataset's poll keys. `fetch()` and `history()` raise it like any `MassiveError`;
-    a `poll()` table fails with it, since the next cycle would fail alike. Data from Massive
-    that the library cannot read is the library's to fix, so its cause is
-    `ErrorCause.LIBRARY_DEFECT`.
+    dataset's poll keys. A `fetch()` or `history()` table fails with it like any `MassiveError`,
+    and a call with `wait=True` raises it; a `poll()` table fails with it, since the next cycle
+    would fail alike. Data from Massive that the library cannot read is the library's to fix, so
+    its cause is `ErrorCause.LIBRARY_DEFECT`.
     """
 
     default_cause = ErrorCause.LIBRARY_DEFECT
@@ -471,6 +472,7 @@ class UnlistedPairError(PermanentError):
     does not list the ticker, or gives currencies that do not join to it
     (`RestReader.crypto_pair` in `_ingest/rest.py`). A pair of a symbol table follows
     `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE`, `fetch()` and each `poll()`
-    cycle leave it out, and a followed read marks it `FAILED`; under `RAISE`, `fetch()` raises
-    it and a `poll()` or followed table fails with it. A pair passed in code always raises it.
+    cycle leave it out, and a followed read marks it `FAILED`; under `RAISE`, a `fetch()`,
+    `poll()`, or followed table fails with it, and `fetch(wait=True)` raises it. A pair passed in
+    code always raises it at the call.
     """

@@ -27,18 +27,18 @@ A `...` in a message stands for more words in the text you see.
 
 ### Reads
 
-These come from `fetch()` and `history()`. A read runs in the background by default, so its
-table shows Massive's error, and so does the `Error` column of its row in `m.streams()`. A call
-with `wait=True` raises the error instead.
+These come from `fetch()` and `history()`. By default a read runs in the background: Massive's
+error fails its table, and shows in the `Error` column of its row in `m.streams()`. A call with
+`wait=True` raises the error instead.
 
 | You see | Why | What to do |
 |---|---|---|
-| A `fetch()` or `history()` table has no rows | The read is still downloading, or it failed. | Find the read's row in `m.streams()`: `LOADING` means its rows are on their way, and `FAILED` has the reason in `Error`. |
+| A `fetch()` or `history()` table has no rows | The download is still running, it failed, or Massive had no rows. | Find the read's row in `m.streams()`. `LOADING` means its rows are on their way, `FAILED` has the reason in `Error`, and `DONE` means Massive had no rows, as "No rows for a symbol" explains. A watchlist's read shows `RUNNING` once each symbol has been read, and `m.symbol_reads()` shows each symbol's result. |
 | `try`/`except` around `fetch()` or `history()` doesn't catch Massive's error | The call returned before Massive answered, and the error went to the table. | Pass `wait=True` to wait for Massive's answer, so its error raises in the call. |
 | No rows for a symbol | Massive has no data for it in that range, or the company changed its ticker. | List the ticker's changes with `m.reference.ticker_events("META").fetch()`. |
 | `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The plan table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
-| A read is slow | A Basic plan allows five requests a minute, and the read waits between them. | Read fewer symbols. Leave out `wait=True`, so the read runs in the background. |
-| A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads all of it, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". Leave out `wait=True`, so the read runs in the background. |
+| A read is slow | A Basic plan allows five requests a minute, and the read waits between them. | Read fewer symbols. |
+| A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads all of it, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". |
 | Prices jump at a stock split | Live bars, flat files, and bars read with `adjusted=False` are as traded. | Read bars with `history()` and leave `adjusted` at `True`, the default, for split-adjusted prices. The [stock bars page](datasets/stocks.bars.md#arguments) explains `adjusted`. |
 
 <a id="live-table-messages"></a>
@@ -70,7 +70,7 @@ checking:
 
 | Table | One row for each | Look here when |
 |---|---|---|
-| `m.streams()` | Live table, and each `fetch()` or `history()` without `wait=True` or that follows a watchlist | A live table looks wrong |
+| `m.streams()` | Live table, and each `fetch()` or `history()` that runs in the background or follows a watchlist | A live table looks wrong |
 | `m.connections()` | Streaming connection, and each real-time or delayed feed the session chose | A stream gets no data |
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
 | `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |

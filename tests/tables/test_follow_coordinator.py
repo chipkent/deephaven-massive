@@ -1764,52 +1764,61 @@ def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
     assert row(massive_session, "AAPL").state is SymbolReadState.FAILED
 
 
-def test_a_call_time_symbol_that_may_pass_keeps_the_table(
+def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
-    del clock  # holds the retry: the symbol stays RETRYING
+    # While AAPL is read again, the table waits; once its last retry fails, every call-time
+    # symbol has failed, and the table fails, as a call that waits would have raised.
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(503, "busy")]
     script.answers["MSFT"] = [refused(403, "not in the plan")]
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
-    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
-    assert not result.j_table.isFailed()
-    massive_session.release(result)
+    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+        wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+        assert not result.j_table.isFailed()
+        clock.advance(delay)
+        massive_session._core.follows.wake()
+        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
+    until(lambda: bool(result.j_table.isFailed()))
 
 
-def test_removing_the_last_unsettled_call_time_symbol_fails_the_table(
+def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession
 ) -> None:
-    # MSFT failed for good, and AAPL, still loading, leaves: every call-time symbol left in
-    # the table has failed.
+    # MSFT failed, and AAPL, still loading, is deleted: the user chose the symbols, so the
+    # table goes on, and a symbol added later fails alone.
     script = Script(massive_session)
     script.gates["AAPL"] = threading.Event()
     script.answers["MSFT"] = [refused(403, "not in the plan")]
+    script.answers["NVDA"] = [refused(403, "not in the plan")]
     wl = watchlist("AAPL", "MSFT")
     result = follow(massive_session, wl, script)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
     delete(wl, "AAPL")
-    until(lambda: bool(result.j_table.isFailed()))
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    add(wl, "NVDA")
+    wait_state(massive_session, "NVDA", SymbolReadState.FAILED)
     script.gates["AAPL"].set()
+    assert not result.j_table.isFailed()
+    massive_session.release(result)
 
 
-def test_call_time_symbols_that_all_leave_before_failing_keep_the_table(
+def test_deleting_a_failed_call_time_symbol_leaves_the_check_to_the_others(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession
 ) -> None:
     script = Script(massive_session)
     script.gates["AAPL"] = threading.Event()
-    wl = watchlist("AAPL")
-    result = follow(massive_session, wl, script)
-    until(lambda: state(massive_session, "AAPL") is SymbolReadState.LOADING)
-    delete(wl, "AAPL")
-    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    script.answers["AAPL"] = [refused(403, "not in the plan")]
     script.answers["MSFT"] = [refused(403, "not in the plan")]
-    add(wl, "MSFT")  # added after the call: its failure is its own
+    wl = watchlist("AAPL", "MSFT")
+    result = follow(massive_session, wl, script)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
-    script.gates["AAPL"].set()
+    delete(wl, "MSFT")
+    wait_state(massive_session, "MSFT", SymbolReadState.REMOVED)
     assert not result.j_table.isFailed()
-    massive_session.release(result)
+    script.gates["AAPL"].set()  # the one call-time symbol left fails: the table fails
+    until(lambda: bool(result.j_table.isFailed()))
 
 
 # --- The coordinator's work grows with the symbols that change --------------------------------
