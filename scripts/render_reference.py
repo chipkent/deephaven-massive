@@ -54,8 +54,8 @@ atexit.register(_exit)
 Server(port=0, jvm_args=["-Xmx1g"]).start()
 
 # The library imports Deephaven, which needs the server started above.
-from deephaven_massive import _config, _dataset_list, _massive, _session  # noqa: E402
-from deephaven_massive._datasets.column_reference import (  # noqa: E402
+from deephaven_massive import _config, _dataset_list, _massive, _session  # noqa: E402 - needs the server above
+from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs the server above
     column_changes,
     render,
     sync,

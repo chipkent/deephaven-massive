@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._errors import raises_through
-from deephaven_massive.namespaces._query_building import Namespace, build_query, list_params
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
+    build_query,
+    list_params,
+)
 from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:

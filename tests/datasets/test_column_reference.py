@@ -56,7 +56,7 @@ from deephaven_massive._massive import (
     source,
 )
 from deephaven_massive._session import CATALOG
-from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.namespaces._namespace import Namespace
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping

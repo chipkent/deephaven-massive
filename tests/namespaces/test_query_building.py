@@ -37,12 +37,11 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, T
 from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
 from deephaven_massive._massive import Transport
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
     SNAPSHOT_SYMBOLS_PER_REQUEST,
-    Namespace,
-    _is_default,
     _time_value,
     accepted_values,
     adjustment_notes,
@@ -368,12 +367,6 @@ def test_every_snapshot_splits_its_tickers_alike() -> None:
     assert {spec.symbols_per_request for spec in lists} == {SNAPSHOT_SYMBOLS_PER_REQUEST}
 
 
-def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
-    namespace = Namespace(massive_session._core)
-    assert namespace._core is massive_session._core
-    assert not hasattr(namespace, "_query")
-
-
 def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession) -> None:
     build(massive_session, DIVIDENDS, filters={"frequency": 4})
     with pytest.raises(ValueError, match="has no filter 'pay_date_lte'"):
@@ -385,43 +378,6 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
         build(massive_session, INDICATOR, timespan="day")
-
-
-def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> None:
-    label = repr(massive_session).removeprefix("<").split(" open")[0]
-    m = massive_session
-    namespaces = {
-        "stocks": m.stocks,
-        "options": m.options,
-        "futures": m.futures,
-        "indices": m.indices,
-        "forex": m.forex,
-        "crypto": m.crypto,
-        "reference": m.reference,
-        "indicators": m.indicators,
-        "economy": m.economy,
-        "partners": m.partners,
-        "partners.benzinga": m.partners.benzinga,
-        "partners.etf_global": m.partners.etf_global,
-        "partners.tmx": m.partners.tmx,
-        "partners.fable": m.partners.fable,
-    }
-    for path, namespace in namespaces.items():
-        assert repr(namespace) == f"<{label} {path}>"
-
-
-def test_a_wrong_call_names_the_method_by_its_path(massive_session: dm.MassiveSession) -> None:
-    m = massive_session
-    bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
-    with pytest.raises(
-        TypeError, match=r"^stocks\.bars\(\) takes 3 positional arguments but 5 were"
-    ):
-        bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
-    news = cast("Callable[..., object]", m.partners.benzinga.news)
-    with pytest.raises(TypeError, match=r"^partners\.benzinga\.news\(\) got an unexpected"):
-        news(tickerz="AAPL")
-    assert m.options.chain.__qualname__ == "options.chain"
-    assert m.stocks.financials.balance_sheets.__qualname__ == "stocks.financials.balance_sheets"
 
 
 NEWS = DatasetSpec(
@@ -1081,15 +1037,6 @@ def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
         spec = CATALOG.by_name[name]
         columns = set(CATALOG.dataset_schema(spec).column_names)
         assert set(spec.column_notes) <= columns, name
-
-
-def test_an_array_argument_is_never_its_default() -> None:
-    # A numpy array's `==` answers element by element; the repr must not ask its truth.
-    assert not _is_default(np.array([1, 1]), 1)
-    assert _is_default(1, 1)
-    assert _is_default({FuturesVenue.CME}, frozenset({FuturesVenue.CME}))
-    assert not _is_default(None, inspect.Parameter.empty)
-    assert not _is_default(2, None)
 
 
 def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:

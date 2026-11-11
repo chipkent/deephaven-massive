@@ -401,48 +401,46 @@ plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
 
-**98. A user finds a public name where they would look for it** (2026-11-11). What a user
-types in ordinary use is on the package root, `dm`: the session and its settings, the enums,
-the errors, `ALL`, the argument types, the symbol converters, `datasets()`, the logging
-switches, and `__version__`. Classes a user only receives, and names only in type hints, live
-in a public package named for what it holds and holding only that:
-`deephaven_massive.queries` holds the query classes and the code that picks a dataset's class,
-and `deephaven_massive.namespaces` holds the classes of `m.stocks` and the other fifteen
-namespaces and the dataset factory they share. Code lives in the package that exposes it:
-inside a public package every module except `__init__.py` is private, no package holds both `x`
-and `_x`, no public module re-exports a private twin, an `__init__.py` only imports and lists
-names (the root's also reads `__version__`), and no `__module__` is rewritten. No package is named for how it is used (`types`,
-`typing`, `typehints`). Every type the public contract declares (parameter, return, property,
-documented exception) is public; the type of `dm.ALL` stays private, since a user passes
-`dm.ALL` and never names its type. `docs/dev/public-api.md` states the principle, and
-`tests/test_layout.py` checks the layout rules rather than a list of public modules.
+**98. A user finds a public name where they would look for it** (2026-11-11). What a user types in
+ordinary use is on the package root, `dm`: the session and its settings, the enums, the errors,
+`ALL`, the argument types, the symbol converters, `datasets()`, the logging switches, and
+`__version__`. Classes a user only receives, and names only in type hints, live in a public package
+named for what it holds and holding only that: `deephaven_massive.queries` holds the query classes
+and the code that picks a dataset's class, and `deephaven_massive.namespaces` holds the classes of
+`m.stocks` and the other fifteen namespaces and the dataset factory they share. Code lives in the
+package that exposes it: inside a public package every module except `__init__.py` is private, no
+package holds both `x` and `_x`, no public module re-exports a private twin, an `__init__.py` only
+imports and lists names (the root's also reads `__version__`), and no `__module__` is rewritten. No
+package is named for how it is used (`types`, `typing`, `typehints`). Every type the public contract
+declares (parameter, return, property, documented exception) is public; the type of `dm.ALL` stays
+private, since a user passes `dm.ALL` and never names its type. `docs/dev/public-api.md` states the
+principle, and `tests/test_layout.py` checks the layout rules rather than a list of public modules.
 
 This renames and moves public names: the module `deephaven_massive.queries` and the private
 `_query.py` it re-exported become one package, whose modules split by subject (`_query.py`,
-`_fetch.py`, `_stream.py`, `_history.py`, `_call.py`, `_choice.py`); the shared base is public
-as `Query`, with `columns()`, and the REST class, formerly `Query`, is `FetchQuery`; the
-sixteen namespace classes become public, named from their session path (`StocksNamespace`,
-`PartnersBenzingaNamespace`); and the alias `Symbols` becomes `dm.SymbolsLike`, beside
-`dm.DateLike` and `dm.FilterValue` on the root, while the private timespan aliases give way
-to the timespans written in each overload. Each `bars()` has two overloads: one-second or one-minute bars at `multiplier=1`
-return a `StreamHistoryQuery`, and any `Timespan` with any multiplier a `HistoryQuery`. A
-dataset method passes the class it declares to the shared factory, which builds the class the
-dataset's spec derives and fails as a library defect when it is not that class or a subclass,
-so no method casts its query.
+`_fetch.py`, `_stream.py`, `_history.py`, `_call.py`, `_choice.py`); the shared base is public as
+`Query`, with `columns()`, and the REST class, formerly `Query`, is `FetchQuery`; the sixteen
+namespace classes become public, named from their session path (`StocksNamespace`,
+`PartnersBenzingaNamespace`); and the alias `Symbols` becomes `dm.SymbolsLike`, beside `dm.DateLike`
+and `dm.FilterValue` on the root, while the private timespan aliases give way to the timespans
+written in each overload. Each `bars()` has two overloads: one-second or one-minute bars at
+`multiplier=1` return a `StreamHistoryQuery`, and any `Timespan` with any multiplier a
+`HistoryQuery`. A dataset method passes the class it declares to the shared factory, which builds
+the class the dataset's spec derives and fails as a library defect when it is not that class or a
+subclass, so no method casts its query.
 
-Imports are eager, and the promise that `import deephaven_massive` works without Java is
-withdrawn: the lazy loading that kept it (`__getattr__` on the root and on `_massive`) hid
-every name's real home from readers and tools. Without a running Deephaven server the import
-fails with Deephaven's own error; the README's console recipe and the root docstring show how
-to start one first, and so do the scripts, the test run (a pytest plugin), and the spec
-refresh, which now runs with Java and writes its drift report to a file.
+Imports are eager, and the promise that `import deephaven_massive` works without Java is withdrawn:
+the lazy loading that kept it (`__getattr__` on the root and on `_massive`) hid every name's real
+home from readers and tools. Without a running Deephaven server the import fails with Deephaven's
+own error; the README's console recipe and the root docstring show how to start one first, and so do
+the scripts, the test run (a pytest plugin), and the spec refresh, which now runs with Java and
+writes its drift report to a file.
 
-The run-time hints that named the dataset to use for a method a query lacks
-(`Query.__getattr__`) are removed. A misspelled or missing method raises Python's own
-`AttributeError`, as tab completion and `hasattr` already show the methods a query has, and
-`docs/troubleshooting.md` lists the alternatives under each message. The `Methods` column of
-`dm.datasets()` and the dataset reference name the bars that stream instead of listing their
-stream methods unqualified.
+The run-time hints that named the dataset to use for a method a query lacks (`Query.__getattr__`)
+are removed. A misspelled or missing method raises Python's own `AttributeError`, as tab completion
+and `hasattr` already show the methods a query has, and `docs/troubleshooting.md` lists the
+alternatives under each message. The `Methods` column of `dm.datasets()` and the dataset reference
+name the bars that stream instead of listing their stream methods unqualified.
 
 **99. A malformed flat-file line follows `MassiveConfig.malformed_rows`, `LOG` by default**
 (2026-11-10). Rule 24 gives each cause of a bad row its own `dm.OnError` setting (66, 81); a

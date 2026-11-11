@@ -44,7 +44,7 @@ from deephaven_massive._massive import (
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive.namespaces import _crypto as crypto
-from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,

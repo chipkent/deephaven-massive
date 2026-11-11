@@ -3,7 +3,7 @@
 Datasets: trades, quotes, bars, each symbol's last trade, last quote, and previous day's bar, LULD
 bands, net order imbalances, fair market value, snapshots, movers, daily open/close, dividends,
 splits, IPOs, short interest and volume, and share float. The nested `m.stocks.financials` and
-`m.stocks.filings` namespaces are `stock_financials.py` and `stock_filings.py`, which
+`m.stocks.filings` namespaces are `_stock_financials.py` and `_stock_filings.py`, which
 `StocksNamespace` creates.
 
 Each dataset is one factory method that validates its arguments and returns a query; nothing
@@ -42,10 +42,10 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
     EVERY_TICKER,
     SNAPSHOT_SYMBOLS_PER_REQUEST,
-    Namespace,
     adjustment_notes,
     build_query,
     day_argument,
@@ -369,7 +369,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     SHARE_FLOAT,
 )
 """Every dataset of `m.stocks` itself, one `DatasetSpec` each (for example `stocks.trades`);
-its nested namespaces have their own (`stock_financials.py`, `stock_filings.py`)."""
+its nested namespaces have their own (`_stock_financials.py`, `_stock_filings.py`)."""
 
 
 # --- Namespaces ---------------------------------------------------------------------------------

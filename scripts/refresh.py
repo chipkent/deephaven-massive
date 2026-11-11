@@ -42,6 +42,8 @@ def main() -> int:
     try:
         runpy.run_module(_REFRESH, run_name="__main__", alter_sys=True)
     except SystemExit as stop:
+        if stop.code is None:
+            return 0
         return stop.code if isinstance(stop.code, int) else 1
     return 0
 

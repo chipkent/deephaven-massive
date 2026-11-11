@@ -44,9 +44,9 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
-    Namespace,
     build_query,
     day_argument,
     list_params,

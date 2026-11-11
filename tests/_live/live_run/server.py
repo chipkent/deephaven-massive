@@ -10,21 +10,35 @@ is sized to the group: half the machine's memory up to 16 GB for a group that st
 for the others; a JVM crash writes its log into the attempt's folder, so the crash travels
 with the results. Every other command opens no session (a group's sessions run in its child),
 so it runs with `PARENT_HEAP`.
+
+The server needs Java 17 or later, and `check` exists to say when it is missing; a server
+that cannot start would end the program before `check` could say so. `java_problem` runs the
+same Java check as `check` does (`machine_checks.java_item`) before the server starts, so a
+script prints its `FAIL java` line and stops instead.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from tests._live.live_run import machine_checks
+from tests._live.live_run.children import run_command
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
-__all__ = ["PARENT_HEAP", "SMALL_HEAP", "STREAM_GROUPS", "STREAM_HEAP_LIMIT", "jvm_args"]
+__all__ = [
+    "PARENT_HEAP",
+    "SMALL_HEAP",
+    "STREAM_GROUPS",
+    "STREAM_HEAP_LIMIT",
+    "java_problem",
+    "jvm_args",
+]
 
 STREAM_HEAP_LIMIT: Final = 16 << 30
 """The most heap a streaming group's child takes, in bytes."""
@@ -62,3 +76,18 @@ def jvm_args(argv: Sequence[str]) -> list[str]:
     streams = request["group"] in STREAM_GROUPS
     heap = min(memory // 2, STREAM_HEAP_LIMIT) if streams else SMALL_HEAP
     return [f"-Xmx{heap >> 20}m", f"-XX:ErrorFile={folder}/hs_err_pid%p.log"]
+
+
+def java_problem(environ: Mapping[str, str] = os.environ) -> str | None:
+    """Say why the embedded server cannot start for want of Java, before a script starts it.
+
+    Args:
+        environ: The environment, whose `JAVA_HOME` names the JDK the server starts.
+
+    Returns:
+        The `check` report's line for Java, such as `"FAIL java: Java not found: install JDK
+        17 or later"`, when `java -version` finds no Java 17 or later; None when it does.
+    """
+    java = machine_checks.java_command(environ)
+    item = machine_checks.java_item(run_command([java, "-version"]))
+    return None if item.verdict == machine_checks.OK else f"{item.verdict} java: {item.detail}"

@@ -8,7 +8,7 @@ import pytest
 from deephaven_massive import namespaces
 from deephaven_massive._session import MassiveSession
 from deephaven_massive.namespaces import _partners, _stocks
-from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.namespaces._namespace import Namespace
 
 # Each namespace's path from the session, and its class.
 _PATHS = {

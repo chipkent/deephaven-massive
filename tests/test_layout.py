@@ -14,10 +14,10 @@ pytest collects a test module wherever it lies, so one inside a helper package m
 mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
 `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
-The only other test files that mirror no module are a `conftest.py` in any test folder, and
-`embedded_server.py` (the `-p` plugin that starts the test JVM), this file, and `test_docs.py`,
-all at the top of `tests/`. Fixtures under `tests/data/` follow the test
-paths, so none of their directories starts with `_` either.
+The only other test files that mirror no module are a `conftest.py`, in any test folder outside
+a helper package, and three files at the top of `tests/`: `embedded_server.py` (the `-p` plugin
+that starts the test JVM), this file, and `test_docs.py`. Fixtures under `tests/data/` follow
+the test paths, so none of their directories starts with `_` either.
 
 The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
 the imports of every module with `ast`:
@@ -1990,7 +1990,7 @@ def test_a_module_in_no_known_layer_is_reported(module: str) -> None:
         ),
         ("namespaces/_base.py", "from deephaven_massive.queries._query import Query\n"),
         ("_tables/liveness.py", "from . import diagnostics\n"),
-        ("__init__.py", "_EXPORTS = {'MassiveSession': 'deephaven_massive._session'}\n"),
+        ("__init__.py", "from deephaven_massive._session import MassiveSession\n"),
     ],
 )
 def test_a_module_may_import_its_own_layer_and_lower_ones(module: str, source: str) -> None:
@@ -2271,7 +2271,7 @@ def test_the_session_imports_the_ingest_clients() -> None:
         ),
         (
             "__init__.py",
-            "_EXPORTS = {'X': 'deephaven_massive._ingest.clients'}\n",
+            "MODULES = {'X': 'deephaven_massive._ingest.clients'}\n",
             "only _session.py imports the ingest layer",
         ),
         (

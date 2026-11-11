@@ -79,7 +79,7 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
     `_massive` and `tests/massive/`, code uses only `deephaven_massive._massive.__all__`.
 15. **Layers**, lowest first: wire; vocabulary (`_config`, `_enums`, `_errors`, `_log_limits`,
     `_types`); `_datasets`; `_tables`; `_ingest`; API (`__init__`, `_debug_log`, `_session`,
-    `_query`, `_namespaces`, and the public `queries` and `namespaces`). A module imports only its own layer or lower, under `TYPE_CHECKING`
+    `_query`, `_namespaces`). A module imports only its own layer or lower, under `TYPE_CHECKING`
     too; pass objects down.
 16. **`tests/test_layout.py` is the owner's.** It enforces rules 10, 14, and 15. Never widen its
     layer map, allow lists, or exceptions to pass a change; ask the owner.
@@ -93,7 +93,7 @@ uv run python scripts/render_reference.py             # regenerate docs/datasets
     whose summary would grow "…, and X". No pattern-word module names (`base`, `core`, `common`,
     `helpers`, `util`). A module over about 1,000 lines is split or says why it is one subject.
     An exception lives where it is raised, or in `_errors.py` when several modules need it.
-    `queries.py` and `namespaces.py` are the only public modules below the package. Every name says what the thing is or does, in words
+    `queries.py` is the one public module. Every name says what the thing is or does, in words
     a newcomer knows; a public argument or field keeps Massive's documented name unless the
     case for renaming it is compelling (a builtin clash, rule 12, or a real user error).
 19. **No `None` mode sentinels.** Select a mode with an enum member; `None` means only absent.

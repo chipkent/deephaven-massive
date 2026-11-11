@@ -60,9 +60,9 @@ if TYPE_CHECKING:
 Server(port=0, jvm_args=["-Xmx1g"]).start()
 
 # The library imports Deephaven, which needs the server started above.
-import deephaven_massive  # noqa: E402
-from deephaven_massive import _dataset_list, _massive, _session  # noqa: E402
-from deephaven_massive._datasets import column_reference  # noqa: E402
+import deephaven_massive  # noqa: E402 - needs the server above
+from deephaven_massive import _dataset_list, _massive, _session  # noqa: E402 - needs the server above
+from deephaven_massive._datasets import column_reference  # noqa: E402 - needs the server above
 
 _CHECKOUT_SOURCE = Path(__file__).resolve().parent.parent / "src"
 """The checkout's source tree, which must not be where the library is imported from."""

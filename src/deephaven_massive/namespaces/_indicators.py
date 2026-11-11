@@ -42,8 +42,8 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
-    Namespace,
     accepted_values,
     build_query,
     list_params,

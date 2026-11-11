@@ -47,7 +47,10 @@ from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, Ke
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive.namespaces._query_building import Namespace, list_query
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
+    list_query,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

@@ -39,7 +39,7 @@ from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
 from deephaven_massive.namespaces import _forex as forex
-from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,

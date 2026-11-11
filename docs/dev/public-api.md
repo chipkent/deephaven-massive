@@ -69,7 +69,9 @@ class its documented members and signatures. Every type that contract declares, 
 a return, a property, or a documented exception, is public by the rules above, so a user can
 import any type a signature or a `Raises:` section names. A class may inherit from a private
 base, whose members are then part of the public class, and a private class may implement a
-public declared type.
+public declared type. A constructor users never call is no part of the contract: its
+parameters start with an underscore, such as a namespace's `_core`, and may have private
+types.
 
 Each public class's docstring states the line that imports it, such as
 `from deephaven_massive.queries import FetchQuery`, so the path is one `help()` away.

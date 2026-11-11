@@ -44,8 +44,6 @@ Each class is named for its path on the session:
 query methods. The classes of the queries are in `deephaven_massive.queries`.
 """
 
-from __future__ import annotations
-
 from deephaven_massive.namespaces._crypto import CryptoNamespace
 from deephaven_massive.namespaces._economy import EconomyNamespace
 from deephaven_massive.namespaces._forex import ForexNamespace

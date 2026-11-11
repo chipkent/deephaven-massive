@@ -63,17 +63,23 @@ from deephaven_massive._tables.execution_context import (
 )
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS
-from deephaven_massive.namespaces._crypto import CryptoNamespace
-from deephaven_massive.namespaces._economy import EconomyNamespace
-from deephaven_massive.namespaces._forex import ForexNamespace
-from deephaven_massive.namespaces._futures import FuturesNamespace
-from deephaven_massive.namespaces._indicators import IndicatorsNamespace
-from deephaven_massive.namespaces._indices import IndicesNamespace
-from deephaven_massive.namespaces._options import OptionsNamespace
-from deephaven_massive.namespaces._partners import PartnersNamespace
-from deephaven_massive.namespaces._query_building import build_query, list_params, shows_call
-from deephaven_massive.namespaces._reference import ReferenceNamespace
-from deephaven_massive.namespaces._stocks import StocksNamespace
+from deephaven_massive.namespaces import (
+    CryptoNamespace,
+    EconomyNamespace,
+    ForexNamespace,
+    FuturesNamespace,
+    IndicatorsNamespace,
+    IndicesNamespace,
+    OptionsNamespace,
+    PartnersNamespace,
+    ReferenceNamespace,
+    StocksNamespace,
+)
+from deephaven_massive.namespaces._namespace import shows_call
+from deephaven_massive.namespaces._query_building import (
+    build_query,
+    list_params,
+)
 from deephaven_massive.queries import FetchQuery
 
 if TYPE_CHECKING:

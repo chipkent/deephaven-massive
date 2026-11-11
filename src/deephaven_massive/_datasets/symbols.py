@@ -244,7 +244,7 @@ class SymbolTable:
 
 
 NormalizedSymbols: TypeAlias = tuple[str, ...] | AllSymbols | SymbolTable
-"""A `Symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
+"""A `symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
 boxed symbol table."""
 
 

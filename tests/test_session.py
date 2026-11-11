@@ -899,7 +899,10 @@ def test_verbs_work_from_a_thread_without_an_execution_context(
 
 def test_every_namespace_module_feeds_the_catalog() -> None:
     package = Path(namespaces.__file__).parent
-    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"_query_building"}
+    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {
+        "_namespace",
+        "_query_building",
+    }
     named = [module.__name__ for module in _session.NAMESPACE_MODULES]
     assert len(named) == len(set(named))
     expected = {f"deephaven_massive.namespaces.{name}" for name in found}

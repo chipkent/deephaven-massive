@@ -46,3 +46,25 @@ def test_a_group_child_gets_a_heap_sized_to_its_group_and_its_crash_log_in_the_a
         f"-Xmx{heap >> 20}m",
         f"-XX:ErrorFile={tmp_path.resolve() / 'a'}/hs_err_pid%p.log",
     ]
+
+
+@pytest.mark.parametrize(
+    ("printed", "problem"),
+    [
+        ('openjdk version "21.0.2" 2024-01-16', None),
+        ("", "FAIL java: Java not found: install JDK 17 or later"),
+        ('java version "1.8.0_391"', "FAIL java: Java 8: install JDK 17 or later"),
+    ],
+)
+def test_a_missing_or_old_java_is_reported_before_the_server_starts(
+    *, printed: str, problem: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[list[str]] = []
+
+    def run(argv: list[str]) -> str:
+        asked.append(argv)
+        return printed
+
+    monkeypatch.setattr(server, "run_command", run)
+    assert server.java_problem({"JAVA_HOME": "/jdk"}) == problem
+    assert asked == [["/jdk/bin/java", "-version"]]

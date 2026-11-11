@@ -28,7 +28,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._session import MassiveSession
-from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import Query
 
 ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError, PermanentError]

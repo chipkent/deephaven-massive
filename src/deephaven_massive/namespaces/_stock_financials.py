@@ -22,9 +22,9 @@ from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec
 from deephaven_massive._enums import AssetClass, Order, Timeframe, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
+from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
     EVERY_TICKER,
-    Namespace,
     list_query,
     ticker_key,
 )

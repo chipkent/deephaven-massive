@@ -32,7 +32,10 @@ from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._massive import Transport, object_key, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _futures as futures
-from deephaven_massive.namespaces._query_building import Namespace, build_query
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
+    build_query,
+)
 from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
 from deephaven_massive.queries._choice import query_class
 

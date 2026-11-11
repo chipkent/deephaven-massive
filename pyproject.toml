@@ -303,10 +303,10 @@ filterwarnings = ["error"]
 # directories to sys.path. `-p tests.embedded_server` starts the embedded Deephaven server
 # before any conftest imports the library, which needs it. `-m` picks which tests run: it
 # leaves out the live tests, which call Massive's real servers, the benchmark sweep, which only
-# prints timings, and the soak tests, which run for minutes or hours. Pass your own `-m` to replace it: `uv run pytest -m
-# integration` runs only the live tests (each skips itself unless MASSIVE_API_KEY is set),
-# `uv run pytest -m benchmark` runs only the sweep, and `uv run pytest -m soak` runs only the
-# soak tests (docs/dev/soak-tests.md).
+# prints timings, and the soak tests, which run for minutes or hours. Pass your own `-m` to
+# replace it: `uv run pytest -m integration` runs only the live tests (each skips itself unless
+# MASSIVE_API_KEY is set), `uv run pytest -m benchmark` runs only the sweep, and
+# `uv run pytest -m soak` runs only the soak tests (docs/dev/soak-tests.md).
 addopts = [
     "-ra",
     "--import-mode=importlib",

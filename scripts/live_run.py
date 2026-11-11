@@ -17,10 +17,11 @@ cleaned of them, and `pack` refuses to zip a folder in which its scan finds one.
 
 All the logic is in `tests/_live/live_run/` (`cli`, `commands`, and the modules they name),
 where the unit tests run it against the fake servers; this script only puts the repository
-root on the import path, starts the embedded Deephaven server, sized by `server.jvm_args`,
-before it imports the command line (which imports the library, and so Deephaven, which needs
-a running JVM), and leaves through `os._exit`, since a normal interpreter shutdown after the
-JVM has run can crash.
+root on the import path, checks for Java (`server.java_problem`, so a missing Java gets the
+`check` report's line instead of a failed server start), starts the embedded Deephaven server,
+sized by `server.jvm_args`, before it imports the command line (which imports the library, and
+so Deephaven, which needs a running JVM), and leaves through `os._exit`, since a normal
+interpreter shutdown after the JVM has run can crash.
 
 Exit status: 0 on success, 1 when a check, a pack, or an upgrade check failed, 2 when a
 command was refused (a folder in use, another commit, a rejected key), 130 after Control-C.
@@ -44,11 +45,15 @@ def main() -> int:
     """Start the server, then run the command named on the command line.
 
     Returns:
-        Its exit status.
+        Its exit status, or 1 when Java is missing or older than 17.
     """
     sys.path.insert(0, str(ROOT))
     # `tests._live` is importable only once the root is on the path, so it is imported by name.
     server = importlib.import_module("tests._live.live_run.server")
+    problem = server.java_problem()
+    if problem is not None:
+        sys.stdout.write(problem + "\n")
+        return 1
     # Port 0 asks the OS for a free port, so the server never clashes with another one.
     Server(port=0, jvm_args=server.jvm_args(sys.argv[1:])).start()
     cli = importlib.import_module("tests._live.live_run.cli")
