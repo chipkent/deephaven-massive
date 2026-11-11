@@ -112,8 +112,9 @@ out incomplete, and a long list of questions goes unread.
    enums, never magic strings. The
    user's code works on any Massive plan, with no tier-specific configuration. Every API
    accepts a live table and follows it, and history and live calls never mix (decisions 82 and
-   83). Bad input from the caller is refused consistently, never silently cleaned or passed
-   through. The simplest behavior that delivers the data beats a clever rule, and an error comes
+   83). Whether a value is valid is Massive's to answer (`AGENTS.md`, Massive judges its own
+   values); the library refuses only a wrong type, a value it cannot express, or one that
+   would silently return wrong data, and never silently cleans input. The simplest behavior that delivers the data beats a clever rule, and an error comes
    only when no source can serve. The public API stays minimal: every type a public signature
    declares is public and documented, a private implementation may sit behind it, and a new
    public name or module is justified by the user code that needs it, never by a list. A design

@@ -125,6 +125,14 @@ These protect the owner's repository, money, and secrets.
   documentation of both fields, their types, and units gets one name through an
   `overrides.SPELLINGS` entry; a suspected but unproven match keeps its names and goes to the
   owner for a verdict, with both fields' documentation quoted and a live test that settles it.
+- **Massive judges its own values.** Whether a ticker exists, a parameter value is allowed,
+  or a combination is valid is Massive's to answer, not the library's: the library sends the
+  request and reports Massive's answer clearly, naming the call, including a ticker Massive
+  has no data for, which must never surface as a silent empty table. The library refuses a
+  value itself only when it is the wrong Python type, when the library cannot express it in a
+  request at all, or when sending it would return wrong data with no error (each such check
+  states which, with its evidence). It never encodes the shape of Massive's tickers or other
+  data particulars.
 - **Supply Massive's data; never repair it.** Users must see what Massive sent: convert
   faithfully (units, types, column names, canonical symbols), and never fill, correct, filter
   out, re-stamp, or replace a value to make vendor data look right. When it is wrong, record
@@ -136,8 +144,7 @@ These protect the owner's repository, money, and secrets.
   its own `dm.OnError` setting in `MassiveConfig` (`LOG` by default); a new cause gets a new
   setting, never a hard-coded failure or a silent skip. Only a problem that affects every row
   fails the table (authentication, a closed session, a plan without the dataset, a library
-  defect). A `str` or list passed as `symbols` is code, not data: a value in it that is not
-  Massive's exact ticker raises `ValueError` (decisions 66 and 81).
+  defect).
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the
@@ -173,7 +180,10 @@ These protect the owner's repository, money, and secrets.
   imports and nothing else. A `cast`, an `Any`, a `getattr` or string lookup, a branch hidden
   from the type checker, or any construct whose only purpose is to make ruff, mypy, or coverage
   pass is bent code: change the design so the tools see the true API, or raise the rule with
-  the owner.
+  the owner. `assert` states an internal fact the code has just established (`assert x is not
+  None` after the check that guarantees it), for readers and the type checker; it never
+  validates input or guards anything at run time, since `python -O` removes it. Prefer it to a
+  `cast`, which asserts the same fact without checking it.
 - **Lint size and complexity limits flag smells**: fix the design. A suppression at a site
   needs the owner's acceptance first, asked with its reason; never raise a global limit to make
   code pass. Too-many-arguments is off because

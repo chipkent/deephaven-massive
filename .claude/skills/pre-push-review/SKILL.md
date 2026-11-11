@@ -76,6 +76,10 @@ same property. Then look for:
   `# pragma: no cover`, `getattr` with a constant name, or code that exists only so ruff, mypy, or
   coverage pass. Each is a blocker unless the owner accepted it: fix the design so the tools see
   the true API.
+- **The library doing Massive's job.** A check that refuses a value Massive could judge (a
+  ticker's shape, an allowed parameter value, a valid combination) is a finding unless it is a
+  wrong Python type, a value the library cannot express, or one with evidence that Massive
+  would return wrong data silently (`AGENTS.md`, Massive judges its own values).
 - **Docstrings that inventory.** Read the first paragraph of every docstring the diff adds or
   changes: it must say what the thing is for and when to use it, not list what it contains
   (`writing-docstrings`).
