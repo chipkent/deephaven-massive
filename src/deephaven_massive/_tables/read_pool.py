@@ -102,20 +102,21 @@ class ReadPool:
             self._queue.put(task)
             if self._idle.acquire(blocking=False):
                 return True
-            if len(self._threads) >= self._max_workers:
-                logger.debug(
-                    "%s read pool: all %d threads are busy; a read waits its turn",
-                    self._thread_prefix,
-                    self._max_workers,
+            busy = len(self._threads) >= self._max_workers
+            if not busy:
+                thread = threading.Thread(
+                    target=self._work,
+                    name=f"{self._thread_prefix} read_{len(self._threads)}",
+                    daemon=True,
                 )
-                return True
-            thread = threading.Thread(
-                target=self._work,
-                name=f"{self._thread_prefix} read_{len(self._threads)}",
-                daemon=True,
+                thread.start()
+                self._threads.append(thread)  # only once started: a failed start counts none
+        if busy:  # logged outside the lock, which is a leaf
+            logger.debug(
+                "%s read pool: all %d threads are busy; a read waits its turn",
+                self._thread_prefix,
+                self._max_workers,
             )
-            thread.start()
-            self._threads.append(thread)  # only once started: a failed start counts no thread
         return True
 
     def stop(self) -> None:

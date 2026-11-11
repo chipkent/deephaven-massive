@@ -1389,7 +1389,7 @@ class FollowCoordinator:
             return
         result.shown = shown
         transport = _shown_transport(result.transports)
-        core.update_followed_read(
+        core.workers.update_followed_read(
             read.call,
             StreamUpdate(
                 rows_published=rows_now,

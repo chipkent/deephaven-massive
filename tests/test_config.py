@@ -134,6 +134,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
+    assert base.malformed_rows is dm.OnError.LOG
     assert base.connection_taken is dm.ConnectionTaken.FAIL
 
 
@@ -410,16 +411,17 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
-_SYMBOL_SETTINGS = [
+_ON_ERROR_SETTINGS = [
     "noncanonical_symbols",
     "unlisted_symbols",
     "unreadable_symbols",
     "unavailable_symbols",
+    "malformed_rows",
 ]
 
 
-@pytest.mark.parametrize("setting", _SYMBOL_SETTINGS)
-def test_symbol_settings_default_to_log_and_read_no_environment(
+@pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
+def test_on_error_settings_default_to_log_and_read_no_environment(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
     # The settings' old environment variables are gone: a value there changes nothing.
@@ -427,8 +429,8 @@ def test_symbol_settings_default_to_log_and_read_no_environment(
     assert getattr(MassiveConfig(api_key="k"), setting) is dm.OnError.LOG
 
 
-@pytest.mark.parametrize("setting", _SYMBOL_SETTINGS)
-def test_symbol_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
+@pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
+def test_on_error_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
     assert getattr(_replace(base, **{setting: dm.OnError.IGNORE}), setting) is dm.OnError.IGNORE
     with pytest.raises(
         TypeError, match=rf"^{setting} must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"
@@ -642,6 +644,7 @@ noncanonical_symbols: raise
 unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
+malformed_rows: ignore
 connection_taken: reconnect
 """,
     )
@@ -667,6 +670,7 @@ connection_taken: reconnect
         unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
+        malformed_rows=OnError.IGNORE,
         connection_taken=dm.ConnectionTaken.RECONNECT,
     )
     config = MassiveConfig.from_file(file)
@@ -915,19 +919,19 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        # The symbol settings: an exact word.
+        # The error settings: an exact word.
         (
             "noncanonical_symbols: Raise\n",
             (
                 ", line 1, column 23: noncanonical_symbols 'Raise' "
-                "is not a symbol setting; write one of raise, log, ignore, exactly as shown"
+                "is not an error setting; write one of raise, log, ignore, exactly as shown"
             ),
         ),
         (
             'unreadable_symbols: " raise"\n',
             (
                 ", line 1, column 21: unreadable_symbols ' raise' "
-                "is not a symbol setting; write one of raise, log, ignore, exactly as shown"
+                "is not an error setting; write one of raise, log, ignore, exactly as shown"
             ),
         ),
         (
@@ -940,8 +944,8 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         (
             "unreadable_symbols: [log]\n",
             (
-                ", line 1, column 21: unreadable_symbols must be a "
-                "symbol setting (raise, log, ignore), not a list or mapping"
+                ", line 1, column 21: unreadable_symbols must be an "
+                "error setting (raise, log, ignore), not a list or mapping"
             ),
         ),
         # The subscription lists.

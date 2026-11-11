@@ -1428,7 +1428,7 @@ def test_every_stream_shape_is_described(
         assert_described(massive_session, TRADES_SPEC, result)
     assert results[0].is_blink
     # The stream's own blink table is never described: every result is a copy.
-    streams = massive_session._core._streams.values()
+    streams = massive_session._core.streams._streams.values()
     blinks = [state.handle.blink for state in streams if state.handle is not None]
     assert blinks
     assert all("TableDescription" not in blink.attributes() for blink in blinks)
@@ -1819,7 +1819,7 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
             instant, instant, wait=True
         )  # no row can lie in the range: nothing is read, no warning
         assert caplog.messages == []
-        q.history("2025-03-03", "2025-03-03", wait=True)
+        q.history("2025-03-03", "2025-03-03")
         q.history("2025-03-04", "2025-03-04", wait=True)  # once per session
     warning = (
         "stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold "
@@ -1884,7 +1884,7 @@ def _futures(count: int) -> list[str]:
 
 def _join_reads(session: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end, then for its row to be written.
-    for state in list(session._core._workers.values()):
+    for state in list(session._core.workers._workers.values()):
         cast("Any", state.fail).__self__.join(TIMEOUT)
 
 
@@ -1954,7 +1954,7 @@ def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder)
     with pytest.raises(TypeError, match="wait must be a bool, not str"):
         trades(massive_session).history("2025-03-03", wait=cast("bool", "no"))
     assert rest.calls == []
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_wait_false_raises_argument_errors_at_the_call(
@@ -1978,7 +1978,7 @@ def test_wait_false_raises_argument_errors_at_the_call(
         news(massive_session).fetch(wait=False)
     assert rest.calls == []
     assert flat.calls == []
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
@@ -2088,7 +2088,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     assert rest.calls == []
     # AUTO chose the flat files (60 symbols), and serves the read from REST instead, warning.
     with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
-        q.history("2025-03-03", "2025-03-03", wait=True)
+        q.history("2025-03-03", "2025-03-03")
     assert [c[0] for c in rest.calls] == ["history"]
     assert caplog.messages[-1] == (
         "stocks.trades history: AUTO read REST because S3 refused the flat files (the plan does "
@@ -2420,7 +2420,7 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
     }
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03", wait=True)
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     rest.outcomes = {}
     rest.raises = dm.AuthenticationError("HTTP 401: wrong key")  # the read fails as a unit
     with pytest.raises(dm.AuthenticationError, match="wrong key"):

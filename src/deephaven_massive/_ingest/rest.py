@@ -399,6 +399,82 @@ class _Outcome:
     missing: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PageRecency:
+    """What the `timeframe` labels of one page's rows say (`_page_recency`).
+
+    Attributes:
+        delayed: Whether a row of a known subscription is labelled delayed, refused or not.
+        real_time: Whether a row is labelled real-time.
+        refused: The tickers and first evidence of the rows labelled delayed, by their
+            subscription, for each subscription neither listed nor `CURRENCIES`: the tickers
+            in the order seen, each once, such as `{STOCKS: (("AAPL", "MSFT"),
+            "timeframe=DELAYED")}`.
+        unknown: Each row's label that is neither `DELAYED` nor `REAL-TIME`, as its row's
+            subscription (None when unknown) and the field and value, in row order.
+    """
+
+    delayed: bool
+    real_time: bool
+    refused: Mapping[Subscription, tuple[tuple[str, ...], str]]
+    unknown: tuple[tuple[Subscription | None, tuple[str, object]], ...]
+
+
+def _page_recency(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    fixed: Subscription | None,
+    listed: AbstractSet[Subscription],
+    symbol_key: str | None,
+    symbol: str | None,
+) -> _PageRecency:
+    """Read the recency labels of a page's rows, and which rows they refuse.
+
+    A row's subscription is `fixed` when the page is charged to one, else its ticker's class's
+    (`symbol_class`); a row whose subscription is unknown is never refused. The page is read
+    whole, so a refusal can name every refused row's ticker.
+
+    Args:
+        rows: The page's decoded rows.
+        fixed: The subscription the page is charged to, or None for the `other` bucket.
+        listed: The subscriptions whose delayed data is accepted
+            (`MassiveConfig.delayed_subscriptions`).
+        symbol_key: The wire key of the rows' ticker, or None.
+        symbol: The call's one symbol, which stands for its rows when they carry none, or None.
+
+    Returns:
+        The page's labels.
+    """
+    delayed = False
+    real_time = False
+    refused: dict[Subscription, tuple[dict[str, None], str]] = {}
+    unknown: list[tuple[Subscription | None, tuple[str, object]]] = []
+    for row in rows:
+        labels = read_labels("", [row])
+        real_time = real_time or labels.real_time is not None
+        if labels.delayed is None and labels.unknown is None:
+            continue
+        ticker = row.get(symbol_key) if symbol_key is not None else symbol
+        subscription = fixed or (
+            subscription_of(symbol_class(ticker)) if isinstance(ticker, str) else None
+        )
+        if labels.unknown is not None:
+            unknown.append((subscription, labels.unknown))
+        if labels.delayed is None or subscription is None:
+            continue
+        if subscription is not Subscription.CURRENCIES and subscription not in listed:
+            tickers, _ = refused.setdefault(subscription, ({}, labels.delayed))
+            if isinstance(ticker, str):
+                tickers[ticker] = None
+        delayed = True
+    return _PageRecency(
+        delayed=delayed,
+        real_time=real_time,
+        refused={key: (tuple(tickers), evidence) for key, (tickers, evidence) in refused.items()},
+        unknown=tuple(unknown),
+    )
+
+
 class RestState:
     """The REST resources one session shares: the client, the shared lookups, and the pollers.
 
@@ -1033,46 +1109,96 @@ class RestReader:
                     )
                 )
         except WireError as error:
-            if error.status == HTTPStatus.NOT_FOUND and call.symbol is not None:
-                # A 404 that arrives after the session closed is no answer about the symbol,
-                # so the call reports the close rather than dropping a symbol with no data.
-                if self.state.closed:
-                    logger.debug(
-                        "%s: HTTP 404 for %s from %s arrived after %s closed; the call "
-                        "reports the close",
-                        spec.name,
-                        call.symbol,
-                        template,
-                        self.state.label,
-                    )
-                    raise self.public_error(error) from error
-                if requests:
-                    raise CutShortError(
-                        f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
-                        f"HTTP 404 for page {requests + 1} of {template} after {requests} "
-                        f"page{'s' if requests > 1 else ''} had arrived; retry the call",
-                        status=error.status,
-                        request_id=error.request_id,
-                    ) from error
-                # A futures session is requested on its own: a 404 there is that session's.
-                session = (
-                    call.query.get(session_date_param(spec))
-                    if window is not None and window.requested is None
-                    else None
-                )
-                scope = "" if session is None else f" for the session {session}"
-                logger.debug(
-                    "%s: %s has no data%s (HTTP 404 from %s, request_id %s: %s); it is left out",
-                    spec.name,
-                    call.symbol,
-                    scope,
-                    template,
-                    error.request_id,
-                    error.message,
-                )
-                return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
-            raise self._dataset_error(spec, bucket, error) from error
+            return self._not_found(
+                error,
+                spec=spec,
+                call=call,
+                template=template,
+                bucket=bucket,
+                window=window,
+                kept=kept,
+                requests=requests,
+            )
         return _Outcome(tuple(kept), requests)
+
+    def _not_found(
+        self,
+        error: WireError,
+        *,
+        spec: DatasetSpec,
+        call: Call,
+        template: str,
+        bucket: str,
+        window: HistoryWindow | None,
+        kept: Sequence[pa.RecordBatch],
+        requests: int,
+    ) -> _Outcome:
+        """Settle a call's failed request: a symbol with no data, or the call's failure.
+
+        Only HTTP 404 on a per-symbol call while the session is open is about the symbol. On the
+        call's first request it means the symbol has no data: the call returns no rows with the
+        symbol in `missing`, scoped to the futures session a `history()` call asked for, and
+        logs it at DEBUG.
+
+        Args:
+            error: The request's failure.
+            spec: The dataset.
+            call: The call.
+            template: The call's path template, for messages.
+            bucket: The call's rate-limit bucket, for the public error.
+            window: The `history()` window whose rows the call keeps, or None.
+            kept: The rows the call kept before the failure.
+            requests: How many of the call's requests were answered before the failure.
+
+        Returns:
+            The call's outcome for a symbol with no data, the 404 counted as a request.
+
+        Raises:
+            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
+                data was cut short: the message names the dataset, the symbol, the path, and
+                how many pages had arrived.
+
+        A 404 that arrives after the session closed raises the `MassiveError("... is closed")`
+        of `public_error`, and any other failure the error of `_dataset_error`.
+        """
+        if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
+            raise self._dataset_error(spec, bucket, error) from error
+        # A 404 that arrives after the session closed is no answer about the symbol,
+        # so the call reports the close rather than dropping a symbol with no data.
+        if self.state.closed:
+            logger.debug(
+                "%s: HTTP 404 for %s from %s arrived after %s closed; the call reports the close",
+                spec.name,
+                call.symbol,
+                template,
+                self.state.label,
+            )
+            raise self.public_error(error) from error
+        if requests:
+            raise CutShortError(
+                f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
+                f"HTTP 404 for page {requests + 1} of {template} after {requests} "
+                f"page{'s' if requests > 1 else ''} had arrived; retry the call",
+                status=error.status,
+                request_id=error.request_id,
+            ) from error
+        # A futures session is requested on its own: a 404 there is that session's.
+        session = (
+            call.query.get(session_date_param(spec))
+            if window is not None and window.requested is None
+            else None
+        )
+        scope = "" if session is None else f" for the session {session}"
+        logger.debug(
+            "%s: %s has no data%s (HTTP 404 from %s, request_id %s: %s); it is left out",
+            spec.name,
+            call.symbol,
+            scope,
+            template,
+            error.request_id,
+            error.message,
+        )
+        return _Outcome(tuple(kept), requests + 1, missing=f"{call.symbol}{scope}")
 
     def _listed(
         self,
@@ -1243,39 +1369,22 @@ class RestReader:
                     streams=False,
                 )
                 raise refusal
-        delayed = page.status == DELAYED_LABEL and bool(named)
-        real_time = False
-        # Every refused row of the page, so the message names its tickers, not only the first:
-        # each subscription's tickers in the order seen, each once, and its first evidence.
-        refused: dict[Subscription, tuple[dict[str, None], str]] = {}
-        for row in page.rows:
-            labels = read_labels("", [row])
-            real_time = real_time or labels.real_time is not None
-            if labels.delayed is None and labels.unknown is None:
-                continue
-            ticker = row.get(symbol_key) if symbol_key is not None else call.symbol
-            subscription = fixed or (
-                subscription_of(symbol_class(ticker)) if isinstance(ticker, str) else None
+        recency = _page_recency(
+            page.rows, fixed=fixed, listed=listed, symbol_key=symbol_key, symbol=call.symbol
+        )
+        for subscription, unknown in recency.unknown:
+            self._warn_unknown_label(
+                spec, template=template, subscription=subscription, unknown=unknown
             )
-            if labels.unknown is not None:
-                self._warn_unknown_label(
-                    spec, template=template, subscription=subscription, unknown=labels.unknown
-                )
-            if labels.delayed is None or subscription is None:
-                continue
-            if subscription is not Subscription.CURRENCIES and subscription not in listed:
-                tickers, _ = refused.setdefault(subscription, ({}, labels.delayed))
-                if isinstance(ticker, str):
-                    tickers[ticker] = None
-            delayed = True
-        if refused:
-            subscription = min(refused)
-            tickers, evidence = refused[subscription]
+        if recency.refused:
+            subscription = min(recency.refused)
+            tickers, evidence = recency.refused[subscription]
             refusal = delayed_refusal(
                 subscription, _delayed_what(spec, list(tickers)), evidence, streams=False
             )
             raise refusal
-        if on_recency is not None and (delayed or real_time):
+        delayed = recency.delayed or (page.status == DELAYED_LABEL and bool(named))
+        if on_recency is not None and (delayed or recency.real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
 
     def _warn_unknown_label(

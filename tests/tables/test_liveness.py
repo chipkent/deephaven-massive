@@ -37,6 +37,7 @@ from deephaven_massive._tables.liveness import (
     make_result,
     new_scope,
     release_scope,
+    weak_owner_callback,
 )
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._types import override
@@ -91,6 +92,24 @@ class _RecordingScope:
         self.locked.append(holds_update_graph_lock(self._exec_ctx))
         if self._fail:
             raise RuntimeError("released twice")
+
+
+class _Owner:
+    def __init__(self) -> None:
+        self.released: list[int] = []
+
+    def release(self, stream_id: int) -> None:
+        self.released.append(stream_id)
+
+
+def test_an_owner_callback_runs_the_method_and_holds_its_owner_weakly() -> None:
+    owner = _Owner()
+    callback = weak_owner_callback(owner, _Owner.release, 7)
+    alive = weakref.ref(owner)
+    callback()
+    assert owner.released == [7]
+    del owner
+    assert alive() is None  # the callback kept no strong reference
 
 
 def test_release_scope_holds_the_update_graph_lock(dh_exec_ctx: ExecutionContext) -> None:
@@ -421,11 +440,11 @@ def test_a_failed_build_drops_its_hold(
         raise RuntimeError("cannot shape")
 
     with pytest.raises(RuntimeError, match="cannot shape"):
-        core.stream_result(
+        core.streams.result(
             SPEC, q._request, channel="T", query="<Query test>", verb="blink", build=broken
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core._stream_ids == {}
+    assert core.streams._stream_ids == {}
 
 
 def test_an_interrupted_build_drops_its_hold(
@@ -438,11 +457,11 @@ def test_an_interrupted_build_drops_its_hold(
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        core.stream_result(
+        core.streams.result(
             SPEC, q._request, channel="T", query="<Query test>", verb="blink", build=interrupted
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core._stream_ids == {}
+    assert core.streams._stream_ids == {}
 
 
 def test_streams_are_shared_then_reopened(
@@ -738,7 +757,7 @@ def test_an_interrupt_right_after_the_finalizer_is_created_never_releases_twice(
     done = threading.Event()
     core._reaper.submit(done.set)
     assert done.wait(TIMEOUT)
-    assert core._streams[1].row.held_results == 1  # `first` still holds the stream
+    assert core.streams._streams[1].row.held_results == 1  # `first` still holds the stream
     massive_session.release(first)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -820,7 +839,9 @@ def test_soak_released_and_collected_results_free_their_streams(
             for _ in soak.rounds():
                 soak_settle(
                     core,
-                    lambda: core.results.held() <= SOAK_HELD and len(core._streams) <= SOAK_HELD,
+                    lambda: (
+                        core.results.held() <= SOAK_HELD and len(core.streams._streams) <= SOAK_HELD
+                    ),
                     f"at most {SOAK_HELD} results and streams",
                 )
                 soak.note(results_opened=sum(steps), rows=sum(feed.sent().values()))
@@ -831,7 +852,7 @@ def test_soak_released_and_collected_results_free_their_streams(
     feed.stop()
     soak_settle(
         core,
-        lambda: core.results.held() == 0 and not core._streams,
+        lambda: core.results.held() == 0 and not core.streams._streams,
         "every result and stream to go",
     )
     soak_settle(core, lambda: not harness.connections.group.streams, "the routes to empty")

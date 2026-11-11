@@ -45,7 +45,7 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG, RowDataError, UnlistedPairError
+from deephaven_massive._errors import LIBRARY_BUG, CutShortError, RowDataError, UnlistedPairError
 from deephaven_massive._ingest import (
     crypto_tickers,
     host_decision,
@@ -3859,7 +3859,7 @@ def test_fetch_rows_reads_every_page_raw(
 
 def _join_reads(m: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end.
-    for state in list(m._core._workers.values()):
+    for state in list(m._core.workers._workers.values()):
         cast("Any", state.fail).__self__.join(30.0)
 
 
@@ -3875,7 +3875,7 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
     rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request, split_pairs=False)
     assert fake_rest.requests == []
-    assert session._core._workers == {}
+    assert session._core.workers._workers == {}
 
 
 def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call(
@@ -3890,7 +3890,7 @@ def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call(
     with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
         pair.fetch()
     assert sent_data(fake_rest) == []
-    assert session._core._workers == {}
+    assert session._core.workers._workers == {}
     # A table's pair is data: the call returns, and the read follows unlisted_symbols.
     table = new_table([string_col("Symbol", ["X:DOTUSD"])])
     from_table = query(session, CRYPTO_OPEN_CLOSE, symbols=table, params=params)
@@ -4598,3 +4598,90 @@ def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
 ) -> None:
     read = _value_cycle(rest_session, ())
     assert (read.rows.num_rows, read.requests, read.left_out) == (0, 0, ())
+
+
+def _not_found(
+    m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
+) -> object:
+    reader = cast("Any", m._core.rest_transport())._reader("call-1")
+    return reader._not_found(
+        error,
+        spec=TRADES,
+        call=rest_requests.Call({"stockTicker": symbol}, {}, symbol),
+        template=TRADES_PATH,
+        bucket="stocks",
+        window=None,
+        kept=[],
+        requests=requests,
+    )
+
+
+def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
+    session: dm.MassiveSession,
+) -> None:
+    error = _massive.WireError("not found", status=404, request_id="r1")
+    outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
+    assert outcome == rest._Outcome((), 1, missing="ZZZZ")
+
+
+def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
+    error = _massive.WireError("not found", status=404, request_id="r1")
+    with pytest.raises(CutShortError, match="after 2 pages had arrived") as info:
+        _not_found(session, error, symbol="AAPL", requests=2)
+    assert info.value.request_id == "r1"
+
+
+@pytest.mark.parametrize(
+    ("status", "symbol"), [(404, None), (500, "AAPL")], ids=["no-symbol", "not-404"]
+)
+def test_only_a_per_symbol_404_is_about_the_symbol(
+    *, session: dm.MassiveSession, status: int, symbol: str | None
+) -> None:
+    error = _massive.WireError("failed", status=status)
+    with pytest.raises(dm.MassiveError) as info:
+        _not_found(session, error, symbol=symbol, requests=0)
+    assert not isinstance(info.value, CutShortError)
+    assert info.value.status == status
+
+
+def _recency(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    fixed: Subscription | None = None,
+    listed: frozenset[Subscription] = frozenset(),
+) -> rest._PageRecency:
+    return rest._page_recency(rows, fixed=fixed, listed=listed, symbol_key="ticker", symbol=None)
+
+
+def test_page_recency_refuses_each_unlisted_subscriptions_delayed_rows() -> None:
+    found = _recency(
+        [
+            {"ticker": "AAPL", "timeframe": "DELAYED"},
+            {"ticker": "MSFT", "last_trade": {"timeframe": "DELAYED"}},
+            {"ticker": "AAPL", "timeframe": "DELAYED"},
+            {"ticker": "X:BTCUSD", "timeframe": "DELAYED"},
+            {"ticker": "I:SPX", "timeframe": "REAL-TIME"},
+        ]
+    )
+    assert found.delayed
+    assert found.real_time
+    # The first evidence is kept; a currency's delay is shown but never refused.
+    assert found.refused == {Subscription.STOCKS: (("AAPL", "MSFT"), "timeframe=DELAYED")}
+    assert found.unknown == ()
+
+
+def test_page_recency_passes_a_listed_subscription_and_collects_unknown_labels() -> None:
+    found = _recency(
+        [{"ticker": "AAPL", "timeframe": "DELAYED"}, {"timeframe": "SOON"}],
+        fixed=Subscription.STOCKS,
+        listed=frozenset({Subscription.STOCKS}),
+    )
+    assert found.delayed
+    assert not found.real_time
+    assert found.refused == {}
+    assert found.unknown == ((Subscription.STOCKS, ("timeframe", "SOON")),)
+
+
+def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
+    found = _recency([{"timeframe": "DELAYED"}, {"ticker": "AAPL"}])
+    assert found == rest._PageRecency(delayed=False, real_time=False, refused={}, unknown=())

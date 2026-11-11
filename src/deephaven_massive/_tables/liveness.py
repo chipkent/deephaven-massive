@@ -28,7 +28,7 @@ the result, an open UI panel, or a user liveness scope keeps the Java table aliv
 stream, the poller, or the background read: topic reference counts, pollers, and reads are bound to
 the blink table's `on_shutdown_callback`, never to result records. The owner callbacks hold the
 session core only weakly, so a result never keeps a session alive through its record; the session's
-live set does that (`_tables/session_core.py`).
+live set does that (`_tables/live_set.py`).
 
 **Every release holds the update graph's lock.** Releasing a scope can drop the last reference
 to a refreshing table, which destroys it. The library releases every scope through
@@ -44,6 +44,7 @@ order is the update graph's lock, then `registry_lock`.
 
 from __future__ import annotations
 
+import functools
 import logging
 import queue
 import threading
@@ -71,6 +72,7 @@ __all__ = [
     "make_result",
     "new_scope",
     "release_scope",
+    "weak_owner_callback",
 ]
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,42 @@ def make_result(
         release_scope(exec_ctx, scope)
         raise
     return result, scope
+
+
+def weak_owner_callback(
+    owner: object, release: Callable[..., None], *args: object
+) -> Callable[[], None]:
+    """Return a result record's owner callback that refers to its owner weakly.
+
+    A result record lives as long as its result's Python wrapper, so a strong reference to the
+    owner there would let a forgotten wrapper keep the session alive, and would make a cycle
+    (core, results, record, owner, core). The owner is a session core, or one of its registries
+    (`SharedStreams`), which the core alone holds and so lives exactly as long as the core. The
+    owner is always alive when the callback runs: the record's unreleased hold (a stream hold or
+    a diagnostics view) keeps the core in the live set (`live_set.py`) until it has run.
+
+    Args:
+        owner: The object whose method the callback runs.
+        release: The unbound method, such as `SharedStreams._release_hold`.
+        *args: Its arguments after the owner.
+
+    Returns:
+        The callback, for `ResultRegistry.track`'s `on_released`.
+    """
+    return functools.partial(_call_owner, weakref.ref(owner), release, *args)
+
+
+def _call_owner(
+    owner_ref: weakref.ref[object], release: Callable[..., None], *args: object
+) -> None:
+    """Run an owner's method through a weak reference (`weak_owner_callback`).
+
+    Args:
+        owner_ref: The owner, weakly.
+        release: The unbound method.
+        *args: Its arguments after the owner.
+    """
+    release(owner_ref(), *args)
 
 
 @dataclass(eq=False, slots=True)

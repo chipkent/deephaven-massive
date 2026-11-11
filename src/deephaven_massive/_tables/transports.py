@@ -82,7 +82,7 @@ class StreamHandle:
 
     The transport creates the stream's publisher (`BlinkPublisher`) and blink table inside `scope`
     (the stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
-    registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
+    registry record is dropped (`SharedStreams.shut_down`) and topic reference counts are
     released. The session's registry record holds the handle until the record is deleted (its holds
     released and its blink table shut down), and releases `scope` when the last result is released.
     Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist listener,
@@ -525,10 +525,10 @@ class StreamTransport(Protocol):
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
         session's registry lock while calling Deephaven. The session has already registered the
         stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
-        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
+        `SharedStreams.shut_down(stream_id)` may be called from the moment the publisher
         exists, even before this method returns. The publisher is named
         `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
-        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
+        call `SharedStreams.shut_down(stream_id)` and only then release the stream's topics.
         The returned handle carries `stream_id`. If the open raises anything, even
         `KeyboardInterrupt`, the transport has released the stream scope and the stream's
         references (its connection lease and topics) before the exception propagates.

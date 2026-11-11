@@ -684,7 +684,7 @@ def watched_rows(table: Table, watchlist: Table, *, key: str = _SYMBOL) -> Table
     end the process every time a watchlist failed. A join forwards the first failure of its
     two tables and ignores the second.
 
-    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    Call it where a result is built (the `build` of `SharedStreams.result`), inside the
     result's liveness scope, which then manages the tables it creates.
 
     Args:
@@ -720,7 +720,7 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
     that span symbols filter first instead (`watched_rows`). It is built from a join, for the
     reason `watched_rows` gives.
 
-    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    Call it where a result is built (the `build` of `SharedStreams.result`), inside the
     result's liveness scope, which then manages the tables it creates. It holds the update
     graph's shared lock while it creates the two stamped tables, so it blocks while an update
     cycle runs; a caller that already holds either lock (a console command) takes it again at

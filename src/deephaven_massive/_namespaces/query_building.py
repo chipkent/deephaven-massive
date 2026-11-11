@@ -756,6 +756,103 @@ def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
     return tuple(venue for venue in FuturesVenue if venue in venues)
 
 
+def _normalized_symbols(
+    core: SessionCore,
+    spec: DatasetSpec,
+    symbols: Symbols | None,
+    *,
+    symbols_optional: bool,
+    all_alternative: str | None,
+) -> NormalizedSymbols | None:
+    """Check a dataset call's `symbols` and return them normalized (`build_query`).
+
+    Args:
+        core: The session core, whose catalog says whether the dataset takes symbols.
+        spec: The dataset.
+        symbols: The caller's instruments, or None.
+        symbols_optional: True for a dataset whose `symbols` only filters the request.
+        all_alternative: None when the dataset accepts `dm.ALL`; otherwise what the
+            `ValueError` tells the caller to do instead.
+
+    Returns:
+        A `SymbolTable` boxing a table, the checked tickers or `ALL` (`check_symbols`), or
+        None when `symbols` is None.
+
+    Raises:
+        ValueError: If `symbols` is None for a dataset that needs symbols, a table lacks a
+            `Symbol` column, or `dm.ALL` is given to a dataset that refuses it.
+
+    A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, and
+    a ticker `check_symbols` refuses its error.
+    """
+    normalized: NormalizedSymbols | None = None
+    if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
+        forms = (
+            "a ticker, a list of tickers, a table with a Symbol column, or dm.ALL for every ticker"
+            if all_alternative is None
+            else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
+            f"take dm.ALL: {all_alternative})"
+        )
+        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+        logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
+        raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
+    if isinstance(symbols, Table):
+        if "Symbol" not in symbols.column_names:
+            columns = ", ".join(symbols.column_names)
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug(
+                "%s refused: a symbol table without Symbol, columns %s", spec.name, columns
+            )
+            raise ValueError(
+                f"a symbol table must have a Symbol column; this one has: {columns}. Name the "
+                'column of tickers Symbol, as in t.view("Symbol = Ticker"); for tickers spelled '
+                "another way (lower case, another convention), convert them first with "
+                'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
+            )
+        _require_text_column(symbols, "Symbol", what="a symbol table")
+        normalized = SymbolTable(symbols)
+    elif symbols is not None:
+        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
+    if isinstance(normalized, _All) and all_alternative is not None:
+        raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
+    return normalized
+
+
+def _typed_params(
+    core: SessionCore, spec: DatasetSpec, params: Mapping[str, object]
+) -> dict[str, object]:
+    """Check a dataset call's typed parameters and add the ones the library sets itself.
+
+    Args:
+        core: The session core, whose catalog checks `order` and `sort`.
+        spec: The dataset.
+        params: The typed parameters by wire name, None where not set.
+
+    Returns:
+        The typed parameters with the dataset's `fixed_params` (`_fixed_params`), None values
+        kept.
+
+    Raises:
+        ValueError: If `params` names `adjusted` or a fixed parameter, or sets `order`
+            without `sort` on a dataset whose paths take the direction as a suffix of `sort`.
+
+    An unknown `sort` field raises the `ValueError` of `Catalog.check_sort`.
+    """
+    if "adjusted" in params:
+        raise ValueError("adjusted is set through build_query(adjusted=...), not params")
+    library = _fixed_params(spec, params)
+    typed = {k: v for k, v in params.items() if v is not None}
+    if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
+        raise ValueError(
+            f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
+            "of the sort field"
+        )
+    sort = typed.get("sort")
+    if isinstance(sort, str):  # `list_params` refused any other type
+        core.catalog.check_sort(spec, sort, ordered="order" in typed)
+    return {**params, **library}
+
+
 def build_query(
     core: SessionCore,
     spec: DatasetSpec,
@@ -854,50 +951,16 @@ def build_query(
     `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
     calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`).
     """
-    normalized: NormalizedSymbols | None = None
-    if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
-        forms = (
-            "a ticker, a list of tickers, a table with a Symbol column, or dm.ALL for every ticker"
-            if all_alternative is None
-            else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
-            f"take dm.ALL: {all_alternative})"
-        )
-        # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
-        logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
-        raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
-    if isinstance(symbols, Table):
-        if "Symbol" not in symbols.column_names:
-            columns = ", ".join(symbols.column_names)
-            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
-            logger.debug(
-                "%s refused: a symbol table without Symbol, columns %s", spec.name, columns
-            )
-            raise ValueError(
-                f"a symbol table must have a Symbol column; this one has: {columns}. Name the "
-                'column of tickers Symbol, as in t.view("Symbol = Ticker"); for tickers spelled '
-                "another way (lower case, another convention), convert them first with "
-                'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
-            )
-        _require_text_column(symbols, "Symbol", what="a symbol table")
-        normalized = SymbolTable(symbols)
-    elif symbols is not None:
-        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
-    if isinstance(normalized, _All) and all_alternative is not None:
-        raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
+    normalized = _normalized_symbols(
+        core,
+        spec,
+        symbols,
+        symbols_optional=symbols_optional,
+        all_alternative=all_alternative,
+    )
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
-    if params is not None and "adjusted" in params:
-        raise ValueError("adjusted is set through build_query(adjusted=...), not params")
-    library = _fixed_params(spec, params or {})
-    typed = {k: v for k, v in (params or {}).items() if v is not None}
-    if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
-        raise ValueError(
-            f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
-            "of the sort field"
-        )
-    sort = typed.get("sort")
-    if isinstance(sort, str):  # `list_params` refused any other type
-        core.catalog.check_sort(spec, sort, ordered="order" in typed)
+    sent = _typed_params(core, spec, params or {})
     cls = query_class(spec)
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
@@ -921,11 +984,7 @@ def build_query(
         adjusted=adjusted,
         start=first,
         end=last,
-        params=tuple(
-            sorted(
-                (k, _value(k, v)) for k, v in {**(params or {}), **library}.items() if v is not None
-            )
-        ),
+        params=tuple(sorted((k, _value(k, v)) for k, v in sent.items() if v is not None)),
         filters=check_filters(core.catalog, spec, dict(given), typed=params or {}),
         limit=None if limit is None else require_positive_int("limit", limit),
         value_table=values,

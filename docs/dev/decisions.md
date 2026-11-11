@@ -401,6 +401,28 @@ plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
 
+**99. A malformed flat-file line follows `MassiveConfig.malformed_rows`, `LOG` by default**
+(2026-11-10). Rule 24 gives each cause of a bad row its own `dm.OnError` setting (66, 81); a
+flat-file line that is not a readable row had none: it was skipped with one WARNING per file.
+The setting is `malformed_rows`, named like its siblings (`unreadable_symbols`, ...) for what it
+governs. A malformed line is one that does not split into the header's fields (too few or too
+many, or a quote that does not close) or is not UTF-8 text. Under `LOG`, the default and the
+former behavior, the line is skipped and each file that had one logs one WARNING with the count
+and the first one's row number and fault, never its text; under `IGNORE` that line is at DEBUG;
+under `RAISE`, `history()` fails with `RowDataError` (`ErrorCause.LIBRARY_DEFECT`, data from
+Massive the library can't read) at the first block after the line, naming the file and the row,
+and a `history()` of a live table marks every symbol of the read `FAILED`, `PERMANENT`. A static
+`history()` has no `m.streams()` row, so the log line is its only record under `LOG`, as for its
+siblings. A file whose every line is malformed fails under every setting: that affects every
+row. A line that is not UTF-8 text used to fail the whole `history()` call, not one block:
+Arrow refuses a chunk with an invalid UTF-8 value in a column it reads (`CSV conversion error to
+string: invalid UTF8 data`), and a line that also has the wrong field count fails before the
+skip handler runs, because pyarrow decodes the row's text first. The reader now checks each
+chunk as UTF-8 in one zero-copy Arrow validation and, only for a chunk that fails, removes the
+lines that do not decode before Arrow reads it, counting them as malformed; Arrow's own UTF-8
+check is off, since every chunk it reads is checked. Such a line is skipped whole even when its
+bad byte is in a column the library drops.
+
 **100. `fetch()` and `history()` read in the background by default: `wait=False`** (2026-11-11).
 "Yes, go with wait=False as the default. Waiting is dumb because it blocks all massive downloads
 and makes startup slow." Like every other verb, the call returns a table at once: "If there is no
@@ -410,17 +432,17 @@ and its static table. What raises at the call, whatever `wait` is: an argument e
 (`TypeError`, `ValueError`), a closed session, and, as decisions 66 and 81 and `poll()` and the
 streams already have it, a crypto pair passed in code that Massive's crypto ticker list does
 not hold, or a failed read of that list, for the paths that take a pair as its two currencies
-(`fetch(wait=False)` failed its table instead, a defect). What Massive answers later fails the table, logged and shown in `m.streams()` `Error`,
-as for `poll()` and the streams. No `with`-block waiting: `close()` and `__exit__` keep their
+(`fetch(wait=False)` failed its table instead, a defect). What Massive answers later fails the
+table, logged and shown in `m.streams()` `Error`, as for `poll()` and the streams. No `with`-block waiting: `close()` and `__exit__` keep their
 behavior, so a read still loading when its session closes fails. Made consistent on the way,
 since the default path now runs them: every background and watchlist read runs on the session's
 read pool of `max_concurrency` threads, where each background read had an unbounded thread of
 its own; a background flat-file `history()` under `AUTO` checks the REST parameters of the days
-it may read from REST at the call, as a call that waits raises them; and a watchlist read that
-does not wait fails its table when every symbol it held at the call fails for good
-(`FailureKind.PERMANENT`), such as on a plan without the dataset (decision 11), as a call that
-waits raises then. A failure that may pass is retried instead, and a symbol added later fails
-alone. Accepted consequences: a script that reads rows on the next line gets none (pass
+it may read from REST at the call, as a call that waits raises them, even when the files serve
+every day; and a watchlist read that does not wait fails its table when every symbol it held at
+the call ends `FAILED`, such as on a plan without the dataset (decision 11), as a call that
+waits raises then. A failure that may pass counts once its retries run out; a symbol with rows,
+or deleted before it failed, settles the check, and a symbol added later fails alone. Accepted consequences: a script that reads rows on the next line gets none (pass
 `wait=True`, or let Deephaven update what is built on the table); a `try`/`except` around a
 default call no longer catches Massive's answers; the `call N start:` line and the table
 description change (`fetch()` is the background call, `fetch(wait=True)` the blocking one); the

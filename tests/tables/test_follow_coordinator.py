@@ -1067,7 +1067,7 @@ def test_a_dying_coordinator_fails_every_followed_table(
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
-        errors = [w.row.error for w in massive_session._core._workers.values()]
+        errors = [w.row.error for w in massive_session._core.workers._workers.values()]
     assert all("the follow coordinator died" in (e or "") for e in errors)
 
 
@@ -1326,7 +1326,7 @@ def test_one_result_s_defect_leaves_the_others_following(
     assert "follow: handling _" in caplog.text  # its start's set, or the later change
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     with massive_session._core.registry_lock:
-        error = massive_session._core._workers[broken_id].row.error or ""
+        error = massive_session._core.workers._workers[broken_id].row.error or ""
     assert "RuntimeError: a defect" in error
     massive_session.release(healthy)
     massive_session.release(broken)
@@ -1335,7 +1335,7 @@ def test_one_result_s_defect_leaves_the_others_following(
 def _calls(m: dm.MassiveSession) -> set[int]:
     # The StreamIds of the session's worker tables now.
     with m._core.registry_lock:
-        return set(m._core._workers)
+        return set(m._core.workers._workers)
 
 
 @pytest.mark.parametrize(
@@ -1390,7 +1390,7 @@ def test_a_defect_in_any_step_fails_only_its_result(
     broken_id = max(_calls(massive_session))
     assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
     with massive_session._core.registry_lock:
-        error = massive_session._core._workers[broken_id].row.error or ""
+        error = massive_session._core.workers._workers[broken_id].row.error or ""
     assert f"the followed read failed {step}: RuntimeError: a defect in {method}" in error
     add(healthy_list, "MSFT")
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
@@ -1583,7 +1583,7 @@ def test_an_outcome_after_the_stop_token_is_dropped(
     gate = script.gates["AAPL"] = threading.Event()
     result = follow(massive_session, watchlist("AAPL"), script)
     until(lambda: script.calls == [("AAPL",)])
-    (worker,) = massive_session._core._workers.values()
+    (worker,) = massive_session._core.workers._workers.values()
     handle = cast("Any", worker.fail).__self__
     handle.stop_token.set()
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
@@ -1841,6 +1841,7 @@ class _QuietCore:
 
     def __init__(self) -> None:
         self.progress: list[int | None] = []
+        self.workers = self  # the worker-table registry's one call, `update_followed_read`
 
     def write_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
         del rows
