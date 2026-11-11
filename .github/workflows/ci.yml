@@ -93,15 +93,16 @@ jobs:
           # installed wheel with docs/datasets/.
           build='^(src|tests)/|^docs/datasets/|^scripts/check_wheel\.py$|^(pyproject\.toml|README\.md|LICENSE|\.gitattributes|\.gitignore|\.git_archival\.txt)$'
           # The user pages (README.md and docs/troubleshooting.md, with any image under docs/;
-          # docs/configuration.md is a test input above), the API reference pages under docs/api/
-          # and the site configuration that lists them, the tester guide, and its examples under
-          # docs/tester-examples/:
-          # tests/test_docs.py runs the user pages' examples, checks their links, and checks that
-          # the API reference covers every public name and that the site lists every page, and
+          # docs/configuration.md is a test input above), the contributing guide, the API reference
+          # pages under docs/api/ and the site configuration that lists them, the tester guide, and
+          # its examples under docs/tester-examples/:
+          # tests/test_docs.py runs the user pages' examples, checks their links and the
+          # contributing guide's, and checks that the API reference covers every public name and
+          # that the site lists every page, and
           # tests/live/tester/test_examples.py runs the tester examples and checks that the guide
           # shows each one. A change to these alone runs only those two tests, on one Python
           # version.
-          docs='^README\.md$|^docs/(troubleshooting|tester-guide)\.md$|^docs/tester-examples/|^docs/api/|^zensical\.toml$|^docs/.+\.(png|jpe?g|gif|svg|webp)$'
+          docs='^(README|CONTRIBUTING)\.md$|^docs/(troubleshooting|tester-guide)\.md$|^docs/tester-examples/|^docs/api/|^zensical\.toml$|^docs/.+\.(png|jpe?g|gif|svg|webp)$'
           # The documentation site's sources, which the site job builds in strict mode: its
           # configuration, the pages it publishes, the package source its API reference reads,
           # and pyproject.toml, which declares the site generator.

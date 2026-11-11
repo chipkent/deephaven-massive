@@ -121,9 +121,14 @@ site: link them, never copy them. Contributor material goes in `CONTRIBUTING.md`
 
 The documentation site publishes the README, the troubleshooting and settings pages, the
 dataset pages, `CONTRIBUTING.md`, and an API reference rendered from the docstrings
-([docs-site.md](docs-site.md)). It renders each page as GitHub does, so a page is written once,
-for GitHub; a link from a published page to one the site leaves out, such as a page under
-`docs/dev/`, is a full GitHub URL.
+([docs-site.md](docs-site.md)). A page is written once, for GitHub, within two rules the site's
+Markdown needs and GitHub's does not:
+
+- a list has a blank line before it;
+- a nested list is indented four spaces.
+
+A link from a published page to one the site leaves out, such as a page under `docs/dev/`, is a
+full GitHub URL.
 
 <a id="install-decision"></a>
 

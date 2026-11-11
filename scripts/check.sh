@@ -14,8 +14,8 @@
 # count; pre-commit hides unstaged edits to tracked files while the hook runs.
 # When CI would run the tests for the change, full runs pytest with coverage on up to 4
 # workers; when CI would not, full runs only the documentation tests if a user page, an image
-# under docs/, an API reference page, the site configuration, or the tester guide changed, and
-# no tests otherwise. It also builds the documentation site in strict mode, in an environment
+# under docs/, the contributing guide, an API reference page, the site configuration, or the
+# tester guide changed, and no tests otherwise. It also builds the documentation site in strict mode, in an environment
 # of its own (.venv-site), when one of the site's sources changed, as CI's site job does. It
 # prints the scope it chose and why.
 #
