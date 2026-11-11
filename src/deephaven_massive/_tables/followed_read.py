@@ -108,8 +108,8 @@ session.
 
 **Failures.** A failure of the whole result (`fail_table`) is recorded first
 (`SessionCore.fail_stream`), then published through the blink table's `BlinkPublisher`, both
-under the result's publish lock, which also guards every download's publish: a failed
-result never gets another row group. The coordinator fails a result; `m.close()` and a dying session
+under the result's publish lock, which also guards every download's publish: a failed result
+never gets another row group. The coordinator fails a result; `m.close()` and a dying session
 thread fail it through `fail`, the session's hook.
 
 **Threads.** `open_followed_read` runs on the caller thread, which may hold the update graph's
