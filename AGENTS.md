@@ -107,7 +107,7 @@ These protect the owner's repository, money, and secrets.
   of public modules decides it. A fix that makes code do what its docs say is not a public
   change.
 - **Compatibility starts at `0.1.0`.** Release candidates owe none: until `v0.1.0` is tagged
-  (`git describe --tags --abbrev=0`), nothing is kept, aliased, or shimmed. From `0.1.0` the
+  (`git fetch --tags`, then `git rev-parse -q --verify refs/tags/v0.1.0`), nothing is kept, aliased, or shimmed. From `0.1.0` the
   library has users, and a breaking change needs the owner's permission. A change breaks when
   code written to the last release's documented contract stops working or gets a different
   documented result. When the owner requests a public change, say whether it breaks existing

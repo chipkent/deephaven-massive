@@ -23,8 +23,8 @@ certain, is.
 
 **Always the owner's:**
 
-- what a user sees: a public change the request does not cover, or a change that breaks code
-  written to the last release (`AGENTS.md`, The public API and the data). A public name a
+- what a user sees: a public change the request does not cover, or, from `0.1.0`, a change
+  that breaks code written to the last release (`AGENTS.md`, The public API and the data). A public name a
   requested feature needs is part of the request, and a fix that makes code do what its docs
   say is not a public change;
 - scope: adding or dropping a feature, dataset, or piece of work;

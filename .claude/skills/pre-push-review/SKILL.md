@@ -47,14 +47,16 @@ same property. Then look for:
   it, or retried forever. State written before an operation that can still fail.
 - **Contract drift.** A public change (`AGENTS.md`, **A public change needs the owner's request
   or approval**) without matching docs and tests, or without a `decisions.md` entry when it sets or changes a
-  rule or contract; a change that
+  rule or contract; from `0.1.0`, a change that
   breaks code written to the last release without the owner's permission and the next version
   named; behavior inconsistent with how a sibling call treats the same concept.
 - **The public API surface**, for any change to what a user can call or reach. Write the call a
   user types, from `import deephaven_massive as dm` to the result, and name the type every
   public signature on that path declares: each parameter, return, property, and documented
   `Raises`. Each must be public (importable by a path with no underscore-prefixed part) and
-  documented. A public signature that declares a private type is a blocker, whoever wrote it.
+  documented. A public signature the change adds or alters that declares a private type is a
+  blocker, whoever wrote it; one that already did is fixed at its source when the request
+  names it, and otherwise listed under Follow-ups.
   A private implementation behind a public declared type is fine, and so are members a public
   class inherits from a private base, which are part of the public class. For every new public
   name, write the user code that needs it; a name no user needs is a blocker. A new public
