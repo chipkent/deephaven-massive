@@ -10,7 +10,7 @@ Call it from a session `m`, made with `dm.MassiveSession()`:
 m.stocks.bars(symbols, timespan, *, multiplier=1, adjusted=True)
 ```
 
-- [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
+- [Methods](README.md#query-methods): `history(start, end=None)`; for 1-second and 1-minute bars also `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
