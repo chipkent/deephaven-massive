@@ -26,7 +26,12 @@ from deephaven_massive._tables import background_read
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
 from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.liveness import (
+    ResultRecord,
+    ResultRegistry,
+    new_scope,
+    release_scope,
+)
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
@@ -339,8 +344,7 @@ def test_a_derived_table_keeps_the_read_going_after_release(
     assert row["RowsPublished"] == 1
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
     derived.clear()
-    with entered(massive_session._core.exec_ctx):
-        scope.release()
+    release_scope(massive_session._core.exec_ctx, scope)
     until(lambda: not massive_session._core._workers)
 
 
@@ -811,8 +815,7 @@ def test_every_ordinary_operation_works_on_the_result(
     for name, table in derived.items():
         assert sorted(tickers(table, dh_to_pylist)) == ["AAPL", "MSFT"], name
     derived.clear()
-    with entered(massive_session._core.exec_ctx):
-        scope.release()
+    release_scope(massive_session._core.exec_ctx, scope)
     massive_session.release(result)
 
 
@@ -892,8 +895,7 @@ def test_a_done_read_with_a_released_result_no_longer_holds_its_session(
     assert (row["State"], row["RowsPublished"]) == ("DONE", count)
     assert [tickers(table, dh_to_pylist) for table in derived] == [["AAPL"][:count]] * 2
     derived.clear()
-    with entered(core.exec_ctx):
-        scope.release()
+    release_scope(core.exec_ctx, scope)
 
 
 def test_a_derived_table_outliving_its_freed_session_shuts_the_read_down_quietly(
@@ -920,8 +922,9 @@ def test_a_derived_table_outliving_its_freed_session_shuts_the_read_down_quietly
     assert not read._stop.is_set()  # the read's blink table is still in use
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
     derived.clear()
-    with caplog.at_level(logging.DEBUG), entered(exec_ctx):
-        scope.release()  # shuts the read's blink table down, with no session to tell
+    with caplog.at_level(logging.DEBUG):
+        # Shuts the read's blink table down, with no session to tell.
+        release_scope(exec_ctx, scope)
     assert read._stop.is_set()
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
