@@ -288,7 +288,7 @@ def test_bar_prices_say_how_they_are_adjusted() -> None:
 @pytest.mark.parametrize(
     ("spec", "gone"),
     [
-        (options.CHAIN, {"DetailsTicker", "UnderlyingAssetTicker"}),
+        (options.CHAIN, {"Ticker", "UnderlyingAssetTicker"}),
         (options.SNAPSHOTS, {"Ticker", "UnderlyingAssetTicker"}),
         (options.CONTRACTS, {"Ticker", "UnderlyingTicker"}),
     ],
@@ -336,7 +336,7 @@ def required_keys(path: str) -> tuple[str, ...]:
 def test_required_keys_are_the_row_keys_of_each_path() -> None:
     assert required_keys("/v3/trades/{optionsTicker}") == ("SipTimestamp",)
     assert required_keys("/v2/last/trade/{optionsTicker}") == ("SipTimestamp", "Ticker")
-    assert required_keys("/v3/snapshot/options/{underlyingAsset}") == ("DetailsTicker",)
+    assert required_keys("/v3/snapshot/options/{underlyingAsset}") == ("Ticker",)
 
 
 @pytest.mark.parametrize(
@@ -945,12 +945,12 @@ def test_chain_reads_one_underlying(
     (row,) = out
     assert (row["Symbol"], row["Underlying"]) == ("O:AAPL220121C00150000", "AAPL")
     assert row["OptionRoot"] == "AAPL"
-    assert (row["DetailsStrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
+    assert (row["StrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
         150.0,
         0.00229,
         1543.0,
     )
-    assert row["DetailsExpirationDate"] == "2022-01-21"  # every date is ISO text
+    assert row["ExpirationDate"] == "2022-01-21"  # every date is ISO text
     assert row["DayLastUpdated"] == 1605195918507251700
 
 

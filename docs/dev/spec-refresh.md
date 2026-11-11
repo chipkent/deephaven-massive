@@ -17,6 +17,8 @@ gate, and what to do when a refresh adds something new.
 - **The hand input**: the only place a person adds knowledge the vendor's specifications lack.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
+  - `refresh/spellings.py`: `SPELLINGS` and `SHARED_DESCRIPTIONS`, which give one field one
+    name across datasets;
   - `refresh/overrides.py`: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES`,
     `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
     `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, and `VENUES`;
@@ -47,15 +49,24 @@ uv run pytest tests/datasets/test_column_reference.py -q      # the column-refer
 2. When a gate stops the refresh, it prints each problem: the gate, the source, the key, and the
    vendor's description. Answer each with an entry and its reason in the matching hand-input
    table (listed above), never by editing a generated file.
-3. A vendor description that is clearly wrong for its source (another asset class's or event's
+3. A `field-spelling` stop means two sources name one field two ways: fields Massive
+   describes with the same text take different long names, or fields with the same wire key
+   and text sit in different columns. Prove the two are the same field from Massive's
+   documentation of both (quote it) and their types and units; then give them one name with a
+   `SPELLINGS` entry that takes the spelling Massive uses on another endpoint and cites it. If
+   they are different fields that happen to share a text, add a `SHARED_DESCRIPTIONS` entry
+   saying why. If the documentation leaves any doubt, write a live test that reads both fields
+   for one symbol back to back, record a verification item, and ask the owner before renaming
+   ([decision 101](decisions.md)).
+4. A vendor description that is clearly wrong for its source (another asset class's or event's
    text, or a statement Massive's own documentation of the field contradicts) is corrected the
    same way, by a `DESCRIPTION_FIXES` entry that quotes it.
-4. Run `scripts/render_reference.py`: every page shows the snapshot's fetch date, so any refresh
+5. Run `scripts/render_reference.py`: every page shows the snapshot's fetch date, so any refresh
    changes the dataset reference. Before it writes the pages, the command prints one line per
    dataset whose columns the refresh changed (`columns: m.forex.quotes: added …; removed …;
    retyped …`): the refresh itself cannot see datasets, so this is where a refresh shows what
    it does to each table. Put those lines in the pull request.
-5. Put the snapshot diff, the `spec/*.json` diff, the hand-input lines, and the regenerated
+6. Put the snapshot diff, the `spec/*.json` diff, the hand-input lines, and the regenerated
    `docs/datasets/` in one pull request.
 
 Rerun `render_reference.py` too whenever a dataset, a namespace, a dataset summary, or the
@@ -84,6 +95,13 @@ be read by a dataset. When a refresh adds one, the same pull request adds a data
 source for good, or defers it with an issue. The module docstring of `refresh/exclusions.py`
 explains the three choices, and the coverage test in `tests/datasets/test_catalog.py` says what
 it expects when it fails. An exclusion never means "not yet".
+
+A new dataset's columns must not bring a second name for a field another dataset already has.
+The `field-spelling` gate catches the fields Massive documents with the same text; it cannot
+see a field documented in other words, so also compare the new dataset page's columns with
+those of the datasets that serve the same objects (the other snapshots, the reference data of
+the same instruments) before the pull request, and answer a match as step 3 of "Taking a change
+from Massive" says.
 
 ## Knowledge-base articles
 

@@ -448,6 +448,8 @@ def _hand(
         kinds=kinds or {},
         sample_errors=sample_errors,
         projections={},
+        spellings={},
+        shared_descriptions={},
         transport_only={},
         venues={},
         undeclared_fields=undeclared_fields or {},

@@ -23,6 +23,7 @@ from deephaven_massive._massive.refresh.gates import (
     RefreshError,
     check_exclusions,
     concept_collisions,
+    field_spellings,
     stale_entries,
     unneeded_type_fixes,
     unused_description_fixes,
@@ -30,6 +31,7 @@ from deephaven_massive._massive.refresh.gates import (
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.rest_sources import generate_rest
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
+from deephaven_massive._massive.refresh.spellings import SharedDescription, Spelling
 from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 
 if TYPE_CHECKING:
@@ -55,6 +57,8 @@ _EMPTY = HandInput(
     kinds={},
     sample_errors=(),
     projections={},
+    spellings={},
+    shared_descriptions={},
     transport_only={},
     venues={},
     undeclared_fields={},
@@ -81,6 +85,7 @@ def test_the_gate_names_are_descriptive() -> None:
         "venue-agreement",
         "column-order",
         "concept-collision",
+        "field-spelling",
         "example-type",
         "units",
         "envelope",
@@ -240,6 +245,10 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             )
         },
         key_fixes={(_PATH, "declared"): overrides.KeyFix(wire_key="sent", reason="test")},
+        spellings={
+            (_PATH, "details"): Spelling(long_name="", source="/v1/flat", reason="test"),
+            ("/gone", "bid"): Spelling(long_name="bid_price", source="/v1/q", reason="test"),
+        },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
         param_units={(_PATH, "gone"): ms},
         sample_errors=(
@@ -257,6 +266,8 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
             ("stale-entry", _PATH, "gone"),  # tag conflicts
             ("stale-entry", _PATH, "gone"),  # type fixes
             ("stale-entry", _PATH, "declared"),  # key fixes
+            ("stale-entry", _PATH, "details"),  # spellings
+            ("stale-entry", "/gone", "bid"),  # spellings of a path not generated
             ("stale-entry", "/gone", ""),  # result keys
             ("stale-entry", _PATH, "gone"),  # param units
             ("stale-entry", "", "zz"),  # identity
@@ -271,6 +282,10 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
     hand = dataclasses.replace(
         _EMPTY,
         shapes={(_PATH, "min"): "bar"},
+        spellings={
+            (_PATH, "min"): Spelling(long_name="last_minute", source="/v1/q", reason="test"),
+            (_PATH, "min.t"): Spelling(long_name="timestamp", source="/v1/q", reason="test"),
+        },
         units={(_PATH, "min.t"): ms},
         identity={"id": "used"},
         result_keys={_PATH: overrides.ResultKey(key=None, reason="test")},
@@ -283,6 +298,101 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
         identities=frozenset({"id"}),
     )
     assert list(stale_entries(hand, {_PATH: use})) == []
+
+
+# --- One name per field Massive documents alike ---------------------------------------------
+
+
+def _described(**fields: tuple[str, str, str]) -> PathUse:
+    """Return a source's use: each wire key (`__` for `.`) to its description, long name, column."""
+    keys = {key.replace("__", "."): value for key, value in fields.items()}
+    return PathUse(
+        descriptions={key: text for key, (text, _, _) in keys.items()},
+        long_names={key: name for key, (_, name, _) in keys.items()},
+        columns={key: column for key, (_, _, column) in keys.items()},
+    )
+
+
+_BID = "The bid price."
+
+
+def test_field_spelling_two_long_names_for_one_description() -> None:
+    uses = {
+        "/quotes": PathUse(),
+        "/a": _described(bid_price=(_BID, "bid_price", "BidPrice")),
+        "/b": _described(last__bid=(_BID, "bid", "LastBid"), ask=("", "ask", "Ask")),
+    }
+    problems = list(field_spellings(_EMPTY, uses))
+    assert _found(problems) == [("field-spelling", "", "bid | bid_price")]
+    assert problems[0].description == _BID
+    assert "bid (/b last.bid); bid_price (/a bid_price)" in problems[0].message
+    assert "SPELLINGS" in problems[0].message
+    assert "SHARED_DESCRIPTIONS" in problems[0].message
+
+
+def test_field_spelling_one_wire_key_and_description_in_two_columns() -> None:
+    # The long names agree; only one source drops the wrapper object's name.
+    uses = {
+        "/chain": _described(details__strike=("Strike.", "strike", "Strike")),
+        "/unified": _described(details__strike=("Strike.", "strike", "DetailsStrike")),
+        "/contracts": _described(strike=("Strike.", "strike", "Strike")),
+    }
+    problems = list(field_spellings(_EMPTY, uses))
+    assert _found(problems) == [("field-spelling", "", "details.strike")]
+    assert "DetailsStrike (/unified); Strike (/chain)" in problems[0].message
+
+
+def test_field_spelling_a_renaming_projection_gives_the_name_its_table_shows() -> None:
+    projection = overrides.Projection(renames={"bid": "bid_price"}, reason="test")
+    hand = dataclasses.replace(_EMPTY, projections={("quotes", "/last"): projection})
+    uses = {
+        "/last": _described(bid=(_BID, "bid", "Bid")),
+        "/quotes": _described(bid_price=(_BID, "bid_price", "BidPrice")),
+    }
+    assert list(field_spellings(hand, uses)) == []
+
+
+_TIME = "The Timestamp in Unix MS."
+_TIMES = SharedDescription(long_names=frozenset({"sip_timestamp", "timestamp"}), reason="test")
+
+
+def test_field_spelling_a_shared_description_exempts_exactly_its_long_names() -> None:
+    hand = dataclasses.replace(_EMPTY, shared_descriptions={_TIME: _TIMES})
+    listed = {
+        "options/T": _described(t=(_TIME, "sip_timestamp", "SipTimestamp")),
+        "indices/V": _described(t=(_TIME, "timestamp", "Timestamp")),
+    }
+    assert list(field_spellings(hand, listed)) == []
+    another = {**listed, "stocks/LULD": _described(t=(_TIME, "unix_timestamp", "UnixTimestamp"))}
+    problems = list(field_spellings(hand, another))
+    assert _found(problems) == [
+        ("field-spelling", "", "sip_timestamp | timestamp | unix_timestamp")
+    ]
+    assert "lists the long names ['sip_timestamp', 'timestamp']" in problems[0].message
+
+
+def test_field_spelling_a_shared_description_no_field_has_is_stale() -> None:
+    hand = dataclasses.replace(_EMPTY, shared_descriptions={_TIME: _TIMES})
+    problems = list(field_spellings(hand, {"/a": _described(t=("Moved.", "timestamp", "T"))}))
+    assert _found(problems) == [("stale-entry", "", "sip_timestamp | timestamp")]
+    assert problems[0].description == _TIME
+
+
+@pytest.mark.skipif(
+    not DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
+)
+def test_field_spelling_finds_the_second_names_the_real_spellings_remove() -> None:
+    # The full refresh passes every gate with the real tables (`test_generate.py`). Without
+    # them, the REST sources alone give the snapshots' bid a second name; without the unified
+    # snapshot's entry alone, its strike price sits in a second column beside the chain's.
+    def found(hand: HandInput) -> set[str]:
+        return {p.key for p in field_spellings(hand, generate_rest(Snapshot.load(), hand)[1].uses)}
+
+    real = HandInput()
+    assert {"bid | bid_price", "ask | ask_price"} <= found(dataclasses.replace(real, spellings={}))
+    partial = {k: v for k, v in real.spellings.items() if k != ("/v3/snapshot", "details")}
+    assert "details.strike_price" in found(dataclasses.replace(real, spellings=partial))
 
 
 # --- Description fixes no field looked up ------------------------------------------------

@@ -194,8 +194,8 @@ def test_the_futures_snapshot_ticker_and_product_code_are_read_where_the_schema_
     # them under `details`, as the schema declares, so no key fix moves them.
     assert not [key for key in overrides.KEY_FIXES if key[0] == "/futures/v1/snapshot"]
     futures = spec.source(Transport.REST, "/futures/v1/snapshot")
-    assert futures.field("DetailsTicker").wire_key == "details.ticker"
-    assert futures.field("DetailsProductCode").wire_key == "details.product_code"
+    assert futures.field("Ticker").wire_key == "details.ticker"
+    assert futures.field("ProductCode").wire_key == "details.product_code"
 
 
 def test_the_option_chain_day_bar_and_break_even_may_be_absent() -> None:

@@ -13,7 +13,7 @@ m.futures.snapshots(symbols, *, product_code=None, sort=None, order=None, limit=
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `Symbol`
-- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol`, `LastQuoteLastUpdated` and `LastTradeLastUpdated`
+- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol`, `LastQuoteTimestamp` and `LastTradeTimestamp`
 
 [Dataset index](README.md)
 
@@ -51,8 +51,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `details.ticker`. |
 | `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
-| `DetailsProductCode` | String | The identifier for the contract's product. |
-| `DetailsSettlementDate` | String | The day that this contract is settled. |
+| `ProductCode` | String | The identifier for the contract's product. |
+| `SettlementDate` | String | The day that this contract is settled. |
 | `LastMinuteOpen` | double | The opening price at the start of the minute bar. |
 | `LastMinuteHigh` | double | The highest price reached in the minute bar. |
 | `LastMinuteLow` | double | The lowest price reached in the minute bar. |
@@ -60,17 +60,17 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `LastMinuteVolume` | long | The number of contracts traded in the minute bar. |
 | `LastMinuteLastUpdated` | Instant | The timestamp indicating the most recent update to the minute bar. |
 | `LastMinuteTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. |
-| `LastQuoteBid` | double | The highest price a buyer is willing to pay. |
+| `LastQuoteBidPrice` | double | The highest price a buyer is willing to pay. |
 | `LastQuoteBidSize` | long | The number of contracts available at the bid price. |
-| `LastQuoteAsk` | double | The lowest price a seller is willing to accept. |
+| `LastQuoteAskPrice` | double | The lowest price a seller is willing to accept. |
 | `LastQuoteAskSize` | long | The number of contracts available at the ask price. |
 | `LastQuoteBidTimestamp` | Instant | The time when the best bid price was last updated. |
 | `LastQuoteAskTimestamp` | Instant | The time when the best ask price was last updated. |
-| `LastQuoteLastUpdated` | Instant | The time when the quote was generated at the exchange to nanosecond precision. |
+| `LastQuoteTimestamp` | Instant | The time when the quote was generated at the exchange to nanosecond precision. |
 | `LastQuoteTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. |
 | `LastTradePrice` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. |
 | `LastTradeSize` | long | The total number of contracts exchanged between buyers and sellers on a given trade. |
-| `LastTradeLastUpdated` | Instant | The time when the trade was generated at the exchange to nanosecond precision. |
+| `LastTradeTimestamp` | Instant | The time when the trade was generated at the exchange to nanosecond precision. |
 | `LastTradeTimeframe` | String | The timeliness of the data as determined by your subscription. One of REAL-TIME or DELAYED. |
 | `SessionOpen` | double | The opening price at the start of the session. |
 | `SessionHigh` | double | The highest price reached in the session. |
@@ -93,8 +93,8 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `details.ticker` |
 | `RawSymbol` | `details.ticker` |
-| `DetailsProductCode` | `details.product_code` |
-| `DetailsSettlementDate` | `details.settlement_date` |
+| `ProductCode` | `details.product_code` |
+| `SettlementDate` | `details.settlement_date` |
 | `LastMinuteOpen` | `last_minute.open` |
 | `LastMinuteHigh` | `last_minute.high` |
 | `LastMinuteLow` | `last_minute.low` |
@@ -102,17 +102,17 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `LastMinuteVolume` | `last_minute.volume` |
 | `LastMinuteLastUpdated` | `last_minute.last_updated` |
 | `LastMinuteTimeframe` | `last_minute.timeframe` |
-| `LastQuoteBid` | `last_quote.bid` |
+| `LastQuoteBidPrice` | `last_quote.bid` |
 | `LastQuoteBidSize` | `last_quote.bid_size` |
-| `LastQuoteAsk` | `last_quote.ask` |
+| `LastQuoteAskPrice` | `last_quote.ask` |
 | `LastQuoteAskSize` | `last_quote.ask_size` |
 | `LastQuoteBidTimestamp` | `last_quote.bid_timestamp` |
 | `LastQuoteAskTimestamp` | `last_quote.ask_timestamp` |
-| `LastQuoteLastUpdated` | `last_quote.last_updated` |
+| `LastQuoteTimestamp` | `last_quote.last_updated` |
 | `LastQuoteTimeframe` | `last_quote.timeframe` |
 | `LastTradePrice` | `last_trade.price` |
 | `LastTradeSize` | `last_trade.size` |
-| `LastTradeLastUpdated` | `last_trade.last_updated` |
+| `LastTradeTimestamp` | `last_trade.last_updated` |
 | `LastTradeTimeframe` | `last_trade.timeframe` |
 | `SessionOpen` | `session.open` |
 | `SessionHigh` | `session.high` |

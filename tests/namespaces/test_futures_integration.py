@@ -142,7 +142,7 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     The schema nests the ticker and product code as `details.ticker` and
     `details.product_code`, while both documented samples send them at the top level. The
     live run of 2026-11-02 found them nested, which the library now reads (`Symbol` and
-    `DetailsProductCode`). Records the top-level `ticker` and `product_code` and the nested
+    `ProductCode`). Records the top-level `ticker` and `product_code` and the nested
     pair of three ES rows, and the library's `Symbol`. Passes when every row nests its ticker
     and product code under `details` and the library fills `Symbol`; top-level keys alone mean
     the library must read those again.

@@ -21,6 +21,7 @@ from deephaven_massive._massive.refresh.fields import (
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi
+from deephaven_massive._massive.refresh.spellings import Spelling
 from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
 
 if TYPE_CHECKING:
@@ -43,6 +44,8 @@ _EMPTY = HandInput(
     kinds={},
     sample_errors=(),
     projections={},
+    spellings={},
+    shared_descriptions={},
     transport_only={},
     venues={},
     undeclared_fields={},
@@ -88,6 +91,70 @@ def test_a_field_takes_its_name_type_and_plain_description() -> None:
     assert use.wire_keys == {"ask_price"}
     assert use.columns == {"ask_price": "AskPrice"}
     assert use.concepts == {"AskPrice": "ask_price"}
+
+
+def _spelled(**long_names: str) -> SourceFields:
+    """Return rules whose `SPELLINGS` give each dotted key (`__` for `.`) its long name."""
+    spellings = {
+        ("us_x/trades_v1", key.replace("__", ".")): Spelling(
+            long_name=name, source="/v1/flat", reason="test"
+        )
+        for key, name in long_names.items()
+    }
+    return _rules(dataclasses.replace(_EMPTY, spellings=spellings))
+
+
+def test_a_spelling_drops_a_wrapper_object_s_name_and_renames_a_field() -> None:
+    rules = _spelled(details="", last_quote__bid="bid_price")
+    number = {"type": "number", "description": "The strike price."}
+    strike = rules.field(RawField("details.strike_price", number, required=True))
+    bid = rules.field(RawField("last_quote.bid", number, required=True))
+    assert strike is not None
+    assert bid is not None
+    assert (strike.column, bid.column) == ("StrikePrice", "LastQuoteBidPrice")
+    assert rules.problems == []
+    use = rules.use()
+    assert use.concepts == {
+        "StrikePrice": "strike_price",
+        "LastQuoteBidPrice": "last_quote.bid_price",
+    }
+    assert use.long_names == {"details.strike_price": "strike_price", "last_quote.bid": "bid_price"}
+    assert use.descriptions == {
+        "details.strike_price": "The strike price.",
+        "last_quote.bid": "The strike price.",
+    }
+
+
+def test_a_spelling_that_drops_a_field_s_own_name_keeps_its_key_and_is_reported() -> None:
+    rules = _spelled(details__ticker="")
+    item = rules.field(RawField("details.ticker", {"type": "string"}, required=True))
+    assert item is not None
+    assert item.column == "DetailsTicker"
+    assert [(p.gate, p.key) for p in rules.problems] == [("field-spelling", "details.ticker")]
+
+
+def test_a_spelling_that_coins_a_library_column_is_reported() -> None:
+    rules = _spelled(last_updated="timestamp")
+    instant = {"type": "string", "format": "date-time"}
+    item = rules.field(RawField("last_updated", instant, required=True))
+    assert item is not None
+    assert item.column == "Timestamp"
+    assert [(p.gate, p.key) for p in rules.problems] == [("field-spelling", "last_updated")]
+
+
+def test_a_field_records_its_corrected_own_description_without_notes() -> None:
+    fix = overrides.DescriptionFix(vendor="Per share.", text="Per coin.", reason="test")
+    rules = _rules(dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "q.p"): fix}))
+    raw = RawField(
+        "q.p",
+        {"type": "number", "description": "Per share."},
+        required=True,
+        notes=(("q", "A quote."),),
+    )
+    item = rules.field(raw)
+    assert item is not None
+    assert item.description == "Per coin. From the `q` object: A quote."
+    assert rules.use().descriptions == {"q.p": "Per coin."}
 
 
 def _fixed(vendor: str) -> HandInput:

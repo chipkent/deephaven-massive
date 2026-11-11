@@ -134,6 +134,23 @@ settles it.
   sent, with Massive's description. Settled by `tests/namespaces/test_options_integration.py`
   (Options Starter), which records each contract's ratio to Black-Scholes gamma from its own
   inputs.
+- **84.** Whether the v2 snapshots' `todaysChange` and `todaysChangePerc` (stocks, forex, and
+  crypto snapshots and movers) are the option chain's `day.change` and `day.change_percent`:
+  the latest price minus the previous day's close, and that change in percent of the close.
+  Kept apart as `TodaysChange` and `TodaysChangePerc` until read. Settled by
+  `tests/massive/refresh/test_spellings_integration.py` (Stocks Starter and Options Starter),
+  which checks each side against that definition within about a cent and 0.01 percentage points.
+- **85.** Whether the v2 snapshots' `updated` is the unified snapshot's `last_updated` for the
+  same ticker. Kept apart as `Updated` until read. Settled by
+  `tests/massive/refresh/test_spellings_integration.py` (Stocks Starter and Currencies Starter),
+  which reads both back to back and compares them within the time between the requests plus 1
+  second.
+- **86.** Whether the forex conversion's `last` object is the last quote of its `from`/`to`
+  pair, as `/v1/last_quote/currencies/{from}/{to}` and the v2 forex snapshot's `lastQuote` give
+  it, or the quote of another pair: Massive's conversion sample for AUD to USD shows a bid of
+  1.3672596, its last-quote sample for AUD/USD 0.73122. Kept as `Last*` until read, not
+  `LastQuote*`. Settled by `tests/massive/refresh/test_spellings_integration.py` (Currencies
+  Starter), which compares the three in both directions of AUD/USD when they carry one quote.
 
 ## Settled
 

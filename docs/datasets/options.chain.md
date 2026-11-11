@@ -60,11 +60,11 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `DayChangePercent` | double | The percent of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
 | `DayLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `day` object: The most recent daily bar for this contract. |
 | `DayPreviousClose` | double | The closing price for the contract of previous trading day. From the `day` object: The most recent daily bar for this contract. |
-| `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
-| `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
-| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
-| `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
-| `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
+| `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
+| `ExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
+| `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
+| `SharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
+| `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `FmvLastUpdated` | Instant | If Fair Market Value (FMV) is available, this field is the nanosecond timestamp of the last FMV calculation. |
 | `GreeksDelta` | double | The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
@@ -72,9 +72,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `GreeksTheta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `GreeksVega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `ImpliedVolatility` | double | The market's forecast for the volatility of the underlying asset, based on this option's current price. |
-| `LastQuoteBid` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteBidPrice` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidSize` | double | The bid size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
-| `LastQuoteAsk` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteAskPrice` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskSize` | double | The ask size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidExchange` | long | The bid side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskExchange` | long | The ask side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
@@ -118,11 +118,11 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `DayChangePercent` | `day.change_percent` |
 | `DayLastUpdated` | `day.last_updated` |
 | `DayPreviousClose` | `day.previous_close` |
-| `DetailsContractType` | `details.contract_type` |
-| `DetailsExerciseStyle` | `details.exercise_style` |
-| `DetailsExpirationDate` | `details.expiration_date` |
-| `DetailsSharesPerContract` | `details.shares_per_contract` |
-| `DetailsStrikePrice` | `details.strike_price` |
+| `ContractType` | `details.contract_type` |
+| `ExerciseStyle` | `details.exercise_style` |
+| `ExpirationDate` | `details.expiration_date` |
+| `SharesPerContract` | `details.shares_per_contract` |
+| `StrikePrice` | `details.strike_price` |
 | `Fmv` | `fmv` |
 | `FmvLastUpdated` | `fmv_last_updated` |
 | `GreeksDelta` | `greeks.delta` |
@@ -130,9 +130,9 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `GreeksTheta` | `greeks.theta` |
 | `GreeksVega` | `greeks.vega` |
 | `ImpliedVolatility` | `implied_volatility` |
-| `LastQuoteBid` | `last_quote.bid` |
+| `LastQuoteBidPrice` | `last_quote.bid` |
 | `LastQuoteBidSize` | `last_quote.bid_size` |
-| `LastQuoteAsk` | `last_quote.ask` |
+| `LastQuoteAskPrice` | `last_quote.ask` |
 | `LastQuoteAskSize` | `last_quote.ask_size` |
 | `LastQuoteBidExchange` | `last_quote.bid_exchange` |
 | `LastQuoteAskExchange` | `last_quote.ask_exchange` |

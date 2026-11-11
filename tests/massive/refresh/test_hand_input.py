@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from deephaven_massive._massive.refresh import exclusions, lexicon, overrides
+from deephaven_massive._massive.refresh import exclusions, lexicon, overrides, spellings
 from deephaven_massive._massive.refresh.hand_input import HandInput
 
 
@@ -11,6 +11,8 @@ def test_the_default_hand_input_is_the_real_tables() -> None:
     assert hand.lexicons is lexicon.LEXICONS
     assert hand.shapes is lexicon.SHAPES
     assert hand.identity is lexicon.IDENTITY
+    assert hand.spellings is spellings.SPELLINGS
+    assert hand.shared_descriptions is spellings.SHARED_DESCRIPTIONS
     assert hand.names is overrides.NAMES
     assert hand.units is overrides.UNITS
     assert hand.tag_conflicts is overrides.TAG_CONFLICTS
