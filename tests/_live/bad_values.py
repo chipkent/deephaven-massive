@@ -97,8 +97,11 @@ _CONDITIONS: Final = "/v3/reference/conditions"
 _PAIRS: Final = ("C:EURUSD", "X:BTCUSD")
 """A forex and a crypto pair: underlyings the library refuses, as it does an option contract."""
 
-_PRECISION_SENT: Final = 5
-"""The conversion `precision` sent, one past the 4 the library accepts."""
+_SERVER_FAILURES: Final = range(500, 600)
+"""Statuses of a server that failed, which say nothing about the value sent."""
+
+_NO_JUDGMENT: Final = frozenset({429, *_SERVER_FAILURES})
+"""Statuses that are no judgment of the value: a rate limit, and a server failure."""
 
 _ROWS_SHOWN: Final = 2
 """How many rows of a 200 the evidence shows."""
@@ -172,7 +175,7 @@ def bad_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
         **_conversion_requests(),
         **_indicator_requests(),
         **_reference_requests(),
-        **_list_requests(),
+        **_list_requests(today),
         **_option_requests(),
         **_bar_requests(today),
     }
@@ -190,8 +193,9 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
         The answer.
 
     Raises:
-        WireError: If the request got no HTTP response (a transport failure after retries, or
-            a closed client): that is no answer of Massive's.
+        WireError: If the request got no answer about its value: no HTTP response (a
+            transport failure after retries, or a closed client), a server failure (5xx)
+            after retries, or a rate limit (429) the governor gave up waiting out.
     """
     rest_path = _text_path(source(Transport.REST, request.path), request.as_text)
     names, query = _shown(request.names), _shown(request.query)
@@ -199,7 +203,7 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     try:
         page = client.get(rest_path, request.names, request.query, bucket=request.bucket)
     except WireError as error:
-        if error.status is None:
+        if error.status is None or error.status in _NO_JUDGMENT:
             raise
         evidence(f"{request.label}: verdict ERROR (HTTP {error.status}: {error.message})")
         return Answer("ERROR", error.status, 0, None)
@@ -292,30 +296,21 @@ def _excerpt(value: object) -> str:
     return json.dumps(value, default=str)[:_EXCERPT]
 
 
-def _decimals(value: object) -> int:
-    """Return how many digits a number has after its decimal point, as JSON gave it.
+def _converted_like(amount: int, row: Row) -> bool:
+    """Tell whether a conversion's `converted` has the sign of the amount sent.
 
     Args:
-        value: A value from a decoded body.
+        amount: The amount sent: 0 or below.
+        row: The conversion.
 
     Returns:
-        The count; 0 for an integer or a value that is no number.
+        True when `converted` is a number that is 0 for an amount of 0, or below 0 for an
+        amount below 0.
     """
-    if isinstance(value, bool) or not isinstance(value, float):
-        return 0
-    return len(repr(value).partition(".")[2])
-
-
-def _at_most_zero(value: object) -> bool:
-    """Tell whether a value is a number of 0 or below.
-
-    Args:
-        value: A value from a decoded body.
-
-    Returns:
-        True for an `int` or `float` of 0 or below.
-    """
-    return isinstance(value, int | float) and not isinstance(value, bool) and value <= 0
+    converted = row.get("converted")
+    if isinstance(converted, bool) or not isinstance(converted, int | float):
+        return False
+    return converted == 0 if amount == 0 else converted < 0
 
 
 def _field_is(key: str, wanted: object, row: Row) -> bool:
@@ -360,14 +355,12 @@ def _conversion_requests() -> dict[str, tuple[BadRequest, ...]]:
     return {
         PRECISION: (
             BadRequest(
-                label=f"precision={_PRECISION_SENT}",
+                label="precision=5",
                 path=_CONVERSION,
                 names=aud_usd,
-                query={"amount": 100, "precision": str(_PRECISION_SENT)},
+                query={"amount": 100, "precision": "5"},
                 bucket="currencies",
                 as_text=frozenset({"precision"}),
-                match=lambda row: _decimals(row.get("converted")) == _PRECISION_SENT,
-                matching=f"with `converted` given to {_PRECISION_SENT} decimals",
             ),
         ),
         AMOUNT: tuple(
@@ -377,8 +370,8 @@ def _conversion_requests() -> dict[str, tuple[BadRequest, ...]]:
                 names=aud_usd,
                 query={"amount": amount},
                 bucket="currencies",
-                match=lambda row: _at_most_zero(row.get("converted")),
-                matching="with `converted` 0 or below, as the amount",
+                match=partial(_converted_like, amount),
+                matching="with `converted` of the amount's sign",
             )
             for amount in (0, -100)
         ),
@@ -453,8 +446,11 @@ def _reference_requests() -> dict[str, tuple[BadRequest, ...]]:
     }
 
 
-def _list_requests() -> dict[str, tuple[BadRequest, ...]]:
+def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
     """Return the requests of the list endpoints' `sort`, `limit`, and filters.
+
+    Args:
+        today: The day the requests are sent.
 
     Returns:
         The requests by check.
@@ -514,7 +510,13 @@ def _list_requests() -> dict[str, tuple[BadRequest, ...]]:
                 label="dividends ticker.any_of=['AAPL', ' MSFT']",
                 path=_DIVIDENDS,
                 names={},
-                query={"ticker.any_of": ["AAPL", " MSFT"], "limit": 50},
+                # A year of quarterly dividends of both fits one page, so a missing MSFT row
+                # is no row on a later page.
+                query={
+                    "ticker.any_of": ["AAPL", " MSFT"],
+                    "ex_dividend_date.gte": today - timedelta(days=365),
+                    "limit": 50,
+                },
                 bucket="stocks",
                 match=partial(_field_is, "ticker", "MSFT"),
                 matching="of MSFT, the item sent with a space",

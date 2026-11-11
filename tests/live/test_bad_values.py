@@ -54,7 +54,12 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
     bad_values.LIMIT: [(_DIVIDENDS, {"ticker": "AAPL", "limit": "0"})],
     bad_values.ENUM_FILTER: [("/v3/reference/tickers", {"market": "equities", "limit": "5"})],
     # The list is joined as sent, its second item keeping its space.
-    bad_values.FILTER_WHITESPACE: [(_DIVIDENDS, {"ticker.any_of": "AAPL, MSFT", "limit": "50"})],
+    bad_values.FILTER_WHITESPACE: [
+        (
+            _DIVIDENDS,
+            {"ticker.any_of": "AAPL, MSFT", "ex_dividend_date.gte": "2025-11-11", "limit": "50"},
+        )
+    ],
     bad_values.TRAILING_BALANCE_SHEET: [
         (
             "/stocks/financials/v1/balance-sheets",
@@ -194,29 +199,48 @@ def test_a_nested_field_is_compared_at_its_depth(
 
 
 @pytest.mark.parametrize(
-    ("check", "converted", "matched"),
+    ("converted", "matched"),
     [
-        (bad_values.PRECISION, 72.12345, 1),
-        (bad_values.PRECISION, 72.1234, 0),
-        (bad_values.PRECISION, 72, 0),  # an integer has no decimals
-        (bad_values.AMOUNT, -72.5, 1),
-        (bad_values.AMOUNT, 72.5, 0),
-        (bad_values.AMOUNT, False, 0),  # a bool is no amount
-        (bad_values.CURRENCY_CODE, 72.5, 1),
+        (0, [1, 0]),
+        (-72.5, [0, 1]),
+        (72.5, [0, 0]),
+        (False, [0, 0]),  # a bool is no amount
     ],
 )
-def test_a_conversion_is_compared_by_its_converted_amount_and_pair(
-    fake_rest: FakeRestServer,
-    client: RestClient,
-    *,
-    check: str,
-    converted: object,
-    matched: int,
+def test_a_conversion_answers_its_amount_when_converted_has_its_sign(
+    fake_rest: FakeRestServer, client: RestClient, *, converted: object, matched: list[int]
 ) -> None:
     body = {"status": "success", "request_id": "r", "from": "AUD", "to": "USD"}
-    fake_rest.reply_default(Reply({**body, "converted": converted, "initialAmount": 100}))
+    fake_rest.reply_default(Reply({**body, "converted": converted, "initialAmount": 0}))
+    answers = bad_values.ask_all(client, bad_values.AMOUNT, _ignore, today=_DAY)
+    # The requests send amounts 0 and -100, in that order.
+    assert [a.matched for a in answers] == matched
+
+
+@pytest.mark.parametrize(
+    ("check", "matched"),
+    [
+        # A decoded float drops trailing zeros, so its digits cannot show the precision.
+        (bad_values.PRECISION, None),
+        (bad_values.CURRENCY_CODE, 1),
+    ],
+)
+def test_a_conversion_is_compared_by_its_pair_and_never_by_its_digits(
+    fake_rest: FakeRestServer, client: RestClient, *, check: str, matched: int | None
+) -> None:
+    body = {"status": "success", "request_id": "r", "from": "AUD", "to": "USD"}
+    fake_rest.reply_default(Reply({**body, "converted": 72.12345, "initialAmount": 100}))
     answers = bad_values.ask_all(client, check, _ignore, today=_DAY)
-    assert answers[0] == bad_values.Answer("DATA", 200, 1, matched)
+    assert answers == (bad_values.Answer("DATA", 200, 1, matched),)
+
+
+def test_a_server_failure_is_no_judgment_of_the_value_and_raises(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    fake_rest.reply(_DIVIDENDS, Reply({"request_id": "r", "message": "busy"}, status=503))
+    with pytest.raises(WireError) as raised:
+        bad_values.ask_all(client, bad_values.LIMIT, _ignore, today=_DAY)
+    assert raised.value.status == 503
 
 
 def test_no_row_of_a_range_that_holds_no_day_matches(

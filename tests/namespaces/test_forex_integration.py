@@ -536,8 +536,9 @@ def test_massive_answers_a_conversion_precision_of_5(
 ) -> None:
     """What Massive answers to a conversion `precision` of 5, which `m.forex.conversion` refuses.
 
-    The library accepts the values Massive's specification lists, 0 to 4. DATA counts the
-    conversions whose `converted` has 5 decimals: those answer the request.
+    The library accepts the values Massive's specification lists, 0 to 4. For DATA, read
+    `converted` in the recorded row: more than 4 decimals means Massive honored the value. A
+    decoded number drops trailing zeros, so fewer decimals do not prove that it was ignored.
     """
     assert bad_values.ask_all(live_rest, bad_values.PRECISION, evidence)
 
@@ -550,7 +551,8 @@ def test_massive_answers_a_conversion_amount_of_0_or_below(
 ) -> None:
     """What Massive answers to a conversion `amount` of 0 and of -100, which the library refuses.
 
-    DATA counts the conversions whose `converted` is 0 or below, as the amount is.
+    DATA counts the conversions whose `converted` has the amount's sign: 0 for 0, negative for
+    -100.
     """
     assert bad_values.ask_all(live_rest, bad_values.AMOUNT, evidence)
 
