@@ -670,11 +670,11 @@ class _SymbolCounter(TableListener):
                 del counts[symbol]
 
 
-def watched_rows(table: Table, watchlist: Table) -> Table:
-    """Keep the rows of a table whose `Symbol` the watchlist holds, following its changes.
+def watched_rows(table: Table, watchlist: Table, *, key: str = _SYMBOL) -> Table:
+    """Keep the rows of a table whose symbol the watchlist holds, following its changes.
 
-    The result is what `table.where_in(watchlist, "Symbol")` returns: a row is kept while its
-    symbol is in the watchlist, and leaves when the symbol does. A blink table stays a blink
+    The result is what `table.where_in(watchlist, f"{key}=Symbol")` returns: a row is kept while
+    its symbol is in the watchlist, and leaves when the symbol does. A blink table stays a blink
     table. Duplicate watchlist rows count once.
 
     It is built from a join instead of `where_in`, because Deephaven 42.7's `where_in` delivers
@@ -688,15 +688,17 @@ def watched_rows(table: Table, watchlist: Table) -> Table:
     result's liveness scope, which then manages the tables it creates.
 
     Args:
-        table: A live table with a `Symbol` column, such as a stream's blink table or its
+        table: A live table with a column of symbols, such as a stream's blink table or its
             `last_by`.
         watchlist: The user's symbol table; only its `Symbol` column is read.
+        key: The table's column of symbols, `Symbol` unless the table's own `Symbol` column
+            holds something else (a followed read's vectors of rows).
 
     Returns:
         The table's rows whose symbol the watchlist holds, with the table's columns.
     """
     marks = watchlist.select_distinct(_SYMBOL).update_view(f"{_WATCHED} = true")
-    joined = table.natural_join(marks, on=_SYMBOL, joins=_WATCHED)
+    joined = table.natural_join(marks, on=f"{key}={_SYMBOL}", joins=_WATCHED)
     return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)
 
 
