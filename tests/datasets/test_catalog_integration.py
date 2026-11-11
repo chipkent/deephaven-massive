@@ -703,8 +703,9 @@ def _stream_case(
     minute bar stream waits until just past the next minute boundary, any other for
     `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement. A stock
     trade or quote stream that gets no row while the plan's feed is in the extended hours skips
-    too, since one stock can go that long without a tick then (`streams.may_go_quiet`); in the
-    regular session it fails.
+    too, since one stock can go that long without a tick then (`streams.may_go_quiet`), when
+    the feed is in the extended hours both as the wait starts and as it ends; a wait that
+    reaches the regular session fails.
 
     Another client on the key can take the class's connection slot during the wait: the
     connection then waits for the slot (`WAITING_SLOT`) or reconnects. When no row came and
@@ -732,6 +733,7 @@ def _stream_case(
     if taken:
         wait = _row_wait(family)
         rows = wait_rows(case.session, table, time.monotonic() + wait)
+    quiet = quiet and _may_go_quiet(asset_class, family, live_plans)  # and still, at the end
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     _STREAM_CLOSED[0] = time.monotonic()

@@ -175,8 +175,9 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     the stream's host, acknowledgement, rows, and any error. While the stock market is closed
     the test skips after the acknowledgement. While it is open, it waits until the session
     has been open longer than the delayed feed's 15 minutes, then up to 45 s for a trade, and
-    requires one in the regular session; in the extended hours, when AAPL can go that long
-    without a trade (`streams.may_go_quiet`), no trade skips it. The test runs up to about 17
+    requires one in the regular session; when the delayed feed is in the extended hours both
+    as the wait for a trade starts and as it ends, when AAPL can go that long without a trade
+    (`streams.may_go_quiet`), no trade skips it. The test runs up to about 17
     minutes in the first quarter hour of a session. Passes when Massive acknowledged the
     subscription without refusing it and, in an open market, sent a trade: a real-time key may
     choose delayed data. A refusal would mean the setting needs a delayed plan, and the
@@ -190,12 +191,19 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
         status = market_status("stocks")
         now = datetime.now(UTC)
         opened = streams.opened_at("stocks", status, family="trades", now=now)
-        quiet = streams.may_go_quiet("stocks", "trades", now=now, delay=_DELAYED_FEED_LAG)
+        quiet = False
         rows: list[dict[str, Any]] = []
         if opened is not None:
             lag = max((opened + _DELAYED_FEED_LAG - now).total_seconds(), 0.0)
             evidence(f"the session opened {opened}; waiting {lag:.0f} s for the feed's lag")
             rows = wait_rows(session, table, time.monotonic() + lag + _WAIT)
+            # The wait for a trade starts after the lag: no trade skips only when the feed is
+            # in the extended hours both as that wait starts and as it ends.
+            start = now + timedelta(seconds=lag)
+            quiet = all(
+                streams.may_go_quiet("stocks", "trades", now=at, delay=_DELAYED_FEED_LAG)
+                for at in (start, datetime.now(UTC))
+            )
         for line in stream_report(session):
             evidence(line)
         errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
