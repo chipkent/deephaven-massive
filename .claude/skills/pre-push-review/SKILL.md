@@ -71,6 +71,14 @@ same property. Then look for:
   fixtures, or is imported by a different set of modules: that cluster is a second subject and
   belongs in its own module. Length alone is no finding; when a reviewer flags size alone, answer
   with the module's subject line and this test.
+- **Code shaped to pass a tool.** Search the diff for `if TYPE_CHECKING:` blocks holding
+  anything but imports, and for each new `cast`, `Any`, `# type: ignore`, `# noqa`,
+  `# pragma: no cover`, `getattr` with a constant name, or code that exists only so ruff, mypy, or
+  coverage pass. Each is a blocker unless the owner accepted it: fix the design so the tools see
+  the true API.
+- **Docstrings that inventory.** Read the first paragraph of every docstring the diff adds or
+  changes: it must say what the thing is for and when to use it, not list what it contains
+  (`writing-docstrings`).
 - **Design smells.** Assume a simpler design exists until you have looked: a workaround layer
   where a fix at the source would do, a second mechanism beside an existing one, an option
   nobody asked for, a public module that only re-exports a private one (a public twin), a helper that duplicates one elsewhere (`git grep` the concept, not only the

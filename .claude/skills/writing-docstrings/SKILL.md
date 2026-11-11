@@ -13,6 +13,12 @@ user contract, so a docstring that disagrees with the code is a bug.
 
 ## What each docstring says
 
+- **Every docstring opens with purpose, not inventory.** Its first paragraph tells a reader who
+  has never seen the code what the thing is for, in plain words, and when they would use it: the
+  idea, the problem it solves, how it fits. A list of members, a table of names, or a
+  restatement of the signature is not an explanation; it can follow the explanation, never
+  replace it. Before you finish, read the first paragraph alone and ask whether a newcomer now
+  understands why this exists.
 - **Modules**: what the module is for, what it owns, and how it fits with its neighbors. The
   first line names its one subject. The package `__init__.py` is the front door: what the
   library does, the public API with a short example, where to read next, and any status a
@@ -30,6 +36,9 @@ A public docstring is user documentation: `help()` shows it in the console. Any 
 docstring of the package, or of a public module, class, function, method, setting, enum, or
 exception, goes through the `writing-user-docs` review before it is pushed:
 
+- **Purpose first.** Read each changed docstring's first paragraph alone: if it enumerates
+  (members, names, a table) instead of explaining what the thing is for and when to use it,
+  rewrite it before grading.
 - **Describe less.** Say what a caller needs to call it correctly. Leave out the mechanism and
   intricate edge cases; a reader who needs them reads the code.
 - **Check every fact.** A fresh subagent traces each changed claim to the code and marks it

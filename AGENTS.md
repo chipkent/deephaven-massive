@@ -168,6 +168,11 @@ These protect the owner's repository, money, and secrets.
   (fake servers in `tests/_fakes/`, live-test fixture logic in `tests/_live/`) sit outside the
   mirror. Coverage is 100% of statements and branches: delete a dead defensive branch instead
   of covering it.
+- **Write code for what it does, never to get past a tool.** `if TYPE_CHECKING:` guards
+  imports and nothing else. A `cast`, an `Any`, a `getattr` or string lookup, a branch hidden
+  from the type checker, or any construct whose only purpose is to make ruff, mypy, or coverage
+  pass is bent code: change the design so the tools see the true API, or raise the rule with
+  the owner.
 - **Lint size and complexity limits flag smells**: fix the design. A suppression at a site
   needs the owner's acceptance first, asked with its reason; never raise a global limit to make
   code pass. Too-many-arguments is off because
