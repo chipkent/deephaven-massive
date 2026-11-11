@@ -536,9 +536,12 @@ def test_massive_answers_a_conversion_precision_of_5(
 ) -> None:
     """What Massive answers to a conversion `precision` of 5, which `m.forex.conversion` refuses.
 
-    The library accepts the values Massive's specification lists, 0 to 4. For DATA, read
-    `converted` in the recorded row: more than 4 decimals means Massive honored the value. A
-    decoded number drops trailing zeros, so fewer decimals do not prove that it was ignored.
+    The library accepts the values Massive's specification lists, 0 to 4. It converts an
+    amount of 1.2345678, whose exact conversion has about 12 decimals. DATA counts the rows
+    whose `converted` is the amount times `last.bid` or `last.ask` rounded to 5 decimals,
+    the value honored, and the line before it names the decimals `converted` was rounded to:
+    2, Massive's default, means the value was ignored; 4, that it was capped (or that the
+    fifth decimal is 0, when the row matched).
     """
     assert bad_values.ask_all(live_rest, bad_values.PRECISION, evidence)
 

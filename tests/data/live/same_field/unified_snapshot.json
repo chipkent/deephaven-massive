@@ -1,0 +1,68 @@
+{
+  "request_id": "abc123",
+  "results": [
+    {
+      "fmv": 0.05,
+      "fmv_last_updated": 1636573458757383400,
+      "last_minute": {
+        "close": 412.05,
+        "decimal_volume": "610.0",
+        "high": 412.1,
+        "low": 412.05,
+        "open": 412.1,
+        "transactions": 26,
+        "volume": 610,
+        "vwap": 412.0881,
+        "last_updated": 1605192864630916600
+      },
+      "last_quote": {
+        "ask": 21.25,
+        "ask_exchange": 300,
+        "ask_size": 110,
+        "bid": 20.9,
+        "bid_exchange": 323,
+        "bid_size": 172,
+        "last_updated": 1636573458756383500,
+        "timeframe": "REAL-TIME"
+      },
+      "last_trade": {
+        "conditions": [
+          209
+        ],
+        "decimal_size": "2.0",
+        "exchange": 316,
+        "id": "4064",
+        "last_updated": 1675280958783136800,
+        "price": 0.05,
+        "size": 2,
+        "timeframe": "REAL-TIME"
+      },
+      "market_status": "closed",
+      "name": "Apple Inc.",
+      "session": {
+        "change": -1.05,
+        "change_percent": -4.67,
+        "close": 21.4,
+        "decimal_volume": "37.0",
+        "early_trading_change": -0.39,
+        "early_trading_change_percent": -0.07,
+        "high": 22.49,
+        "late_trading_change": 1.2,
+        "late_trading_change_percent": 3.92,
+        "low": 21.35,
+        "open": 22.49,
+        "previous_close": 22.45,
+        "volume": 37,
+        "last_updated": 1605192894630916600
+      },
+      "ticker": "AAPL",
+      "type": "stocks"
+    },
+    {
+      "error": "NOT_FOUND",
+      "message": "Ticker not found.",
+      "ticker": "TSLAAPL"
+    }
+  ],
+  "status": "OK"
+}

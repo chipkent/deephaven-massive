@@ -48,9 +48,10 @@ def test_massive_answers_a_start_after_the_end(
 @pytest.mark.settles("106")
 @pytest.mark.requests(1)
 def test_massive_answers_a_start_after_now(live_rest: RestClient, *, evidence: Evidence) -> None:
-    """What Massive answers to AAPL's day bars from 30 days ahead to today.
+    """What Massive answers to AAPL's day bars from 10 to 20 days ahead.
 
     The library refuses a start after now when `end` is left out, which reads through now.
-    No row can answer it: DATA means Massive reads the range some other way.
+    Both ends are in the future and in order, so an error names the future start, not the
+    order. No row can answer it: DATA means Massive reads the range some other way.
     """
     assert bad_values.ask_all(live_rest, bad_values.START_AFTER_NOW, evidence)

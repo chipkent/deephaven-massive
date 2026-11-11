@@ -219,7 +219,7 @@ settles it.
   Basic), on AAPL's day bars and on the dividends' `ex_dividend_date.gte` and `.lte`.
 - **106.** What Massive answers to a range that starts after now. Refused when `end` is left out
   until read. Settled by `tests/datasets/test_dates_integration.py` (Stocks Basic), which sends
-  AAPL's day bars from 30 days ahead to today.
+  AAPL's day bars from 10 to 20 days ahead.
 
 ## Settled
 

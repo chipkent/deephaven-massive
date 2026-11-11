@@ -28,6 +28,7 @@ __all__ = [
     "FX",
     "QUOTE_TRIES",
     "STOCKS",
+    "UNIFIED_TIMES",
     "V2_CRYPTO",
     "V2_FOREX",
     "V2_STOCKS",
@@ -54,6 +55,15 @@ FOREX_PAIRS: Final = ("C:EURUSD", "C:AUDUSD")
 
 CRYPTO_PAIRS: Final = ("X:BTCUSD", "X:ETHUSD")
 """The crypto tickers the update-time check reads."""
+
+UNIFIED_TIMES: Final = (
+    "last_updated",
+    "session.last_updated",
+    "last_minute.last_updated",
+    "last_quote.last_updated",
+    "last_trade.last_updated",
+)
+"""The unified snapshot's update times that `updated_times` compares with the v2 `updated`."""
 
 FX: Final = "currencies"
 """The rate bucket and plan class of forex and crypto, both under the Currencies plans."""
@@ -183,14 +193,18 @@ def updated_times(
     tickers: tuple[str, ...],
     bucket: str,
 ) -> Outcome:
-    """Check whether the v2 snapshot's `updated` is the unified snapshot's `last_updated`.
+    """Check whether the v2 snapshot's `updated` is one of the unified snapshot's update times.
 
     Reads the v2 snapshot and the unified snapshot (`/v3/snapshot`) of the same tickers back
-    to back, timing the two requests, and records each ticker's `updated` and `last_updated`
-    in nanoseconds (an `updated` below 10**17 is read as milliseconds). SAME when, for every
-    requested ticker, the two differ by no more than the time between the requests plus
-    `_UPDATE_TOLERANCE_NS`; INCONCLUSIVE when a ticker lacks either time. The evidence also
-    counts the tickers whose two times are equal.
+    to back, timing the two requests, and records, for each requested ticker, the v2 row's
+    `updated` and every update time of the unified row (`UNIFIED_TIMES`), in nanoseconds (an
+    `updated` below 10**17 is read as milliseconds), or why a row cannot be compared: absent,
+    an error row, or no `updated`. Massive documents a top-level `last_updated` on the unified
+    snapshot, but its own stock sample sends only the nested ones, so each is compared: one
+    verdict line per key, SAME when, for every requested ticker, `updated` and that key differ
+    by no more than the time between the requests plus `_UPDATE_TOLERANCE_NS`, DIFFERENT when
+    one does not, INCONCLUSIVE when a ticker lacks either time. Each line also counts the
+    tickers whose two times are equal.
 
     Args:
         client: The wire REST client.
@@ -200,31 +214,43 @@ def updated_times(
         bucket: The rate bucket of the tickers' class.
 
     Returns:
-        The verdict, and the number of rows of each snapshot.
+        The verdict for the top-level `last_updated`, and the number of rows of each snapshot.
     """
     started = time.monotonic_ns()
     v2 = _rows(client, v2_path, names={}, query={"tickers": tickers}, bucket=bucket)
     unified = _rows(client, _UNIFIED, names={}, query={"ticker.any_of": tickers}, bucket=bucket)
     gap = time.monotonic_ns() - started
-    latest: dict[str, int] = {
-        row["ticker"]: row["last_updated"] for row in unified if row.get("last_updated")
-    }
-    pairs = [
-        (row["ticker"], _nanoseconds(row["updated"]), latest[row["ticker"]])
-        for row in v2
-        if row.get("updated") and row.get("ticker") in latest
-    ]
-    for ticker, updated, last_updated in pairs:
-        evidence(f"{ticker}: updated={updated} last_updated={last_updated}")
-    differing = sum(
-        abs(updated - last_updated) > gap + _UPDATE_TOLERANCE_NS
-        for _, updated, last_updated in pairs
-    )
-    equal = sum(updated == last_updated for _, updated, last_updated in pairs)
-    evidence(f"requests {gap / 1e9:.3f} s apart; {equal} of {len(pairs)} times equal")
-    verdict = _verdict(compared=len(pairs), differing=differing, wanted=len(tickers))
-    evidence(f"v2 updated is the unified last_updated: {verdict}")
-    return Outcome(verdict=verdict, rows=(len(v2), len(unified)))
+    v2_by_ticker = {row.get("ticker"): row for row in v2}
+    unified_by_ticker = {row.get("ticker"): row for row in unified}
+    # Per unified key, the (updated, that key's time) of each ticker that has both.
+    pairs: dict[str, list[tuple[int, int]]] = {key: [] for key in UNIFIED_TIMES}
+    for ticker in tickers:
+        updated = (v2_by_ticker.get(ticker) or {}).get("updated")
+        row = unified_by_ticker.get(ticker)
+        if row is None or row.get("error"):
+            error = "no row" if row is None else f"error {row.get('error')}: {row.get('message')}"
+            evidence(f"{ticker}: updated={updated}; unified snapshot: {error}")
+            continue
+        times = {key: _field(row, key) for key in UNIFIED_TIMES}
+        evidence(f"{ticker}: updated={updated} unified {times}")
+        if not updated:
+            continue
+        for key, stamp in times.items():
+            if isinstance(stamp, int) and stamp:
+                pairs[key].append((_nanoseconds(updated), stamp))
+    evidence(f"requests {gap / 1e9:.3f} s apart")
+    verdicts: dict[str, str] = {}
+    for key, compared in pairs.items():
+        differing = sum(
+            abs(updated - stamp) > gap + _UPDATE_TOLERANCE_NS for updated, stamp in compared
+        )
+        equal = sum(updated == stamp for updated, stamp in compared)
+        verdicts[key] = _verdict(compared=len(compared), differing=differing, wanted=len(tickers))
+        evidence(
+            f"v2 updated is the unified {key}: {verdicts[key]} "
+            f"({len(compared)} of {len(tickers)} tickers compared, {equal} equal)"
+        )
+    return Outcome(verdict=verdicts["last_updated"], rows=(len(v2), len(unified)))
 
 
 def conversion_quote(
@@ -335,6 +361,24 @@ def _nanoseconds(stamp: int) -> int:
         The stamp in nanoseconds.
     """
     return stamp if stamp > 10**17 else stamp * 10**6
+
+
+def _field(row: Mapping[str, Any], key: str) -> object:
+    """Return a row's field by a dotted key, walking into nested objects.
+
+    Args:
+        row: The row.
+        key: The key, such as `session.last_updated`.
+
+    Returns:
+        The field's value; None when it or an object on its way is absent.
+    """
+    found: object = row
+    for part in key.split("."):
+        if not isinstance(found, dict):
+            return None
+        found = found.get(part)
+    return found
 
 
 def _inverse(converted: Mapping[str, Any], quoted: Mapping[str, Any]) -> bool:

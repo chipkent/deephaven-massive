@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, TypeGuard
 from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive import (
@@ -110,6 +110,16 @@ _SERVER_FAILURES: Final = range(500, 600)
 _NO_JUDGMENT: Final = frozenset({429, *_SERVER_FAILURES})
 """Statuses that are no judgment of the value: a rate limit, and a server failure."""
 
+_PRECISION_AMOUNT: Final = 1.2345678
+"""The amount the precision check converts: times a rate of 5 decimals, its exact conversion
+has about 12, so the decimals of `converted` show the precision Massive rounded to."""
+
+_PRECISION_SENT: Final = 5
+"""The precision the precision check sends, one more than Massive's specification lists."""
+
+_ROUNDING_TOLERANCE: Final = 1e-9
+"""How far `converted` may stray from a rounding of the exact conversion: float noise only."""
+
 _ROWS_SHOWN: Final = 2
 """How many rows of a 200 the evidence shows."""
 
@@ -137,6 +147,8 @@ class BadRequest:
             compared with it.
         matching: What a matching row is, for the verdict line, such as `"of asset_class
             futures"`; empty when `match` is None.
+        note: Describes each recorded row in one more evidence line, such as the decimals a
+            conversion was rounded to; None for no such line.
     """
 
     label: str
@@ -147,6 +159,7 @@ class BadRequest:
     as_text: frozenset[str] = frozenset()
     match: Callable[[Row], bool] | None = None
     matching: str = ""
+    note: Callable[[Row], str] | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +242,8 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     evidence(f"{request.label}: HTTP 200, {len(rows)} rows, body {_excerpt(scalars)}")
     for row in rows[:_ROWS_SHOWN]:
         evidence(f"{request.label}: row {_excerpt(row)}")
+        if request.note is not None:
+            evidence(f"{request.label}: {request.note(row)}")
     if not rows:
         evidence(f"{request.label}: verdict EMPTY (HTTP 200, no rows)")
         return Answer("EMPTY", 200, 0, None)
@@ -328,6 +343,93 @@ def _converted_like(amount: int, row: Row) -> bool:
     return converted == 0 if amount == 0 else converted < 0
 
 
+def _exact(row: Row) -> dict[str, tuple[float, float] | None]:
+    """Return, per side of a conversion's quote, its `converted` and its exact conversion.
+
+    Args:
+        row: The conversion, with `converted`, `initialAmount`, and `last.bid` and `.ask`.
+
+    Returns:
+        For `bid` and `ask`, `converted` and the amount times that price; None when one of
+        the three is not a number.
+    """
+    converted, amount = row.get("converted"), row.get("initialAmount")
+    last = row.get("last") or {}
+    found: dict[str, tuple[float, float] | None] = {}
+    for side in ("bid", "ask"):
+        price = last.get(side)
+        if _number(converted) and _number(amount) and _number(price):
+            found[side] = (converted, amount * price)
+        else:
+            found[side] = None
+    return found
+
+
+def _number(value: object) -> TypeGuard[float]:
+    """Tell whether a decoded value is a number, and not a boolean.
+
+    Args:
+        value: The value.
+
+    Returns:
+        True for an int or a float other than a boolean.
+    """
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _rounds_to(exact: float, decimals: int, converted: float) -> bool:
+    """Tell whether an exact conversion rounded to `decimals` places is `converted`.
+
+    Args:
+        exact: The amount times a price.
+        decimals: The places.
+        converted: Massive's `converted`.
+
+    Returns:
+        True when the two are within `_ROUNDING_TOLERANCE`.
+    """
+    return abs(round(exact, decimals) - converted) <= _ROUNDING_TOLERANCE
+
+
+def _rounded_to(decimals: int, row: Row) -> bool:
+    """Tell whether a conversion's `converted` is its exact conversion rounded to `decimals`.
+
+    Args:
+        decimals: The precision sent.
+        row: The conversion.
+
+    Returns:
+        True when the amount times `last.bid` or `last.ask`, rounded to `decimals` places, is
+        `converted`.
+    """
+    return any(
+        pair is not None and _rounds_to(pair[1], decimals, pair[0]) for pair in _exact(row).values()
+    )
+
+
+def _rounding(row: Row) -> str:
+    """Describe the decimals a conversion's `converted` was rounded to, for the evidence.
+
+    Args:
+        row: The conversion.
+
+    Returns:
+        A line naming `converted` and, for each side of the quote, the fewest decimals, 0 to
+        12, at which the amount times that price rounds to `converted`, or that none does.
+        A conversion rounded to 5 decimals whose fifth is 0 reads as 4.
+    """
+    sides = []
+    for side, pair in _exact(row).items():
+        if pair is None:
+            sides.append(f"no amount x last.{side}")
+            continue
+        converted, exact = pair
+        decimals = next((n for n in range(13) if _rounds_to(exact, n, converted)), None)
+        rounded = "matches no rounding" if decimals is None else f"rounded to {decimals} decimals"
+        sides.append(f"amount x last.{side} = {exact:.12f} {rounded}")
+    return f"converted={row.get('converted')}: " + "; ".join(sides)
+
+
 def _field_is(key: str, wanted: object, row: Row) -> bool:
     """Tell whether a row's field holds a value, for a `BadRequest.match`.
 
@@ -370,12 +472,18 @@ def _conversion_requests() -> dict[str, tuple[BadRequest, ...]]:
     return {
         PRECISION: (
             BadRequest(
-                label="precision=5",
+                label=f"precision={_PRECISION_SENT}",
                 path=_CONVERSION,
                 names=aud_usd,
-                query={"amount": 100, "precision": "5"},
+                query={"amount": _PRECISION_AMOUNT, "precision": str(_PRECISION_SENT)},
                 bucket="currencies",
                 as_text=frozenset({"precision"}),
+                match=partial(_rounded_to, _PRECISION_SENT),
+                matching=(
+                    f"with `converted` the amount times `last.bid` or `last.ask` rounded to "
+                    f"{_PRECISION_SENT} decimals"
+                ),
+                note=_rounding,
             ),
         ),
         AMOUNT: tuple(
@@ -651,12 +759,12 @@ def _bar_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
         ),
         START_AFTER_NOW: (
             _stock_bars(
-                "bars from 30 days ahead to today",
+                "bars from 10 to 20 days ahead",
                 1,
                 "day",
-                start=today + timedelta(days=30),
-                end=today,
-                empty=empty,
+                start=today + timedelta(days=10),
+                end=today + timedelta(days=20),
+                empty="inside the range, which holds no bar yet",
             ),
         ),
     }
