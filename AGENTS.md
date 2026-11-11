@@ -117,10 +117,13 @@ These protect the owner's repository, money, and secrets.
   shadows a builtin or causes a real user error gets a descriptive name mapped to the wire name
   (`ticker_type`, not `type_`).
 - **One name per field.** A column for a field Massive also serves in another dataset takes
-  the name that dataset already uses, so a user's query strings work across tables. Check every
-  new or changed dataset's columns against the existing ones; a match that is suspected but not
-  proven from Massive's documentation goes to the owner for a verdict, with both fields'
-  documentation quoted.
+  the name that dataset already uses, so a user's query strings work across tables. The spec
+  refresh's `field-spelling` gate stops on fields Massive describes alike; it can't see fields
+  described in other words, so also compare a new dataset's columns with those of datasets
+  serving the same objects (`docs/dev/spec-refresh.md`). A match proven from Massive's
+  documentation of both fields, their types, and units gets one name through an
+  `overrides.SPELLINGS` entry; a suspected but unproven match keeps its names and goes to the
+  owner for a verdict, with both fields' documentation quoted and a live test that settles it.
 - **Supply Massive's data; never repair it.** Users must see what Massive sent: convert
   faithfully (units, types, column names, canonical symbols), and never fill, correct, filter
   out, re-stamp, or replace a value to make vendor data look right. When it is wrong, record
