@@ -376,8 +376,16 @@ class _PublicApiWalk:
 
     def check_raises(self, function: Callable[..., object], where: str) -> None:
         """Check that each exception a `Raises:` section documents is builtin or public."""
-        public_names = {path.rpartition(".")[2] for path in self.public.values()}
+        public_paths = set(self.public.values())
+        public_names = {path.rpartition(".")[2] for path in public_paths}
         for name in _documented_raises(function):
+            module, _, short = name.rpartition(".")
+            if module:
+                # A path names the public module it comes from; `dm` is the package's alias.
+                module = "deephaven_massive" if module == "dm" else module
+                if f"{module}.{short}" not in public_paths:
+                    self.findings.add(f"{where} raises: {name}")
+                continue
             builtin = getattr(builtins, name, None)
             is_builtin = isinstance(builtin, type) and issubclass(builtin, BaseException)
             if not is_builtin and name not in public_names:
@@ -403,7 +411,7 @@ def _documented_raises(function: Callable[..., object]) -> frozenset[str]:
     """Return the exception names a function's Google `Raises:` section lists.
 
     Returns:
-        Each name, without its module path, such as `MassiveError` for `dm.MassiveError`.
+        Each name as written, such as `MassiveError` or `dm.MassiveError`.
     """
     names: set[str] = set()
     inside = False
@@ -413,7 +421,7 @@ def _documented_raises(function: Callable[..., object]) -> frozenset[str]:
         elif inside and line and not line.startswith(" "):
             inside = False
         elif inside and (entry := _RAISES_ENTRY.match(line)) is not None:
-            names.add(entry.group(1).rpartition(".")[2])
+            names.add(entry.group(1))
     return frozenset(names)
 
 
@@ -561,6 +569,15 @@ def _documents_a_private_error(self: object) -> None:
     raise NotImplementedError
 
 
+def _documents_a_private_path(self: object) -> None:
+    """Fail.
+
+    Raises:
+        deephaven_massive._errors.MassiveError: Never; a public type, but by a private path.
+    """
+    raise NotImplementedError
+
+
 class _Stocks:
     """A stand-in for the private namespace class `m.stocks` once declared."""
 
@@ -585,6 +602,10 @@ _Stocks.__module__ = "deephaven_massive._session"
         (_private_default, "planted(value=): _Hidden"),
         (property(_planted({"return": "_Stocks"})), "planted ->: _Stocks"),
         (_documents_a_private_error, "planted raises: RowDataError"),
+        (
+            _documents_a_private_path,
+            "planted raises: deephaven_massive._errors.MassiveError",
+        ),
         (_Hidden(), "planted: _Hidden"),
     ],
 )
