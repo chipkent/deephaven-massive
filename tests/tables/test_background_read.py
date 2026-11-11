@@ -889,8 +889,10 @@ def test_a_done_read_with_a_released_result_no_longer_holds_its_session(
         until_done(stream_rows)
         massive_session.release(result)
     del result
-    until(lambda: not core._workers)
-    assert not core._in_live
+    # The session leaves the live set once the read's record is gone and the reaper has let go
+    # of this test's own `m.streams()` views. Other threads make both changes, and each
+    # updates the live set last, so the test waits for the live set itself.
+    until(lambda: not core._in_live)
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", count)
     assert [tickers(table, dh_to_pylist) for table in derived] == [["AAPL"][:count]] * 2
