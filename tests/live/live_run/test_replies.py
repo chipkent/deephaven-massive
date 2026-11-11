@@ -148,7 +148,7 @@ def test_a_data_example_that_raises_after_a_reply_fails_with_the_error(
     fake_rest.reply("/v1/marketstatus/now", Reply({"market": "open"}))
 
     def fetch_then_fail(m: MassiveSession, today: date) -> None:
-        m.reference.market_status().fetch()
+        m.reference.market_status().fetch(wait=True)
         raise dm.MassiveError("after the reply")
 
     status, reason = replies.run_example(

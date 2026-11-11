@@ -26,8 +26,9 @@ decides which requests share one, how long each read waits, and what the user is
 - **Patience.** Each read decides how long it waits out pauses (`read_patience`): `READ_PATIENCE`
   (10 minutes of pauses), or `CONSOLE_PATIENCE` (90 s) for a read made while its thread holds the
   Deephaven update graph's lock, as a console command does, since every table of the process
-  stops updating meanwhile; that read's give-up error then names `wait=False`, whose background
-  read holds no lock and so waits out the full 10 minutes. A read that gives up fails alone;
+  stops updating meanwhile; that read's give-up error then advises leaving out `wait=True`,
+  since a background read, the default of `fetch()` and `history()`, holds no lock and so waits
+  out the full 10 minutes. A read that gives up fails alone;
   the bucket keeps pausing and probing for every other read.
 - **Refusal notices.** `RateLimitNotices` is the REST client's refusal hook: the first 429 of
   each subscription in a session logs one INFO line that says what happened and what to do.
@@ -116,8 +117,8 @@ of the process stops updating meanwhile, so it gives up sooner."""
 
 CONSOLE_ADVICE: Final = (
     f"this read ran inside a Deephaven console command, which waits out only "
-    f"{CONSOLE_PATIENCE:.0f} s of pauses; pass wait=False to fetch() or history() to read in "
-    f"the background, which waits out {READ_PATIENCE / 60:.0f} min"
+    f"{CONSOLE_PATIENCE:.0f} s of pauses; leave out wait=True to let fetch() or history() read "
+    f"in the background, which waits out {READ_PATIENCE / 60:.0f} min"
 )
 """The remedy a console read's give-up error ends with (`Patience.advice`)."""
 
@@ -170,8 +171,9 @@ def read_patience(exec_ctx: ExecutionContext) -> Patience:
     A read waits out `READ_PATIENCE` (10 minutes) of pauses, or `CONSOLE_PATIENCE` (90 s)
     when its thread holds the Deephaven update graph's lock, as a console command does: no
     table of the process updates meanwhile. Only pauses count; waiting for a paced slot never
-    does. The console's patience carries `CONSOLE_ADVICE`, so its give-up error names
-    `wait=False`; a background read's thread holds no lock and gets the full patience. Call it
+    does. The console's patience carries `CONSOLE_ADVICE`, so its give-up error advises
+    leaving out `wait=True`; a background read's thread holds no lock and gets the full
+    patience. Call it
     on the read's own thread, before any fan-out and outside every library lock, since it asks
     Deephaven (a Java call); pass the result to every request of the read. It logs nothing: the
     line that starts the read (a `fetch()` call's, or a `poll()` cycle's) names its seconds.
@@ -603,7 +605,8 @@ def announce(
     Deephaven console command does, holds every live table of the server still while it runs,
     so its paced line is a WARNING instead, which says so and names the remedy: "stocks.bars
     history: 250 requests; paced at 5 requests a minute (stocks); this command will pause every
-    live table on the server for at least 49 min: pass wait=False to read in the background".
+    live table on the server for at least 49 min: leave out wait=True to read in the
+    background".
 
     Args:
         governor: The session's governor.
@@ -622,8 +625,8 @@ def announce(
             if seconds >= _MINUTE and pauses_live_tables:
                 logger.warning(
                     "%s: %s; paced at %d requests a minute (%s); this command will pause every "
-                    "live table on the server for at least %d min: pass wait=False to read in "
-                    "the background",
+                    "live table on the server for at least %d min: leave out wait=True to read "
+                    "in the background",
                     read,
                     what,
                     rate,

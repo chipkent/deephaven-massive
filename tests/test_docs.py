@@ -468,7 +468,9 @@ def test_the_backfill_example_merges_history_with_live_bars(
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     rows = _wait_for_rows(names["spy"], lambda rows: len(rows) == 2, dh_to_pylist)
-    # Today's minute from history, then the live minute after it, oldest first.
+    # Today's minute from history and the live minute after it. History reads in the
+    # background, so either may land first: the rows are compared oldest first.
+    rows.sort(key=lambda r: r["TimestampStart"])
     assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),

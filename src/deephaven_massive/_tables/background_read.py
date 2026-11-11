@@ -1,10 +1,12 @@
-"""Background reads: `fetch(wait=False)` and `history(..., wait=False)`, one thread each.
+"""Background reads: `fetch()` and `history()` without `wait=True`, each a task of the read pool.
 
-A static verb called with `wait=False` returns at once a refreshing table with the dataset's
-columns and no rows. A library thread of its own, the *read*, runs the same transport call
-`wait=True` makes, so the whole static result is built off the update graph's lock; the
-complete result then appears in that table in one update cycle, and the table never changes
-again. It is never half loaded.
+`fetch()` and `history()` of a static set of symbols return at once, by default, a refreshing
+table with the dataset's columns and no rows. A task on the session's read pool
+(`_tables/read_pool.py`), the *read*, runs the same transport call `wait=True` makes, so the
+whole static result is built off the update graph's lock; the complete result then appears in
+that table in one update cycle, and the table never changes again. It is never half loaded.
+The pool runs at most `MassiveConfig.max_concurrency` reads at once; a read that waits for a
+thread is `LOADING` meanwhile.
 
 **How the rows land without a copy.** The result ungroups an append-only blink table whose
 columns are the dataset's columns as vectors, the definition `group_by()` gives a table of the
@@ -58,8 +60,8 @@ comes after the read published its rows fails nothing: the rows land on the next
 the row is marked `DONE` at once (`BackgroundRead.fail`), while the session still shows it.
 
 **Threads and locks.** `open_read` runs on the caller thread, which may hold the update graph's
-lock (a console command): it creates tables, registers the row, and starts the thread, and
-waits for nothing. The read's thread enters the session's execution context; it holds no lock
+lock (a console command): it creates tables, registers the row, and submits the read to the
+pool, and waits for nothing. The read enters the session's execution context; it holds no lock
 while the transport call runs, so its rate-limit patience is the full `READ_PATIENCE`, not the
 console's. Its publish lock serializes the one `add` with a failure, so the table either gets
 its rows or fails, never both; only `registry_lock` is taken below it. Every other method is
@@ -123,9 +125,9 @@ larger result is grouped in slices of this size, all published in the one `add`.
 go once Deephaven ships a fix."""
 
 BACKGROUND_NOTE: Final = (
-    "Read in the background (wait=False): no rows until the download completes, then the "
-    "complete result in one update, which never changes; m.streams() shows LOADING, then DONE "
-    "or FAILED."
+    "Read in the background: no rows until the download completes, then the complete result "
+    "in one update, which never changes; m.streams() shows LOADING, then DONE or FAILED. "
+    "wait=True waits for the rows instead."
 )
 """The sentence a background read's table description ends with. Deephaven fixes a table's
 description when the table is created, so it states the behaviour; `m.streams()` shows the
@@ -133,13 +135,13 @@ progress."""
 
 
 class BackgroundRead:
-    """One background read: its thread, the publisher of its one `add`, and its stop token.
+    """One background read: its pool task, the publisher of its one `add`, and its stop token.
 
     Created by `open_read` on the caller thread, which builds the table, registers the read
-    with the session, and then starts its thread (`start`). The thread enters the session's
-    execution context, runs the transport call, and publishes the static result as rows of
-    the blink table, or fails the table. `release` and `fail` are the session's hooks and are
-    safe from any thread. The publish lock makes the one `add` and a failure exclusive, and
+    with the session, and then submits it to the session's read pool (`start`). The task enters
+    the session's execution context, runs the transport call, and publishes the static result as
+    rows of the blink table, or fails the table. `release` and `fail` are the session's hooks
+    and are safe from any thread. The publish lock makes the one `add` and a failure exclusive, and
     each happens at most once.
     """
 
@@ -148,6 +150,7 @@ class BackgroundRead:
         "_call",
         "_columns",
         "_core",
+        "_done",
         "_exec_ctx",
         "_failed",
         "_name",
@@ -157,7 +160,6 @@ class BackgroundRead:
         "_run",
         "_started",
         "_stop",
-        "_thread",
     )
 
     def __init__(
@@ -171,12 +173,12 @@ class BackgroundRead:
         stop: threading.Event,
         run: Callable[[threading.Event], Table],
     ) -> None:
-        """Prepare the read; nothing is requested, and the thread is not started yet.
+        """Prepare the read; nothing is requested, and nothing is submitted to the pool yet.
 
         Args:
             core: The session's core, held weakly.
             name: The dataset's name, such as `"stocks.trades"`, for the failure messages.
-            call: The call's id: the read's `StreamId`, its thread's name, and its log lines.
+            call: The call's id: the read's `StreamId` and its log lines.
             columns: The dataset's columns in schema order, the result's definition, which the
                 static result is viewed as before it is grouped and published.
             publisher: The blink table's publisher (`blink_publisher`).
@@ -196,14 +198,19 @@ class BackgroundRead:
         self._failed = False
         self._published: int | None = None
         self._started = time.monotonic()
-        self._thread = threading.Thread(
-            target=self._read, name=f"{core.thread_prefix} read-{call}", daemon=True
-        )
+        self._done = threading.Event()
 
-    @property
-    def thread(self) -> threading.Thread:
-        """The read's thread."""
-        return self._thread
+    def join(self, timeout: float) -> bool:
+        """Wait until the read's task has run, for at most `timeout` seconds.
+
+        Args:
+            timeout: The most seconds to wait.
+
+        Returns:
+            True once the task has run; False when it is still waiting or running, or was
+            dropped by the pool's stop.
+        """
+        return self._done.wait(timeout)
 
     @property
     def stopped(self) -> bool:
@@ -211,11 +218,18 @@ class BackgroundRead:
         return self._stop.is_set()
 
     def start(self) -> None:
-        """Start the thread, which begins the transport call at once."""
-        self._thread.start()
+        """Submit the read to the session's read pool, which runs it once a thread is free.
+
+        A pool that has stopped refuses it: the session closed after the read was registered,
+        and the close failed its table already. The read is stopped then, and nothing runs.
+        """
+        core = cast("SessionCore", self._core())  # the caller holds the session
+        if not core.reads.submit(self._read):
+            logger.debug("call %d: the read pool stopped; the read never runs", self._call)
+            self._stop.set()
 
     def abandon(self) -> None:
-        """Stop a read whose thread will never start (`SessionCore.track_worker`)."""
+        """Stop a read that will never be submitted (`SessionCore.track_worker`)."""
         self._stop.set()
 
     def release(self) -> None:
@@ -263,15 +277,25 @@ class BackgroundRead:
         return False
 
     def _read(self) -> None:
-        """The thread: run the transport call, then publish its result or fail the table.
+        """The pool task: run the transport call, then publish its result or fail the table.
 
-        A read stopped meanwhile (its result released and unused, or the session closed)
-        publishes nothing and logs only at DEBUG, whatever the call returned or raised. A
+        A read stopped before its turn came (its result released and unused, or the session
+        closed) makes no request. One stopped meanwhile publishes nothing and logs only at
+        DEBUG, whatever the call returned or raised. A
         `MassiveError` fails the table as it is; anything else is a defect of the library, logged
         at ERROR with its traceback and how to report it, and fails the table with a
         `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`).
         """
-        core = cast("SessionCore", self._core())  # registered before the thread started
+        try:
+            if self._stopped_by("no request: it was stopped before its turn"):
+                return
+            self._read_now()
+        finally:
+            self._done.set()
+
+    def _read_now(self) -> None:
+        """Run the transport call and publish its result or fail the table, as `_read` says."""
+        core = cast("SessionCore", self._core())  # registered before the task was submitted
         with entered(self._exec_ctx):
             try:
                 self._publish(core, self._run(self._stop))
@@ -526,12 +550,12 @@ def open_read(
     note: str | None,
     run: Callable[[threading.Event], Table],
 ) -> Table:
-    """Create a background read's table and start its thread.
+    """Create a background read's table and submit the read to the session's read pool.
 
     On the caller thread: the result is created inside its own liveness scope (in the
     session's execution context); the read's row is registered in `m.streams()` as `LOADING`,
     which keeps the session alive while the read is in use; and the result is tracked, so
-    that releasing it marks the row released. Only then does the thread start, unless the
+    that releasing it marks the row released. Only then is the read submitted, unless the
     session closed meanwhile: the result is then released and the closed session's
     `MassiveError` raised. If any step raises, even `KeyboardInterrupt`, every step already
     taken is undone and nothing keeps running. Nothing here waits, so it works on a thread
@@ -549,16 +573,17 @@ def open_read(
             `Transport`.
         note: The sentence the table description adds after the dataset's summary (a
             `history()` table's source), or None.
-        run: Runs the transport call with the read's stop token, on the read's thread, and
-            returns its static table in the dataset's schema.
+        run: Runs the transport call with the read's stop token, on a thread of the read pool,
+            and returns its static table in the dataset's schema.
 
     Returns:
         The refreshing result: every column of the dataset and no rows, until the read lands.
 
     Raises:
-        MassiveError: If the session closed after the read was registered but before its
-            thread started (`"MassiveSession #1 is closed"`). One closed before the read
+        MassiveError: If the session closed after the read was registered but before the
+            read was submitted (`"MassiveSession #1 is closed"`). One closed before the read
             could be registered raises the `MassiveError` of `SessionCore.track_worker`.
+            A close after the read was submitted fails its table instead.
     """
     stop = core.read_stop()
     with entered(core.exec_ctx):

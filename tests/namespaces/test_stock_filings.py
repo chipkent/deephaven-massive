@@ -213,7 +213,7 @@ def test_insider_datasets_normalize_every_documented_field(
 ) -> None:
     path = cast("str", spec_of(name).fetch_path)
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
-    table = cast("Query", factory(rest_session, name)()).fetch()
+    table = cast("Query", factory(rest_session, name)()).fetch(wait=True)
     assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "10000"})]
     (row,) = table_rows(table)
     # Every row carries the instant its page arrived, last.
@@ -246,7 +246,7 @@ def test_a_13f_row_without_its_filer_is_dropped(
     count = len(body["results"])
     del body["results"][1]["filer_cik"]
     fake_rest.reply(path, Reply(body=body))
-    rows = table_rows(rest_session.stocks.filings.institutional_holdings().fetch())
+    rows = table_rows(rest_session.stocks.filings.institutional_holdings().fetch(wait=True))
     assert len(rows) == count - 1
     assert None not in [row["FilerCik"] for row in rows]
 
@@ -432,7 +432,7 @@ def test_a_filing_without_a_ticker_keeps_a_null_symbol(
     first = body["results"][0]
     body["results"] = [first, {k: v for k, v in first.items() if k != "ticker"}]
     fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("Query", factory(rest_session, name)()).fetch())
+    out = table_rows(cast("Query", factory(rest_session, name)()).fetch(wait=True))
     assert [row["Symbol"] for row in out] == [first["ticker"], None]
     key = spec_of(name).keys_for(R, path).symbol
     assert key is not None

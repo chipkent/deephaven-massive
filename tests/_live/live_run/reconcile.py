@@ -94,7 +94,7 @@ def _history(
         "indices-minute-bars": lambda: m.indices.bars(symbols, dm.Timespan.MINUTE),
         "futures-minute-bars": lambda: m.futures.bars(symbols, dm.Timespan.MINUTE),
     }
-    table: Table = queries[stream]().history(first, last, source=rest)
+    table: Table = queries[stream]().history(first, last, source=rest, wait=True)
     return table
 
 

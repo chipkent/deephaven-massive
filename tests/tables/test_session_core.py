@@ -1283,7 +1283,7 @@ def test_a_long_verb_in_a_console_command_is_reported_once_per_pause(
         assert message.startswith(
             f"{label(massive_session)}: m.test.trades().append_only() ran for "
         )
-        assert "until the command ends; pass wait=False to fetch() or history() to read" in message
+        assert "the command ends; leave out wait=True to let fetch() or history() read" in message
         caplog.clear()
         next_update_cycle()  # the live tables updated again: the pause ended
         console_command(lambda: made.append(q.ring(7)))

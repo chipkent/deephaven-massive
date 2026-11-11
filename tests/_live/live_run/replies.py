@@ -121,84 +121,89 @@ EXAMPLES: Final = (
     Example(
         "nvda-daily-2024-06-adjusted",
         lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY).history(
-            "2024-06-03", "2024-06-14", source=_REST
+            "2024-06-03", "2024-06-14", source=_REST, wait=True
         ),
         history=("stocks", date(2024, 6, 3)),
     ),
     Example(
         "nvda-daily-2024-06-as-traded",
         lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
-            "2024-06-03", "2024-06-14", source=_REST
+            "2024-06-03", "2024-06-14", source=_REST, wait=True
         ),
         history=("stocks", date(2024, 6, 3)),
     ),
-    Example("nvda-splits", lambda m, _: m.stocks.splits("NVDA").fetch()),
-    Example("market-status", lambda m, _: m.reference.market_status().fetch()),
-    Example("market-holidays", lambda m, _: m.reference.market_holidays().fetch()),
+    Example("nvda-splits", lambda m, _: m.stocks.splits("NVDA").fetch(wait=True)),
+    Example("market-status", lambda m, _: m.reference.market_status().fetch(wait=True)),
+    Example("market-holidays", lambda m, _: m.reference.market_holidays().fetch(wait=True)),
     Example(
-        "ticker-details", lambda m, _: m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch()
+        "ticker-details",
+        lambda m, _: m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch(wait=True),
     ),
     Example(
         "daily-bars-last-year",
         lambda m, today: m.stocks.bars(_COMPANIES, dm.Timespan.DAY).history(
-            *_last_year(today), source=_REST
+            *_last_year(today), source=_REST, wait=True
         ),
     ),
     Example(
         "dividends-last-year",
         lambda m, today: m.stocks.dividends(
             _COMPANIES, start=_last_year(today)[0], end=_last_year(today)[1]
-        ).fetch(),
+        ).fetch(wait=True),
     ),
     Example(
         "nvda-minute-bars-last-trading-day",
         lambda m, today: m.stocks.bars("NVDA", dm.Timespan.MINUTE).history(
-            trading_day_before(today), trading_day_before(today), source=_REST
+            trading_day_before(today), trading_day_before(today), source=_REST, wait=True
         ),
     ),
-    Example("nvda-previous-day-bar", lambda m, _: m.stocks.previous_day_bar("NVDA").fetch()),
+    Example(
+        "nvda-previous-day-bar", lambda m, _: m.stocks.previous_day_bar("NVDA").fetch(wait=True)
+    ),
     Example(
         "treasury-yields-last-month",
-        lambda m, today: m.economy.treasury_yields(start=today - timedelta(days=31)).fetch(),
+        lambda m, today: m.economy.treasury_yields(start=today - timedelta(days=31)).fetch(
+            wait=True
+        ),
     ),
     Example(
         "unknown-ticker-details",
-        lambda m, _: m.reference.ticker_details("ZZZZZQ").fetch(),
+        lambda m, _: m.reference.ticker_details("ZZZZZQ").fetch(wait=True),
         expects=REPLY,
     ),
     Example(
         "refusal-stocks-starter",
-        lambda m, _: m.stocks.snapshots("AAPL").fetch(),
+        lambda m, _: m.stocks.snapshots("AAPL").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("stocks", "basic"),
     ),
     Example(
         "refusal-stocks-developer",
-        lambda m, _: m.stocks.last_trade("AAPL").fetch(),
+        lambda m, _: m.stocks.last_trade("AAPL").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("stocks", "starter"),
     ),
     Example(
         "refusal-stocks-advanced",
-        lambda m, _: m.stocks.last_quote("AAPL").fetch(),
+        lambda m, _: m.stocks.last_quote("AAPL").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("stocks", "developer"),
     ),
     Example(
         "refusal-options-starter",
-        lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(),
+        lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("options", "basic"),
     ),
     Example(
         "refusal-indices-starter",
-        lambda m, _: m.indices.snapshots("I:SPX").fetch(),
+        lambda m, _: m.indices.snapshots("I:SPX").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("indices", "basic"),
     ),
     Example(
         "refusal-currencies-starter",
-        lambda m, _: m.forex.last_quote("C:EURUSD").fetch(),
+        lambda m, _: m.forex.last_quote("C:EURUSD").fetch(wait=True),
         expects=REFUSAL,
         only_tier=("currencies", "basic"),
     ),
@@ -211,7 +216,7 @@ EXAMPLES: Final = (
     ),
     Example(
         "refusal-futures-starter",
-        lambda m, _: m.futures.snapshots(dm.ALL, product_code="ES", limit=1).fetch(),
+        lambda m, _: m.futures.snapshots(dm.ALL, product_code="ES", limit=1).fetch(wait=True),
         expects=REFUSAL,
         only_tier=("futures", "basic"),
     ),

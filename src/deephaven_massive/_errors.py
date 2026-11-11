@@ -35,9 +35,9 @@ Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` 
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
 synchronously on the calling thread.
 
-Static verbs (`fetch()`, `history()`) raise these exceptions directly; with `wait=False`, a
-failure after the call has returned fails the verb's table instead of raising (a parameter
-mistake still raises at the call). A live table fails with
+Static verbs (`fetch()`, `history()`) read in the background by default: a failure after the
+call has returned fails the verb's table instead of raising (a parameter mistake still raises
+at the call). With `wait=True` they raise these exceptions directly. A live table fails with
 one (its publisher's `publish_failure`), so the failure shows where Deephaven users look; it is
 also logged, at the level its cause gives, and shown in `m.streams()`.
 
@@ -142,9 +142,9 @@ class MassiveError(Exception):
     the retries, or a closed session. The message names the host, the dataset, and Massive's own
     text. To branch on the failure, read `status`, such as 404 or 429, instead of the message.
 
-    A static `fetch()` or `history()` raises the error. A live table, or a call with `wait=False`,
-    fails with it instead: the table shows the error, the log records it, and `m.streams()` lists
-    it.
+    A `fetch()` or `history()` with `wait=True` raises the error. A live table, including the
+    table `fetch()` and `history()` return by default, fails with it instead: the table shows the
+    error, the log records it, and `m.streams()` lists it.
 
     Example:
         Catch every failure of the library, and branch on the HTTP status::

@@ -405,7 +405,7 @@ def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBas
 def fetch(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> list[dict[str, Any]]:
     q = query(m, spec, **kwargs)
     assert isinstance(q, Query)
-    return rows(q.fetch())
+    return rows(q.fetch(wait=True))
 
 
 def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
@@ -466,7 +466,7 @@ def test_iso_text_in_a_date_filter_is_sent_as_its_date(
     q = query(session, CONSTITUENTS, symbols="SPY", filters={"effective_date": "2025-09-18"})
     assert q._request.filters == (("effective_date", date(2025, 9, 18)),)
     assert isinstance(q, Query)
-    q.fetch()
+    q.fetch(wait=True)
     ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["effective_date"] == ["2025-09-18"]
     assert sent_query["composite_ticker"] == ["SPY"]
@@ -1622,7 +1622,7 @@ def test_order_without_sort_fails_on_a_chosen_path_without_order(
     q = query(session, CONTRACTS, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
     assert isinstance(q, Query)
     with pytest.raises(ValueError, match=r"does not take \['order'\]"):
-        q.fetch()
+        q.fetch(wait=True)
     assert fake_rest.requests == []
 
 
@@ -1725,7 +1725,7 @@ def test_an_explicit_adjusted_fails_on_a_path_without_it(
     q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
     assert isinstance(q, Query)
     with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
-        q.fetch()
+        q.fetch(wait=True)
     assert fake_rest.requests == []
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     fetch(session, SMA, symbols=["AAPL"], adjusted=False)
@@ -1751,7 +1751,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
     q = query(session, CONTRACTS, symbols=["O:SPY250117C00600000"], filters={"strike_price_gte": 1})
     assert isinstance(q, Query)
     with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-        q.fetch()
+        q.fetch(wait=True)
 
 
 def test_row_symbols_are_canonical(
@@ -2137,7 +2137,9 @@ def history(
 ) -> list[dict[str, Any]]:
     q = query(m, spec, **kwargs)
     assert isinstance(q, HistoryQuery)
-    return rows(q.history(cast("Any", start), cast("Any", end), source=HistorySource.REST))
+    return rows(
+        q.history(cast("Any", start), cast("Any", end), source=HistorySource.REST, wait=True)
+    )
 
 
 def test_history_bounds_a_timestamp_axis_exactly_and_pages(
@@ -2384,12 +2386,12 @@ def test_a_session_end_date_filter_needs_datetimes(
     q = query(session, FUTURES_TRADES, symbols=["ESH5"], filters={"session_end_date": "2025-01-21"})
     assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
-        q.history("2025-01-21", "2025-01-21", source=HistorySource.REST)
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []
     # With datetimes, the filter and the time range travel together.
     fake_rest.reply(FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([])))
     start = datetime(2025, 1, 21, 8, tzinfo=CHICAGO)
-    q.history(start, start + timedelta(hours=1), source=HistorySource.REST)
+    q.history(start, start + timedelta(hours=1), source=HistorySource.REST, wait=True)
     sent_query = fake_rest.get_queries()[0][1]
     assert sent_query["session_end_date"] == ["2025-01-21"]
     assert sent_query["timestamp.gte"] == [str(epoch_ns(start))]
@@ -2982,13 +2984,13 @@ def test_an_empty_range_returns_every_column_without_a_request(
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
     q = query(session, TRADES, symbols=["AAPL"])
     assert isinstance(q, HistoryQuery)
-    table = q.history(moment, moment, source=source)
+    table = q.history(moment, moment, source=source, wait=True)
     assert table.size == 0
     assert "Timestamp" in table.column_names
     # So is a range too short to hold one whole bar.
     bars = query(session, BARS, symbols=["AAPL"], timespan=Timespan.MONTH, adjusted=False)
     assert isinstance(bars, HistoryQuery)
-    assert bars.history("2025-03-05", "2025-03-20", source=source).size == 0
+    assert bars.history("2025-03-05", "2025-03-20", source=source, wait=True).size == 0
     assert fake_rest.get_queries() == []
 
 
@@ -3605,7 +3607,9 @@ def test_every_row_of_a_page_shares_the_instant_the_page_arrived(
     )
     q = query(session, TRADES, symbols=["AAPL"])
     assert isinstance(q, HistoryQuery)
-    out = rows(q.history("2025-03-03", "2025-03-03", source=HistorySource.REST), arrival=True)
+    out = rows(
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True), arrival=True
+    )
     first = {row["TimestampInsert"] for row in out if row["Price"] == 1.0}
     second = {row["TimestampInsert"] for row in out if row["Price"] == 2.0}
     assert len(first) == len(second) == 1
@@ -3625,7 +3629,7 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
     q = query(session, INDEX_LEVELS, symbols=["I:NDX", "I:SPX"])
     assert isinstance(q, Query)
-    table = q.fetch()
+    table = q.fetch(wait=True)
     row = rows(table)[0]
     assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
     assert string_objects(table, "Date") == 1  # the two rows share one stored string
@@ -3856,7 +3860,7 @@ def test_fetch_rows_reads_every_page_raw(
 def _join_reads(m: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end.
     for state in list(m._core._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(30.0)
+        cast("Any", state.fail).__self__.join(30.0)
 
 
 def test_a_background_fetch_checks_its_parameters_with_no_request(
@@ -3867,11 +3871,33 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     assert isinstance(q, Query)
     with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
         q.fetch(wait=False)
-    # A crypto pair is not split by the check, which would read Massive's ticker list.
+    # Without split_pairs, the check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
-    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
+    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request, split_pairs=False)
     assert fake_rest.requests == []
     assert session._core._workers == {}
+
+
+def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # As poll() does: a pair passed in code is code, so one Massive does not list raises
+    # before any table exists, whatever wait is. Only the crypto ticker list is read.
+    serve_pairs(fake_rest)
+    params = {"date": "2025-03-03"}
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(pair, Query)
+    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+        pair.fetch()
+    assert sent_data(fake_rest) == []
+    assert session._core._workers == {}
+    # A table's pair is data: the call returns, and the read follows unlisted_symbols.
+    table = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    from_table = query(session, CRYPTO_OPEN_CLOSE, symbols=table, params=params)
+    assert isinstance(from_table, Query)
+    result = from_table.fetch()
+    assert result.is_refreshing
+    session.release(result)
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(
@@ -3901,7 +3927,7 @@ def test_a_background_history_checks_its_plan_with_no_request(
         q = query(session, spec, symbols=tickers, timespan=Timespan.DAY)
         request = dataclasses.replace(q._request, start=first, end=last)
         window = history_window(spec, request, start=first, end=last, classes=())
-        rest.check_history(spec, request, window)
+        rest.check_history(spec, request, window, split_pairs=False)
     assert fake_rest.requests == []
 
 
@@ -3967,7 +3993,7 @@ def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
         )
         q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
         assert isinstance(q, Query)
-        table = q.fetch()
+        table = q.fetch(wait=True)
         assert [r["Symbol"] for r in rows(table)] == ["I:SPX"]
         description = table.attributes()["TableDescription"]
         assert description.endswith(
@@ -3986,7 +4012,7 @@ def test_an_unlisted_fetch_says_it_was_checked_like_its_poll(
     )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert isinstance(q, Query)
-    table = q.fetch()
+    table = q.fetch(wait=True)
     assert table.attributes()["TableDescription"].endswith(
         "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
         "MassiveConfig.delayed_subscriptions lists its subscription."
@@ -4289,7 +4315,7 @@ def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing
     )
     q = query(session, UNIFIED)
     assert isinstance(q, Query)
-    assert q.fetch().size == 1  # the row without a ticker is dropped as unreadable
+    assert q.fetch(wait=True).size == 1  # the row without a ticker is dropped as unreadable
 
 
 # --- Bounded and explaining log records ---------------------------------------------------------

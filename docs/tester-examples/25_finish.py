@@ -17,6 +17,6 @@ except dm.MassiveError as error:
 # A with block closes its session when the block ends.
 with dm.MassiveSession() as m2:
     last_week = m2.stocks.bars("NVDA", dm.Timespan.DAY).history(
-        yesterday - timedelta(days=6), yesterday
+        yesterday - timedelta(days=6), yesterday, wait=True
     )
 print(m2, last_week.size)

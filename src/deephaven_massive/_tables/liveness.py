@@ -19,9 +19,9 @@ a `ResultRecord`:
 4. The `Reaper`, one daemon thread per session, runs the job: it releases the result scope
    (under the update graph's shared lock, `release_scope`) and then calls the record's
    `on_released` callback, which for a stream decrements the stream's held-result count (and at
-   zero releases the stream scope), for a `poll()` table or a background read
-   (`wait=False`) marks its row released, and for a diagnostics view drops the session's count
-   of held views. A failing job is logged at ERROR
+   zero releases the stream scope), for a `poll()` table or a background read (a `fetch()` or
+   `history()` without `wait=True`) marks its row released, and for a diagnostics view drops the
+   session's count of held views. A failing job is logged at ERROR
    and the thread carries on.
  Releasing a result scope drops the library's liveness reference only. A table the user derived from
 the result, an open UI panel, or a user liveness scope keeps the Java table alive, and with it the

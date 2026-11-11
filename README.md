@@ -163,8 +163,10 @@ m = dm.MassiveSession()
 apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 ```
 
-`apple` has five rows, one per trading day, with columns such as `Date`, `Open`, `High`, `Low`,
-`Close`, and `Volume`.
+`apple` fills in with five rows, one per trading day, with columns such as `Date`, `Open`,
+`High`, `Low`, `Close`, and `Volume`. `history()` returns at once, and the rows arrive together
+when the download finishes, so the console is free meanwhile. To wait for the rows instead,
+pass `wait=True`.
 
 `m` is the session, your connection to Massive. Every dataset works the same way through it.
 `m.stocks.bars(...)` is a query, which names the data and reads nothing. `history()` and the
@@ -216,7 +218,7 @@ from deephaven import agg
 
 m = dm.MassiveSession()
 year = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
-    "2025-11-03", "2026-10-30", wait=False
+    "2025-11-03", "2026-10-30"
 )
 returns = year.agg_by(
     [agg.sorted_first("Date", "Start = Close"), agg.sorted_last("Date", "End = Close")],
@@ -225,10 +227,9 @@ returns = year.agg_by(
 ```
 
 `returns` has one row per stock, with its close on the first and last day and its percent
-return. It starts empty and fills in when the download finishes.
-
-With `wait=False`, `history()` hands back `year` at once and reads its rows in the background,
-so the console stays free while Basic's request limit paces the download.
+return. It starts empty and fills in when the download finishes: Deephaven updates a table
+built on `year` when `year`'s rows arrive. The console stays free while Basic's request limit
+paces the download.
 
 Dates are `yyyy-MM-dd` text in every table, so they sort by day and join across tables. A range
 includes both of its dates, and for stocks a date is the trading day in New York.
@@ -371,8 +372,8 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 ```
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
-`TodaysChangePerc`. On Starter or Developer without the setting, the same call raises
-`dm.EntitlementError`.
+`TodaysChangePerc`. On Starter or Developer without the setting, the read is refused: the table
+fails, and the `Error` of its row in `m.streams()` names the setting to change.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)

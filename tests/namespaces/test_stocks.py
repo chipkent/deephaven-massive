@@ -727,7 +727,7 @@ def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSes
         assert not hasattr(query, "fetch")
         assert not hasattr(query, "poll")
     with pytest.raises(AttributeError, match=r"use m\.stocks\.last_trade\(\.\.\.\)\.fetch\(\)"):
-        cast("Any", namespace.trades("AAPL")).fetch()
+        cast("Any", namespace.trades("AAPL")).fetch(wait=True)
 
 
 def test_previous_day_bar_is_one_adjusted_day_by_default(
@@ -748,7 +748,7 @@ def test_last_trade_fetch_reads_each_symbols_last_trade(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_trade="/v2/last/trade/AAPL")
-    out = table_rows(rest_session.stocks.last_trade("AAPL").fetch())
+    out = table_rows(rest_session.stocks.last_trade("AAPL").fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [("/v2/last/trade/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["Price"], r["Size"]) for r in out] == [
         ("AAPL", 1617901342969834000, 129.8473, 25.0)
@@ -760,7 +760,7 @@ def test_last_quote_fetch_reads_each_symbols_last_nbbo(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, last_quote="/v2/last/nbbo/AAPL")
-    out = table_rows(rest_session.stocks.last_quote(["AAPL"]).fetch())
+    out = table_rows(rest_session.stocks.last_quote(["AAPL"]).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [("/v2/last/nbbo/AAPL", {})]
     assert [(r["Symbol"], r["Timestamp"], r["BidPrice"], r["AskPrice"]) for r in out] == [
         ("AAPL", 1617827221349730300, 127.96, 127.98)
@@ -785,7 +785,9 @@ def test_tick_history_over_rest_bounds_new_york_days(
 ) -> None:
     serve(fake_rest, load_fixture, **{name: path})
     query = cast("StreamHistoryQuery", factory(rest_session, name)("AAPL"))
-    out = table_rows(query.history("2018-02-02", "2018-02-02", source=dm.HistorySource.REST))
+    out = table_rows(
+        query.history("2018-02-02", "2018-02-02", source=dm.HistorySource.REST, wait=True)
+    )
     assert fake_rest.get_queries(one_value=True) == [
         (
             path,
@@ -806,7 +808,7 @@ def test_previous_day_bar_fetches_the_previous_session(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, bars_prev="/v2/aggs/ticker/AAPL/prev")
-    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch())
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [
         ("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})
     ]
@@ -833,7 +835,7 @@ def test_previous_day_bar_sends_adjusted_false_when_asked(
 ) -> None:
     body = json.loads(load_fixture(FIXTURES, "bars_prev.json"))
     fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "adjusted": False}))
-    out = table_rows(rest_session.stocks.previous_day_bar("AAPL", adjusted=False).fetch())
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL", adjusted=False).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [
         ("/v2/aggs/ticker/AAPL/prev", {"adjusted": "false"})
     ]
@@ -851,7 +853,7 @@ def test_previous_day_bar_refuses_a_bar_on_another_split_basis(
         match=r"^stocks\.previous_day_bar: Massive answered .* with adjusted=False although "
         r"adjusted=True was requested",
     ):
-        rest_session.stocks.previous_day_bar("AAPL").fetch()
+        rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True)
 
 
 def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -875,7 +877,7 @@ def test_previous_day_bar_serves_an_unexpected_stamp_with_a_warning(
     fake_rest.reply(
         "/v2/aggs/ticker/AAPL/prev", Reply({"status": "OK", "adjusted": True, "results": [bar]})
     )
-    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch())
+    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
         (None, stamp * 10**6, (stamp + 86_400_000) * 10**6, 115.97)
     ]
@@ -918,7 +920,9 @@ def test_bars_history_over_rest_fills_the_range_path(
     body = json.loads(load_fixture(FIXTURES, "bars_range.json"))
     fake_rest.reply(RANGE_PATH, Reply(body={**body, "adjusted": False}))
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
-    out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
+    out = table_rows(
+        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
+    )
     assert fake_rest.get_queries(one_value=True) == [
         (RANGE_PATH, {"adjusted": "false", "sort": "asc", "limit": "50000"})
     ]
@@ -943,7 +947,7 @@ def test_a_page_on_another_adjustment_basis_fails_the_call(
         match=r"^stocks\.bars: Massive answered .* with adjusted=True although adjusted=False was "
         r"requested, so the call would mix split-adjusted and as-traded prices",
     ):
-        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
+        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
 
 
 def test_a_symbol_without_data_returns_no_rows_but_a_cut_short_one_fails(
@@ -954,7 +958,9 @@ def test_a_symbol_without_data_returns_no_rows_but_a_cut_short_one_fails(
     fake_rest.reply(missing, Reply(status=404, body={"status": "NOT_FOUND"}))
     serve(fake_rest, load_fixture, bars_range=RANGE_PATH)
     query = rest_session.stocks.bars(["AAPL", "NOPE"], dm.Timespan.DAY)
-    out = table_rows(query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST))
+    out = table_rows(
+        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
+    )
     assert {r["Symbol"] for r in out} == {"AAPL"}
     # A 404 on a later page means the data was cut short: an error, never a short table.
     first = json.loads(load_fixture(FIXTURES, "bars_range.json"))
@@ -963,7 +969,7 @@ def test_a_symbol_without_data_returns_no_rows_but_a_cut_short_one_fails(
     fake_rest.reply("/v2/aggs/ticker/AAPL/next-page", Reply(status=404, body={"status": "x"}))
     with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: AAPL's data was cut short"):
         rest_session.stocks.bars("AAPL", dm.Timespan.DAY).history(
-            "2020-01-02", "2020-01-03", source=dm.HistorySource.REST
+            "2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True
         )
 
 
@@ -973,7 +979,9 @@ def test_all_daily_bars_read_the_grouped_daily_path(
     path = "/v2/aggs/grouped/locale/us/market/stocks/2020-10-14"
     serve(fake_rest, load_fixture, bars_grouped_daily=path)
     query = rest_session.stocks.bars(dm.ALL, dm.Timespan.DAY)
-    out = table_rows(query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST))
+    out = table_rows(
+        query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST, wait=True)
+    )
     assert fake_rest.get_queries(one_value=True) == [(path, {"adjusted": "true"})]
     # Grouped daily stamps its bars at the 16:00 close (1602705600000), moved to the day's start.
     assert {(r["Date"], r["TimestampStart"]) for r in out} == {
@@ -997,7 +1005,7 @@ def test_snapshots_split_a_long_watchlist_into_requests_of_250(
 ) -> None:
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
     symbols = [f"T{n:03d}" for n in range(251)]
-    rest_session.stocks.snapshots(symbols).fetch()
+    rest_session.stocks.snapshots(symbols).fetch(wait=True)
     sizes = sorted(len(q["tickers"].split(",")) for _, q in fake_rest.get_queries(one_value=True))
     assert sizes == [1, 250]
 
@@ -1006,7 +1014,7 @@ def test_snapshots_send_the_tickers_and_the_otc_flag(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
-    out = table_rows(rest_session.stocks.snapshots(["MSFT", "AAPL"]).fetch())
+    out = table_rows(rest_session.stocks.snapshots(["MSFT", "AAPL"]).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [
         (SNAPSHOTS_PATH, {"tickers": "AAPL,MSFT", "include_otc": "false"})
     ]
@@ -1020,7 +1028,7 @@ def test_snapshots_send_the_tickers_and_the_otc_flag(
         "LastTradePrice": 20.506,
     }
     assert "Timestamp" not in out[0]
-    full = table_rows(rest_session.stocks.snapshots(dm.ALL, include_otc=True).fetch())
+    full = table_rows(rest_session.stocks.snapshots(dm.ALL, include_otc=True).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True)[1] == (SNAPSHOTS_PATH, {"include_otc": "true"})
     assert len(full) == len(out)
 
@@ -1030,7 +1038,7 @@ def test_movers_fill_the_direction(
 ) -> None:
     path = "/v2/snapshot/locale/us/markets/stocks/losers"
     serve(fake_rest, load_fixture, movers=path)
-    out = table_rows(rest_session.stocks.movers(dm.Direction.LOSERS).fetch())
+    out = table_rows(rest_session.stocks.movers(dm.Direction.LOSERS).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [(path, {"include_otc": "false"})]
     assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
         "Symbol": "PDS",
@@ -1047,7 +1055,7 @@ def test_daily_open_close_requests_each_symbol_on_its_day(
 ) -> None:
     serve(fake_rest, load_fixture, daily_open_close="/v1/open-close/AAPL/2023-01-09")
     query = rest_session.stocks.daily_open_close("AAPL", date(2023, 1, 9), adjusted=False)
-    out = table_rows(query.fetch())
+    out = table_rows(query.fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [
         ("/v1/open-close/AAPL/2023-01-09", {"adjusted": "false"})
     ]
@@ -1276,7 +1284,7 @@ def test_list_datasets_send_their_exact_request(
     name, kwargs, path, query, (column, value) = call
     fixture, _ = SOURCES[path]
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, fixture))))
-    out = table_rows(cast("Query", factory(rest_session, name)(**kwargs)).fetch())
+    out = table_rows(cast("Query", factory(rest_session, name)(**kwargs)).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [(path, query)]
     assert out[0][column] == value
     listed = spec_of(name).ticker_list is not None
@@ -1288,7 +1296,7 @@ def test_limit_caps_the_rows_and_never_raises_the_page_size(
 ) -> None:
     path = "/stocks/filings/vX/index"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "filings_index.json"))))
-    out = table_rows(rest_session.stocks.filings.index(limit=1).fetch())
+    out = table_rows(rest_session.stocks.filings.index(limit=1).fetch(wait=True))
     # A cap below the page size asks for no more rows than it keeps.
     assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "1"})]
     assert [r["Symbol"] for r in out] == ["AAPL"]
@@ -1299,7 +1307,7 @@ def test_ipos_fan_out_one_request_per_ticker(
 ) -> None:
     path = "/vX/reference/ipos"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
-    table_rows(rest_session.stocks.ipos(["RAPP", "ACME"]).fetch())
+    table_rows(rest_session.stocks.ipos(["RAPP", "ACME"]).fetch(wait=True))
     assert sorted(q["ticker"] for _, q in fake_rest.get_queries(one_value=True)) == ["ACME", "RAPP"]
 
 
@@ -1318,7 +1326,7 @@ def test_ipos_send_their_own_order_without_sort(
 ) -> None:
     path = "/vX/reference/ipos"
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, "ipos.json"))))
-    rest_session.stocks.ipos(order=dm.Order.ASC).fetch()
+    rest_session.stocks.ipos(order=dm.Order.ASC).fetch(wait=True)
     assert fake_rest.get_queries(one_value=True) == [(path, {"order": "asc", "limit": "1000"})]
 
 
@@ -1581,10 +1589,10 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
         bars = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
         every = m.stocks.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)
         tables = [
-            bars.history(day, day, source=dm.HistorySource.REST),
-            every.history(day, day, source=dm.HistorySource.REST),
-            bars.history(day, day, source=dm.HistorySource.FLAT_FILES),
-            m.stocks.previous_day_bar("BCC").fetch(),
+            bars.history(day, day, source=dm.HistorySource.REST, wait=True),
+            every.history(day, day, source=dm.HistorySource.REST, wait=True),
+            bars.history(day, day, source=dm.HistorySource.FLAT_FILES, wait=True),
+            m.stocks.previous_day_bar("BCC").fetch(wait=True),
         ]
         stamped = [
             [
@@ -1610,7 +1618,9 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date(
         Reply({"status": "OK", "adjusted": True, "results": [{"t": sunday, "c": 1.0}]}),
     )
     week = rest_session.stocks.bars("AAPL", dm.Timespan.WEEK)
-    out = table_rows(week.history("2025-03-03", "2025-03-07", source=dm.HistorySource.REST))
+    out = table_rows(
+        week.history("2025-03-03", "2025-03-07", source=dm.HistorySource.REST, wait=True)
+    )
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (None, new_york_midnight_ns(date(2025, 3, 3)), new_york_midnight_ns(date(2025, 3, 8)))
     ]
@@ -1621,7 +1631,9 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date(
         Reply({"status": "OK", "adjusted": True, "results": [{"t": first, "c": 1.0}]}),
     )
     month = rest_session.stocks.bars("AAPL", dm.Timespan.MONTH)
-    out = table_rows(month.history("2024-06-03", "2024-06-28", source=dm.HistorySource.REST))
+    out = table_rows(
+        month.history("2024-06-03", "2024-06-28", source=dm.HistorySource.REST, wait=True)
+    )
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (None, new_york_midnight_ns(date(2024, 6, 3)), new_york_midnight_ns(date(2024, 6, 29)))
     ]
@@ -1642,7 +1654,9 @@ def test_bars_of_several_days_count_calendar_days_as_massive_does(
         Reply({"status": "OK", "adjusted": True, "results": results}),
     )
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, multiplier=2)
-    out = table_rows(query.history("2026-10-16", "2026-10-21", source=dm.HistorySource.REST))
+    out = table_rows(
+        query.history("2026-10-16", "2026-10-21", source=dm.HistorySource.REST, wait=True)
+    )
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (None, new_york_midnight_ns(day), new_york_midnight_ns(day + timedelta(days=2)))
         for day in days
@@ -1665,7 +1679,9 @@ def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
     fake_s3.put(
         key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{day + 13 * HOUR_NS},1\n")
     )
-    out = table_rows(query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES))
+    out = table_rows(
+        query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES, wait=True)
+    )
     assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
         ("BCC", "2024-11-29", day)
     ]
@@ -1675,7 +1691,9 @@ def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
     # it; one WARNING names it.
     afternoon = day + 29 * HOUR_NS // 2
     fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
-    odd = table_rows(query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES))
+    odd = table_rows(
+        query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES, wait=True)
+    )
     assert odd == []
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -1744,7 +1762,9 @@ def test_a_flat_file_block_round_trips(
     key = f"us_stocks_sip/{prefix}/2023/03/2023-03-28.csv.gz"
     fake_s3.put(key, make_csv_gz(load_fixture(FIXTURES, fixture).decode()))
     query = make(flat_session.stocks)
-    out = table_rows(query.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES))
+    out = table_rows(
+        query.history("2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES, wait=True)
+    )
     time = "TimestampStart" if "aggs" in prefix else "Timestamp"
     assert [(r["Symbol"], r[time], r[column]) for r in out] == expected
     assert {r["Date"] for r in out} == {"2023-03-28"}
@@ -1818,7 +1838,7 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
         rows.append({**first, field.wire_key: _other(first.get(field.wire_key), field.wire_type)})
     body[result_key] = rows
     fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("Query", make(rest_session)).fetch())
+    out = table_rows(cast("Query", make(rest_session)).fetch(wait=True))
     # A list key (`OtherManagers`) is compared as a tuple, so a set can hold it.
     keyed = [tuple(tuple(v) if isinstance(v := row[k], list) else v for k in keys) for row in out]
     assert len(set(keyed)) == len(rows)
@@ -1937,9 +1957,9 @@ def test_the_split_factors_adjust_bars_as_traded(
     }
     fake_rest.reply("/stocks/v1/splits", Reply({"status": "OK", "results": [split]}))
     bars = rest_session.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
-        "2024-06-07", "2024-06-10", source=dm.HistorySource.REST
+        "2024-06-07", "2024-06-10", source=dm.HistorySource.REST, wait=True
     )
-    splits = rest_session.stocks.splits("NVDA").fetch()
+    splits = rest_session.stocks.splits("NVDA").fetch(wait=True)
     adjusted = bars.raj(
         splits, on=["Symbol", "Date<ExecutionDate"], joins=["F=HistoricalAdjustmentFactor"]
     ).update(["F = isNull(F) ? 1.0 : F", "AdjClose = Close * F", "AdjVolume = Volume / F"])
