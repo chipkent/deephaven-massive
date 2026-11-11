@@ -1917,6 +1917,22 @@ def test_wait_false_reads_in_the_background(
     _released(massive_session, fetched, history)
 
 
+@pytest.mark.jvm_held  # the formula hands this frame's locals to the JVM
+def test_a_wait_false_result_takes_view_and_update_view(
+    massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    fetched = news(massive_session).fetch(wait=False)
+    history = trades(massive_session).history(
+        "2025-03-03", "2025-03-04", source=HistorySource.REST, wait=False
+    )
+    _join_reads(massive_session)
+    for result in (fetched, history):
+        first = result.columns[0].name
+        assert result.view([first]).column_names == [first]
+        assert result.update_view(f"Again = {first}").column_names[-1] == "Again"
+    _released(massive_session, fetched, history)
+
+
 def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(TypeError, match="wait must be a bool, not int"):
         news(massive_session).fetch(wait=cast("bool", 0))

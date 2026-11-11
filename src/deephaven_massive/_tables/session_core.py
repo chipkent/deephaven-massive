@@ -294,8 +294,11 @@ def _worker_table_shut_down(
     Runs on whichever thread dropped the table's last reference (the reaper, an update-graph
     thread after a failure, a gRPC thread, or Deephaven's liveness-cleanup thread), so it only
     sets a token and updates the registry (`SessionCore._worker_shut_down`). The session is
-    alive: the table's record keeps it in the live set until this has run, and before the
-    record exists the opening caller holds it.
+    alive unless the record left early: the table's record keeps it in the live set until this
+    has run, and before the record exists the opening caller holds it, except that a background
+    read's record leaves once the read is `DONE` and its result released, and its session may
+    then be freed while a derived table still uses the table. With the session gone there is
+    nothing to record.
 
     Args:
         core_ref: The session's core, weakly.
@@ -304,7 +307,9 @@ def _worker_table_shut_down(
         stop: The thread's stop token.
     """
     stop.set()
-    _call(core_ref, record, stream_id)
+    core = core_ref()
+    if core is not None:
+        record(core, stream_id)
 
 
 def _let_go(core: SessionCore) -> None:
@@ -327,9 +332,11 @@ def _collect_session(
     """Finalizer of a session freed without `close()`: clean up, without waiting.
 
     A freed core has, by the live set's rule, no running stream or poll and no held diagnostics
-    view. The closers (the session's leases on its connections, its REST client) are handed to
-    the reaper, which runs them, and the diagnostics writer's release is queued behind them, so
-    the rows they write are applied. That job waits for the writer to end, and the reaper's
+    view; a table derived from a finished background read may still keep that read's blink
+    table, which holds no failure pin and needs nothing from the session. The closers (the
+    session's leases on its connections, its REST client) are handed to the reaper, which runs
+    them, and the diagnostics writer's release is queued behind them, so the rows they write
+    are applied. That job waits for the writer to end, and the reaper's
     retirement is queued after it, so the reaper outlives the writer: a writer that dies hands
     its tables' failure pins and scope to the reaper (`Diagnostics`), which must still be there
     to release them. The reaper itself keeps running while results are still tracked and ends
@@ -420,7 +427,9 @@ class _WorkerState:
     own fills. Like a stream's record, it has two clocks: its one result's hold, and its blink
     table's shutdown. Releasing the result marks the row `RELEASED` and leaves the thread
     running (a derived table may still use the table); the shutdown stops the thread. The
-    record leaves the registry once both have happened.
+    record leaves the registry once both have happened, or, for a background read, once its
+    result is released and its row is `DONE`: its rows are in the table, and it has no thread
+    left to stop.
 
     Attributes:
         row: The table's current diagnostics row.
@@ -1455,8 +1464,9 @@ class SessionCore:
         registry, keeping the session alive and taking its thread's updates (`update_streams`,
         `fail_stream`, `record_stream_drift`, `finish_read`), until its result is released
         (`release_worker`) and its blink table has shut down (`_worker_shut_down`), in either
-        order. One short critical section under `registry_lock`; the row is queued for the
-        diagnostics writer.
+        order; a background read's leaves as soon as it is `DONE` and its result released,
+        since nothing of it needs the session then. One short critical section under
+        `registry_lock`; the row is queued for the diagnostics writer.
 
         Args:
             row: The table's first row: its `StreamId` (from `next_stream_id`), its `Kind`
@@ -1482,10 +1492,11 @@ class SessionCore:
         The row is written with no held result and `State=RELEASED` when it was `RUNNING` or
         `LOADING`; a failed, closed, or done row keeps its state. A derived table may still use
         the table, so the thread runs on until the table's blink table shuts down
-        (`_worker_shut_down`); if it already has, the record leaves the registry now and the
-        drift registry forgets it. Runs on the reaper thread when the result is released, or on
-        the caller thread when the verb fails after registering the row; each table is released
-        once. No Deephaven call, no wait.
+        (`_worker_shut_down`); if it already has, or the row is a background read's `DONE`
+        (its rows are in the table, and no thread or close acts on it any more), the record
+        leaves the registry now and the drift registry forgets it. Runs on the reaper thread
+        when the result is released, or on the caller thread when the verb fails after
+        registering the row; each table is released once. No Deephaven call, no wait.
 
         Args:
             stream_id: The table's `StreamId`.
@@ -1499,9 +1510,8 @@ class SessionCore:
                 state=StreamState.RELEASED if released else state.row.state,
             )
             self.diagnostics.write(row)
-            if state.shut_down:
-                del self._workers[stream_id]
-                self.drift.forget(stream_id)
+            if state.shut_down or row.state is StreamState.DONE:
+                self._forget_worker(stream_id)
             else:
                 self._workers[stream_id] = replace(state, row=row, held=False)
             self._sync_live()
@@ -1526,9 +1536,20 @@ class SessionCore:
             if state.held:
                 self._workers[stream_id] = replace(state, shut_down=True)
             else:
-                del self._workers[stream_id]
-                self.drift.forget(stream_id)
+                self._forget_worker(stream_id)
             self._sync_live()
+
+    def _forget_worker(self, stream_id: int) -> None:
+        """Take a worker table's record out of the registry; `registry_lock` is held.
+
+        Its last row stays in `m.streams()`, and the drift registry forgets the table. The
+        caller updates the live set (`_sync_live`).
+
+        Args:
+            stream_id: The table's `StreamId`, which must be registered.
+        """
+        del self._workers[stream_id]
+        self.drift.forget(stream_id)
 
     def finish_read(self, stream_id: int, rows: int) -> None:
         """Record that a background read's rows have landed: its row becomes `DONE`.
@@ -1541,7 +1562,9 @@ class SessionCore:
         table kept the read going after its result was released), and `CLOSED` (a close that
         raced the publish, which then failed nothing: the table has its rows). The read's
         publish lock fails a read only before its rows land, so no row is `FAILED` here. `DONE`
-        is final. `RowsPublished` is set and `Error` cleared. One short critical section under
+        is final. `RowsPublished` is set and `Error` cleared. A read whose result was released
+        already then leaves the registry, as `release_worker` takes a `DONE` one out: a table
+        derived from it keeps its rows without the session. One short critical section under
         `registry_lock`; an id that has left the registry is ignored. No Deephaven call, no
         wait.
 
@@ -1553,7 +1576,9 @@ class SessionCore:
             done = functools.partial(
                 replace, state=StreamState.DONE, rows_published=rows, error=None
             )
-            self._update_worker(stream_id, done)
+            if self._update_worker(stream_id, done) and not self._workers[stream_id].held:
+                self._forget_worker(stream_id)
+                self._sync_live()
 
     def _update_worker(self, stream_id: int, change: Callable[[StreamRow], StreamRow]) -> bool:
         """Change a registered worker table's row and write it; `registry_lock` is held.

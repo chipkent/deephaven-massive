@@ -2331,3 +2331,22 @@ def test_rows_written_while_close_runs_leave_one_row_per_key(
     assert len(keys) == len(set(keys))
     assert all(0 <= r["Reconnects"] < 200 for r in rows)
     del view
+
+
+def test_a_worker_shutdown_after_its_session_was_freed_only_stops_the_thread() -> None:
+    # A finished background read's record leaves the session once its result is released, so
+    # its session may be freed while a derived table still uses the read's blink table; the
+    # table's shutdown callback then has no session to tell.
+    class Gone:
+        pass
+
+    gone = Gone()
+    core_ref = cast("weakref.ref[_core.SessionCore]", weakref.ref(gone))
+    del gone
+    stop = threading.Event()
+    told: list[int] = []
+    _core._worker_table_shut_down(
+        core_ref, 7, record=lambda _, stream_id: told.append(stream_id), stop=stop
+    )
+    assert stop.is_set()
+    assert told == []

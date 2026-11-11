@@ -675,8 +675,10 @@ def test_the_returns_example_gives_each_stock_its_return(
         )
     [block] = section_blocks(README, "compare-stocks")
     [names] = run_blocks([block], tmp_path, "returns", console_command=console_command)
-    # One row per stock, its first and last close, and the percent return between them.
-    returns = {r["Symbol"]: r for r in dh_to_pylist(names["returns"])}
+    # The read runs in the background: one row per stock once it lands, its first and last
+    # close, and the percent return between them.
+    rows = _wait_for_rows(names["returns"], lambda rows: len(rows) == 3, dh_to_pylist)
+    returns = {r["Symbol"]: r for r in rows}
     assert {s: (r["Start"], r["End"]) for s, r in returns.items()} == {
         "AAPL": (200.0, 250.0),
         "MSFT": (400.0, 380.0),

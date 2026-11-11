@@ -12,13 +12,13 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from deephaven import agg, empty_table
 from deephaven import arrow as dh_arrow
-from deephaven import empty_table
 from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
-from deephaven_massive._datasets.schema import ColumnType, Schema
+from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
@@ -26,7 +26,12 @@ from deephaven_massive._tables import background_read
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
 from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.liveness import ResultRecord, ResultRegistry, new_scope
+from deephaven_massive._tables.liveness import (
+    ResultRecord,
+    ResultRegistry,
+    new_scope,
+    release_scope,
+)
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
@@ -339,8 +344,7 @@ def test_a_derived_table_keeps_the_read_going_after_release(
     assert row["RowsPublished"] == 1
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
     derived.clear()
-    with entered(massive_session._core.exec_ctx):
-        scope.release()
+    release_scope(massive_session._core.exec_ctx, scope)
     until(lambda: not massive_session._core._workers)
 
 
@@ -537,6 +541,40 @@ def test_a_billion_rows_land_in_one_cycle_without_a_copy(
     massive_session.release(result)
 
 
+@pytest.mark.jvm_held  # the rows' formulas hand this frame's locals to the JVM
+def test_a_result_past_two_billion_rows_reads_every_value(
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # Deephaven's ungroup reads a vector longer than 2^31 wrongly, so the read groups such a
+    # result in slices: a value past 2^31 rows is the one the transport returned.
+    count = 2**31 + 10
+    result = open_test_read(massive_session, returning(lazy_rows(massive_session, count)))
+    the_read(massive_session).thread.join(TIMEOUT)
+    until(lambda: result.size == count)
+    with entered(massive_session._core.exec_ctx):
+        late = result.slice(count - 3, count - 2)
+    assert tickers(late, dh_to_pylist) == [f"T{count - 3}"]
+    del late
+    massive_session.release(result)
+
+
+def test_a_result_grouped_in_slices_lands_whole_and_in_order(
+    *,
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(background_read, "GROUP_ROWS", 2)
+    names = ["A", "B", "C", "D", "E"]
+    result = open_test_read(massive_session, returning(static_rows(massive_session, *names)))
+    row = until_done(stream_rows)
+    assert row["RowsPublished"] == 5  # the first update that landed held every row
+    assert tickers(result, dh_to_pylist) == names
+    massive_session.release(result)
+
+
 # --- Failure delivery: a read loading or landed, every way it ends ------------------------------
 # A table that hears of a second failure ends the process. A loading read fails once, from its
 # own download or from the session's close, whichever comes first, while the user may be
@@ -719,3 +757,192 @@ def test_a_reads_blink_table_is_created_under_the_update_graphs_shared_lock(
     result = open_test_read(massive_session, returning(static_rows(massive_session, "AAPL")))
     assert blink_creations[before:] == [True]
     massive_session.release(result)
+
+
+# --- The result is an ordinary table ------------------------------------------------------------
+
+
+def priced_rows(m: dm.MassiveSession) -> Table:
+    # Two trades in the dataset's schema, with prices.
+    rows = [
+        {"Ticker": "AAPL", "Price": 200.0, "TimestampInsert": 1},
+        {"Ticker": "MSFT", "Price": 400.0, "TimestampInsert": 2},
+    ]
+    with entered(m._core.exec_ctx):
+        return dh_arrow.to_table(schema(m).to_arrow(rows))
+
+
+OPERATIONS: dict[str, Callable[[Table], Table]] = {
+    "view": lambda t: t.view(["Ticker", "Price"]),
+    "update_view": lambda t: t.update_view("Twice = Price * 2"),
+    "where then view": lambda t: t.where("Price > 0").view(["Ticker"]),
+    "select": lambda t: t.select(["Ticker"]),
+    "update": lambda t: t.update("Twice = Price * 2"),
+    "sort": lambda t: t.sort_descending("Price"),
+    "agg_by": lambda t: t.agg_by([agg.first("Price")], by="Ticker"),
+    "natural_join": lambda t: t.natural_join(t.last_by("Ticker"), on="Ticker", joins="Last=Price"),
+}
+"""Ordinary operations a user calls on a result, by test id; each keeps `Ticker`."""
+
+
+@pytest.mark.jvm_held  # the operations' formulas hand this frame's locals to the JVM
+@pytest.mark.parametrize("landed", [False, True], ids=["while loading", "once landed"])
+def test_every_ordinary_operation_works_on_the_result(
+    *,
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    landed: bool,
+) -> None:
+    # `view` and `update_view` refuse a stateful column, which every column of a merged
+    # partitioned table is while it may gain partitions: the result must not be one.
+    gate = threading.Event()
+    rows = priced_rows(massive_session)
+
+    def run(stop: threading.Event) -> Table:
+        assert gate.wait(TIMEOUT)
+        return rows
+
+    result = open_test_read(massive_session, run)
+    if landed:
+        gate.set()
+        until_done(stream_rows)
+    scope = new_scope()  # the user's own scope, released below
+    with scope.open():
+        derived = {name: operation(result) for name, operation in OPERATIONS.items()}
+    gate.set()
+    until_done(stream_rows)
+    for name, table in derived.items():
+        assert sorted(tickers(table, dh_to_pylist)) == ["AAPL", "MSFT"], name
+    derived.clear()
+    release_scope(massive_session._core.exec_ctx, scope)
+    massive_session.release(result)
+
+
+def test_the_result_holds_every_column_type_and_null_as_read(
+    *,
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    every = Schema("every type", tuple(Column(f"Col{t.name}", t) for t in ColumnType))
+    monkeypatch.setattr(massive_session._core, "dataset_schema", lambda _: every)
+    values = {
+        ColumnType.INSTANT: 1_700_000_000_000_000_000,
+        ColumnType.DOUBLE: 1.5,
+        ColumnType.LONG: 7,
+        ColumnType.INT: 3,
+        ColumnType.STRING: "x",
+        ColumnType.BOOLEAN: True,
+        ColumnType.LONG_ARRAY: [1, 2],
+        ColumnType.STRING_ARRAY: ["a", "b"],
+    }
+    assert set(values) == set(ColumnType)  # a new type is checked here too
+    full = {f"Col{t.name}": value for t, value in values.items()}
+    with entered(massive_session._core.exec_ctx):
+        static = dh_arrow.to_table(every.to_arrow([full, {}]))  # a full row, then all nulls
+    result = open_test_read(massive_session, returning(static))
+    until_done(stream_rows)
+    assert result.j_table.getDefinition().equals(static.j_table.getDefinition())
+    assert dh_arrow.to_arrow(result).equals(dh_arrow.to_arrow(static))
+    massive_session.release(result)
+
+
+# --- A finished read lets its session go --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("released_first", "count"),
+    [(False, 1), (True, 1), (True, 0)],
+    ids=["landed, then released", "released, then landed", "released, then empty"],
+)
+def test_a_done_read_with_a_released_result_no_longer_holds_its_session(
+    *,
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    released_first: bool,
+    count: int,
+) -> None:
+    # A table derived from the result keeps its rows, and nothing of the read needs the
+    # session any more: the session leaves the live set without waiting for the JVM to
+    # collect the derived table, which would shut the read's blink table down.
+    gate = threading.Event()
+    rows = static_rows(massive_session, *["AAPL"][:count])
+
+    def run(stop: threading.Event) -> Table:
+        assert gate.wait(TIMEOUT)
+        return rows
+
+    core = massive_session._core
+    result = open_test_read(massive_session, run)
+    scope = new_scope()  # the user's own scope, released below
+    with scope.open():
+        # Not a formula: it would capture this frame's locals in the query scope.
+        derived = [result.tail(10), result.last_by("Ticker")]
+    if released_first:
+        massive_session.release(result)
+        assert stream_rows()[0]["State"] == "RELEASED"
+        gate.set()
+    else:
+        gate.set()
+        until_done(stream_rows)
+        massive_session.release(result)
+    del result
+    until(lambda: not core._workers)
+    assert not core._in_live
+    (row,) = stream_rows()
+    assert (row["State"], row["RowsPublished"]) == ("DONE", count)
+    assert [tickers(table, dh_to_pylist) for table in derived] == [["AAPL"][:count]] * 2
+    derived.clear()
+    release_scope(core.exec_ctx, scope)
+
+
+def test_a_derived_table_outliving_its_freed_session_shuts_the_read_down_quietly(
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="freed-session"))
+    core = m._core
+    alive = weakref.ref(core)
+    result = open_test_read(m, returning(static_rows(m, "AAPL")))
+    read = the_read(m)
+    stream_id = read._call
+    workers = core._workers  # read after the core is gone too
+    until(lambda: workers[stream_id].row.state == StreamState.DONE)
+    scope = new_scope()
+    with scope.open():
+        derived = [result.tail(10)]
+    m.close()
+    m.release(result)
+    exec_ctx = core.exec_ctx
+    del result, core, m
+    until(lambda: gc.collect() >= 0 and alive() is None)  # freed while the derived table
+    # still uses the read's table
+    assert not read._stop.is_set()  # the read's blink table is still in use
+    assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
+    derived.clear()
+    with caplog.at_level(logging.DEBUG):
+        # Shuts the read's blink table down, with no session to tell.
+        release_scope(exec_ctx, scope)
+    assert read._stop.is_set()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_the_landing_listener_of_a_freed_session_records_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A close marks a published read DONE before its rows land; its session may then be freed
+    # before the cycle that lands them. Called here, as on an update-graph thread.
+    class Gone:
+        pass
+
+    gone = Gone()
+    landed = background_read._RowsLanded(cast("Any", weakref.ref(gone)), 7)
+    del gone
+    added = SimpleNamespace(size=lambda: 3)
+    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
+        landed.on_update(cast("Any", update), is_replay=False)
+    (record,) = [r for r in caplog.records if r.name == background_read.__name__]
+    assert record.getMessage() == "call 7 done: its 3 rows landed in the result"

@@ -6,32 +6,39 @@ columns and no rows. A library thread of its own, the *read*, runs the same tran
 complete result then appears in that table in one update cycle, and the table never changes
 again. It is never half loaded.
 
-**How the rows land without a copy.** The result is the merge of a partitioned table whose
-constituents are Deephaven tables held in a one-column blink table (`CONSTITUENT`), made
-append-only, all created on the caller thread inside the result's own liveness scope
-(`make_result`)::
+**How the rows land without a copy.** The result ungroups an append-only blink table whose
+columns are the dataset's columns as vectors, the definition `group_by()` gives a table of the
+dataset's columns (`_grouped_columns`), all created on the caller thread inside the result's
+own liveness scope (`make_result`)::
 
-    blink, publisher = blink_publisher(name, {"Constituent": TABLE}, ...)
-    parts = PartitionedTable.from_partitioned_table(
-        blink_to_append_only(blink), key_cols=[], unique_keys=False,
-        constituent_column="Constituent", constituent_table_columns=<the dataset's columns>,
-        constituent_changes_permitted=True)
-    result = describe(parts.merge(), spec, schema, note=...)   # refreshing, no rows
+    blink, publisher = blink_publisher(name, <each dataset column as a vector>, ...)
+    rows = blink_to_append_only(blink).ungroup(<the dataset's columns>)
+    result = describe(rows, spec, schema, note=...)   # refreshing, no rows
 
-When the transport call returns, the read publishes one row that holds the static table. On
-the next cycle the append-only table gains that row and the merge adds the static table as a
-constituent, which only redirects row keys: no row is copied inside the cycle, so a result of a
-billion rows lands as fast as one of ten, and the cycle that adds it freezes nothing.
+When the transport call returns, the read groups the static table into one row per
+`GROUP_ROWS` rows (`group_by()` with no keys, whose vectors view the static table's columns
+without copying them) and publishes them in one `add`. On the next cycle the append-only table
+gains those rows and `ungroup` expands them into the result's rows, in order, which only maps
+row keys onto the vectors: no row is copied,
+so a result of a billion rows lands as fast as one of ten, and the cycle that adds it freezes
+nothing. The static table stays in memory, viewed by the vectors, for the life of the result.
+
+Not a merged `PartitionedTable` holding the static table as its one constituent: while a
+partitioned table may gain constituents, Deephaven counts its merge's columns as stateful, and
+its `view` and `update_view` refuse stateful columns, so a user could not call them on the
+result. `ungroup`'s columns are stateless.
 
 **Its row in `m.streams()`.** `Kind=read`, keyed by the call's id: `LOADING` from the call,
 then `DONE` with `RowsPublished` once the rows have landed (`SessionCore.finish_read`), or
 `FAILED` with the error. The rows land on the update cycle after the publish, so `DONE` is
-recorded by a listener on the merged table (`_RowsLanded`), in the cycle that adds the rows:
+recorded by a listener on the ungrouped table (`_RowsLanded`), in the cycle that adds the rows:
 the row reaches `m.streams()` on a later cycle, so whoever sees `DONE` there sees the rows in the
 result. An empty result adds no rows and has nothing to wait for; the read records it `DONE`
 as soon as it is published. The read is a *worker table* of the session core
 (`SessionCore.track_worker`), as a `poll()` table is, so its record keeps the session alive
-while the result is held or still in use, and `m.close()` fails it while it is loading.
+while the result is held, or still in use while it loads, and `m.close()` fails it while it is
+loading. Once the read is `DONE` and its result released, the record leaves the session: a
+table derived from the result keeps its rows without it.
 
 **Lifetime.** Releasing the result (`m.release`, garbage collection) marks the row `RELEASED`
 and leaves the read running, since a table derived from the result may still want the rows.
@@ -42,8 +49,8 @@ and one on the wire is the last; a stopped read publishes nothing. A read releas
 loading becomes `DONE` if a derived table kept it going until its rows landed.
 
 **Failures.** A transport call that raises fails the table through `publish_failure` (the
-normal failed-table state, which reaches the merged result through the append-only and
-partitioned tables), after marking the row `FAILED` and logging `call 7 failed after 3.2 s:
+normal failed-table state, which reaches the result through the append-only and ungrouped
+tables), after marking the row `FAILED` and logging `call 7 failed after 3.2 s:
 ...` once, at WARNING for an expected failure and at ERROR for a defect, naming whose. An error
 that is not a `MassiveError` is a defect of the library, logged with its traceback and how to
 report it, and the table fails with a `MassiveError` that names it. A close or a failure that
@@ -68,10 +75,10 @@ import time
 import weakref
 from typing import TYPE_CHECKING, Final, cast
 
-from deephaven import dtypes, new_table
+from deephaven import merge, new_table
 from deephaven.column import InputColumn
 from deephaven.stream import blink_to_append_only
-from deephaven.table import PartitionedTable
+from deephaven.table import TableDefinition
 from deephaven.table_listener import TableListener, TableListenerHandle
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
@@ -97,19 +104,19 @@ if TYPE_CHECKING:
     from deephaven.table_listener import TableUpdate
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.session_core import SessionCore
 
-__all__ = ["BACKGROUND_NOTE", "BackgroundRead", "open_read"]
+__all__ = ["BACKGROUND_NOTE", "GROUP_ROWS", "BackgroundRead", "open_read"]
 
 logger = logging.getLogger(__name__)
 
-CONSTITUENT: Final = "Constituent"
-"""The column of the read's blink table that holds the static result, as a Deephaven table."""
-
-TABLE: Final = dtypes.DType(j_name="io.deephaven.engine.table.Table")
-"""The Deephaven type of `CONSTITUENT`: a column whose cells are tables."""
+GROUP_ROWS: Final = 1 << 30
+"""The most rows one published row's vectors hold. Deephaven's `ungroup` reads every value of a
+vector longer than 2^31 wrongly (Deephaven 42.8), so a larger result is grouped in slices of
+this size, all published in the one `add`."""
 
 BACKGROUND_NOTE: Final = (
     "Read in the background (wait=False): no rows until the download completes, then the "
@@ -122,11 +129,11 @@ progress."""
 
 
 class BackgroundRead:
-    """One background read: its thread, the publisher of its one row, and its stop token.
+    """One background read: its thread, the publisher of its one `add`, and its stop token.
 
     Created by `open_read` on the caller thread, which builds the table, registers the read
     with the session, and then starts its thread (`start`). The thread enters the session's
-    execution context, runs the transport call, and publishes the static result as one row of
+    execution context, runs the transport call, and publishes the static result as rows of
     the blink table, or fails the table. `release` and `fail` are the session's hooks and are
     safe from any thread. The publish lock makes the one `add` and a failure exclusive, and
     each happens at most once.
@@ -166,8 +173,8 @@ class BackgroundRead:
             core: The session's core, held weakly.
             name: The dataset's name, such as `"stocks.trades"`, for the failure messages.
             call: The call's id: the read's `StreamId`, its thread's name, and its log lines.
-            columns: The dataset's columns in schema order, the definition of the merged
-                result, which the static result is viewed as before it is published.
+            columns: The dataset's columns in schema order, the result's definition, which the
+                static result is viewed as before it is grouped and published.
             publisher: The blink table's publisher (`blink_publisher`).
             stop: The read's stop token; the blink table's shutdown and `fail` set it.
             run: Runs the transport call with the stop token and returns its static table in
@@ -220,7 +227,8 @@ class BackgroundRead:
         """Stop the read and fail its table, once: the session closed, or a library thread died.
 
         The session's hook for the read (`SessionCore.track_worker`), called outside every
-        lock while the read is registered, so the session is alive.
+        lock while the session is alive (a read that is `DONE` may have left the registry
+        meanwhile; it fails nothing).
 
         Args:
             error: The error the table fails with.
@@ -323,27 +331,37 @@ class BackgroundRead:
         return True
 
     def _publish(self, core: SessionCore, table: Table) -> None:
-        """Publish the static result as the blink table's one row.
+        """Publish the static result as rows of the blink table, in one `add`.
 
-        The result is viewed as the dataset's columns, in schema order (a view copies no
-        data), so it matches the merged table's definition. A read stopped meanwhile
-        publishes nothing. The rows land on the next update cycle, where the result's
-        listener (`_RowsLanded`) marks the row `DONE`; an empty result adds no rows, so its
-        row is marked `DONE` here.
+        The result is viewed as the dataset's columns, in schema order, and grouped into one
+        row of vectors per `GROUP_ROWS` rows (`group_by()` with no keys, on each slice);
+        none of it copies data, and the rows match the blink table's definition. A read
+        stopped meanwhile publishes nothing. The rows land on the next update cycle, where the
+        result's listener (`_RowsLanded`) marks the row `DONE`; an empty result publishes no
+        row and adds no rows, so its row is marked `DONE` here.
 
         Args:
             core: The session's core.
             table: The transport's static table.
         """
-        constituent = table.view(list(self._columns))
-        cell = InputColumn(name=CONSTITUENT, data_type=TABLE, input_data=[constituent.j_table])
-        row = new_table([cell])
-        rows = constituent.size
+        columns = table.view(list(self._columns))
+        rows = columns.size
+        grouped = (
+            merge(
+                [
+                    columns.slice(start, min(rows, start + GROUP_ROWS)).group_by()
+                    for start in range(0, rows, GROUP_ROWS)
+                ]
+            )
+            if rows
+            else None
+        )
         with self._publish_lock:
             # Checked under the lock: a close sets the token before it fails the table here.
             if self._stopped_by(f"{rows} rows"):
                 return
-            self._publisher.add(row)
+            if grouped is not None:
+                self._publisher.add(grouped)
             self._published = rows
         logger.debug("call %d published: %d rows in %.3f s", self._call, rows, self._took)
         if not rows:  # no rows to land: the empty result is already what the table shows
@@ -379,7 +397,7 @@ class BackgroundRead:
 class _RowsLanded(TableListener):
     """The listener on a background read's result that marks its row `DONE` once rows land.
 
-    Created by `_build`, listening to the merged table; the result keeps it alive. The merged
+    Created by `_build`, listening to the ungrouped table; the result keeps it alive. That
     table changes once, in the cycle that adds the read's complete result, and never again,
     so its one update marks the row `DONE` with the number of rows it added. An empty result
     never changes, and the read marks it `DONE` itself. It runs on an update-graph thread,
@@ -391,9 +409,10 @@ class _RowsLanded(TableListener):
         """Wait for the read's rows.
 
         Args:
-            core_ref: The session's core, weakly. The session is alive whenever the listener
-                runs: the read's record keeps it in the live set until the blink table shuts
-                down, and the merged table that updates keeps the blink table alive.
+            core_ref: The session's core, weakly. The read's record keeps the session in the
+                live set while the read loads; a close marks a read that has published `DONE`
+                before its rows land, and once its result is released too the session may be
+                freed before the listener runs.
             call: The read's `StreamId`.
         """
         self._core_ref = core_ref
@@ -401,16 +420,20 @@ class _RowsLanded(TableListener):
 
     @override
     def on_update(self, update: TableUpdate, is_replay: object) -> None:
-        """Mark the row `DONE` with the number of rows the update added.
+        """Mark the row `DONE` with the number of rows the update added, if the session lives.
+
+        A session freed meanwhile has nothing to mark: its close marked the read `DONE`.
 
         Args:
-            update: The merged table's one update; only its count of added rows is read.
+            update: The ungrouped table's one update; only its count of added rows is read.
             is_replay: Always False: the listener starts without a replay.
         """
         del is_replay  # never a replay
         rows = update.j_table_update.added().size()
         logger.debug("call %d done: its %d rows landed in the result", self._call, rows)
-        cast("SessionCore", self._core_ref()).finish_read(self._call, rows)
+        core = self._core_ref()
+        if core is not None:
+            core.finish_read(self._call, rows)
 
     @override
     def on_error(self, e: Exception) -> None:
@@ -420,6 +443,25 @@ class _RowsLanded(TableListener):
             e: The failure, logged at DEBUG.
         """
         logger.debug("call %d: its result failed: %s", self._call, e)
+
+
+def _grouped_columns(schema: Schema) -> TableDefinition:
+    """Return the read's blink-table columns: each dataset column as the vector `group_by()` makes.
+
+    Taken from `group_by()` with no keys on an empty static table of the dataset's columns, so
+    the definition, element types included, is exactly that of the row `_publish` groups, and
+    `ungroup` turns it back into the dataset's columns. An aggregation of a static table:
+    nothing is compiled or waited for, so it runs on a thread that holds the update graph's
+    lock.
+
+    Args:
+        schema: The dataset's schema.
+
+    Returns:
+        The definition, column for column in schema order.
+    """
+    empty = new_table([InputColumn(name, kind) for name, kind in col_defs(schema).items()])
+    return TableDefinition(empty.group_by().j_table.getDefinition())
 
 
 def _build(
@@ -436,8 +478,8 @@ def _build(
             table's source), or None; `BACKGROUND_NOTE` follows it.
 
     Returns:
-        The result and its publisher, and the result scope. The result is the merged
-        partitioned table, described last (`describe`).
+        The result and its publisher, and the result scope. The result is the ungrouped
+        append-only table, described last (`describe`).
     """
     built: list[BlinkPublisher] = []
     schema = core.dataset_schema(spec)
@@ -446,26 +488,18 @@ def _build(
     def shape() -> Table:
         blink, publisher = blink_publisher(
             f"massive.{spec.name}#{call}",
-            {CONSTITUENT: TABLE},
+            _grouped_columns(schema),
             on_shutdown=core.worker_shutdown_callback(call, stop),
             release_later=core.release_later,
         )
         built.append(publisher)
-        parts = PartitionedTable.from_partitioned_table(
-            blink_to_append_only(blink),
-            key_cols=[],
-            unique_keys=False,
-            constituent_column=CONSTITUENT,
-            constituent_table_columns=col_defs(schema),
-            constituent_changes_permitted=True,
-        )
-        merged = parts.merge()
-        described = describe(merged, spec, schema, note=text)
-        # The listener hears the merged table and the result keeps it, so it lives exactly as
-        # long as the result: a table derived from a released result still sees `DONE`. It
+        rows = blink_to_append_only(blink).ungroup(list(schema.column_names))
+        described = describe(rows, spec, schema, note=text)
+        # The listener hears the ungrouped table and the result keeps it, so it lives exactly
+        # as long as the result: a table derived from a released result still sees `DONE`. It
         # cannot listen to the result itself, which would then keep itself alive.
         landed = TableListenerHandle(
-            merged,
+            rows,
             _RowsLanded(weakref.ref(core), call),
             description=f"deephaven_massive read {call} landed",
         )
