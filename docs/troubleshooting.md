@@ -34,6 +34,7 @@ These come from `fetch()` and `history()`:
 | No rows for a symbol | Massive has no data for it in that range, or the company changed its ticker. | List the ticker's changes with `m.reference.ticker_events("META").fetch()`. |
 | `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The plan table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
 | A read is slow | A Basic plan allows five requests a minute, and the read waits between them. | Read fewer symbols, or pass `wait=False` to read in the background. |
+| A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads the whole file, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". Pass `wait=False` to read in the background. |
 | Prices jump at a stock split | Live bars, flat files, and bars read with `adjusted=False` are as traded. | Read bars with `history()` and leave `adjusted` at `True`, the default, for split-adjusted prices. The [stock bars page](datasets/stocks.bars.md#arguments) explains `adjusted`. |
 
 <a id="live-table-messages"></a>

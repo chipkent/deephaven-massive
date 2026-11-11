@@ -4,7 +4,9 @@ A stream test asserts that Massive acknowledged its topics, whatever the hour, a
 rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
 on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
 the first values of a session fifteen minutes after its open. Stock trades and quotes are due in
-the extended hours too, from 04:00 New York time. Every other stock stream, and every option
+the extended hours too, from 04:00 New York time, though one stock can go a minute without
+either then, so a test of one stock requires them only in the regular session
+(`may_go_quiet`). Every other stock stream, and every option
 and index stream, is due only in the regular session, from
 09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says after
 the close. The futures session opens at the time of Massive's futures market status, and forex
@@ -168,8 +170,20 @@ def rows_due(plans: LivePlans, name: str, *, opened: datetime | None, now: datet
     """
     if opened is None:
         return False
-    delay = FEED_DELAYS.get((name, plans.tiers[name]), timedelta(0))
-    return now >= opened + delay
+    return now >= opened + feed_delay(plans, name)
+
+
+def feed_delay(plans: LivePlans, name: str) -> timedelta:
+    """Return how far a class's stream lags the market on the run's plan.
+
+    Args:
+        plans: The run's plans.
+        name: The class, such as `"stocks"` or `"futures"`.
+
+    Returns:
+        The class plan's delay in `FEED_DELAYS`, zero on a real-time plan.
+    """
+    return FEED_DELAYS.get((name, plans.tiers[name]), timedelta(0))
 
 
 EXTENDED_CLOSE: Final = time(20, 0)
@@ -210,3 +224,28 @@ def stock_session(now: datetime, delay: timedelta) -> str:
     if clock < INDEX_OPEN:
         return PRE_MARKET
     return REGULAR if feed < regular_close(feed) else AFTER_HOURS
+
+
+def may_go_quiet(market: str, family: str, *, now: datetime, delay: timedelta) -> bool:
+    """Tell whether one symbol's stream may send no row in a test's wait, though rows are due.
+
+    Stock trades and quotes are due in the extended hours (`EXTENDED_HOURS_FAMILIES`), but one
+    stock trades and quotes far less often then than in the regular session, and can go a
+    minute without either: on 2026-11-10 at 18:40 New York time, in the after-hours session,
+    Massive acknowledged AAPL's quote stream and sent it no quote in 60 s, while AAPL's trade
+    stream got one trade in the same minute. A test that streams one stock then skips when no
+    row comes, and fails only in the regular session.
+
+    Args:
+        market: The market, as the `market_status` fixture names it, such as `"stocks"`.
+        family: The stream's family, the last part of its dataset's name, such as `"quotes"`.
+        now: The present, as an aware instant.
+        delay: How far the stream's feed lags the market (`feed_delay`), zero when real-time.
+
+    Returns:
+        True for stock trades and quotes while the feed is in the pre-market or after hours
+        (`stock_session`); False for every other stream, and in every other session.
+    """
+    if market != "stocks" or family not in EXTENDED_HOURS_FAMILIES:
+        return False
+    return stock_session(now, delay) in {PRE_MARKET, AFTER_HOURS}

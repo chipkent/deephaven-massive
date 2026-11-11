@@ -174,6 +174,8 @@ class HistorySource(StrEnum):
       them, it reads from REST any day whose file is missing or isn't in your plan.
     - `REST`: Massive's REST API.
     - `FLAT_FILES`: Massive's flat files, the daily CSV files it publishes on S3. They need S3 keys.
+      Each file holds a whole day of data, and a read downloads the whole file, however few
+      symbols or short a range you ask for.
 
     Example:
         ::

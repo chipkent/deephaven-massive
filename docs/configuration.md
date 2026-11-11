@@ -230,6 +230,8 @@ update.
 #### flat_file_symbol_threshold
 
 Lower it to read flat files for shorter lists, or raise it to keep them on requests.
+Each flat file holds a whole day of data, and a flat-file read downloads the whole
+file, however few symbols you ask for.
 A call for this many symbols or more reads flat files when all of these hold:
 
 - `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` are set.

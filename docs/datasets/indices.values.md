@@ -21,7 +21,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| [`symbols`](README.md#symbols) | Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index. |
+| [`symbols`](README.md#symbols) | Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index. `history()` downloads each day's whole flat file of every index's values, however few indices you pass: the file for 2026-11-09 was 2.9 GB. |
 
 ## Plans
 

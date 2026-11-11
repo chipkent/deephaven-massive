@@ -195,6 +195,8 @@ class _Indices(Namespace):
 
         Args:
             symbols: Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index.
+                `history()` downloads each day's whole flat file of every index's values, however
+                few indices you pass: the file for 2026-11-09 was 2.9 GB.
 
         Returns:
             A query. Its columns, plans, and methods:

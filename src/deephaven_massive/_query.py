@@ -1753,7 +1753,8 @@ class HistoryQuery(QueryBase):
 
         Rows come from REST or from Massive's flat files. By default, the library picks the source
         and reads from REST any day the flat files can't serve. The table's description says which
-        source it read.
+        source it read. Each flat file holds a whole day of data, and a flat-file read downloads
+        the whole file, however few symbols or short a range you ask for.
 
         A static table of symbols is read once, when you call. A watchlist is followed over the
         range fixed at the call: a symbol you add arrives with all its rows, and one you delete
