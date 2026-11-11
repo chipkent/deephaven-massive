@@ -34,9 +34,9 @@ from deephaven_massive._datasets.column_reference import (
     call_path,
     page_url,
 )
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query, StreamHistoryQuery, verbs
 from deephaven_massive._session import CATALOG, NAMESPACE_MODULES, MassiveSession
+from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.typehints._queries import FetchQuery, StreamHistoryQuery, verbs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -130,7 +130,7 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
     )
 
 
-_QUERY_CLASSES: Final = (Query, StreamHistoryQuery)
+_QUERY_CLASSES: Final = (FetchQuery, StreamHistoryQuery)
 """The query classes that between them define every verb, read for each verb's call and summary."""
 
 _RETURN: Final = "Return "

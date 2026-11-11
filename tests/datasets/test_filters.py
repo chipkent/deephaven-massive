@@ -4,15 +4,17 @@ They run on synthetic specs over the real generated sources.
 """
 
 import dataclasses
-from collections.abc import Mapping
+import typing
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from deephaven_massive._datasets import filters
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.filters import check_filters, param_base
+from deephaven_massive._datasets.filters import FilterValue, check_filters, param_base
 from deephaven_massive._enums import AssetClass, ContractType
 from deephaven_massive._massive import (
     Field,
@@ -445,3 +447,16 @@ def test_date_text_writes_a_day_only_for_a_list_of_dates() -> None:
     assert filters._date_text(date(2026, 10, 30), ParamKind.DATE, label="x") == "2026-10-30"
     with pytest.raises(ValueError, match=r"^d filter 'k' takes no dates"):
         filters._date_text(date(2026, 10, 30), None, label="d filter 'k'")
+
+
+def test_filter_value_alias() -> None:
+    assert set(typing.get_args(FilterValue)) == {
+        str,
+        int,
+        float,
+        bool,
+        date,
+        datetime,
+        np.datetime64,
+        Sequence[str | int | float | date | np.datetime64],
+    }

@@ -6,11 +6,11 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
 reference data), and `daily_open_close`.
 
-Each dataset is one factory method on `Options`. The method validates its arguments and returns
-a query; nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
-(`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its
-columns: those come from the generated wire schemas.
+Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
+returns a query; nothing touches the network until a verb is called on the query. This module owns
+the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
+(`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its columns:
+those come from the generated wire schemas.
 
 Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL250117C00150000`).
 Every method that takes contracts takes only that form (`check_symbol` in
@@ -43,6 +43,7 @@ from deephaven.table import Table
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import (
+    ALL,
     UNDERLYING_CLASSES,
     check_symbol,
     is_canonical,
@@ -60,7 +61,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     adjustment_notes,
@@ -70,21 +71,22 @@ from deephaven_massive._namespaces.query_building import (
     require_bool,
     value_table,
 )
-from deephaven_massive._types import ALL
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._query import (
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import (
+        FetchQuery,
         HistoryQuery,
-        Query,
         StreamHistoryQuery,
         StreamQuery,
         SymbolStreamQuery,
     )
-    from deephaven_massive._types import DateLike, FilterValue, StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "Options"]
+__all__ = ["DATASETS", "OptionsNamespace"]
 
 logger = logging.getLogger(__name__)
 
@@ -395,8 +397,12 @@ def _expired(value: object) -> bool | None:
     return True if value else None
 
 
-class Options(Namespace):
+class OptionsNamespace(Namespace):
     """The US options datasets, reached as `m.options`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import OptionsNamespace
 
     Its methods cover trades, quotes, bars, each contract's last trade and previous day's bar, fair
     market value, OPRA's administrative messages, option chains, snapshots, contract reference
@@ -450,7 +456,7 @@ class Options(Namespace):
         return cast("StreamHistoryQuery", build_query(self._core, TRADES, symbols=symbols))
 
     @raises_through(build_query)
-    def last_trade(self, symbols: Symbols) -> Query:
+    def last_trade(self, symbols: Symbols) -> FetchQuery:
         """The latest trade of each US-listed options contract.
 
         Each row holds one contract's most recent trade. A contract with no trade is left out, and
@@ -485,7 +491,7 @@ class Options(Namespace):
             symbols=symbols,
             all_alternative="use m.options.chain(underlying).fetch()",
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query)
     def quotes(self, symbols: Symbols) -> StreamHistoryQuery:
@@ -521,7 +527,7 @@ class Options(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamBarTimespan,
+        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
         adjusted: bool = True,
@@ -592,7 +598,7 @@ class Options(Namespace):
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> Query:
+    def previous_day_bar(self, symbols: Symbols, *, adjusted: bool = True) -> FetchQuery:
         """The previous trading day's open, high, low, close, and volume of options contracts.
 
         Each row holds one contract's bar of the previous completed session. A contract with no bar
@@ -632,7 +638,7 @@ class Options(Namespace):
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query)
     def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
@@ -695,7 +701,7 @@ class Options(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The snapshot of every contract in one underlying's option chain.
 
         Each row holds one contract's details, the session's prices, its last quote and trade, its
@@ -757,7 +763,7 @@ class Options(Namespace):
         query = build_query(
             self._core, CHAIN, params=params, filters=filters, limit=limit, values=values
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params)
     def snapshots(
@@ -768,7 +774,7 @@ class Options(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The current snapshot of each requested options contract, with its greeks.
 
         Each row holds one contract's details, the session's prices, and its last quote, trade, and
@@ -815,7 +821,7 @@ class Options(Namespace):
         params: dict[str, object] = {"type": _SNAPSHOT_TYPE if listing else None}
         params.update(list_params(sort=sort, order=order))
         return cast(
-            "Query",
+            "FetchQuery",
             build_query(
                 self._core, SNAPSHOTS, symbols=symbols, params=params, filters=filters, limit=limit
             ),
@@ -836,7 +842,7 @@ class Options(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
         Each row holds one contract's underlying, shares per contract, primary exchange, and CFI
@@ -911,7 +917,7 @@ class Options(Namespace):
         }
         params.update(list_params(sort=sort, order=order))
         return cast(
-            "Query",
+            "FetchQuery",
             build_query(
                 self._core,
                 CONTRACTS,
@@ -926,7 +932,9 @@ class Options(Namespace):
         )
 
     @raises_through(build_query, day_argument)
-    def daily_open_close(self, symbols: Symbols, date: DateLike, *, adjusted: bool = True) -> Query:
+    def daily_open_close(
+        self, symbols: Symbols, date: DateLike, *, adjusted: bool = True
+    ) -> FetchQuery:
         """The open, high, low, close, and volume of each options contract on one day.
 
         Each row holds one contract's day, with its pre-market and after-hours prices. Massive
@@ -957,7 +965,7 @@ class Options(Namespace):
                 day = m.options.daily_open_close("O:AAPL250117C00150000", "2025-01-02").fetch()
         """
         return cast(
-            "Query",
+            "FetchQuery",
             build_query(
                 self._core,
                 DAILY_OPEN_CLOSE,

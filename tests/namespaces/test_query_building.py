@@ -28,7 +28,7 @@ from deephaven.column import int_col, string_col
 from deephaven.time import to_j_instant, to_j_local_date
 
 import deephaven_massive as dm
-from deephaven_massive import _enums, _query, _types
+from deephaven_massive import _enums, typehints
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
@@ -36,7 +36,8 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
 from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces._query_building import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
     SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -52,16 +53,15 @@ from deephaven_massive._namespaces.query_building import (
     require_bool,
     value_table,
 )
-from deephaven_massive._query import (
+from deephaven_massive.typehints import _queries
+from deephaven_massive.typehints._queries import (
+    FetchQuery,
     HistoryQuery,
     Query,
-    QueryBase,
     StreamHistoryQuery,
     bar_query_class,
     query_class,
 )
-from deephaven_massive._session import CATALOG
-from deephaven_massive._types import StreamBarTimespan
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
@@ -111,7 +111,7 @@ INDICATOR = DatasetSpec(
 )
 
 
-def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
     # Most tests build a list dataset without symbols, which only filter it; the refusal of
     # None for a dataset that needs symbols has its own test.
     kwargs.setdefault("symbols_optional", True)
@@ -174,7 +174,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
         filters={"frequency_lte": 12, "frequency": 4, "distribution_type": "recurring"},
     )
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
     assert request.start == date(2025, 1, 1)
@@ -190,7 +190,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
 
 def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession) -> None:
     q = build(massive_session, INDICATOR, timespan=Timespan.DAY)
-    assert type(q) is Query  # not a bars dataset: the timespan does not pick the class
+    assert type(q) is FetchQuery  # not a bars dataset: the timespan does not pick the class
     assert q._request.symbols is None
     assert q._request.timespan is Timespan.DAY
 
@@ -592,8 +592,8 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
     names = {
         **vars(collections.abc),
         **vars(dt),
-        **vars(_query),
-        **vars(_types),
+        **vars(_queries),
+        **{name: getattr(typehints, name) for name in typehints.__all__},
         **vars(_enums),
         "AbstractSet": collections.abc.Set,
         "Literal": Literal,
@@ -750,14 +750,14 @@ class _Good(Namespace):
 
     @overload
     def bars(
-        self, timespan: StreamBarTimespan, *, multiplier: Literal[1] = 1
+        self, timespan: Literal[Timespan.SECOND, Timespan.MINUTE], *, multiplier: Literal[1] = 1
     ) -> StreamHistoryQuery: ...
     @overload
     def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery: ...
     def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery:
         raise NotImplementedError
 
-    def dividends(self) -> Query:
+    def dividends(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -775,13 +775,15 @@ class _Bad(Namespace):
     ) -> HistoryQuery: ...
     def bars(  # a default timespan, which every bars factory must not have
         self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
-    ) -> QueryBase:
+    ) -> Query:
         raise NotImplementedError
 
-    def trades(self) -> Query:  # the trades dataset streams, so this must be a SymbolStreamQuery
+    def trades(
+        self,
+    ) -> FetchQuery:  # the trades dataset streams, so this must be a SymbolStreamQuery
         raise NotImplementedError
 
-    def news(self) -> Query:  # no dataset is named options.news
+    def news(self) -> FetchQuery:  # no dataset is named options.news
         raise NotImplementedError
 
     def minute_bars(self) -> HistoryQuery:  # a bars dataset served without its overloads
@@ -797,7 +799,7 @@ class _GoodSession:
     def label(self) -> str:  # a property that leads to no namespace
         raise NotImplementedError
 
-    def snapshots(self) -> Query:
+    def snapshots(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -806,7 +808,7 @@ class _BadSession:
     def options(self) -> _Bad:
         raise NotImplementedError
 
-    def snapshots(self) -> Query:  # no snapshots dataset
+    def snapshots(self) -> FetchQuery:  # no snapshots dataset
         raise NotImplementedError
 
 
@@ -881,18 +883,18 @@ def test_symbols_is_the_first_positional_parameter_of_every_factory() -> None:
 class _Summarized(Namespace):
     __slots__ = ()
 
-    def dividends(self) -> Query:
+    def dividends(self) -> FetchQuery:
         """Cash dividends of US-listed stocks. The rest of the summary line.
 
         The rest of the docstring.
         """
         raise NotImplementedError
 
-    def splits(self) -> Query:
+    def splits(self) -> FetchQuery:
         """Something else entirely."""
         raise NotImplementedError
 
-    def news(self) -> Query:
+    def news(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -1134,7 +1136,7 @@ def test_a_namespace_method_logs_the_input_it_refuses(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._namespaces"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.namespaces"),
         pytest.raises(TypeError),
     ):
         massive_session.stocks.trades(42)  # type: ignore[arg-type]  # a refused symbol type

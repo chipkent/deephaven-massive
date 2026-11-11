@@ -36,7 +36,7 @@ from botocore.exceptions import EndpointConnectionError
 from botocore.response import StreamingBody
 from urllib3.exceptions import ProtocolError
 
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence

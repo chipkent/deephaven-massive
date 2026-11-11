@@ -26,8 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
+from deephaven_massive._override import override
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.liveness import (
     QueueWorker,
@@ -40,7 +39,8 @@ from deephaven_massive._tables.liveness import (
     weak_owner_callback,
 )
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore

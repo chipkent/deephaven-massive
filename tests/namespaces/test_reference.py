@@ -28,12 +28,12 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.poll import Pollers, open_poll
+from deephaven_massive.namespaces import _reference as reference
+from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.typehints._queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -82,7 +82,7 @@ def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.reference
-    assert type(namespace) is reference.Reference
+    assert type(namespace) is reference.ReferenceNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -203,7 +203,7 @@ def test_market_holidays_hours_are_instants() -> None:
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> None:
-    doc = getattr(reference.Reference, name).__doc__
+    doc = getattr(reference.ReferenceNamespace, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"reference.{name}"].summary
     assert f"docs/datasets/reference.{name}.md" in doc
 
@@ -214,7 +214,7 @@ def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> N
 def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     query = ref.tickers()
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
@@ -362,7 +362,7 @@ def test_lookup_queries(massive_session: dm.MassiveSession) -> None:
         (ref.market_status(), reference.MARKET_STATUS),
         (ref.market_holidays(), reference.MARKET_HOLIDAYS),
     ):
-        assert type(query) is Query
+        assert type(query) is FetchQuery
         assert query._spec is spec
         assert query._request == Request()
     assert repr(ref.market_status()) == "m.reference.market_status()"
@@ -372,7 +372,7 @@ def test_each_endpoint_accepts_its_own_asset_classes(
     massive_session: dm.MassiveSession,
 ) -> None:
     ref = massive_session.reference
-    rejected: list[tuple[Callable[..., Query], str, dm.AssetClass, list[str]]] = [
+    rejected: list[tuple[Callable[..., FetchQuery], str, dm.AssetClass, list[str]]] = [
         (ref.ticker_types, "ticker_types", dm.AssetClass.FUTURES, ["STOCKS", "OPTIONS", "INDICES"]),
         (ref.exchanges, "exchanges", dm.AssetClass.INDICES, ["STOCKS", "OPTIONS", "FUTURES"]),
         (ref.conditions, "conditions", dm.AssetClass.FUTURES, ["STOCKS", "OPTIONS"]),
@@ -440,7 +440,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
-    calls: list[tuple[Callable[..., Query], str, str]] = [
+    calls: list[tuple[Callable[..., FetchQuery], str, str]] = [
         (ref.tickers, "market", "Market"),
         (ref.tickers, "ticker_type", "TickerType"),
         (ref.tickers, "order", "Order"),

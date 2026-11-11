@@ -32,7 +32,7 @@ from deephaven.time import to_j_local_date, to_j_zdt
 from deephaven_massive._datasets.dates import TimeTextError, parse_date_like
 
 if TYPE_CHECKING:
-    from deephaven_massive._types import DateLike
+    from deephaven_massive._datasets.dates import DateLike
 
 __all__ = ["deephaven_time_text"]
 

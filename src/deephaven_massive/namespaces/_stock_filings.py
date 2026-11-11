@@ -28,7 +28,7 @@ from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, Ke
 from deephaven_massive._enums import AssetClass, Order, PollMode
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     EVERY_TICKER,
     Namespace,
     list_query,
@@ -39,13 +39,15 @@ from deephaven_massive._namespaces.query_building import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from deephaven_massive._query import Query
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = [
     "DATASETS",
-    "StockFilings",
+    "StocksFilingsNamespace",
 ]
 
 _REST: Final = Transport.REST
@@ -381,7 +383,7 @@ def _insider_query(
     order: Order | None,
     limit: int | None,
     filters: Mapping[str, FilterValue] | None,
-) -> Query:
+) -> FetchQuery:
     """Build the query of an insider dataset that takes an issuer and an owner CIK.
 
     Form 3, Form 4, and the insider holdings share the arguments and their checks.
@@ -400,7 +402,7 @@ def _insider_query(
         filters: The `filters` mapping, or None.
 
     Returns:
-        The `Query`.
+        The `FetchQuery`.
 
     Raises:
         TypeError: If a CIK or another argument has the wrong type (`_ciks`, `list_query`).
@@ -440,8 +442,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.stocks.filings`, one `DatasetSpec` each."""
 
 
-class StockFilings(Namespace):
+class StocksFilingsNamespace(Namespace):
     """The SEC filing datasets, reached as `m.stocks.filings`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import StocksFilingsNamespace
 
     Its methods cover the EDGAR filing index, 10-K sections, 8-K text and disclosures, and risk
     factors. They also cover institutional holdings from Form 13-F, insider ownership and
@@ -477,7 +483,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
         Each row holds a filing's form type, filer CIK, issuer, ticker, filing date, and EDGAR URL.
@@ -538,7 +544,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The text of sections of 10-K annual reports, one row per filing and section.
 
         Each row holds one section of a company's 10-K, such as the business description. It also
@@ -599,7 +605,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The item text of 8-K current reports, one row per filing and filer.
 
         Each row holds the text of the items a company reported on an 8-K or an amendment. It also
@@ -659,7 +665,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Disclosures in 8-K current reports, classified by category, one row per disclosure.
 
         Each row holds one disclosure of an 8-K: its primary, secondary, and tertiary categories,
@@ -721,7 +727,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Risk factors disclosed in company filings, classified by category, one row each.
 
         Each row holds one risk factor a company disclosed: its primary, secondary, and tertiary
@@ -780,7 +786,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Holdings that institutional managers report on Form 13-F, one row per position.
 
         Each row holds one security that an institutional investment manager held at a quarter's
@@ -842,7 +848,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Initial insider ownership statements (SEC Form 3), one row per reported holding.
 
         Each row holds a security that an officer, director, or 10% owner held on becoming an
@@ -911,7 +917,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Insider transactions (SEC Form 4), one row per reported transaction or holding.
 
         Each row holds a purchase, sale, grant, or exercise that an officer, director, or 10% owner
@@ -978,7 +984,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Open-market insider purchases and sales, summed per company and transaction day.
 
         Directors, officers, and holders of over 10% are insiders, and they report each trade on SEC
@@ -1050,7 +1056,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Each company's insiders and the shares each one holds now, one row per insider.
 
         Massive combines one insider's Form 3, 4, and 5 filings for one company into one current
@@ -1119,7 +1125,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The taxonomy that classifies filing risk factors, one row per category.
 
         Each row holds one tertiary category of the risk-factor classification. It also holds the
@@ -1165,7 +1171,7 @@ class StockFilings(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The taxonomy that classifies 8-K disclosures, one row per category.
 
         Each row holds one tertiary category of the 8-K disclosure classification. It also holds the

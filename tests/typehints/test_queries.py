@@ -43,23 +43,7 @@ from deephaven_massive._errors import LIBRARY_BUG, UnlistedPairError
 from deephaven_massive._ingest import history_reads
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience, Transport
-from deephaven_massive._namespaces import futures
-from deephaven_massive._namespaces.options import CHAIN
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import (
-    MINIMUM_POLL_INTERVAL,
-    HistoryQuery,
-    Query,
-    QueryBase,
-    QueryCall,
-    StreamHistoryQuery,
-    StreamQuery,
-    SymbolStreamQuery,
-    _shown,
-    _symbols_per_read,
-    bar_query_class,
-    query_class,
-)
+from deephaven_massive._override import override
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE
 from deephaven_massive._tables.execution_context import entered
@@ -73,7 +57,23 @@ from deephaven_massive._tables.transports import (
     SymbolOutcome,
     SymbolRows,
 )
-from deephaven_massive._types import override
+from deephaven_massive.namespaces import _futures as futures
+from deephaven_massive.namespaces._options import CHAIN
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import (
+    MINIMUM_POLL_INTERVAL,
+    FetchQuery,
+    HistoryQuery,
+    Query,
+    QueryCall,
+    StreamHistoryQuery,
+    StreamQuery,
+    SymbolStreamQuery,
+    _shown,
+    _symbols_per_read,
+    bar_query_class,
+    query_class,
+)
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.stream import FakeStreamTransport
@@ -411,7 +411,7 @@ def flat(massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) ->
     return recorder
 
 
-def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
     return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
 
 
@@ -421,19 +421,19 @@ def trades(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamHis
     return q
 
 
-def last_trade(session: dm.MassiveSession) -> Query:
+def last_trade(session: dm.MassiveSession) -> FetchQuery:
     q = make(session, LAST_TRADE_SPEC, symbols=("AAPL",))
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     return q
 
 
-def news(session: dm.MassiveSession, **kwargs: object) -> Query:
+def news(session: dm.MassiveSession, **kwargs: object) -> FetchQuery:
     q = make(session, NEWS_SPEC, **kwargs)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     return q
 
 
-def feed(session: dm.MassiveSession) -> Query:
+def feed(session: dm.MassiveSession) -> FetchQuery:
     # A feed query that may poll: it has a start.
     return news(session, start="2025-01-02")
 
@@ -536,10 +536,10 @@ def test_class_hierarchy() -> None:
     assert not hasattr(StreamQuery, "last_by")
     assert not hasattr(HistoryQuery, "fetch")
     assert not hasattr(StreamHistoryQuery, "fetch")
-    assert not hasattr(Query, "history")
+    assert not hasattr(FetchQuery, "history")
 
 
-def _missing(query: QueryBase, verb: str) -> str:
+def _missing(query: Query, verb: str) -> str:
     # The message of the AttributeError a missing verb raises.
     with pytest.raises(AttributeError) as info:
         getattr(query, verb)
@@ -625,7 +625,7 @@ def test_any_other_missing_attribute_raises_python_s_own_error(
 ) -> None:
     q = trades(massive_session)
     with pytest.raises(AttributeError, match=r"^'StreamHistoryQuery' object has no attribute "):
-        _ = q.fetchh
+        _ = q.fetchh  # type: ignore[attr-defined]  # the missing verb is the point
     assert not hasattr(q, "__setstate_ex__")
     assert callable(q.blink)  # a verb the query has never reaches the fallback
 
@@ -638,7 +638,7 @@ def test_fetch_and_poll_delegate(
 ) -> None:
     q = feed(massive_session)
     q.fetch()
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"):
         q.poll(30)
         q.poll(30, mode=PollMode.AUTO)
         q.poll(timedelta(minutes=1), mode=PollMode.REPLACE)
@@ -756,7 +756,7 @@ def _calls(caplog: pytest.LogCaptureFixture) -> list[str]:
 def test_each_static_verb_is_one_logged_call(
     massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"):
         news(massive_session).fetch()
         last_trade(massive_session).fetch()
         trades(massive_session).history("2025-03-03", "2025-03-04", source=HistorySource.REST)
@@ -781,7 +781,7 @@ def test_a_failed_call_logs_its_error(
 ) -> None:
     every = trades(massive_session, dm.ALL)
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"),
         pytest.raises(ValueError, match="needs explicit symbols") as info,
     ):
         every.history("2025-03-03", "2025-03-03", source=HistorySource.REST)
@@ -809,7 +809,7 @@ def test_an_expected_failure_is_logged_once_at_debug(
 
     monkeypatch.setattr(rest, "fetch", refused)
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"),
         pytest.raises(dm.EntitlementError),
     ):
         news(massive_session).fetch()
@@ -991,7 +991,7 @@ def test_history_dispatches_by_the_source_choice(
     )
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive.typehints._queries"):
         values.history("2025-03-03", "2025-03-04")  # AUTO: flat files are the only source
         values.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
         trades(s3_session).history("2025-03-03", "2025-03-03")  # AUTO: no flat files
@@ -1355,7 +1355,7 @@ def test_a_refused_static_verb_logs_nothing(
     q = trades(massive_session)
     one_row = last_trade(massive_session)
     massive_session.close()
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"):
         verbs: list[Callable[[], Table]] = [
             one_row.fetch,
             lambda: q.history("2025-03-03", source=HistorySource.REST),
@@ -1706,7 +1706,7 @@ SAMPLE_SYMBOLS = {
 }
 
 
-def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[QueryBase]:
+def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query]:
     # One query per query class the dataset's calls can make, each with a symbol list and with
     # a reactive symbol table (which changes the shape of `last_by()`): a bars dataset gets
     # them for every timespan it accepts (the timespan picks the class), any other dataset once.
@@ -1720,7 +1720,7 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
             yield make(session, spec, symbols=symbols, timespan=span, **bounds)
 
 
-def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
+def verb_results(query: Query, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
     # Every result shape the query's verbs make, labelled by the call. The last column is a
     # `last_by` key that the aggregation itself would move to the front.
     if isinstance(query, StreamQuery):
@@ -1730,7 +1730,7 @@ def verb_results(query: QueryBase, columns: Sequence[str]) -> Iterator[tuple[str
     if isinstance(query, SymbolStreamQuery):
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
-    if isinstance(query, Query):
+    if isinstance(query, FetchQuery):
         yield "fetch()", query.fetch()
         for mode in PollMode:
             yield f"poll(mode={mode.name})", query.poll(60, mode=mode)
@@ -1828,7 +1828,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: files)
     many = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
     assert isinstance(many, HistoryQuery)
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.INFO, logger="deephaven_massive.typehints._queries"):
         many.history("2025-03-03", "2025-03-04")
     [(verb, _, request, extra)] = rest.calls
     assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
@@ -2144,7 +2144,7 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
 @pytest.mark.parametrize(
     ("changes", "expected"),
     [
-        ({**_FETCH}, Query),
+        ({**_FETCH}, FetchQuery),
         ({**_CHANNELS}, SymbolStreamQuery),
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
@@ -2152,7 +2152,7 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
     ],
 )
 def test_the_query_class_follows_the_transports(
-    changes: dict[str, Any], expected: type[QueryBase]
+    changes: dict[str, Any], expected: type[Query]
 ) -> None:
     spec = DatasetSpec(
         name="stocks.trades",
@@ -2381,7 +2381,7 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
             dm.EntitlementError("HTTP 403: not in the plan"), FailureKind.PERMANENT
         )
     }
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive.typehints._queries"):
         result = trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03")
     assert caplog.messages == [
         (
@@ -2398,7 +2398,7 @@ def test_reread_is_ignored_for_a_static_symbol_table(
     *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
     static = new_table([string_col("Symbol", ["AAPL"])])
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"):
         result = trades(massive_session, static).history(
             "2025-03-03", "2025-03-03", reread=dm.Reread.NEVER
         )
@@ -2414,7 +2414,7 @@ def test_reread_is_ignored_for_a_static_symbol_table(
 def test_a_static_call_logs_its_start_as_before(
     *, massive_session: dm.MassiveSession, rest: Recorder, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"):
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"):
         trades(massive_session).history("2025-03-03", "2025-03-03")
     starts = [m for m in caplog.messages if " start: " in m]
     assert len(starts) == 1
@@ -2511,7 +2511,7 @@ def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
 ) -> None:
     static = new_table([string_col("Symbol", ["AAPL"])])
     q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     assert not q.fetch().is_refreshing
     assert not last_trade(massive_session).fetch().is_refreshing
     # A symbol table's crypto pairs follow the session's setting; symbols in code always raise.
@@ -2530,7 +2530,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     rest.outcomes = {"AAPL": rows_of(massive_session, LAST_TRADE_SPEC, 1)}
     wl = live("AAPL")
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     result = q.fetch()
     assert result.is_refreshing
     assert result.size == 1  # the call-time read is in the result when the call returns
@@ -2574,7 +2574,7 @@ def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
     ]
     wl = live()
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     result = q.fetch()
     cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
     _until(lambda: len(rest.fetched) == 1)
@@ -2591,7 +2591,7 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
     *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     result = q.fetch(wait=False)
     assert result.is_refreshing
     _until(lambda: len(rest.fetched) == 1)
@@ -2611,12 +2611,12 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {"AAPL": SymbolFailure(refusal, FailureKind.PERMANENT)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         q.fetch()
     both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
-    assert isinstance(both, Query)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+    assert isinstance(both, FetchQuery)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive.typehints._queries"):
         result = both.fetch()
     assert caplog.messages == [
         (
@@ -2645,8 +2645,8 @@ def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
     error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
     rest.outcomes = {"DOT": SymbolFailure(error, FailureKind.PERMANENT)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
-    assert isinstance(q, Query)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._query"):
+    assert isinstance(q, FetchQuery)
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive.typehints._queries"):
         if setting is OnError.RAISE:
             with pytest.raises(UnlistedPairError, match="does not list it"):
                 q.fetch()
@@ -2706,7 +2706,7 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     rest.outcomes = {"AAPL": rows_of(massive_session, LAST_TRADE_SPEC, 1)}
     wl = live()
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     result = q.fetch()
     assert result.is_refreshing
     assert result.size == 0

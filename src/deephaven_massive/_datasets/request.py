@@ -6,9 +6,9 @@ pass it, with the dataset's `DatasetSpec`, to the transports. The module also na
 request is built from (`ParamValue`), the identity of a live stream (`StreamKey`), and a table
 passed where a dataset takes one value, such as an option chain's underlying (`ValueTable`).
 
-Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces'
-shared dataset factory builds requests (`build_query` in `_namespaces/query_building.py`), the
-query classes of `_query.py` hand them to the transports, and the transport interfaces that
+Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces' shared
+dataset factory builds requests (`build_query` in `namespaces/_query_building.py`), the query
+classes of `typehints/_queries.py` hand them to the transports, and the transport interfaces that
 receive them live in `_tables/transports.py`.
 """
 
@@ -50,7 +50,7 @@ class ValueTable:
     instead of one value. Each of its values is read as if it had been passed alone, one
     request series per value (`Request.for_value`); a refreshing table is followed, so a value
     added to it is read and a value deleted from it leaves the result. Built by the dataset
-    method (`value_table` in `_namespaces/query_building.py`); immutable. Like `SymbolTable`,
+    method (`value_table` in `namespaces/_query_building.py`); immutable. Like `SymbolTable`,
     it compares and hashes by the identity of the table's Python wrapper, which it holds
     strongly.
 
@@ -83,7 +83,7 @@ class ValueTable:
 class Request:
     """The normalized arguments of a dataset call, shared by every verb of its query.
 
-    Built by `_namespaces/query_building.py` when the query is created; immutable and hashable, so
+    Built by `namespaces/_query_building.py` when the query is created; immutable and hashable, so
     equal calls give equal queries and share streams.
 
     Attributes:

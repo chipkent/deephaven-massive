@@ -2,14 +2,15 @@
 
 Partner datasets stay nested by vendor, one class each:
 
-- `m.partners.benzinga` (`Benzinga`): analysts, analyst insights, ratings, consensus
-  ratings, bulls-and-bears summaries, guidance, earnings, firms, and news;
-- `m.partners.etf_global` (`EtfGlobal`): ETF analytics, constituents, fund flows, profiles,
-  and taxonomies;
-- `m.partners.tmx` (`Tmx`): corporate events;
-- `m.partners.fable` (`Fable`): European consumer-spending merchant aggregates and hierarchy.
+- `m.partners.benzinga` (`PartnersBenzingaNamespace`): analysts, analyst insights, ratings,
+  consensus ratings, bulls-and-bears summaries, guidance, earnings, firms, and news;
+- `m.partners.etf_global` (`PartnersEtfGlobalNamespace`): ETF analytics, constituents, fund flows,
+  profiles, and taxonomies;
+- `m.partners.tmx` (`PartnersTmxNamespace`): corporate events;
+- `m.partners.fable` (`PartnersFableNamespace`): European consumer-spending merchant aggregates and
+  hierarchy.
 
-Every partner dataset is a REST list endpoint, so every factory returns a `Query`: `fetch()`
+Every partner dataset is a REST list endpoint, so every factory returns a `FetchQuery`: `fetch()`
 reads every page once into a static table, and `poll()` re-reads it on an interval into a live
 one. Nothing streams over the WebSocket and nothing has flat files. Each factory validates its
 arguments synchronously and touches no network; the request runs only when a query method is
@@ -47,17 +48,26 @@ from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec, Ke
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, PollMode
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import Namespace, list_query
+from deephaven_massive.namespaces._query_building import Namespace, list_query
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
-__all__ = ["DATASETS", "Benzinga", "EtfGlobal", "Fable", "Partners", "Tmx"]
+__all__ = [
+    "DATASETS",
+    "PartnersBenzingaNamespace",
+    "PartnersEtfGlobalNamespace",
+    "PartnersFableNamespace",
+    "PartnersNamespace",
+    "PartnersTmxNamespace",
+]
 
 
 _REST: Final = Transport.REST
@@ -361,8 +371,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every partner dataset, one `DatasetSpec` each, in the order of the namespace tree."""
 
 
-class Benzinga(Namespace):
+class PartnersBenzingaNamespace(Namespace):
     """The Benzinga datasets, reached as `m.partners.benzinga`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import PartnersBenzingaNamespace
 
     Its methods cover analyst profiles and their firms, analyst insights, rating actions and their
     consensus, bull and bear cases, corporate guidance, earnings, and news. Each method only builds
@@ -390,7 +404,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.
 
         Each row holds an analyst's name, firm, ratings issued, and performance measures. The
@@ -440,7 +454,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Benzinga analyst insights on US stocks: a rating, a price target, and the reason.
 
         Each row holds an insight's stock, firm, rating and rating action, price target, and `Date`.
@@ -493,7 +507,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 
         Each row holds one analyst's action, such as an upgrade, a downgrade, a reiteration, or a
@@ -540,7 +554,7 @@ class Benzinga(Namespace):
     @raises_through(list_query)
     def consensus_ratings(
         self, symbols: Symbols, *, filters: Mapping[str, FilterValue] | None = None
-    ) -> Query:
+    ) -> FetchQuery:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
         Each row holds one stock's count of each rating and its consensus rating. It also holds the
@@ -588,7 +602,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Benzinga's bull case and bear case summaries for US stocks.
 
         Each row holds a stock's bull case and bear case as text. `LastUpdated` says when they last
@@ -639,7 +653,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
         Each row holds one guidance release: the stock, the fiscal period, the guided EPS and
@@ -692,7 +706,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Earnings announcements of US companies from Benzinga, with estimates and surprises.
 
         Each row holds one announcement, past or scheduled: the stock, the fiscal period, and the
@@ -745,7 +759,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The research firms behind Benzinga's analyst ratings.
 
         Each row holds a firm's Benzinga id, name, currency, and last update. Join its `BenzingaId`
@@ -795,7 +809,7 @@ class Benzinga(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
         Each row holds one article with its publication `Timestamp`. `Tickers` lists every ticker an
@@ -846,8 +860,12 @@ class Benzinga(Namespace):
         )
 
 
-class EtfGlobal(Namespace):
+class PartnersEtfGlobalNamespace(Namespace):
     """The ETF Global datasets, reached as `m.partners.etf_global`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import PartnersEtfGlobalNamespace
 
     Its methods cover scores, holdings, fund flows, profiles, and classifications of US-listed ETFs.
     Each row describes one fund, named by its ticker in `Symbol`. `EffectiveDate` is the date the
@@ -879,7 +897,7 @@ class EtfGlobal(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 
         Each row holds a fund's risk and reward scores, its quant grade and total score, and their
@@ -930,7 +948,7 @@ class EtfGlobal(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The holdings of US-listed ETFs from ETF Global, one row per fund, date, and holding.
 
         Each row holds a security the fund in `Symbol` holds on an `EffectiveDate`: its ticker in
@@ -984,7 +1002,7 @@ class EtfGlobal(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 
         Each row holds the money that flowed into or out of a fund on an `EffectiveDate`. It also
@@ -1035,7 +1053,7 @@ class EtfGlobal(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
         Each row holds a fund's issuer, inception, fees, assets under management, holdings count,
@@ -1087,7 +1105,7 @@ class EtfGlobal(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """ETF Global's classification of US-listed ETFs by strategy, structure, and exposure.
 
         Each row holds a fund's asset class, category, focus, region, objective, selection and
@@ -1130,8 +1148,12 @@ class EtfGlobal(Namespace):
         )
 
 
-class Tmx(Namespace):
+class PartnersTmxNamespace(Namespace):
     """The TMX dataset, reached as `m.partners.tmx`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import PartnersTmxNamespace
 
     Its one method reads corporate events from TMX's Wall Street Horizon calendar. The calendar
     covers companies worldwide: earnings dates and calls, dividends, splits, conferences, and
@@ -1163,7 +1185,7 @@ class Tmx(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
         Each row holds an event's company: its ticker in `Symbol`, and its name, ISIN, and venue. It
@@ -1214,8 +1236,12 @@ class Tmx(Namespace):
         )
 
 
-class Fable(Namespace):
+class PartnersFableNamespace(Namespace):
     """The Fable Data datasets, reached as `m.partners.fable`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import PartnersFableNamespace
 
     Fable Data totals a consumer panel's card and open-banking spending per merchant and day. The
     panel covers six European countries: the UK, Germany, France, Italy, Spain, and Austria. Fable
@@ -1249,7 +1275,7 @@ class Fable(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Daily European consumer spending per merchant, from Fable Data's transaction panel.
 
         Each row holds a merchant's spending and its transaction and account counts. It also holds
@@ -1304,7 +1330,7 @@ class Fable(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Fable Data's map from merchants to parent companies, tickers, and industries.
 
         Each row holds a merchant's names, its parent companies with their Bloomberg tickers,
@@ -1346,8 +1372,12 @@ class Fable(Namespace):
         )
 
 
-class Partners(Namespace):
+class PartnersNamespace(Namespace):
     """The datasets Massive resells from its partners, reached as `m.partners`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import PartnersNamespace
 
     Each partner has its own namespace:
 
@@ -1377,27 +1407,27 @@ class Partners(Namespace):
             _core: The session's internal core.
         """
         super().__init__(_core)
-        self._benzinga = Benzinga(_core)
-        self._etf_global = EtfGlobal(_core)
-        self._tmx = Tmx(_core)
-        self._fable = Fable(_core)
+        self._benzinga = PartnersBenzingaNamespace(_core)
+        self._etf_global = PartnersEtfGlobalNamespace(_core)
+        self._tmx = PartnersTmxNamespace(_core)
+        self._fable = PartnersFableNamespace(_core)
 
     @property
-    def benzinga(self) -> Benzinga:
+    def benzinga(self) -> PartnersBenzingaNamespace:
         """Every Benzinga dataset: analysts, firms, ratings, insights, guidance, and news."""
         return self._benzinga
 
     @property
-    def etf_global(self) -> EtfGlobal:
+    def etf_global(self) -> PartnersEtfGlobalNamespace:
         """Every ETF Global dataset: analytics, constituents, flows, profiles, taxonomies."""
         return self._etf_global
 
     @property
-    def tmx(self) -> Tmx:
+    def tmx(self) -> PartnersTmxNamespace:
         """The TMX datasets: scheduled corporate events."""
         return self._tmx
 
     @property
-    def fable(self) -> Fable:
+    def fable(self) -> PartnersFableNamespace:
         """The Fable Data datasets: European consumer spending by merchant."""
         return self._fable

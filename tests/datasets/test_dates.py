@@ -3,6 +3,7 @@
 import importlib
 import logging
 import re
+import typing
 from datetime import UTC, date, datetime, timedelta
 from typing import TypeVar, cast
 
@@ -15,6 +16,7 @@ from deephaven_massive._datasets.dates import (
     DAY_ZONES,
     MIXED_BOUNDS,
     NEW_YORK,
+    DateLike,
     DaySpan,
     TimeRange,
     bounds,
@@ -659,3 +661,7 @@ def test_a_day_reaches_now_in_its_class_zone() -> None:
     late = datetime(2025, 6, 19, 1, tzinfo=UTC)
     assert reaches_now(date(2025, 6, 18), AssetClass.STOCKS, now=late)
     assert not reaches_now(date(2025, 6, 18), AssetClass.CRYPTO, now=late)
+
+
+def test_date_like_alias() -> None:
+    assert set(typing.get_args(DateLike)) == {str, date, datetime, np.datetime64}

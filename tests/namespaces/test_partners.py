@@ -23,14 +23,14 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, sources
-from deephaven_massive._namespaces import partners
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query, query_class
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _partners as partners
+from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.typehints._queries import FetchQuery, query_class
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from deephaven_massive._types import FilterValue
+    from deephaven_massive._datasets.filters import FilterValue
 
 FIXTURES = "namespaces/partners"
 
@@ -98,12 +98,12 @@ def spec_of(name: str) -> DatasetSpec:
     return CATALOG.by_name[name]
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., FetchQuery]:
     # "partners.benzinga.ratings" is reached as session.partners.benzinga.ratings.
     target: Any = session
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., Query]", target)
+    return cast("Callable[..., FetchQuery]", target)
 
 
 def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[dict[str, Any]]:
@@ -117,11 +117,11 @@ def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[d
 
 def test_vendors_are_nested(massive_session: dm.MassiveSession) -> None:
     vendors = massive_session.partners
-    assert type(vendors) is partners.Partners
-    assert type(vendors.benzinga) is partners.Benzinga
-    assert type(vendors.etf_global) is partners.EtfGlobal
-    assert type(vendors.tmx) is partners.Tmx
-    assert type(vendors.fable) is partners.Fable
+    assert type(vendors) is partners.PartnersNamespace
+    assert type(vendors.benzinga) is partners.PartnersBenzingaNamespace
+    assert type(vendors.etf_global) is partners.PartnersEtfGlobalNamespace
+    assert type(vendors.tmx) is partners.PartnersTmxNamespace
+    assert type(vendors.fable) is partners.PartnersFableNamespace
     for vendor in (vendors.benzinga, vendors.etf_global, vendors.tmx, vendors.fable):
         assert isinstance(vendor, Namespace)
         assert vendor._core is massive_session._core
@@ -139,7 +139,7 @@ def test_each_dataset_is_one_rest_list_path(name: str) -> None:
     path, _ = DATASETS[name]
     assert spec.fetch_path == path
     assert spec.sources == ((Transport.REST, path),)
-    assert query_class(spec) is Query
+    assert query_class(spec) is FetchQuery
     assert spec.kind is None
 
 
@@ -331,7 +331,7 @@ def a_sort_field(spec: DatasetSpec) -> str:
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
     sort = a_sort_field(spec_of(name))
     q = factory(massive_session, name)(["MSFT", "AAPL"], sort=sort, order=Order.DESC, limit=10)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._spec is spec_of(name)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
@@ -361,10 +361,10 @@ def test_datasets_without_instruments_take_no_symbols(name: str) -> None:
 def _class_of(name: str) -> str:
     vendor = name.split(".")[1]
     return {
-        "benzinga": "Benzinga",
-        "etf_global": "EtfGlobal",
-        "tmx": "Tmx",
-        "fable": "Fable",
+        "benzinga": "PartnersBenzingaNamespace",
+        "etf_global": "PartnersEtfGlobalNamespace",
+        "tmx": "PartnersTmxNamespace",
+        "fable": "PartnersFableNamespace",
     }[vendor]
 
 
@@ -415,7 +415,7 @@ def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, n
 
 def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession) -> None:
     q = massive_session.partners.benzinga.consensus_ratings(["MSFT", "AAPL"])
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("AAPL", "MSFT")
     assert q._request.params == ()
     spec = q._spec
@@ -425,7 +425,9 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
     with pytest.raises(ValueError, match="takes one ticker per request"):
         massive_session.partners.benzinga.consensus_ratings(dm.ALL)
     # One row per stock: no sort, order, or limit; filters choose the ratings aggregated.
-    assert list(inspect.signature(partners.Benzinga.consensus_ratings).parameters) == [
+    assert list(
+        inspect.signature(partners.PartnersBenzingaNamespace.consensus_ratings).parameters
+    ) == [
         "self",
         "symbols",
         "filters",

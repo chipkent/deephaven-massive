@@ -3,10 +3,10 @@
 Datasets: quotes, each pair's last quote, bars, each pair's previous day's bar, fair market
 value, snapshots, movers, and currency conversion.
 
-Each dataset is one factory method on `Forex` that validates its arguments and returns a query;
-nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
-(`CATALOG` in `_session.py`).
+Each dataset is one factory method on `ForexNamespace` that validates its arguments and returns a
+query; nothing touches the network until a verb is called on the query. This module owns the
+namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG`
+in `_session.py`).
 
 A currency pair is Massive's REST ticker, `C:EURUSD`: every factory takes only that form
 (`check_symbol` in `_datasets/symbols.py`; `dm.canonical_symbol_forex` converts `EUR/USD`), the
@@ -34,7 +34,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     accepted_values,
@@ -42,15 +42,15 @@ from deephaven_massive._namespaces.query_building import (
 )
 
 if TYPE_CHECKING:
-    from deephaven_massive._query import (
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import (
+        FetchQuery,
         HistoryQuery,
-        Query,
         StreamHistoryQuery,
         SymbolStreamQuery,
     )
-    from deephaven_massive._types import StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "Forex"]
+__all__ = ["DATASETS", "ForexNamespace"]
 
 
 _REST: Final = Transport.REST
@@ -248,8 +248,12 @@ def _currency(name: str, value: object) -> str:
     raise ValueError(f"{name}={value!r} is not a three-letter upper-case currency code{hint}")
 
 
-class Forex(Namespace):
+class ForexNamespace(Namespace):
     """The forex datasets, reached as `m.forex`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import ForexNamespace
 
     Its methods cover quotes, bars, each pair's last quote and previous day's bar, fair market
     value, snapshots, movers, and currency conversion. Each method only builds a query, so it never
@@ -299,7 +303,7 @@ class Forex(Namespace):
         return cast("StreamHistoryQuery", query)
 
     @raises_through(build_query)
-    def last_quote(self, symbols: Symbols) -> Query:
+    def last_quote(self, symbols: Symbols) -> FetchQuery:
         """The latest best bid and ask of each currency pair.
 
         Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
@@ -332,13 +336,13 @@ class Forex(Namespace):
             symbols=symbols,
             all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @overload
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamBarTimespan,
+        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -401,7 +405,7 @@ class Forex(Namespace):
         return cast("HistoryQuery", query)
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: Symbols) -> Query:
+    def previous_day_bar(self, symbols: Symbols) -> FetchQuery:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
         Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
@@ -437,7 +441,7 @@ class Forex(Namespace):
             ),
             timespan=Timespan.DAY,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query)
     def fmv(self, symbols: Symbols) -> SymbolStreamQuery:
@@ -468,7 +472,7 @@ class Forex(Namespace):
         return cast("SymbolStreamQuery", build_query(self._core, FMV, symbols=symbols))
 
     @raises_through(build_query)
-    def snapshots(self, symbols: Symbols) -> Query:
+    def snapshots(self, symbols: Symbols) -> FetchQuery:
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
         Each row holds one pair's bars for today and the previous UTC day, and its latest minute
@@ -493,10 +497,10 @@ class Forex(Namespace):
 
                 latest = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
         """
-        return cast("Query", build_query(self._core, SNAPSHOTS, symbols=symbols))
+        return cast("FetchQuery", build_query(self._core, SNAPSHOTS, symbols=symbols))
 
     @raises_through(_require_enum)
-    def movers(self, direction: Direction) -> Query:
+    def movers(self, direction: Direction) -> FetchQuery:
         """The twenty currency pairs that gained or lost the most since the previous UTC close.
 
         Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
@@ -521,12 +525,12 @@ class Forex(Namespace):
                 losers = m.forex.movers(dm.Direction.LOSERS).poll(60)
         """
         side = _require_enum(direction, Direction, "direction")
-        return cast("Query", build_query(self._core, MOVERS, params={"direction": side}))
+        return cast("FetchQuery", build_query(self._core, MOVERS, params={"direction": side}))
 
     @raises_through(build_query, _currency)
     def conversion(
         self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
-    ) -> Query:
+    ) -> FetchQuery:
         """An amount converted between two currencies at the latest quote.
 
         The table has one row. It holds the converted amount, the amount you passed, and the last
@@ -570,4 +574,4 @@ class Forex(Namespace):
             raise ValueError(f"precision must be one of {sorted(accepted)}, got {precision}")
         # The endpoint's `precision` is an enum of digit strings, so it is sent as text.
         params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
-        return cast("Query", build_query(self._core, CONVERSION, params=params))
+        return cast("FetchQuery", build_query(self._core, CONVERSION, params=params))

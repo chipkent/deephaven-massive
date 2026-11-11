@@ -21,7 +21,7 @@ from deephaven_massive._massive.flatfiles import reader
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"

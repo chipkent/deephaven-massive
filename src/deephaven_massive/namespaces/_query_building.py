@@ -1,7 +1,7 @@
 """Query building: the shared dataset factory behind every namespace method.
 
-Each namespace class (`Stocks`, `Options`, ...) is a thin set of typed factory methods; this
-module does the work they share when a dataset method is called:
+Each namespace class (`StocksNamespace`, `OptionsNamespace`, ...) is a thin set of typed factory
+methods; this module does the work they share when a dataset method is called:
 
 - `Namespace` is the base class of the namespace classes; it holds the session core, which
   each factory method passes to `build_query`, and wraps each factory in `shows_call`.
@@ -13,7 +13,7 @@ module does the work they share when a dataset method is called:
   `dm.ALL` where the dataset cannot serve it (naming the alternative), parses the time-axis
   bounds, and normalizes the typed parameters and the `filters` mapping into a hashable
   `Request`.
-- The query class `build_query` returns is the one `_query.py` chooses for the dataset
+- The query class `build_query` returns is the one `typehints/_queries.py` chooses for the dataset
   (`query_class`, and `bar_query_class` for a `bars()` call).
 - `list_params` validates the `sort` and `order` parameters of the `…F` block shared by the
   REST list datasets; its `limit` goes to `build_query(limit=...)` (`Request.limit`), because
@@ -62,20 +62,28 @@ from deephaven_massive._datasets.filters import (
     takes_instants,
 )
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.symbols import SymbolTable, check_symbols
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._query import Query, QueryBase, QueryCall, bar_query_class, query_class
+from deephaven_massive._override import override
 from deephaven_massive._tables.time_text import deephaven_time_text
-from deephaven_massive._types import AllSymbols, override
+from deephaven_massive.typehints._queries import (
+    FetchQuery,
+    Query,
+    QueryCall,
+    bar_query_class,
+    query_class,
+)
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import RestPath
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
 
 __all__ = [
     "ADJUSTED_PRICE",
@@ -116,7 +124,7 @@ ADJUSTED_VOLUME: Final = (
 """The note on every volume column of a dataset with a split-adjustment choice."""
 
 
-_F = TypeVar("_F", bound=Callable[..., QueryBase])
+_F = TypeVar("_F", bound=Callable[..., Query])
 
 SNAPSHOT_SYMBOLS_PER_REQUEST: Final = 250
 """The most tickers one snapshot request names in its comma-separated ticker list.
@@ -227,7 +235,7 @@ def shows_call(path: str) -> Callable[[_F], _F]:
         )
 
         @functools.wraps(method)
-        def factory(*args: object, **kwargs: object) -> QueryBase:
+        def factory(*args: object, **kwargs: object) -> Query:
             try:
                 query = method(*args, **kwargs)
             except Exception as error:
@@ -267,12 +275,12 @@ class Namespace:
         """Name each public method by its path, such as `stocks.bars`, and wrap it in `shows_call`.
 
         Python names a function by its `__qualname__` in the `TypeError` of a wrong call
-        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). A user
-        reached the method as `m.stocks.bars`, so that path, not the class name `Stocks`, is
-        the name the message should show: each public function the class defines itself is
-        renamed to its path from the session when the class is created, at import. `typing` files a
-        function's overloads under its `__qualname__`, so each overload is renamed too and
-        registered again under the new name, which keeps `typing.get_overloads` finding them.
+        (`stocks.bars() takes from 2 to 3 positional arguments but 5 were given`). A user reached
+        the method as `m.stocks.bars`, so that path, not the class name `StocksNamespace`, is the
+        name the message should show: each public function the class defines itself is renamed to
+        its path from the session when the class is created, at import. `typing` files a function's
+        overloads under its `__qualname__`, so each overload is renamed too and registered again
+        under the new name, which keeps `typing.get_overloads` finding them.
 
         Every public method of a namespace class is a dataset factory, so each is then wrapped
         in `shows_call`, whose wrapper keeps the new name; a sub-namespace is a property, which
@@ -873,7 +881,7 @@ def build_query(
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
     values: ValueTable | None = None,
-) -> QueryBase:
+) -> Query:
     """Validate one dataset call and return its query.
 
     The dataset's `fixed_params` (parameters the library sets itself, such as the indicators'
@@ -1008,11 +1016,11 @@ def list_query(
     order: Order | None = None,
     limit: int | None = None,
     filters: Mapping[str, FilterValue] | None = None,
-) -> Query:
+) -> FetchQuery:
     """Build the query of a REST list dataset from its factory's arguments.
 
     A list dataset takes the `sort`, `order`, and `limit` block (`list_params`) beside its own
-    typed parameters, and has only a fetch path, so `build_query` builds a `Query`. A ticker
+    typed parameters, and has only a fetch path, so `build_query` builds a `FetchQuery`. A ticker
     filter (`DatasetSpec.symbol_param`) is optional; a ticker in the path, such as Benzinga's
     consensus ratings, is not.
 
@@ -1053,8 +1061,8 @@ def list_query(
         filters=filters,
         limit=limit,
     )
-    # A list dataset has only a fetch path, so `build_query` builds its `Query`.
-    return cast("Query", query)
+    # A list dataset has only a fetch path, so `build_query` builds its `FetchQuery`.
+    return cast("FetchQuery", query)
 
 
 def ticker_key(time: str | None = None) -> SourceKeys:

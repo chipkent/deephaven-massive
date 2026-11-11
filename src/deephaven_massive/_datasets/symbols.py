@@ -62,6 +62,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
@@ -69,7 +70,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
 from deephaven_massive._errors import raises_through
-from deephaven_massive._types import AllSymbols
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -77,9 +78,11 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
 __all__ = [
+    "ALL",
     "AS_WRITTEN",
     "CANONICAL_GRAMMARS",
     "UNDERLYING_CLASSES",
+    "AllSymbols",
     "NormalizedSymbols",
     "SymbolTable",
     "canonical_symbol",
@@ -104,6 +107,49 @@ __all__ = [
     "read_forex_pair",
     "symbol_class",
 ]
+
+
+class AllSymbols(Enum):
+    """The type of `dm.ALL`, for annotations.
+
+    Import it for annotations::
+
+        from deephaven_massive.typehints import AllSymbols
+
+    Pass `dm.ALL` itself; never construct this class. `dm.ALL` is its only instance, even after
+    copying or unpickling, so test for it with `symbols is dm.ALL`. It is not a `str`, so it is
+    never mistaken for a ticker.
+    """
+
+    ALL = "ALL"
+
+    @override
+    def __repr__(self) -> str:
+        """Show the public spelling, so the console prints `dm.ALL`, not `<AllSymbols.ALL: 'ALL'>`.
+
+        Returns:
+            `"dm.ALL"`.
+        """
+        return "dm.ALL"
+
+    @override
+    def __str__(self) -> str:
+        """Render as `ALL` in messages and logs, as a query's `repr` does.
+
+        Returns:
+            `"ALL"`.
+        """
+        return "ALL"
+
+
+ALL: Final = AllSymbols.ALL
+"""Every symbol: a stream of the whole market, a whole flat file, or a full-market snapshot.
+
+`ALL` is accepted by the stream methods, by every per-class `snapshots()`, and by `history()`
+when a flat file or a grouped-daily REST path exists. Everywhere else it raises `ValueError`
+naming the alternative.
+"""
+
 
 UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
 """The classes whose tickers an option can be linked to: the ones an `underlying` takes."""

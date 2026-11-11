@@ -25,10 +25,10 @@ from deephaven_massive._ingest.host_decision import (
 )
 from deephaven_massive._ingest.recency_labels import DelayedDataError
 from deephaven_massive._massive import Transport, source
-from deephaven_massive._namespaces.options import ADMIN_MESSAGES as ADMIN
-from deephaven_massive._namespaces.options import TRADES as OPTION_TRADES
-from deephaven_massive._namespaces.stocks import FMV as STOCK_FMV
 from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.namespaces._options import ADMIN_MESSAGES as ADMIN
+from deephaven_massive.namespaces._options import TRADES as OPTION_TRADES
+from deephaven_massive.namespaces._stocks import FMV as STOCK_FMV
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
 LOGGER = "deephaven_massive._ingest.host_decision"

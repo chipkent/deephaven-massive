@@ -76,18 +76,18 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_on_or_before,
 )
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
+from deephaven_massive._datasets.symbols import AllSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._massive import ParamKind, Transport, source
-from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._types import DateLike
 
 __all__ = [
     "HISTORY_TRANSPORTS",

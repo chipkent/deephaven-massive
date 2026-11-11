@@ -5,9 +5,9 @@ exchanges, condition codes, market status, and market holidays. They declare no 
 the reference endpoints span every class, and a symbol's prefix selects its class (`X:`
 crypto, `C:` forex, `I:` indices, `O:` options, none for stocks).
 
-Each dataset is one factory method on `Reference` that validates its arguments and returns a
-`Query`; nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
+Each dataset is one factory method on `ReferenceNamespace` that validates its arguments and returns
+a `FetchQuery`; nothing touches the network until a verb is called on the query. This module owns
+the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 """
 
@@ -29,7 +29,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     Namespace,
     accepted_values,
     build_query,
@@ -41,12 +41,14 @@ from deephaven_massive._namespaces.query_building import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
-__all__ = ["DATASETS", "Reference"]
+__all__ = ["DATASETS", "ReferenceNamespace"]
 
 
 _REST: Final = Transport.REST
@@ -254,8 +256,12 @@ def _event_types(types: object) -> str | None:
     return ",".join(cast("tuple[str, ...]", items))
 
 
-class Reference(Namespace):
+class ReferenceNamespace(Namespace):
     """The reference datasets across asset classes, reached as `m.reference`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import ReferenceNamespace
 
     Its methods cover tickers and their details, types, events, and related companies, news, the
     exchanges, the trade and quote condition codes, the market status, and the market holidays. Each
@@ -291,7 +297,7 @@ class Reference(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Tickers of stocks, OTC securities, indices, forex, and crypto, with listing details.
 
         Each row holds one ticker's name, market, type, primary exchange, and identifiers. Massive
@@ -358,10 +364,10 @@ class Reference(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, day_argument)
-    def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> Query:
+    def ticker_details(self, symbols: Symbols, *, as_of: DateLike | None = None) -> FetchQuery:
         """One ticker's company and listing details: address, branding, shares, and more.
 
         Each row holds one ticker's company details. A ticker Massive doesn't know gets no row, and
@@ -398,12 +404,12 @@ class Reference(Namespace):
             },
             arguments={"date": "as_of"},
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, _require_enum, _asset_class)
     def ticker_types(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
-    ) -> Query:
+    ) -> FetchQuery:
         """The ticker type codes Massive uses, such as `CS` for common stock, with their names.
 
         Each row holds one type's code, its description, its asset class, and its locale. The codes
@@ -432,10 +438,10 @@ class Reference(Namespace):
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return cast("Query", build_query(self._core, TICKER_TYPES, params=params))
+        return cast("FetchQuery", build_query(self._core, TICKER_TYPES, params=params))
 
     @raises_through(build_query, _event_types)
-    def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> Query:
+    def ticker_events(self, symbols: Symbols, *, types: Sequence[str] | None = None) -> FetchQuery:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
         Each row holds the event's date and type. A symbol may also be a CUSIP or a Composite FIGI,
@@ -469,10 +475,10 @@ class Reference(Namespace):
             all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def related_companies(self, symbols: Symbols) -> Query:
+    def related_companies(self, symbols: Symbols) -> FetchQuery:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
         `Symbol` is the related company, and `Underlying` is the ticker you asked about.
@@ -498,7 +504,7 @@ class Reference(Namespace):
         query = build_query(
             self._core, RELATED_COMPANIES, symbols=symbols, all_alternative="pass a list of symbols"
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params)
     def news(
@@ -511,7 +517,7 @@ class Reference(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """News articles about tickers, with their publishers and sentiment insights.
 
         Each row holds one article's headline, publisher, publication time, and Massive's sentiment
@@ -558,12 +564,12 @@ class Reference(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, _require_enum, _asset_class)
     def exchanges(
         self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
-    ) -> Query:
+    ) -> FetchQuery:
         """The exchanges, trade reporting facilities, and SIPs Massive knows, with their codes.
 
         Each row holds one venue's id, name, type, MIC, and asset class. The ids are the exchange
@@ -592,7 +598,7 @@ class Reference(Namespace):
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return cast("Query", build_query(self._core, EXCHANGES, params=params))
+        return cast("FetchQuery", build_query(self._core, EXCHANGES, params=params))
 
     @raises_through(build_query, list_params, _require_enum, _asset_class)
     def conditions(
@@ -606,7 +612,7 @@ class Reference(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The trade and quote condition codes, with what each means and how it updates bars.
 
         Each row holds one condition's id, name, and the SIP codes it maps to. It also says whether
@@ -661,9 +667,9 @@ class Reference(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
-    def market_status(self) -> Query:
+    def market_status(self) -> FetchQuery:
         """Whether the markets are open now, by exchange, currency market, and index group.
 
         The table has one row, with a column for each exchange, currency market, and index group. A
@@ -678,9 +684,9 @@ class Reference(Namespace):
 
                 status = m.reference.market_status().poll(60)
         """
-        return cast("Query", build_query(self._core, MARKET_STATUS))
+        return cast("FetchQuery", build_query(self._core, MARKET_STATUS))
 
-    def market_holidays(self) -> Query:
+    def market_holidays(self) -> FetchQuery:
         """The upcoming market holidays and early closes, one row per exchange and day.
 
         Each row holds the holiday's name and the exchange's status that day, with its open and
@@ -695,4 +701,4 @@ class Reference(Namespace):
 
                 holidays = m.reference.market_holidays().fetch()
         """
-        return cast("Query", build_query(self._core, MARKET_HOLIDAYS))
+        return cast("FetchQuery", build_query(self._core, MARKET_HOLIDAYS))

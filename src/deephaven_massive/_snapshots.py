@@ -20,7 +20,7 @@ from typing import Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import SNAPSHOT_SYMBOLS_PER_REQUEST
+from deephaven_massive.namespaces._query_building import SNAPSHOT_SYMBOLS_PER_REQUEST
 
 __all__ = ["DATASETS", "SNAPSHOTS"]
 

@@ -32,8 +32,7 @@ from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._errors import PermanentError, RowDataError
 from deephaven_massive._massive import Cancel, DriftReport, Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import Query
+from deephaven_massive._override import override
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
     ResultRecord,
@@ -42,7 +41,8 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -1698,7 +1698,7 @@ def test_query_poll_reads_the_fetch_path(
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
     q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     clock.wait_for_sleepers(1)
@@ -1709,7 +1709,7 @@ def test_a_bad_parameter_fails_poll_at_once(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"], params={"bogus": 1})
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
         q.poll(60)
     assert fake_rest.requests == []
@@ -1725,11 +1725,11 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
     watch = new_table([string_col("Symbol", ["AAPL"])])
     q = build_query(rest_session._core, DIVIDENDS, symbols=watch)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     bad = build_query(
         rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
     )
-    assert isinstance(bad, Query)
+    assert isinstance(bad, FetchQuery)
     with pytest.raises(
         ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table is"
     ):
@@ -1806,7 +1806,7 @@ def test_an_emptied_symbol_table_evicts_every_key(
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["I:SPX"])]))
     q = build_query(routed_session._core, spec, symbols=watch)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["I:SPX"])
     watch.delete(new_table([string_col("Symbol", ["I:SPX"])]))
@@ -1842,7 +1842,7 @@ def test_a_symbol_routed_to_a_path_without_the_parameter_is_left_out_and_listed(
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
     q = build_query(routed_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
         table = q.poll(60)  # the stock path takes `adjusted`, so nothing fails up front
         until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
@@ -1884,7 +1884,7 @@ def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", SMA_VALUE, Reply(b"{}", status=404), SMA_VALUE)
     q = build_query(routed_session._core, SMA, symbols=["AAPL", "MSFT"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "MSFT"])
     next_cycle(clock)
@@ -1946,7 +1946,7 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
     watch = new_table([string_col("Symbol", ["AAPL", "MSFT", "X:BTCUSD"])])
     q = build_query(ignoring_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
         table = q.poll(60, mode=PollMode.REPLACE)
         until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
@@ -1962,7 +1962,7 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     # A fetch() of the same session follows the same setting: the symbol is left out quietly.
     caplog.clear()
     fetched = build_query(ignoring_session._core, SMA, symbols=["MSFT"])
-    assert isinstance(fetched, Query)
+    assert isinstance(fetched, FetchQuery)
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
         fetched.fetch()
     assert caplog.records == []
@@ -1976,7 +1976,7 @@ def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
 ) -> None:
     watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
     q = build_query(raising_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     until(lambda: bool(table.j_table.isFailed()))
     until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
@@ -1998,7 +1998,7 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
     q = build_query(raising_session._core, SMA, symbols=["AAPL", "MSFT"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: bool(table.j_table.isFailed()))
     until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
@@ -2038,7 +2038,7 @@ def test_a_cycle_reports_its_pages_drift(
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "brand_new": 1}])))
     q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     clock.wait_for_sleepers(1)
     drift = streams_of(rest_session, dh_to_pylist)[0]["SchemaDrift"]
@@ -2058,7 +2058,7 @@ def test_a_cycle_with_odd_rows_keeps_the_table_and_shows_the_drift(
     rows = [{"id": "x"}, {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0}]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     clock.wait_for_sleepers(1)
     (row,) = streams_of(rest_session, dh_to_pylist)
@@ -2143,7 +2143,7 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     q = build_query(routed_session._core, crypto_first, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
     watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
@@ -2159,7 +2159,7 @@ def test_the_path_column_names_the_paths_static_symbols_read(
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
     q = build_query(routed_session._core, SMA, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert row["Path"] == SMA_STOCK
@@ -2201,7 +2201,7 @@ def page(*rows: tuple[str, float]) -> Reply:
 def feed(m: dm.MassiveSession) -> Table:
     # The default mode of the feed, APPEND.
     q = build_query(m._core, FEED, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     return q.poll(60)
 
 
@@ -2287,7 +2287,7 @@ def test_append_appends_each_revision_of_a_keyed_row(
         Reply(envelope([state("2026-01-02", 9.0)])),
     )
     q = build_query(feed_session._core, snapshot, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=PollMode.APPEND)
     until(lambda: len(dh_to_pylist(table)) == 1)
     for _ in range(3):
@@ -2353,7 +2353,7 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     fake_rest.reply(PATH, Reply(envelope(rows)))
     spec = dataclasses.replace(FEED, poll_keys=poll_keys)
     q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
@@ -2376,7 +2376,7 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60, mode=mode)
     until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
@@ -2464,7 +2464,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m:
         q = build_query(m._core, spec, symbols=["AAPL"], start="2025-01-02")
-        assert isinstance(q, Query)
+        assert isinstance(q, FetchQuery)
         table = q.poll(60, mode=mode)
         expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
 
@@ -2682,7 +2682,7 @@ def open_poll_case(
         symbols = watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
         watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     q = build_query(m._core, DIVIDENDS, symbols=cast("Any", symbols))
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     case = PollCase(m, fake_rest, clock, q.poll(60, mode=mode), race, cycles_ended, watchlist)
     until(lambda: case.table.size == 1)
     clock.wait_for_sleepers(1)

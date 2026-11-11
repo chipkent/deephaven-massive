@@ -64,7 +64,7 @@ from deephaven_massive._massive import (
     without_userinfo,
     without_userinfo_or_query,
 )
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator

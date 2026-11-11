@@ -36,37 +36,25 @@ from typing import TYPE_CHECKING, Final, Self, cast
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._economy as economy
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._options as options
+import deephaven_massive.namespaces._partners as partners
+import deephaven_massive.namespaces._reference as reference
+import deephaven_massive.namespaces._stock_filings as stock_filings
+import deephaven_massive.namespaces._stock_financials as stock_financials
+import deephaven_massive.namespaces._stocks as stocks
+from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._config import MassiveConfig, shown_setting
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
-from deephaven_massive._namespaces import (
-    crypto,
-    economy,
-    forex,
-    futures,
-    indicators,
-    indices,
-    options,
-    partners,
-    reference,
-    snapshots,
-    stock_filings,
-    stock_financials,
-    stocks,
-)
-from deephaven_massive._namespaces.crypto import Crypto
-from deephaven_massive._namespaces.economy import Economy
-from deephaven_massive._namespaces.forex import Forex
-from deephaven_massive._namespaces.futures import Futures
-from deephaven_massive._namespaces.indicators import Indicators
-from deephaven_massive._namespaces.indices import Indices
-from deephaven_massive._namespaces.options import Options
-from deephaven_massive._namespaces.partners import Partners
-from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
-from deephaven_massive._namespaces.reference import Reference
-from deephaven_massive._namespaces.stocks import Stocks
+from deephaven_massive._override import override
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
@@ -75,14 +63,25 @@ from deephaven_massive._tables.execution_context import (
 )
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._crypto import CryptoNamespace
+from deephaven_massive.namespaces._economy import EconomyNamespace
+from deephaven_massive.namespaces._forex import ForexNamespace
+from deephaven_massive.namespaces._futures import FuturesNamespace
+from deephaven_massive.namespaces._indicators import IndicatorsNamespace
+from deephaven_massive.namespaces._indices import IndicesNamespace
+from deephaven_massive.namespaces._options import OptionsNamespace
+from deephaven_massive.namespaces._partners import PartnersNamespace
+from deephaven_massive.namespaces._query_building import build_query, list_params, shows_call
+from deephaven_massive.namespaces._reference import ReferenceNamespace
+from deephaven_massive.namespaces._stocks import StocksNamespace
 
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import Query
-    from deephaven_massive._types import FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 
@@ -105,7 +104,7 @@ NAMESPACE_MODULES: Final = (
 )
 """Every namespace module, each exporting `DATASETS`, imported statically, and `snapshots`, the
 module of the dataset the session serves itself. A test asserts that this tuple names every
-module of `_namespaces/` except `query_building`."""
+private module of `namespaces/` except `_query_building`, and `_snapshots`."""
 
 CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session
@@ -310,16 +309,16 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         core.attach(SessionClients(core))
         _register(core)
         self._core = core
-        self._stocks = Stocks(core)
-        self._options = Options(core)
-        self._futures = Futures(core)
-        self._indices = Indices(core)
-        self._forex = Forex(core)
-        self._crypto = Crypto(core)
-        self._reference = Reference(core)
-        self._indicators = Indicators(core)
-        self._economy = Economy(core)
-        self._partners = Partners(core)
+        self._stocks = StocksNamespace(core)
+        self._options = OptionsNamespace(core)
+        self._futures = FuturesNamespace(core)
+        self._indices = IndicesNamespace(core)
+        self._forex = ForexNamespace(core)
+        self._crypto = CryptoNamespace(core)
+        self._reference = ReferenceNamespace(core)
+        self._indicators = IndicatorsNamespace(core)
+        self._economy = EconomyNamespace(core)
+        self._partners = PartnersNamespace(core)
 
     @override
     def __repr__(self) -> str:
@@ -337,52 +336,52 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         return f"<{core.label} {state}>"
 
     @property
-    def stocks(self) -> Stocks:
+    def stocks(self) -> StocksNamespace:
         """US equities: trades, quotes, bars, snapshots, fundamentals, and filings."""
         return self._stocks
 
     @property
-    def options(self) -> Options:
+    def options(self) -> OptionsNamespace:
         """US options: trades, quotes, bars, chains, snapshots, and contracts."""
         return self._options
 
     @property
-    def futures(self) -> Futures:
+    def futures(self) -> FuturesNamespace:
         """US futures: trades, quotes, bars, snapshots, contracts, products, and schedules."""
         return self._futures
 
     @property
-    def indices(self) -> Indices:
+    def indices(self) -> IndicesNamespace:
         """Indices: values, bars, and snapshots."""
         return self._indices
 
     @property
-    def forex(self) -> Forex:
+    def forex(self) -> ForexNamespace:
         """Forex: quotes, bars, snapshots, movers, and currency conversion."""
         return self._forex
 
     @property
-    def crypto(self) -> Crypto:
+    def crypto(self) -> CryptoNamespace:
         """Crypto: trades, quotes, bars, fair market value, snapshots, and movers."""
         return self._crypto
 
     @property
-    def reference(self) -> Reference:
+    def reference(self) -> ReferenceNamespace:
         """Reference data: tickers, news, exchanges, conditions, market status, and holidays."""
         return self._reference
 
     @property
-    def indicators(self) -> Indicators:
+    def indicators(self) -> IndicatorsNamespace:
         """Technical indicators: SMA, EMA, RSI, and MACD."""
         return self._indicators
 
     @property
-    def economy(self) -> Economy:
+    def economy(self) -> EconomyNamespace:
         """US economic data: treasury yields, inflation, labor market, and funding conditions."""
         return self._economy
 
     @property
-    def partners(self) -> Partners:
+    def partners(self) -> PartnersNamespace:
         """Datasets from Massive's partners: `benzinga`, `etf_global`, `tmx`, and `fable`."""
         return self._partners
 
@@ -396,7 +395,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The current state of tickers of any asset class, from Massive's unified snapshot.
 
         Each row holds one ticker's latest trade, quote, and minute bar, and its session's open,
@@ -451,7 +450,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(SessionCore.diagnostics_view)
     def connections(self) -> Table:

@@ -27,8 +27,6 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import transports as _transports
@@ -46,6 +44,8 @@ from deephaven_massive._tables.liveness import (
     new_scope,
     release_scope,
 )
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import SymbolStreamQuery
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:

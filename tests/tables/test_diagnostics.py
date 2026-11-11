@@ -27,6 +27,7 @@ from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
+from deephaven_massive._override import override
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import (
@@ -67,7 +68,6 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     SymbolReadState,
 )
-from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
 TIMEOUT = 30.0

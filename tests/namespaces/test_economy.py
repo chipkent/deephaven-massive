@@ -16,10 +16,10 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import Transport, source, to_batch
-from deephaven_massive._namespaces import economy
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _economy as economy
+from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.typehints._queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply
 
 OWNER = "namespaces/economy"
@@ -76,7 +76,7 @@ EACH = pytest.mark.parametrize("series", SERIES, ids=[s.method for s in SERIES])
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.economy
-    assert type(namespace) is economy.Economy
+    assert type(namespace) is economy.EconomyNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -109,7 +109,7 @@ def test_each_series_is_a_date_axis_list_endpoint(series: Series) -> None:
 def test_each_factory_builds_its_query(massive_session: dm.MassiveSession, series: Series) -> None:
     factory = getattr(massive_session.economy, series.method)
     query = factory(start="2025-01-01", end=date(2025, 6, 30), limit=10)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is series.spec
     assert query._request == Request(start=date(2025, 1, 1), end=date(2025, 6, 30), limit=10)
     assert repr(query) == (
@@ -139,7 +139,7 @@ def test_sort_and_order_are_kept_for_the_rest_layer(massive_session: dm.MassiveS
 
 @EACH
 def test_the_summary_opens_the_docstring(series: Series) -> None:
-    doc = getattr(economy.Economy, series.method).__doc__
+    doc = getattr(economy.EconomyNamespace, series.method).__doc__
     assert doc.splitlines()[0] == series.spec.summary
 
 

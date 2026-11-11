@@ -27,12 +27,12 @@ import deephaven_massive as dm
 from deephaven_massive._datasets import wire_symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.symbols import ALL, SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, sources
-from deephaven_massive._namespaces.options import ADMIN_MESSAGES
+from deephaven_massive._override import override
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
@@ -45,7 +45,7 @@ from deephaven_massive._tables.stream import (
     open_stream_tables,
 )
 from deephaven_massive._tables.watchlist import skipped_rows_text
-from deephaven_massive._types import ALL, override
+from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

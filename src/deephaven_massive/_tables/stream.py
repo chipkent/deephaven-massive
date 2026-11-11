@@ -102,7 +102,7 @@ from deephaven_massive._datasets.source_columns import (
     rename,
     required_fields,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, option_roots
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import (
     first_failure,
     masked_instants,
@@ -120,7 +120,6 @@ from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
-from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence

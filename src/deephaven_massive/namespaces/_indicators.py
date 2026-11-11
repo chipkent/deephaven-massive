@@ -26,9 +26,9 @@ session, since which day it covers is not known. `fetch()` and `poll()` return w
 reports now, the current period's still-changing value included; a row whose `TimestampEnd`
 is after its `TimestampInsert` was read before its period ended.
 
-Each dataset is one factory method on `Indicators` that validates its arguments and returns a
-`Query`; nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
+Each dataset is one factory method on `IndicatorsNamespace` that validates its arguments and returns
+a `FetchQuery`; nothing touches the network until a verb is called on the query. This module owns
+the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
 (`CATALOG` in `_session.py`).
 """
 
@@ -42,7 +42,7 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     Namespace,
     accepted_values,
     build_query,
@@ -52,12 +52,14 @@ from deephaven_massive._namespaces.query_building import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
-    from deephaven_massive._query import Query
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
-__all__ = ["DATASETS", "Indicators"]
+__all__ = ["DATASETS", "IndicatorsNamespace"]
 
 
 def _indicator(name: str, summary: str) -> DatasetSpec:
@@ -173,8 +175,12 @@ def _check_window(name: str, value: object) -> int:
     return require_positive_int(name, value)
 
 
-class Indicators(Namespace):
+class IndicatorsNamespace(Namespace):
     """The technical indicator datasets, reached as `m.indicators`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import IndicatorsNamespace
 
     Its methods cover the simple and exponential moving averages, the relative strength index, and
     the moving average convergence/divergence. Massive computes them from its bars, for tickers of
@@ -216,7 +222,7 @@ class Indicators(Namespace):
         order: Order | None,
         limit: int | None,
         filters: Mapping[str, FilterValue] | None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Validate the arguments every indicator shares and return its query.
 
         Args:
@@ -234,7 +240,7 @@ class Indicators(Namespace):
             filters: Further query parameters, or None.
 
         Returns:
-            The dataset's `Query`.
+            The dataset's `FetchQuery`.
 
         Raises:
             TypeError: If an argument has the wrong type, such as a `series_type` that is not
@@ -264,7 +270,7 @@ class Indicators(Namespace):
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(_query)
     def sma(
@@ -280,7 +286,7 @@ class Indicators(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The simple moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
@@ -354,7 +360,7 @@ class Indicators(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The exponential moving average of a ticker's bars, one row per bar.
 
         Each row holds the average for one bar, with the bar's start and end. `Date` is the bar's
@@ -428,7 +434,7 @@ class Indicators(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 
         Each row holds the index for one bar, with the bar's start and end. `Date` is the bar's day,
@@ -503,7 +509,7 @@ class Indicators(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The moving average convergence/divergence of a ticker's bars, one row per bar.
 
         Each row holds one bar's MACD line in `Value`, its signal line in `Signal`, and their

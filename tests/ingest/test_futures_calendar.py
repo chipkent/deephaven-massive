@@ -26,8 +26,8 @@ from deephaven_massive._ingest.futures_calendar import (
     RELOAD_SPACING,
     FuturesCalendar,
 )
-from deephaven_massive._namespaces import futures
-from deephaven_massive._types import override
+from deephaven_massive._override import override
+from deephaven_massive.namespaces import _futures as futures
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping

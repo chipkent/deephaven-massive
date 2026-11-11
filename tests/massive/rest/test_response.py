@@ -19,7 +19,7 @@ from deephaven_massive._massive.rest.response import (
     http_error,
 )
 from deephaven_massive._massive.spec.types import DriftReport, RestPath
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable

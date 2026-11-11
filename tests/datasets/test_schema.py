@@ -7,6 +7,8 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import merge
 
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import (
     COLUMN_TYPES,
@@ -18,7 +20,6 @@ from deephaven_massive._datasets.schema import (
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
-from deephaven_massive._namespaces import futures, stocks
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.columns import col_defs
 

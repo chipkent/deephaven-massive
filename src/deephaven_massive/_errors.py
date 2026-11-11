@@ -419,7 +419,7 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         A dataset method lets through the errors of the factory that checks its arguments::
 
             from deephaven_massive._errors import RAISES_THROUGH, raises_through
-            from deephaven_massive._namespaces.query_building import build_query
+            from deephaven_massive.namespaces._query_building import build_query
 
 
             @raises_through(build_query)

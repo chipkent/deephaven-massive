@@ -26,9 +26,9 @@ Datasets:
     reads symbols of several asset classes at once. `dm.datasets()` lists every dataset in a
     table, with each one's query methods in its `Methods` column.
 
-    To annotate your own code, import the namespace classes, such as `Stocks` for `m.stocks`,
-    from `deephaven_massive.namespaces`, and the query classes and argument types from
-    `deephaven_massive.queries`.
+    To annotate your own code, import the namespace classes, such as `StocksNamespace` for
+    `m.stocks`, from `deephaven_massive.namespaces`, and the query classes and argument types
+    from `deephaven_massive.typehints`.
 
 Query methods:
     A query reads nothing until you call one of its methods. It has only the methods its
@@ -150,7 +150,7 @@ __version__: str = _version("deephaven-massive")
 
 # Each lazily resolved public name, and the private module that defines it.
 _EXPORTS: dict[str, str] = {
-    "ALL": "deephaven_massive._types",
+    "ALL": "deephaven_massive._datasets.symbols",
     "AssetClass": "deephaven_massive._enums",
     "AuthenticationError": "deephaven_massive._errors",
     "ConditionDataType": "deephaven_massive._enums",
@@ -201,6 +201,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._dataset_list import datasets
     from deephaven_massive._datasets.symbols import (
+        ALL,
         canonical_symbol,
         canonical_symbol_crypto,
         canonical_symbol_forex,
@@ -248,7 +249,6 @@ if TYPE_CHECKING:
     )
     from deephaven_massive._session import MassiveSession
     from deephaven_massive._tables.symbols import canonicalize_symbols
-    from deephaven_massive._types import ALL
 else:
 
     def __getattr__(name: str) -> object:

@@ -113,9 +113,9 @@ def test_helper_names_are_not_reachable(name: str) -> None:
 def test_no_public_names_outside_all() -> None:
     # Every public name resolves lazily, so the namespace itself holds no public name at all;
     # anything else would be reachable as `dm.<name>` beyond the exports. The exceptions are
-    # the public submodules `queries` and `namespaces`, which Python binds here once anything
+    # the public packages `typehints` and `namespaces`, which Python binds here once anything
     # imports them.
-    assert {name for name in vars(dm) if not name.startswith("_")} <= {"queries", "namespaces"}
+    assert {name for name in vars(dm) if not name.startswith("_")} <= {"typehints", "namespaces"}
 
 
 def test_type_checking_imports_mirror_all() -> None:
@@ -216,7 +216,11 @@ def test_the_logging_switch_needs_no_other_module() -> None:
 
 
 # The public modules, whose `__all__` is the whole public surface.
-_PUBLIC_MODULES = ("deephaven_massive", "deephaven_massive.queries", "deephaven_massive.namespaces")
+_PUBLIC_MODULES = (
+    "deephaven_massive",
+    "deephaven_massive.typehints",
+    "deephaven_massive.namespaces",
+)
 
 # The dunder methods whose signatures users see in `help()` and API references.
 _PUBLIC_DUNDERS = frozenset({"__init__", "__call__", "__enter__", "__exit__", "__iter__"})
@@ -518,11 +522,11 @@ def test_no_public_signature_names_a_private_type() -> None:
 def test_the_walk_reaches_every_namespace_and_its_dataset_methods() -> None:
     walk = _walk_public_api()
     assert "deephaven_massive.MassiveSession.partners" in walk.methods
-    assert "deephaven_massive.namespaces.Benzinga.ratings" in walk.methods
-    assert "deephaven_massive.queries.Query.columns" in walk.methods
+    assert "deephaven_massive.namespaces.PartnersBenzingaNamespace.ratings" in walk.methods
+    assert "deephaven_massive.typehints.Query.columns" in walk.methods
     # Overloads are filed under each method's renamed path; the walk still finds them.
-    assert walk.methods["deephaven_massive.namespaces.Stocks.bars"] == 2
-    assert walk.methods["deephaven_massive.namespaces.Futures.bars"] == 2
+    assert walk.methods["deephaven_massive.namespaces.StocksNamespace.bars"] == 2
+    assert walk.methods["deephaven_massive.namespaces.FuturesNamespace.bars"] == 2
 
 
 class _Hidden:
@@ -640,18 +644,18 @@ def test_the_walk_finds_a_private_type_planted_in_a_public_class(
 def test_a_constructor_skips_its_underscore_parameters() -> None:
     # `_core` of a namespace's constructor is a private `SessionCore`, and nothing is reported.
     walk = _walk_public_api()
-    assert "deephaven_massive.namespaces.Stocks.__init__" in walk.methods
+    assert "deephaven_massive.namespaces.StocksNamespace.__init__" in walk.methods
     assert walk.findings == set()
 
 
 def test_the_walk_finds_a_private_type_inside_a_public_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    queries = importlib.import_module("deephaven_massive.queries")
+    queries = importlib.import_module("deephaven_massive.typehints")
     alias = importlib.import_module("deephaven_massive._datasets.symbols").NormalizedSymbols
     monkeypatch.setattr(queries, "Symbols", alias)
     walk = _walk_public_api()
-    assert "deephaven_massive.queries.Symbols: SymbolTable" in walk.findings
+    assert "deephaven_massive.typehints.Symbols: SymbolTable" in walk.findings
 
 
 def test_the_walk_fails_on_a_name_nothing_defines(monkeypatch: pytest.MonkeyPatch) -> None:

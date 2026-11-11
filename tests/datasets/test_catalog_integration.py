@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._query import QueryBase
+    from deephaven_massive.typehints._queries import Query
     from tests._live.plans import LivePlans
 
 pytestmark = [pytest.mark.integration, pytest.mark.integration_smoke]
@@ -411,7 +411,7 @@ def _query(
     client: RestClient,
     symbols: Mapping[Any, str],
     day: date,
-) -> QueryBase:
+) -> Query:
     """Build a dataset's query for one verb, with one symbol and the fewest rows.
 
     Every required argument gets a value (`_FIXED_ARGUMENTS`, `day` for a `date`); `symbols`
@@ -431,7 +431,7 @@ def _query(
     target: Any = session
     for part in name.split("."):  # every dataset method is at its name's path
         target = getattr(target, part)
-    method: Callable[..., QueryBase] = target
+    method: Callable[..., Query] = target
     arguments: dict[str, object] = {}
     for parameter in inspect.signature(method).parameters.values():
         if parameter.name == "symbols" and verb == "stream" and name in _EVERY_SYMBOL:
@@ -470,7 +470,7 @@ class _Histories(Protocol):
         ...
 
 
-def _run(query: QueryBase, verb: str, *, bars: bool, day: date) -> Table:
+def _run(query: Query, verb: str, *, bars: bool, day: date) -> Table:
     """Run one fetch or history verb on a query that offers it.
 
     Returns:
@@ -550,7 +550,7 @@ class _Case:
         return str(failed[0]["Error"]) if failed else None
 
 
-def _call(case: _Case, query: QueryBase, verb: str, *, day: date) -> tuple[list[str], list[str]]:
+def _call(case: _Case, query: Query, verb: str, *, day: date) -> tuple[list[str], list[str]]:
     """Run a `fetch()` or `history()` case; a refusal or missing S3 credentials skip it.
 
     Returns:
@@ -577,7 +577,7 @@ def _call(case: _Case, query: QueryBase, verb: str, *, day: date) -> tuple[list[
     return columns, case.drift()
 
 
-def _poll_case(case: _Case, query: QueryBase) -> tuple[list[str], list[str]]:
+def _poll_case(case: _Case, query: Query) -> tuple[list[str], list[str]]:
     """Run the poll case: it passes once two cycles have published rows.
 
     A cycle shows as a new `TimestampInsert`: every row of a cycle carries that cycle's.
@@ -688,7 +688,7 @@ def _may_go_quiet(asset_class: dm.AssetClass, family: str, live_plans: LivePlans
 
 def _stream_case(
     case: _Case,
-    query: QueryBase,
+    query: Query,
     *,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     wait_rows: WaitRows,

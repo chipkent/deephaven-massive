@@ -22,7 +22,7 @@ from deephaven_massive._datasets.catalog import NO_NAMED_TICKER, DatasetSpec
 from deephaven_massive._enums import AssetClass, Order, Timeframe, _require_enum
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     EVERY_TICKER,
     Namespace,
     list_query,
@@ -32,13 +32,15 @@ from deephaven_massive._namespaces.query_building import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._query import Query
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._types import DateLike, FilterValue, Symbols
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery
 
 __all__ = [
     "DATASETS",
-    "StockFinancials",
+    "StocksFinancialsNamespace",
 ]
 
 _REST: Final = Transport.REST
@@ -120,7 +122,7 @@ def _statement_query(
     order: Order | None,
     limit: int | None,
     filters: Mapping[str, FilterValue] | None,
-) -> Query:
+) -> FetchQuery:
     """Build the query of one financial statement, checking its `timeframe`.
 
     Args:
@@ -136,7 +138,7 @@ def _statement_query(
         filters: The `filters` mapping, or None.
 
     Returns:
-        The `Query`.
+        The `FetchQuery`.
 
     Raises:
         TypeError: If `timeframe` is not a `dm.Timeframe`, or another argument has the wrong
@@ -168,8 +170,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.stocks.financials`, one `DatasetSpec` each."""
 
 
-class StockFinancials(Namespace):
+class StocksFinancialsNamespace(Namespace):
     """The financial statement datasets, reached as `m.stocks.financials`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import StocksFinancialsNamespace
 
     Its methods cover the balance sheets, income statements, and cash flow statements that companies
     file with the SEC, and Massive's valuation ratios. Each method only builds a query, so it never
@@ -200,7 +206,7 @@ class StockFinancials(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Balance sheets of US public companies, one row per filer and reporting period.
 
         Each row holds a company's assets, liabilities, and equity at the end of a quarter or fiscal
@@ -270,7 +276,7 @@ class StockFinancials(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Income statements of US public companies, one row per filer and reporting period.
 
         Each row holds a company's revenue, expenses, earnings, and per-share figures, as filed with
@@ -334,7 +340,7 @@ class StockFinancials(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
         Each row holds a company's operating, investing, and financing cash flows, as filed with the
@@ -393,7 +399,7 @@ class StockFinancials(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
         Each row holds one ticker's ratios as of its `Date`, such as price to earnings, return on

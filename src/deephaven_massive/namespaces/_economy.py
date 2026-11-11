@@ -3,8 +3,8 @@
 Datasets: treasury yields, inflation, inflation expectations, labor-market indicators, and
 funding conditions, one REST list endpoint each under `/fed/v1/`.
 
-Each dataset is one factory method on `Economy` that validates its arguments and returns a
-`Query`; nothing touches the network until a verb is called on the query. Every row is one
+Each dataset is one factory method on `EconomyNamespace` that validates its arguments and returns a
+`FetchQuery`; nothing touches the network until a verb is called on the query. Every row is one
 calendar date of the series, so the datasets have no `Symbol` and no `Timestamp`: they keep
 their `Date` column (ISO `yyyy-MM-dd` text, as every date the library returns), and `start` and
 `end` bound it through `date.gte` and `date.lte`. This module owns the namespace's
@@ -18,16 +18,17 @@ from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._errors import raises_through
-from deephaven_massive._namespaces.query_building import Namespace, build_query, list_params
+from deephaven_massive.namespaces._query_building import Namespace, build_query, list_params
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import Query
-    from deephaven_massive._types import DateLike, FilterValue
+    from deephaven_massive.typehints._queries import FetchQuery
 
-__all__ = ["DATASETS", "Economy"]
+__all__ = ["DATASETS", "EconomyNamespace"]
 
 
 def _series(name: str, path: str, summary: str) -> DatasetSpec:
@@ -87,8 +88,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.economy`, one `DatasetSpec` each (for example `economy.inflation`)."""
 
 
-class Economy(Namespace):
+class EconomyNamespace(Namespace):
     """The US economic datasets, reached as `m.economy`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import EconomyNamespace
 
     Its methods cover Treasury yields, inflation, inflation expectations, the labor market, and
     short-term funding conditions. They take no symbols, and each row is one date of the series.
@@ -117,7 +122,7 @@ class Economy(Namespace):
         order: Order | None,
         limit: int | None,
         filters: Mapping[str, FilterValue] | None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Validate the arguments every economy dataset shares and return its query.
 
         Args:
@@ -130,7 +135,7 @@ class Economy(Namespace):
             filters: Further query parameters, or None.
 
         Returns:
-            The dataset's `Query`.
+            The dataset's `FetchQuery`.
 
         Raises:
             TypeError: If an argument has the wrong type (`list_params`, `build_query`).
@@ -140,7 +145,7 @@ class Economy(Namespace):
         query = build_query(
             self._core, spec, start=start, end=end, params=params, filters=filters, limit=limit
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(_query)
     def treasury_yields(
@@ -152,7 +157,7 @@ class Economy(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """US Treasury yields at constant maturities from one month to 30 years, one row per day.
 
         Each row holds one day's yields, one column per maturity, such as `Yield10Year`.
@@ -201,7 +206,7 @@ class Economy(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """US inflation: CPI, core CPI, and the PCE price indexes and spending, one row per month.
 
         Each row holds one month's CPI, core CPI, and year-over-year CPI, and its PCE, core PCE, and
@@ -251,7 +256,7 @@ class Economy(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """US inflation expectations from market prices and models, one row per day.
 
         Each row holds one day's expected inflation over several horizons. Market-price columns,
@@ -301,7 +306,7 @@ class Economy(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """US labor-market indicators: unemployment, participation, earnings, and job openings.
 
         Each row holds one month's unemployment rate, labor force participation rate, average hourly
@@ -351,7 +356,7 @@ class Economy(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """US short-term funding conditions: policy, overnight, and repo rates, one row per day.
 
         Each row holds one day's fed funds target range and effective rate, the overnight bank

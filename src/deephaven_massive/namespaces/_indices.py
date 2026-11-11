@@ -1,9 +1,9 @@
 """The `m.indices` namespace: index values, bars, the previous day's bar, snapshots, and more.
 
-Each dataset is one factory method on `Indices` that validates its arguments and returns a query;
-nothing touches the network until a verb is called on the query. This module owns the
-namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog
-(`CATALOG` in `_session.py`).
+Each dataset is one factory method on `IndicesNamespace` that validates its arguments and returns a
+query; nothing touches the network until a verb is called on the query. This module owns the
+namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG`
+in `_session.py`).
 
 The five datasets and what serves them:
 
@@ -35,7 +35,7 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
@@ -46,15 +46,17 @@ from deephaven_massive._namespaces.query_building import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import (
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import (
+        FetchQuery,
         HistoryQuery,
-        Query,
         StreamHistoryQuery,
     )
-    from deephaven_massive._types import DateLike, FilterValue, StreamBarTimespan, Symbols
 
-__all__ = ["DATASETS", "Indices"]
+__all__ = ["DATASETS", "IndicesNamespace"]
 
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -165,8 +167,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.indices`, one `DatasetSpec` each, in the order the reference lists them."""
 
 
-class Indices(Namespace):
+class IndicesNamespace(Namespace):
     """The index datasets, reached as `m.indices`.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import IndicesNamespace
 
     Its methods cover index values, bars, each index's previous day's bar and daily open and close,
     and snapshots. Index symbols take the `I:` prefix, such as `I:SPX`. Each method only builds a
@@ -220,7 +226,7 @@ class Indices(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamBarTimespan,
+        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
     ) -> StreamHistoryQuery: ...
@@ -269,7 +275,7 @@ class Indices(Namespace):
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: Symbols) -> Query:
+    def previous_day_bar(self, symbols: Symbols) -> FetchQuery:
         """The previous trading day's open, high, low, and close of each index.
 
         Each row holds one index's bar of the previous complete session. Its volume columns are
@@ -305,7 +311,7 @@ class Indices(Namespace):
             ),
             timespan=Timespan.DAY,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params)
     def snapshots(
@@ -316,7 +322,7 @@ class Indices(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The current state of each index: its level, its session so far, and its status.
 
         Each row holds one index's level and its session's open, high, low, close, and change. It
@@ -353,7 +359,7 @@ class Indices(Namespace):
                 latest = m.indices.snapshots(["I:SPX", "I:NDX"]).poll(5)
         """
         return cast(
-            "Query",
+            "FetchQuery",
             build_query(
                 self._core,
                 SNAPSHOTS,
@@ -365,7 +371,7 @@ class Indices(Namespace):
         )
 
     @raises_through(build_query, day_argument)
-    def daily_open_close(self, symbols: Symbols, date: DateLike) -> Query:
+    def daily_open_close(self, symbols: Symbols, date: DateLike) -> FetchQuery:
         """One day's opening, closing, high, and low levels of each index.
 
         Each row holds one index's levels for the day, with the window of an index day bar. It also
@@ -394,7 +400,7 @@ class Indices(Namespace):
                 day = m.indices.daily_open_close(["I:SPX", "I:NDX"], "2026-10-30").fetch()
         """
         return cast(
-            "Query",
+            "FetchQuery",
             build_query(
                 self._core,
                 DAILY_OPEN_CLOSE,

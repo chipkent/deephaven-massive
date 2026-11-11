@@ -41,10 +41,10 @@ from deephaven_massive._ingest.symbol_reads import (
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import futures
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive.namespaces import _futures as futures
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:

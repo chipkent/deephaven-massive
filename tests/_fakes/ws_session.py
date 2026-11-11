@@ -23,10 +23,10 @@ from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
 from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
+from deephaven_massive._override import override
 from deephaven_massive._tables.transports import HostDecision
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

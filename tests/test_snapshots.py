@@ -7,16 +7,16 @@ from typing import Any, cast
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import snapshots
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
-OWNER = "namespaces/snapshots"
+OWNER = "snapshots"
 R = Transport.REST
 Fixture = Callable[[str, str], bytes]
 ToRows = Callable[[Table], list[dict[str, Any]]]

@@ -33,8 +33,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import QueryCall, SymbolStreamQuery
+from deephaven_massive._override import override
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -54,7 +53,8 @@ from deephaven_massive._tables.liveness import (
 )
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import QueryCall, SymbolStreamQuery
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:

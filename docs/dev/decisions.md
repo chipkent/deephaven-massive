@@ -400,28 +400,32 @@ plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
 
-**98. Every type the public contract declares is public: `deephaven_massive.namespaces`**
-(2026-11-10). The public API is the declared contract users program against: the public names,
-and for each public class its documented members and their signatures, inherited ones
-included. Every type that contract declares must be public: each parameter, return, and
-property type, each type inside a public alias, and each exception a `Raises:` section
-documents. An implementation detail may stay private when the declared type is public: a
-method declared to return a public interface may return a private class that implements it; a
-public class may inherit members from a private base (`QueryBase`, `Namespace`), whose members
-are part of the public class and render with it in `help()` and in API docs; and an exception
-may be a private subclass of a documented public type (`MassiveError`), unless the docs tell
-users to catch it by its own type. A constructor users never call is no part of the contract,
-and its parameters, named with a leading underscore (`_core`), may have private types. The
-defect this fixes: `m.stocks` and the other fifteen namespace properties declared private
-classes (`_Stocks`), so no public type declared the dataset methods. The namespace classes are
-now public concrete classes named after their properties (`Stocks`, `StockFinancials`,
-`EtfGlobal`), exported from a second public module, `deephaven_massive.namespaces`, which mirrors
-`queries`: for annotations, and not imported by `import deephaven_massive`. Public interfaces
-with private implementations were rejected: they would copy about 130 method signatures and
-their docstrings. `queries` also exports the declared types `AllSymbols` (the type of
-`dm.ALL`, inside `Symbols`), `StreamBarTimespan`, and `FuturesBarTimespan` (the `timespan` types
-of the `bars()` overloads). A test walks the contract and fails on any private type it
-declares.
+**98. Every type the public contract declares is public, in a public package that implements
+it: `deephaven_massive.namespaces` and `deephaven_massive.typehints`** (2026-11-11). The public
+API is the declared contract users program against: the public names, and for each public class
+its documented members and their signatures, inherited ones included. Every type that contract
+declares must be public: each parameter, return, and property type, each type inside a public
+alias, and each exception a `Raises:` section documents. An implementation detail may stay
+private when the declared type is public: a private base whose members render with the public
+class in `help()` and API docs (`Namespace`), the private class behind a declared public
+interface, and a private exception subclass of a documented public type (`MassiveError`), unless
+the docs tell users to catch it by its own type. A constructor users never call is no part of
+the contract, and its parameters, named with a leading underscore (`_core`), may have private
+types. A public class lives in the public package whose private submodules implement it, never in a
+public module that only re-exports a private one; a type the lower layers need is defined with
+the code that reads it and exported by the public package, as the root exports the enums. `deephaven_massive.namespaces` holds the classes of `m.stocks` and the
+other fifteen namespaces, named for their path on the session (`StocksNamespace`,
+`PartnersBenzingaNamespace`), in private submodules, with an `__init__.py` that names them.
+`deephaven_massive.typehints` holds the query classes (`Query`, the base every query shares,
+with `columns()`; `FetchQuery`, the REST class; `StreamQuery`, `SymbolStreamQuery`,
+`HistoryQuery`, `StreamHistoryQuery`) in its private `_queries.py`, defines `Symbols`, and
+exports `AllSymbols`, `DateLike`, and `FilterValue`, which are defined with the code that reads
+them in `_datasets` because the lower layers use them too. Both packages import eagerly, stay
+out of the root `__all__`, and are not imported by `import deephaven_massive`. The name
+`typehints` says what users do with the package and takes no standard-library module name, so
+it is never confused with `typing` or `types` in an import line or an IDE's suggestions. The
+`bars()` overloads write their timespan `Literal`s in place instead of naming private aliases. A
+test walks the contract and fails on any private type it declares.
 
 **99. A malformed flat-file line follows `MassiveConfig.malformed_rows`, `LOG` by default**
 (2026-11-10). Rule 24 gives each cause of a bad row its own `dm.OnError` setting (66, 81); a

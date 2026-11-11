@@ -1,4 +1,4 @@
-"""The five query classes, their verbs, and the choice of a dataset's class.
+"""The base `Query` and its five query classes, their verbs, and the choice of a dataset's class.
 
 A dataset method such as `m.stocks.trades(["AAPL"])` returns a *query*: an immutable,
 hashable description of what to fetch. Nothing touches the network until a *verb* is called,
@@ -6,7 +6,7 @@ and each verb returns a Deephaven `Table` of a particular shape:
 
 | Class                | Verbs                                                     |
 |----------------------|-----------------------------------------------------------|
-| `Query`              | `fetch()`, `poll(interval)`                               |
+| `FetchQuery`         | `fetch()`, `poll(interval)`                               |
 | `StreamQuery`        | `blink()`, `append_only()`, `ring(capacity)`              |
 | `SymbolStreamQuery`  | the `StreamQuery` verbs and `last_by()`                   |
 | `HistoryQuery`       | `history(start, end=None)`                                |
@@ -18,8 +18,8 @@ options admin messages, is a plain `StreamQuery`: it has no `last_by()`, whose d
 
 A verb that cannot work for a dataset does not exist on its query class, so tab completion and
 `hasattr` are the contract; calling one raises an `AttributeError` that names the verbs the
-query has and, where one exists, the dataset that has the verb (`QueryBase.__getattr__`): a
-one-row endpoint, such as each symbol's last trade, is a `Query` dataset of its own
+query has and, where one exists, the dataset that has the verb (`Query.__getattr__`): a
+one-row endpoint, such as each symbol's last trade, is a `FetchQuery` dataset of its own
 (`m.stocks.last_trade`), never a `fetch()` of the stream. Every query also has `columns()`,
 which is not a verb: it lists the dataset's columns,
 their types, and what each one means, as a static table built without any network call.
@@ -58,7 +58,7 @@ A dataset's class follows from the transports its spec declares (`query_class`),
 class and the dataset layer never refers to the query classes.
 
 Users import the classes for type annotations from the public module
-`deephaven_massive.queries`, and never construct them.
+`deephaven_massive.typehints`, and never construct them.
 
 The module is one subject although it runs past 1,000 lines: the five classes build on one
 base and on each other (`StreamHistoryQuery` is a `SymbolStreamQuery`, itself a `StreamQuery`,
@@ -98,7 +98,7 @@ from deephaven_massive._datasets.history_source import (
     rest_history_problem,
     warn_unfilled,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
+from deephaven_massive._datasets.symbols import ALL, SymbolTable, symbol_class
 from deephaven_massive._enums import (
     AssetClass,
     HistorySource,
@@ -116,6 +116,7 @@ from deephaven_massive._errors import (
     raises_through,
 )
 from deephaven_massive._massive import Transport
+from deephaven_massive._override import override
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -144,22 +145,21 @@ from deephaven_massive._tables.watchlist import (
     skipped_rows_text,
     watched_rows,
 )
-from deephaven_massive._types import ALL, override
 
 if TYPE_CHECKING:
     import threading
     from collections.abc import Callable, Mapping
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request, ValueTable
     from deephaven_massive._tables.transports import SymbolOutcome
-    from deephaven_massive._types import DateLike
 
 __all__ = [
+    "FetchQuery",
     "HistoryQuery",
     "Query",
-    "QueryBase",
     "QueryCall",
     "StreamHistoryQuery",
     "StreamQuery",
@@ -193,7 +193,7 @@ _STREAM_VERBS: Final = frozenset({"blink", "append_only", "ring", "last_by"})
 """The verbs a dataset with WebSocket channels serves; `last_by` only where its rows name their
 symbol (`DatasetSpec.names_symbols`)."""
 
-_Q = TypeVar("_Q", bound="QueryBase")
+_Q = TypeVar("_Q", bound="Query")
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -306,7 +306,7 @@ def verbs(spec: DatasetSpec) -> tuple[str, ...]:
 
     A `bars` dataset streams at some timespans only, and its stream verbs are listed all the
     same; the verbs of one `bars()` call follow its timespan (`bar_query_class` in
-    `_namespaces/query_building.py`). `dm.datasets()` shows the result.
+    `namespaces/_query_building.py`). `dm.datasets()` shows the result.
 
     Args:
         spec: The dataset.
@@ -570,7 +570,7 @@ class QueryCall:
     """The dataset-method call that built a query, as its repr shows it.
 
     Created by the dataset method itself, through `shows_call` in
-    `_namespaces/query_building.py`, when it returns its query; a query built any other way
+    `namespaces/_query_building.py`, when it returns its query; a query built any other way
     carries only its dataset's path. Not part of the query's equality: two calls that
     normalize to one request are one query, and since `text` writes the normalized values,
     they print alike. Immutable and thread-safe.
@@ -620,13 +620,20 @@ class QueryCall:
 
 
 @dataclass(frozen=True, repr=False, slots=True)
-class QueryBase:
-    """The state every query class shares: the session, the dataset, and the arguments.
+class Query:
+    """Any query: the base class of the five query classes, for annotations.
 
-    Frozen and hashable; equality includes the concrete class, so a `StreamQuery` never equals
-    a `HistoryQuery`, and covers the dataset and the normalized request, never the call that
-    built it. Queries have no public attributes: the verbs and `columns()` are the whole API,
-    and the `repr` is the call that built the query (`QueryCall`).
+    Import it for annotations::
+
+        from deephaven_massive.typehints import Query
+
+    It types code that takes any query, such as a helper that lists a query's columns. A dataset
+    method returns an instance of one of its subclasses; users never construct a query.
+
+    Every query has `columns()`. Frozen and hashable; equality includes the concrete class, so a
+    `StreamQuery` never equals a `HistoryQuery`, and covers the dataset and the normalized request,
+    never the call that built it. Queries have no public attributes: the verbs and `columns()` are
+    the whole API, and the `repr` is the call that built the query (`QueryCall`).
     """
 
     _core: SessionCore
@@ -678,32 +685,38 @@ class QueryBase:
         """
         return self._call.text(self._request)
 
-    def __getattr__(self, name: str) -> object:
-        """Explain a verb this query does not have, and name the dataset that has it.
+    if TYPE_CHECKING:
+        # Declared at run time only: a type checker that saw `__getattr__` would accept any
+        # attribute of a query, such as a misspelled verb, instead of refusing it.
+        pass
+    else:
 
-        Python calls this only when the normal lookup fails, so the query's own verbs,
-        `columns()`, and every other attribute resolve as usual, and `hasattr(q, "fetch")` is
-        False on a query without `fetch()`. The return type is `object`, not `NoReturn`, so a
-        type checker still refuses a call of a verb the query's class lacks.
+        def __getattr__(self, name: str) -> object:
+            """Explain a verb this query does not have, and name the dataset that has it.
 
-        Args:
-            name: The attribute that was not found.
+            Python calls this only when the normal lookup fails, so the query's own verbs,
+            `columns()`, and every other attribute resolve as usual, and `hasattr(q, "fetch")` is
+            False on a query without `fetch()`.
 
-        Returns:
-            Never: it always raises.
+            Args:
+                name: The attribute that was not found.
 
-        Raises:
-            AttributeError: Always. For a verb's name, the message names the dataset, the methods
-                its query has, and where one exists the dataset that has the verb, such as
-                `"stocks.trades has no fetch(); its methods are blink(), append_only(), ring(),
-                last_by(), history(); use m.stocks.last_trade(...).fetch()"`
-                (`_missing_verb`); for any other name, Python's own message.
-        """
-        if name not in _VERBS:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}", name=name, obj=self
-            )
-        raise AttributeError(self._missing_verb(name), name=name, obj=self)
+            Returns:
+                Never: it always raises.
+
+            Raises:
+                AttributeError: Always. For a verb's name, the message names the dataset, the
+                    methods its query has, and where one exists the dataset that has the verb,
+                    such as `"stocks.trades has no fetch(); its methods are blink(),
+                    append_only(), ring(), last_by(), history(); use
+                    m.stocks.last_trade(...).fetch()"`
+                    (`_missing_verb`); for any other name, Python's own message.
+            """
+            if name not in _VERBS:
+                raise AttributeError(
+                    f"{type(self).__name__!r} object has no attribute {name!r}", name=name, obj=self
+                )
+            raise AttributeError(self._missing_verb(name), name=name, obj=self)
 
     def _missing_verb(self, verb: str) -> str:
         """Say why this query has no `verb`, and what to call instead.
@@ -953,8 +966,12 @@ def _symbols_per_read(spec: DatasetSpec) -> int:
     return spec.symbols_per_request or 1
 
 
-class Query(QueryBase):
+class FetchQuery(Query):
     """A query with `fetch()` for a static table and `poll()` for a live one.
+
+    Import it for annotations::
+
+        from deephaven_massive.typehints import FetchQuery
 
     You get the query from a dataset method, such as `m.stocks.dividends(...)`. It reads nothing
     until you call one of its methods. You can call them as often as you like.
@@ -1301,8 +1318,12 @@ class Query(QueryBase):
         )
 
 
-class StreamQuery(QueryBase):
+class StreamQuery(Query):
     """A streaming query: `blink()`, `append_only()`, and `ring()`.
+
+    Import it for annotations::
+
+        from deephaven_massive.typehints import StreamQuery
 
     Every live stream's query is a `StreamQuery`. When the stream's rows have a `Symbol` column, as
     `m.stocks.luld(...)`'s do, its query is a `SymbolStreamQuery`, which adds `last_by()`.
@@ -1551,6 +1572,10 @@ class StreamQuery(QueryBase):
 class SymbolStreamQuery(StreamQuery):
     """A streaming query with a `Symbol` column: the `StreamQuery` methods and `last_by()`.
 
+    Import it for annotations::
+
+        from deephaven_massive.typehints import SymbolStreamQuery
+
     You get the query from a dataset method, such as `m.stocks.luld(...)`, and you can reuse it. Its
     four methods return the same stream as four Deephaven table types; `help(StreamQuery)` covers
     what every stream method shares.
@@ -1693,8 +1718,12 @@ class SymbolStreamQuery(StreamQuery):
         )
 
 
-class HistoryQuery(QueryBase):
+class HistoryQuery(Query):
     """A query with history: `history(start, end)` reads a past range.
+
+    Import it for annotations::
+
+        from deephaven_massive.typehints import HistoryQuery
 
     You get the query from a dataset method, such as `m.options.bars(...)` with a timespan that
     doesn't stream. Each call of `history()` reads its range again.
@@ -2115,10 +2144,13 @@ class HistoryQuery(QueryBase):
 class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     """A streaming query that also has history: the four stream methods and `history()`.
 
+    Import it for annotations::
+
+        from deephaven_massive.typehints import StreamHistoryQuery
+
     You get the query from a dataset method, such as `m.stocks.bars(...)` with a one-second or
     one-minute timespan, and you can reuse it. `help(StreamQuery)` covers what every stream method
-    shares, and `help(SymbolStreamQuery)` covers the symbols and watchlists it takes. Import it with
-    `from deephaven_massive.queries import StreamHistoryQuery`.
+    shares, and `help(SymbolStreamQuery)` covers the symbols and watchlists it takes.
 
     Example:
         ::
@@ -2131,7 +2163,7 @@ class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     __slots__ = ()
 
 
-def query_class(spec: DatasetSpec) -> type[QueryBase]:
+def query_class(spec: DatasetSpec) -> type[Query]:
     """Return the query class of a dataset, derived from the transports its spec declares.
 
     A dataset's verbs are exactly what its transports can serve, so the class follows from the
@@ -2141,7 +2173,7 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
 
     | Channels | History | Fetch | Class                |
     |----------|---------|-------|----------------------|
-    | no       | no      | yes   | `Query`              |
+    | no       | no      | yes   | `FetchQuery`         |
     | yes      | no      | no    | `SymbolStreamQuery`  |
     | no       | yes     | no    | `HistoryQuery`       |
     | yes      | yes     | no    | `StreamHistoryQuery` |
@@ -2163,13 +2195,13 @@ def query_class(spec: DatasetSpec) -> type[QueryBase]:
     if spec.is_bars:
         return HistoryQuery
     if not spec.has_channels:
-        return Query if spec.has_fetch else HistoryQuery
+        return FetchQuery if spec.has_fetch else HistoryQuery
     if not spec.names_symbols:
         return StreamQuery
     return StreamHistoryQuery if spec.has_history else SymbolStreamQuery
 
 
-def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[QueryBase]:
+def bar_query_class(spec: DatasetSpec, timespan: object, multiplier: object) -> type[Query]:
     """Pick the query class of a `bars()` call from its actual timespan and multiplier.
 
     With `multiplier=1`, a timespan that has a WebSocket channel (`SECOND`, `MINUTE`) gives a

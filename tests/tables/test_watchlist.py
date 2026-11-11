@@ -15,10 +15,14 @@ from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._options as options
+import deephaven_massive.namespaces._partners as partners
 from deephaven_massive._datasets.request import ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._namespaces import crypto, forex, futures, options, partners
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher

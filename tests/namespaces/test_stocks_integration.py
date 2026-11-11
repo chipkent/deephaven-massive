@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._query import HistoryQuery
+    from deephaven_massive.typehints._queries import HistoryQuery
 
 pytestmark = pytest.mark.integration
 

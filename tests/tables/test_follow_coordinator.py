@@ -31,6 +31,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
+from deephaven_massive._override import override
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -50,7 +51,6 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:

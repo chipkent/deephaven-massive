@@ -8,12 +8,17 @@ from typing import cast
 
 import pytest
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.column_descriptions import JSON_TEXT_NOTE, TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import ColumnType, dataset_schema
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
-from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES

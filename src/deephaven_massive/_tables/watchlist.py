@@ -64,7 +64,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence

@@ -1,5 +1,6 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
+import copy
 import json
 import re
 from collections.abc import Callable
@@ -14,6 +15,8 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.symbols import (
+    ALL,
+    AllSymbols,
     SymbolTable,
     check_symbol,
     check_symbols,
@@ -720,3 +723,18 @@ def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
         dm.canonical_symbol_forex("EURUSD=X")
     with pytest.raises(ValueError, match="Yahoo Finance"):
         dm.canonical_symbol_forex("eurusd=x")
+
+
+def test_all_is_the_exported_singleton() -> None:
+    assert dm.ALL is ALL
+    assert AllSymbols("ALL") is ALL
+    assert copy.copy(ALL) is ALL
+    assert copy.deepcopy(ALL) is ALL
+    assert hash(ALL) == hash(AllSymbols.ALL)
+    assert not isinstance(ALL, str)
+
+
+def test_all_shows_its_public_name() -> None:
+    assert repr(ALL) == "dm.ALL"
+    assert str(ALL) == "ALL"
+    assert f"{ALL}" == "ALL"

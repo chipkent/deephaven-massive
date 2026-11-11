@@ -4,8 +4,8 @@ Datasets: `trades`, `quotes`, and `bars` (streamed over the `/futures` WebSocket
 REST and flat-file history), `snapshots` (the current state of contracts), and the reference
 datasets `contracts`, `products`, `exchanges`, `market_status`, and `schedules`.
 
-Each dataset is one factory method on `Futures` that validates its arguments through
-`build_query` (`_namespaces/query_building.py`) and returns a query; nothing touches the network
+Each dataset is one factory method on `FuturesNamespace` that validates its arguments through
+`build_query` (`namespaces/_query_building.py`) and returns a query; nothing touches the network
 until a verb is called on the query. This module owns the namespace's `DatasetSpec`s, exported as
 `DATASETS` and composed into the dataset catalog (`CATALOG` in `_session.py`). A spec names the
 generated sources of its dataset and the key columns of each source; the columns, their types, and
@@ -44,7 +44,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
     Namespace,
     build_query,
@@ -58,18 +58,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
+    from deephaven_massive._datasets.dates import DateLike
+    from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery
-    from deephaven_massive._types import (
-        DateLike,
-        FilterValue,
-        FuturesBarTimespan,
-        StreamBarTimespan,
-        Symbols,
-    )
+    from deephaven_massive.typehints import Symbols
+    from deephaven_massive.typehints._queries import FetchQuery, HistoryQuery, StreamHistoryQuery
 
-__all__ = ["DATASETS", "Futures"]
+__all__ = ["DATASETS", "FuturesNamespace"]
 
 
 _REST, _WS, _FLAT_FILES = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -288,8 +284,12 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.futures`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
 
-class Futures(Namespace):
+class FuturesNamespace(Namespace):
     """The US futures datasets, reached as `m.futures`, for CME, CBOT, NYMEX, and COMEX contracts.
+
+    Import it for annotations::
+
+        from deephaven_massive.namespaces import FuturesNamespace
 
     Its methods cover trades, quotes, bars, snapshots, and the reference datasets of contracts,
     products, exchanges, market status, and session schedules. Each method only builds a query, so
@@ -397,7 +397,7 @@ class Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: StreamBarTimespan,
+        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
         *,
         multiplier: Literal[1] = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -406,7 +406,16 @@ class Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesBarTimespan,
+        timespan: Literal[
+            Timespan.SECOND,
+            Timespan.MINUTE,
+            Timespan.HOUR,
+            Timespan.SESSION,
+            Timespan.WEEK,
+            Timespan.MONTH,
+            Timespan.QUARTER,
+            Timespan.YEAR,
+        ],
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -415,7 +424,16 @@ class Futures(Namespace):
     def bars(
         self,
         symbols: Symbols,
-        timespan: FuturesBarTimespan,
+        timespan: Literal[
+            Timespan.SECOND,
+            Timespan.MINUTE,
+            Timespan.HOUR,
+            Timespan.SESSION,
+            Timespan.WEEK,
+            Timespan.MONTH,
+            Timespan.QUARTER,
+            Timespan.YEAR,
+        ],
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
@@ -478,7 +496,7 @@ class Futures(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The latest trade, quote, minute bar, and session of each futures contract.
 
         Each row holds one contract's last trade, quote, and minute bar, and the open, high, low,
@@ -528,7 +546,7 @@ class Futures(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
     def contracts(
@@ -541,7 +559,7 @@ class Futures(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The specification of every listed futures contract.
 
         Each row holds one contract as of a date: its product, trading venue, first and last trade
@@ -605,7 +623,7 @@ class Futures(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
     def products(
@@ -617,7 +635,7 @@ class Futures(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The specification of every futures product.
 
         Each row holds one product as of a date, such as `ES`, the E-mini S&P 500. A row gives the
@@ -671,10 +689,10 @@ class Futures(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query)
-    def exchanges(self, *, limit: int | None = None) -> Query:
+    def exchanges(self, *, limit: int | None = None) -> FetchQuery:
         """The exchanges and trading venues of US futures.
 
         Each row holds one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
@@ -697,7 +715,7 @@ class Futures(Namespace):
 
                 venues = m.futures.exchanges().fetch()
         """
-        return cast("Query", build_query(self._core, EXCHANGES, limit=limit))
+        return cast("FetchQuery", build_query(self._core, EXCHANGES, limit=limit))
 
     @raises_through(build_query, _product_codes)
     def market_status(
@@ -705,7 +723,7 @@ class Futures(Namespace):
         *,
         product_code: str | Sequence[str] | Table | None = None,
         limit: int | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """Whether each futures product is trading right now.
 
         Each row holds one product's current market event, such as `open`, `pause`, or `close`, in
@@ -741,7 +759,7 @@ class Futures(Namespace):
         """
         codes, values = _product_codes(product_code)
         query = build_query(self._core, MARKET_STATUS, params=codes, limit=limit, values=values)
-        return cast("Query", query)
+        return cast("FetchQuery", query)
 
     @raises_through(build_query, list_params, _product_codes)
     def schedules(
@@ -754,7 +772,7 @@ class Futures(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The timed events of each futures product's trading sessions.
 
         Each row holds one scheduled event of a product's session, such as `pre_open`, `open`, or
@@ -809,4 +827,4 @@ class Futures(Namespace):
             limit=limit,
             values=values,
         )
-        return cast("Query", query)
+        return cast("FetchQuery", query)

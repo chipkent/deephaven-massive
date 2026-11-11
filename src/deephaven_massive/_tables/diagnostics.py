@@ -78,7 +78,7 @@ from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
-from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
@@ -91,7 +91,6 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     symbol_read_values,
 )
-from deephaven_massive._types import AllSymbols
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence

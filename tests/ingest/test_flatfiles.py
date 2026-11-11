@@ -42,13 +42,13 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, No
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import HistoryQuery
+from deephaven_massive._override import override
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import HistoryQuery
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
@@ -2425,7 +2425,7 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.typehints._queries"),
         pytest.raises(dm.MassiveError) as info,
     ):
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)

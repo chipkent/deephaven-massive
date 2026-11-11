@@ -1,6 +1,6 @@
 """`poll()`: live tables that re-read a REST dataset on an interval, one poller thread each.
 
-`Query.poll(interval, mode=...)` returns a live table that one *poller* keeps current: a daemon
+`FetchQuery.poll(interval, mode=...)` returns a live table that one *poller* keeps current: a daemon
 thread that runs a cycle (one `fetch()` of the dataset, through the REST transport's reader),
 publishes its rows, and waits for the next cycle. Every mode publishes through one blink table's
 publisher (`BlinkPublisher`, whose failure is delivered exactly once), created with the result

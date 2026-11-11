@@ -26,8 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars, Recency, Subscription
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.snapshots import SNAPSHOTS
+from deephaven_massive._snapshots import SNAPSHOTS
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
@@ -41,6 +40,7 @@ from deephaven_massive._tables.columns import (
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive.namespaces import _indices as indices
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope

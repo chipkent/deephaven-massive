@@ -58,18 +58,18 @@ from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, RestPath, Transport
-from deephaven_massive._namespaces import futures as futures_ns
-from deephaven_massive._namespaces import options as options_ns
-from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces import stocks as stocks_ns
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import HistoryQuery, Query, QueryBase
+from deephaven_massive._override import override
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import HostDecision, SymbolFailure, SymbolRows
-from deephaven_massive._types import override
+from deephaven_massive.namespaces import _futures as futures_ns
+from deephaven_massive.namespaces import _options as options_ns
+from deephaven_massive.namespaces import _reference as reference
+from deephaven_massive.namespaces import _stocks as stocks_ns
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import FetchQuery, HistoryQuery, Query
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
@@ -393,7 +393,7 @@ def session(
     m.close()
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
     # An indicator is computed over bars of a timespan, which its factory always sets.
     if spec is SMA:
         kwargs.setdefault("timespan", Timespan.MINUTE)
@@ -404,7 +404,7 @@ def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBas
 
 def fetch(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> list[dict[str, Any]]:
     q = query(m, spec, **kwargs)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     return rows(q.fetch())
 
 
@@ -465,7 +465,7 @@ def test_iso_text_in_a_date_filter_is_sent_as_its_date(
     fake_rest.reply(CONSTITUENTS_PATH, Reply(envelope([])))
     q = query(session, CONSTITUENTS, symbols="SPY", filters={"effective_date": "2025-09-18"})
     assert q._request.filters == (("effective_date", date(2025, 9, 18)),)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     q.fetch()
     ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["effective_date"] == ["2025-09-18"]
@@ -1455,7 +1455,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
     static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
-    assert isinstance(static, Query)
+    assert isinstance(static, FetchQuery)
     with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
         static.poll(60)
     reader = cast("Any", session._core.rest_transport())._reader("poll")
@@ -1483,7 +1483,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
         table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
-        assert isinstance(table, Query)
+        assert isinstance(table, FetchQuery)
         assert _failed_soon(table.poll(60))
 
 
@@ -1620,7 +1620,7 @@ def test_order_without_sort_fails_on_a_chosen_path_without_order(
 ) -> None:
     # The contracts list path has `order`; the per-contract detail path has neither.
     q = query(session, CONTRACTS, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"does not take \['order'\]"):
         q.fetch()
     assert fake_rest.requests == []
@@ -1723,7 +1723,7 @@ def test_an_explicit_adjusted_fails_on_a_path_without_it(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
         q.fetch()
     assert fake_rest.requests == []
@@ -1749,7 +1749,7 @@ def test_a_per_symbol_detail_path_serves_named_symbols(
     assert listed == named
     # A filter of the list path cannot reach the detail path: it fails, never drops.
     q = query(session, CONTRACTS, symbols=["O:SPY250117C00600000"], filters={"strike_price_gte": 1})
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
         q.fetch()
 
@@ -2848,7 +2848,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 ) -> None:
     watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
     q = query(session, SMA, symbols=watch, params={"bogus": 1})
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
         q.poll(60)
     assert fake_rest.requests == []
@@ -3427,7 +3427,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     m = dm.MassiveSession(config)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
     q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     warned = threading.Event()
 
     class _Late(logging.Handler):
@@ -3497,7 +3497,7 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
             governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
         )
     q = query(m, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     left = threading.Event()
 
     def on_change() -> None:  # the governor's notice once the cycle gives up its place
@@ -3624,7 +3624,7 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
     q = query(session, INDEX_LEVELS, symbols=["I:NDX", "I:SPX"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.fetch()
     row = rows(table)[0]
     assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
@@ -3864,7 +3864,7 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
 ) -> None:
     rest = session._core.rest_transport()
     q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
         q.fetch(wait=False)
     # A crypto pair is not split by the check, which would read Massive's ticker list.
@@ -3879,7 +3879,7 @@ def test_a_background_fetch_lands_the_rows_the_read_requested(
 ) -> None:
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     q = query(session, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.fetch(wait=False)
     _join_reads(session)
     # The read's own row says how it ended; a failure shows its error here. It shows DONE
@@ -3966,7 +3966,7 @@ def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
             Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}], status="DELAYED")),
         )
         q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-        assert isinstance(q, Query)
+        assert isinstance(q, FetchQuery)
         table = q.fetch()
         assert [r["Symbol"] for r in rows(table)] == ["I:SPX"]
         description = table.attributes()["TableDescription"]
@@ -3985,7 +3985,7 @@ def test_an_unlisted_fetch_says_it_was_checked_like_its_poll(
         INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "REAL-TIME"}]))
     )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.fetch()
     assert table.attributes()["TableDescription"].endswith(
         "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
@@ -4038,7 +4038,7 @@ def test_a_delayed_label_fails_an_indicator_poll(
         "/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
     )
     q = query(session, SMA, symbols=["AAPL"], start="2025-03-03", end="2025-03-04")
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)  # polled, so current whatever its window
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
     assert row["State"] == "FAILED"
@@ -4126,7 +4126,7 @@ def test_a_delayed_label_fails_a_real_time_poll_table(
         INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}]))
     )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     assert table.attributes()["TableDescription"].endswith(
         "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
@@ -4161,7 +4161,7 @@ def test_a_poll_tables_recency_follows_the_labels_it_was_sent(
     try:
         fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([row])))
         q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-        assert isinstance(q, Query)
+        assert isinstance(q, FetchQuery)
         table = q.poll(60)
         (seen,) = rows_when(m.streams(), lambda rows: bool(rows) and rows[0]["RowsPublished"])
         assert seen["Recency"] == shown
@@ -4179,7 +4179,7 @@ def test_a_poll_of_data_no_label_describes_shows_no_recency(
     recency: str | None,
 ) -> None:
     q = query(session, spec)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     assert "Checked for delayed data" not in table.attributes()["TableDescription"]
     (row,) = rows_when(session.streams(), bool)
@@ -4288,7 +4288,7 @@ def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing
         ),
     )
     q = query(session, UNIFIED)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     assert q.fetch().size == 1  # the row without a ticker is dropped as unreadable
 
 

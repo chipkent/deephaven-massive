@@ -47,7 +47,7 @@ from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, Re
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.slots import ConnectionSlots
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
 

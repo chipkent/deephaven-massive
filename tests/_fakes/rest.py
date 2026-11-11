@@ -42,7 +42,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 
 if TYPE_CHECKING:
     import io

@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, cast
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.typehints._queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.

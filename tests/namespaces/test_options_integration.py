@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
-    from deephaven_massive._query import Query
+    from deephaven_massive.typehints._queries import FetchQuery
     from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration
@@ -149,7 +149,7 @@ def _raw(
         return []
 
 
-def _library(build: Callable[[], Query], table_rows: TableRows) -> list[dict[str, Any]] | str:
+def _library(build: Callable[[], FetchQuery], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Build one library query, fetch it, and describe the outcome.
 
     Returns:

@@ -33,7 +33,7 @@ from deephaven_massive._massive.rest.governor import (
     RequestGovernor,
 )
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
-from deephaven_massive._types import override
+from deephaven_massive._override import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 

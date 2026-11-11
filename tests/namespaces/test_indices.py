@@ -29,11 +29,16 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._enums import NotBars
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
+from deephaven_massive.namespaces import _indices as indices
+from deephaven_massive.namespaces._query_building import Namespace
+from deephaven_massive.typehints._queries import (
+    FetchQuery,
+    HistoryQuery,
+    StreamHistoryQuery,
+    query_class,
+)
 
 # The reply and envelope builders are plain functions of the fake, which no fixture hands over.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -59,7 +64,7 @@ def m(massive_session: dm.MassiveSession) -> dm.MassiveSession:
 
 def test_namespace_is_reached_from_the_session(m: dm.MassiveSession) -> None:
     namespace = m.indices
-    assert type(namespace) is indices.Indices
+    assert type(namespace) is indices.IndicesNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -306,7 +311,7 @@ def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
         r"ring\(\), last_by\(\), history\(\); for each symbol's current state use "
         r"m\.indices\.snapshots\(\.\.\.\)\.fetch\(\)$",
     ):
-        _ = q.fetch
+        _ = q.fetch  # type: ignore[attr-defined]  # the missing verb is the point
 
 
 def test_values_history_has_no_rest_source(m: dm.MassiveSession) -> None:
@@ -374,7 +379,7 @@ def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
 
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     q = m.indices.previous_day_bar(["I:SPX", "I:NDX"])
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
@@ -408,7 +413,7 @@ def test_snapshots_query(m: dm.MassiveSession) -> None:
         limit=10,
         filters={"ticker_gte": "I:A"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("I:NDX", "I:SPX")
     assert dict(q._request.params) == {"order": dm.Order.DESC, "sort": "ticker"}
     assert dict(q._request.filters) == {"ticker_gte": "I:A"}
@@ -443,7 +448,7 @@ def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
 )
 def test_daily_open_close_query(m: dm.MassiveSession, day: str | date) -> None:
     q = m.indices.daily_open_close(["I:SPX", "I:NDX"], day)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("I:NDX", "I:SPX")
     assert dict(q._request.params) == {"date": date(2025, 6, 2)}
 
@@ -491,16 +496,16 @@ def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
 
 def test_factories_return_the_class_of_their_dataset() -> None:
     assert query_class(indices.VALUES) is StreamHistoryQuery
-    assert query_class(indices.PREVIOUS_DAY_BAR) is Query
-    assert query_class(indices.SNAPSHOTS) is Query
-    assert query_class(indices.DAILY_OPEN_CLOSE) is Query
+    assert query_class(indices.PREVIOUS_DAY_BAR) is FetchQuery
+    assert query_class(indices.SNAPSHOTS) is FetchQuery
+    assert query_class(indices.DAILY_OPEN_CLOSE) is FetchQuery
     assert query_class(indices.BARS) is HistoryQuery
 
 
 @pytest.mark.parametrize("spec", indices.DATASETS, ids=lambda spec: spec.name)
 def test_each_docstring_names_its_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.split(".", 1)[1]
-    doc = getattr(indices.Indices, dataset).__doc__
+    doc = getattr(indices.IndicesNamespace, dataset).__doc__
     assert doc.splitlines()[0] == spec.summary
     assert f"docs/datasets/{spec.name}.md" in doc
 

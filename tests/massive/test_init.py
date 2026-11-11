@@ -225,8 +225,8 @@ def test_importing_the_interface_never_imports_deephaven() -> None:
 
 
 def test_the_probe_detects_a_module_that_imports_deephaven() -> None:
-    # The negative case: `_types` imports `deephaven.table`, and the probe must see it.
-    assert "deephaven" in _deephaven_imports_attempted_by("deephaven_massive._types", [])
+    # The negative case: `typehints` imports `deephaven.table`, and the probe must see it.
+    assert "deephaven" in _deephaven_imports_attempted_by("deephaven_massive.typehints", [])
 
 
 def _boto_modules_loaded_by(names: list[str]) -> list[str]:

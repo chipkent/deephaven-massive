@@ -30,10 +30,16 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import KeySpec
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._massive import Transport, object_key, source
-from deephaven_massive._namespaces import futures
-from deephaven_massive._namespaces.query_building import Namespace, build_query
-from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _futures as futures
+from deephaven_massive.namespaces._query_building import Namespace, build_query
+from deephaven_massive.typehints._queries import (
+    FetchQuery,
+    HistoryQuery,
+    Query,
+    StreamHistoryQuery,
+    query_class,
+)
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
@@ -53,7 +59,7 @@ Loader = Callable[[str, str], bytes]
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.futures
-    assert type(namespace) is futures.Futures
+    assert type(namespace) is futures.FuturesNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -191,7 +197,7 @@ def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> No
     q = massive_session.futures.snapshots(
         ["ESZ5"], sort="ticker", order=dm.Order.DESC, limit=10, filters={"ticker_gte": "E"}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("ESZ5",)
     assert q._request.params == (("order", dm.Order.DESC), ("sort", "ticker"))
     assert q._request.filters == (("ticker_gte", "E"),)
@@ -210,7 +216,7 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.contracts(
         product_code="ES", filters={"active": True, "last_trade_date_gte": date(2026, 1, 1)}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols is None
     assert q._request.params == (("product_code", "ES"),)
     assert dict(q._request.filters) == {"active": True, "last_trade_date_gte": date(2026, 1, 1)}
@@ -246,7 +252,7 @@ def test_products(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(
         product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "GC"), ("sort", "name"))
     assert q._request.limit == 5
     with pytest.raises(ValueError, match="filter 'sector' takes"):
@@ -257,7 +263,7 @@ def test_products(massive_session: dm.MassiveSession) -> None:
 
 def test_exchanges(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.exchanges()
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request == type(q._request)()
     assert repr(q) == "m.futures.exchanges()"
     assert massive_session.futures.exchanges(limit=2)._request.limit == 2
@@ -272,14 +278,14 @@ def rest_params(name: str) -> set[str]:
 @pytest.mark.parametrize("name", ["exchanges", "market_status"])
 def test_a_path_without_filters_or_sort_offers_none(name: str) -> None:
     # Every parameter of either path is `limit` or a form of the typed `product_code`.
-    parameters = inspect.signature(getattr(futures.Futures, name)).parameters
+    parameters = inspect.signature(getattr(futures.FuturesNamespace, name)).parameters
     assert not {"filters", "sort", "order"} & set(parameters)
     assert {p.split(".")[0] for p in rest_params(name)} <= {"limit", "product_code"}
 
 
 def test_market_status(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.market_status(product_code="ES", limit=3)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "ES"),)
     assert q._request.limit == 3
 
@@ -306,11 +312,11 @@ def test_product_code_forms_are_set_only_through_product_code(
 _PRODUCT_DATASETS = ["snapshots", "contracts", "products", "market_status", "schedules"]
 
 
-def _with_product_code(namespace: object, name: str, product_code: object) -> QueryBase:
+def _with_product_code(namespace: object, name: str, product_code: object) -> Query:
     factory = getattr(namespace, name)
     if name == "snapshots":
-        return cast("QueryBase", factory(dm.ALL, product_code=product_code))
-    return cast("QueryBase", factory(product_code=product_code))
+        return cast("Query", factory(dm.ALL, product_code=product_code))
+    return cast("Query", factory(product_code=product_code))
 
 
 @pytest.mark.parametrize("name", _PRODUCT_DATASETS)
@@ -362,7 +368,7 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
         end=date(2025, 12, 26),
         filters={"trading_venue": "XCME"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "ES"),)
     assert q._request.start == date(2025, 12, 22)
     assert q._request.end == date(2025, 12, 26)
@@ -395,12 +401,12 @@ def _spec(name: str) -> DatasetSpec:
         ("trades", StreamHistoryQuery),
         ("quotes", StreamHistoryQuery),
         ("bars", HistoryQuery),
-        ("snapshots", Query),
-        ("contracts", Query),
-        ("products", Query),
-        ("exchanges", Query),
-        ("market_status", Query),
-        ("schedules", Query),
+        ("snapshots", FetchQuery),
+        ("contracts", FetchQuery),
+        ("products", FetchQuery),
+        ("exchanges", FetchQuery),
+        ("market_status", FetchQuery),
+        ("schedules", FetchQuery),
     ],
 )
 def test_query_classes(name: str, expected: type) -> None:
@@ -481,7 +487,7 @@ def test_schedule_and_status_times_are_instants_and_sessions_dates() -> None:
 @pytest.mark.parametrize("spec", futures.DATASETS, ids=lambda spec: spec.name)
 def test_docstrings_name_their_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.removeprefix("futures.")
-    doc = getattr(futures.Futures, dataset).__doc__
+    doc = getattr(futures.FuturesNamespace, dataset).__doc__
     assert doc is not None
     assert f"docs/datasets/{spec.name}.md" in doc
     assert doc.splitlines()[0] == spec.summary
