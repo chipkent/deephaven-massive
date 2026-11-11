@@ -1786,17 +1786,20 @@ def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
     watchlist: Callable[..., Table], massive_session: dm.MassiveSession
 ) -> None:
-    # MSFT failed, and AAPL, still loading, is deleted: the user chose the symbols, so the
-    # table goes on, and a symbol added later fails alone.
+    # AAPL, still loading, is deleted: the user chose the symbols, so the check is settled.
+    # MSFT, the one call-time symbol left, then fails alone, and so does one added later.
     script = Script(massive_session)
     script.gates["AAPL"] = threading.Event()
+    script.gates["MSFT"] = threading.Event()
     script.answers["MSFT"] = [refused(403, "not in the plan")]
     script.answers["NVDA"] = [refused(403, "not in the plan")]
     wl = watchlist("AAPL", "MSFT")
     result = follow(massive_session, wl, script)
-    wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
+    until(lambda: state(massive_session, "MSFT") is SymbolReadState.LOADING)
     delete(wl, "AAPL")
     wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    script.gates["MSFT"].set()
+    wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
     add(wl, "NVDA")
     wait_state(massive_session, "NVDA", SymbolReadState.FAILED)
     script.gates["AAPL"].set()
