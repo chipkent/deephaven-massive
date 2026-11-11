@@ -1,14 +1,13 @@
 """The hand input of the refresh, gathered into one value the generators and gates read.
 
 Everything the refresh does not read from the vendor's own files is hand input: the lexicons
-and identity keys (`lexicon`); the respellings that give a field one name across sources and
-the descriptions differently named fields share (`spellings`); the names, units, conversions,
-corrected wire keys, undeclared fields, optional fields, corrected descriptions, result keys,
-parameter units, dataset kinds and their projections, single-transport columns, and futures
-venues (`overrides`); and the excluded vendor items, disbelieved vendor samples, and ignored
-wire keys (`exclusions`). Those modules hold the tables, each entry with its reason; this one
-only bundles them as `HandInput`, so a test can pass small tables of its own instead of the
-real ones.
+and identity keys (`lexicon`); the names, units, conversions, corrected wire keys, undeclared
+fields, optional fields, corrected descriptions, result keys, parameter units, dataset kinds and
+their projections, single-transport columns, futures venues, respellings that give a field one
+name across sources, and descriptions differently named fields share (`overrides`); and the
+excluded vendor items, disbelieved vendor samples, and ignored wire keys (`exclusions`). Those
+modules hold the tables, each entry with its reason; this one only bundles them as `HandInput`,
+so a test can pass small tables of its own instead of the real ones.
 """
 
 from __future__ import annotations
@@ -17,13 +16,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from deephaven_massive._massive.refresh import exclusions, lexicon, overrides
-from deephaven_massive._massive.refresh.spellings import SHARED_DESCRIPTIONS, SPELLINGS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from deephaven_massive._massive.refresh.exclusions import IgnoredKey, SampleError
-    from deephaven_massive._massive.refresh.spellings import SharedDescription, Spelling
 
 
 __all__ = ["HandInput"]
@@ -33,8 +30,8 @@ __all__ = ["HandInput"]
 class HandInput:
     """Every hand-written input of the generators, so tests can substitute their own.
 
-    `HandInput()` holds the real tables of `lexicon`, `spellings`, `overrides`, and
-    `exclusions`; a keyword replaces one table. Instances are immutable and safe to share.
+    `HandInput()` holds the real tables of `lexicon`, `overrides`, and `exclusions`; a keyword
+    replaces one table. Instances are immutable and safe to share.
 
     Example:
         ::
@@ -89,9 +86,11 @@ class HandInput:
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
     shapes: Mapping[tuple[str, str], str] = field(default_factory=lambda: lexicon.SHAPES)
     identity: Mapping[str, str] = field(default_factory=lambda: lexicon.IDENTITY)
-    spellings: Mapping[tuple[str, str], Spelling] = field(default_factory=lambda: SPELLINGS)
-    shared_descriptions: Mapping[str, SharedDescription] = field(
-        default_factory=lambda: SHARED_DESCRIPTIONS
+    spellings: Mapping[tuple[str, str], overrides.Spelling] = field(
+        default_factory=lambda: overrides.SPELLINGS
+    )
+    shared_descriptions: Mapping[str, overrides.SharedDescription] = field(
+        default_factory=lambda: overrides.SHARED_DESCRIPTIONS
     )
     names: Mapping[tuple[str, str], overrides.Name] = field(default_factory=lambda: overrides.NAMES)
     units: Mapping[tuple[str, str], overrides.Unit] = field(default_factory=lambda: overrides.UNITS)

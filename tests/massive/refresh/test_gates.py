@@ -31,7 +31,6 @@ from deephaven_massive._massive.refresh.gates import (
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.rest_sources import generate_rest
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
-from deephaven_massive._massive.refresh.spellings import SharedDescription, Spelling
 from deephaven_massive._massive.spec.types import Conversion, Transport, WireUnit
 
 if TYPE_CHECKING:
@@ -246,8 +245,10 @@ def test_stale_entry_hand_entries_naming_nothing() -> None:
         },
         key_fixes={(_PATH, "declared"): overrides.KeyFix(wire_key="sent", reason="test")},
         spellings={
-            (_PATH, "details"): Spelling(long_name="", source="/v1/flat", reason="test"),
-            ("/gone", "bid"): Spelling(long_name="bid_price", source="/v1/q", reason="test"),
+            (_PATH, "details"): overrides.Spelling(long_name="", source="/v1/flat", reason="test"),
+            ("/gone", "bid"): overrides.Spelling(
+                long_name="bid_price", source="/v1/q", reason="test"
+            ),
         },
         result_keys={"/gone": overrides.ResultKey(key=None, reason="test")},
         param_units={(_PATH, "gone"): ms},
@@ -283,8 +284,12 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
         _EMPTY,
         shapes={(_PATH, "min"): "bar"},
         spellings={
-            (_PATH, "min"): Spelling(long_name="last_minute", source="/v1/q", reason="test"),
-            (_PATH, "min.t"): Spelling(long_name="timestamp", source="/v1/q", reason="test"),
+            (_PATH, "min"): overrides.Spelling(
+                long_name="last_minute", source="/v1/q", reason="test"
+            ),
+            (_PATH, "min.t"): overrides.Spelling(
+                long_name="timestamp", source="/v1/q", reason="test"
+            ),
         },
         units={(_PATH, "min.t"): ms},
         identity={"id": "used"},
@@ -354,7 +359,9 @@ def test_field_spelling_a_renaming_projection_gives_the_name_its_table_shows() -
 
 
 _TIME = "The Timestamp in Unix MS."
-_TIMES = SharedDescription(long_names=frozenset({"sip_timestamp", "timestamp"}), reason="test")
+_TIMES = overrides.SharedDescription(
+    long_names=frozenset({"sip_timestamp", "timestamp"}), reason="test"
+)
 
 
 def test_field_spelling_a_shared_description_exempts_exactly_its_long_names() -> None:

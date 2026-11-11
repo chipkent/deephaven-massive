@@ -17,11 +17,10 @@ gate, and what to do when a refresh adds something new.
 - **The hand input**: the only place a person adds knowledge the vendor's specifications lack.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
-  - `refresh/spellings.py`: `SPELLINGS` and `SHARED_DESCRIPTIONS`, which give one field one
-    name across datasets;
   - `refresh/overrides.py`: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES`,
     `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
-    `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, and `VENUES`;
+    `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`, and `SPELLINGS` and
+    `SHARED_DESCRIPTIONS`, which give one field one name across datasets;
   - `refresh/exclusions.py`: `EXCLUSIONS`, `SAMPLE_ERRORS`, and `IGNORED_KEYS`.
 - **The dataset reference**, `docs/datasets/`: an index, `README.md`, and one page per dataset,
   `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), each with Massive's plan tables for

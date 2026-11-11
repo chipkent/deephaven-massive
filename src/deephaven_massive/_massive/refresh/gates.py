@@ -103,8 +103,8 @@ class Gate(StrEnum):
     whose last segments take different long names (`bid` and `bid_price` for "The bid
     price."), or fields with one wire key and one description in different columns
     (`DetailsStrikePrice` beside a respelled `StrikePrice`), unless a
-    `spellings.SHARED_DESCRIPTIONS` entry lists exactly those long names with why they
-    differ. Also a `spellings.SPELLINGS` entry that drops a field's own name or coins a
+    `overrides.SHARED_DESCRIPTIONS` entry lists exactly those long names with why they
+    differ. Also a `overrides.SPELLINGS` entry that drops a field's own name or coins a
     library column."""
     EXAMPLE_TYPE = "example-type"
     """A documented example value (of the response's example, or of a field's own `example`)
@@ -330,7 +330,7 @@ def field_spellings(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Pr
                 key=" | ".join(sorted(named)),
                 message="fields Massive describes alike take different long names: "
                 f"{_where(named)}. If they are one field, give them one name with a SPELLINGS "
-                "entry (spellings.py) citing the endpoint whose spelling they take; if they "
+                "entry (overrides.py) citing the endpoint whose spelling they take; if they "
                 "are different fields, add a SHARED_DESCRIPTIONS entry saying why",
                 description=text,
             )
@@ -342,7 +342,7 @@ def field_spellings(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Pr
                 key=wire_key,
                 message="fields with one wire key and one description sit in different "
                 f"columns: {_where(columns)}. Give them one column with a SPELLINGS entry "
-                "like the other sources' (spellings.py), or add a SHARED_DESCRIPTIONS entry "
+                "like the other sources' (overrides.py), or add a SHARED_DESCRIPTIONS entry "
                 "saying why they are different fields",
                 description=text,
             )

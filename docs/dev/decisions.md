@@ -424,7 +424,7 @@ bad byte is in a column the library drops.
 
 **101. One field has one column name across datasets** (2026-11-11). Where Massive spells one
 field two ways on two endpoints, every dataset takes one of Massive's own spellings, through a
-reasoned hand table, `refresh/spellings.py` `SPELLINGS`: `(source, key)` to the long name an
+reasoned hand table, `refresh/overrides.py` `SPELLINGS`: `(source, key)` to the long name an
 object or field takes, the endpoint it is taken from, and why the two are the same field. An
 empty long name drops a wrapper object's name, so the option chain's, the unified snapshot's,
 and the futures snapshot's `details` fields take the names `/v3/reference/options/contracts`

@@ -21,7 +21,6 @@ from deephaven_massive._massive.refresh.fields import (
 )
 from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.openapi import OpenApi
-from deephaven_massive._massive.refresh.spellings import Spelling
 from deephaven_massive._massive.spec.types import Field, WireType, WireUnit
 
 if TYPE_CHECKING:
@@ -96,7 +95,7 @@ def test_a_field_takes_its_name_type_and_plain_description() -> None:
 def _spelled(**long_names: str) -> SourceFields:
     """Return rules whose `SPELLINGS` give each dotted key (`__` for `.`) its long name."""
     spellings = {
-        ("us_x/trades_v1", key.replace("__", ".")): Spelling(
+        ("us_x/trades_v1", key.replace("__", ".")): overrides.Spelling(
             long_name=name, source="/v1/flat", reason="test"
         )
         for key, name in long_names.items()

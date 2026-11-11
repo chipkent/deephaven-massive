@@ -4,7 +4,7 @@ Each test reads the two fields from the wire REST client, back to back, records 
 sent (`evidence`), and ends with one line that says whether the two carried the same quantity
 within the stated tolerance (`SAME`) or not (`DIFFERENT`). The tests are marked `settles`:
 they assert only that the requests worked, and the owner reads the verdict before a
-`spellings.SPELLINGS` entry gives the fields one name. How to run these tests is in
+`overrides.SPELLINGS` entry gives the fields one name. How to run these tests is in
 `docs/live-tests.md`.
 """
 
