@@ -726,7 +726,8 @@ def _attended_child(
         reported none.
 
     Raises:
-        KeyboardInterrupt: After stopping the child, on Control-C.
+        KeyboardInterrupt: On Control-C once the child has started, even while its pid is being
+            saved: the child is stopped and the attempt marked interrupted first.
     """
     folder = ctx.out / attempt.folder
     prompted = threading.Event()
@@ -757,9 +758,9 @@ def _attended_child(
         echo=echo,
         with_stdin=True,
     )
-    attempt.pid = child.process.pid
-    run_state.save(ctx.out, state)
     try:
+        attempt.pid = child.process.pid
+        run_state.save(ctx.out, state)
         while child.process.poll() is None:
             if prompted.wait(0.5):
                 prompted.clear()

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import _thread
 import json
+import os
 import signal
 import sys
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -630,12 +632,27 @@ def test_an_upgrade_check_that_reports_nothing_is_an_error(harness: Harness) -> 
     assert (check.status, check.reason) == ("error", "the upgrade check reported nothing")
 
 
-def test_control_c_during_the_upgrade_check_records_nothing(harness: Harness) -> None:
+def test_control_c_during_the_upgrade_check_records_nothing(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The child's "hanging" line arrives on its output thread, which can run before the main
+    # thread has returned from starting the child. The interrupt is sent only once the main
+    # thread saves the child's pid, which it does inside the handler that stops the child.
+    saving_pid = threading.Event()
+    real_save = run_state.save
+
+    def save(out: Path, state: RunState) -> None:
+        if state.attempts and state.attempts[-1].pid:
+            saving_pid.set()
+        real_save(out, state)
+
     def interrupt(line: str) -> None:
         harness.lines.append(line)
         if line.endswith("hanging"):
+            saving_pid.wait()
             _thread.interrupt_main()
 
+    monkeypatch.setattr(run_state, "save", save)
     harness.ctx.echo = interrupt
     harness.script(hang=True)
     assert commands.command_upgrade_check(harness.ctx, "stocks") == commands.INTERRUPTED
@@ -643,6 +660,27 @@ def test_control_c_during_the_upgrade_check_records_nothing(harness: Harness) ->
     assert state.attempts[-1].status == "interrupted"
     assert check_of(state, "upgrade-check", "stocks").status == "not run"
     assert harness.lines[-1] == "upgrade check interrupted; nothing recorded"
+
+
+def test_control_c_while_the_upgrade_checks_pid_is_saved_stops_the_child(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_save = run_state.save
+    interrupted: list[int] = []
+
+    def save(out: Path, state: RunState) -> None:
+        pid = state.attempts[-1].pid if state.attempts else 0
+        if pid and not interrupted:
+            interrupted.append(pid)
+            raise KeyboardInterrupt
+        real_save(out, state)
+
+    monkeypatch.setattr(run_state, "save", save)
+    harness.script(hang=True)
+    assert commands.command_upgrade_check(harness.ctx, "stocks") == commands.INTERRUPTED
+    assert harness.state().attempts[-1].status == "interrupted"
+    with pytest.raises(ProcessLookupError):  # stopped and reaped, not left running
+        os.kill(interrupted[0], 0)
 
 
 def test_the_pause_after_a_basic_probe_holds_the_first_group(harness: Harness) -> None:
