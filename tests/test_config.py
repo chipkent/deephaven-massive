@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import sysconfig
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -197,19 +198,41 @@ def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "value"),
+    ("name", "change"),
     [
-        ("subscription_confirmation_timeout", 0.0),
-        ("flush_interval", -1.0),
-        ("subscription_confirmation_timeout", float("inf")),
-        ("subscription_confirmation_timeout", float("nan")),
-        ("max_concurrency", 0),
-        ("flat_file_symbol_threshold", -5),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=0.0),
+        ),
+        ("flush_interval", lambda c: dataclasses.replace(c, flush_interval=-1.0)),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("inf")),
+        ),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("nan")),
+        ),
+        ("max_concurrency", lambda c: dataclasses.replace(c, max_concurrency=0)),
+        (
+            "flat_file_symbol_threshold",
+            lambda c: dataclasses.replace(c, flat_file_symbol_threshold=-5),
+        ),
+    ],
+    ids=[
+        "timeout-zero",
+        "flush-negative",
+        "timeout-inf",
+        "timeout-nan",
+        "concurrency-zero",
+        "threshold-negative",
     ],
 )
-def test_positive_numbers(base: MassiveConfig, name: str, value: float) -> None:
+def test_positive_numbers(
+    base: MassiveConfig, name: str, change: Callable[[MassiveConfig], MassiveConfig]
+) -> None:
     with pytest.raises(ValueError, match=f"{name} must be positive"):
-        dataclasses.replace(base, **{name: value})  # type: ignore[arg-type]  # a field named at run time
+        change(base)
 
 
 @pytest.mark.parametrize("value", [60.0, 90.0])
@@ -416,13 +439,16 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
-_ON_ERROR_SETTINGS = [
-    "noncanonical_symbols",
-    "unlisted_symbols",
-    "unreadable_symbols",
-    "unavailable_symbols",
-    "malformed_rows",
-]
+_ON_ERROR_SETTERS: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
+    "noncanonical_symbols": lambda c, v: dataclasses.replace(c, noncanonical_symbols=v),
+    "unlisted_symbols": lambda c, v: dataclasses.replace(c, unlisted_symbols=v),
+    "unreadable_symbols": lambda c, v: dataclasses.replace(c, unreadable_symbols=v),
+    "unavailable_symbols": lambda c, v: dataclasses.replace(c, unavailable_symbols=v),
+    "malformed_rows": lambda c, v: dataclasses.replace(c, malformed_rows=v),
+}
+"""Each `OnError` setting, by name, with a function that sets it on a config."""
+
+_ON_ERROR_SETTINGS = list(_ON_ERROR_SETTERS)
 
 
 @pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
@@ -437,8 +463,7 @@ def test_on_error_settings_default_to_log_and_read_no_environment(
 @pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
 def test_on_error_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
     assert (
-        getattr(dataclasses.replace(base, **{setting: dm.OnError.IGNORE}), setting)  # type: ignore[arg-type]  # a field named at run time
-        is dm.OnError.IGNORE
+        getattr(_ON_ERROR_SETTERS[setting](base, dm.OnError.IGNORE), setting) is dm.OnError.IGNORE
     )
     with pytest.raises(
         TypeError, match=rf"^{setting} must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"
@@ -498,7 +523,14 @@ def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
     assert "api_key" not in shown
 
 
-@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url"])
+_URL_SETTERS: dict[str, Callable[[MassiveConfig, str], MassiveConfig]] = {
+    "rest_base_url": lambda c, url: dataclasses.replace(c, rest_base_url=url),
+    "s3_endpoint_url": lambda c, url: dataclasses.replace(c, s3_endpoint_url=url),
+}
+"""Each URL setting, by name, with a function that sets it on a config."""
+
+
+@pytest.mark.parametrize("name", list(_URL_SETTERS))
 @pytest.mark.parametrize(
     "url",
     [
@@ -517,7 +549,7 @@ def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
 )
 def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> None:
     with pytest.raises(ValueError, match=f"^{name} must be an http or https URL with a host"):
-        dataclasses.replace(MassiveConfig(api_key="k"), **{name: url})  # type: ignore[arg-type]  # a field named at run time
+        _URL_SETTERS[name](MassiveConfig(api_key="k"), url)
 
 
 @pytest.mark.parametrize(

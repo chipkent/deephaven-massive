@@ -572,7 +572,7 @@ def test_daily_open_close_names_a_new_york_day(
     massive_session: dm.MassiveSession, day: object, expected: date
 ) -> None:
     open_close = massive_session.stocks.daily_open_close
-    query = open_close("AAPL", day, adjusted=False)  # type: ignore[arg-type]  # a console's days
+    query = open_close("AAPL", day, adjusted=False)  # type: ignore[arg-type]  # a Java time, which the types do not name
     assert type(query) is FetchQuery
     assert dict(query._request.params) == {"date": expected}
     assert query._request.adjusted is False

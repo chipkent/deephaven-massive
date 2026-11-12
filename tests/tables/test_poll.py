@@ -1566,6 +1566,7 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
 def test_a_cycle_after_the_core_is_gone_ends_the_poller(
     *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
 ) -> None:
+    unused: BlinkPublisher = None  # type: ignore[assignment]  # a fake: the cycle ends first
     poller = poll.Poller(
         massive_session._core,
         spec=DIVIDENDS,
@@ -1576,7 +1577,7 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
         read=script,
         pollers=pollers,
         clock=poll.CLOCK,
-        publisher=None,  # type: ignore[arg-type]  # never used: the cycle ends first
+        publisher=unused,
         stop=Cancel(),
     )
 
