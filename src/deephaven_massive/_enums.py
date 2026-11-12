@@ -443,9 +443,9 @@ class SymbolConvention(StrEnum):
 
     - `MASSIVE`: Massive's own spelling, the default. A forex, crypto, index, or option symbol in
       another unambiguous spelling of its class converts (`EUR/USD` to `C:EURUSD`, `SPX` to
-      `I:SPX` for the indices class), and any other text comes back unchanged, a stock ticker
-      in another convention's spelling included, since `-` means a class to Yahoo and a
-      preferred to Nasdaq. It is the only member every class takes.
+      `I:SPX` for the indices class), and any other text comes back unchanged. So does a stock
+      ticker in another convention's spelling, since `-` means a class to Yahoo and a preferred
+      to Nasdaq. It is the only member every class takes.
     - `YAHOO`: Yahoo Finance; a class is `-B` (`BRK-B`), a preferred `-P` and its series
       (`BAC-PL`).
     - `NASDAQ`: the Nasdaq Integrated Platform symbology (the "NASDAQ Symbol" column of
@@ -476,8 +476,8 @@ class OnError(StrEnum):
 
     One enum for every symbol problem, used in five places:
 
-    - `canonicalize_symbols(on_error=)`, for a value of the table that a stock convention spells
-      as another instrument than Massive does (Yahoo's `VOD.L`). The default there is `LOG`.
+    - `canonicalize_symbols(on_error=)`, for a value Massive would read as another
+      instrument, such as Yahoo's `VOD.L`. The default there is `LOG`.
     - `MassiveConfig.unsendable_symbols`, for a row of a table of symbols passed as `symbols` that
       can't be sent: an empty value, or one with `,` or `*`. Such a `str` or
       list value you pass always raises, whatever the setting.

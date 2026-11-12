@@ -243,10 +243,10 @@ class FetchQuery(Query):
                 - the endpoint doesn't take one of the query's parameters or filters;
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
                 - no row of a table of symbols can be sent.
-            AuthenticationError: With `wait=True`, if Massive rejects your API key. For
-                `m.crypto.last_trade` and `m.crypto.daily_open_close` of pairs passed in code under
-                `unlisted_symbols=dm.OnError.RAISE`, also at the call, if Massive rejects it while
-                the call reads Massive's list of crypto tickers.
+            AuthenticationError: With `wait=True`, if Massive rejects your API key. Also at the
+                call, if Massive rejects it while reading its list of crypto tickers. That happens
+                only for `m.crypto.last_trade` and `m.crypto.daily_open_close`, with pairs passed
+                in code, under `unlisted_symbols=dm.OnError.RAISE`.
             EntitlementError: With `wait=True`, if your plan doesn't include the data, or Massive
                 delays current data whose subscription isn't in
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
@@ -512,10 +512,11 @@ class FetchQuery(Query):
                 - a news or filings feed has neither `start` nor `limit`;
                 - no row of a table of symbols can be sent;
                 - an endpoint doesn't take one of the query's parameters or filters.
-            AuthenticationError: For a crypto dataset, if Massive rejects your API key while the
-                call reads Massive's list of crypto tickers.
-            EntitlementError: For a crypto dataset, if your plan doesn't include Massive's list of
-                crypto tickers.
+            AuthenticationError: If Massive rejects your API key while the call reads its list of
+                crypto tickers. That happens only for `m.crypto.last_trade` and
+                `m.crypto.daily_open_close`, with pairs passed in code, under
+                `unlisted_symbols=dm.OnError.RAISE`.
+            EntitlementError: Under the same condition, if your plan doesn't include that list.
             MassiveError: If the session is closed, or, under
                 `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers can't be read
                 or lacks a crypto pair passed as a `str` or list.

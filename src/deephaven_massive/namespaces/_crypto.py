@@ -272,8 +272,8 @@ class CryptoNamespace(Namespace):
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
         Each row holds one trade on one exchange. `Timestamp` is the exchange's own time, and `Date`
-        is its UTC date. A pair that isn't on Massive's crypto ticker list gives no rows by
-        default. For each pair's latest trade alone, use `last_trade()`.
+        is its UTC date. A stream skips a pair that isn't on Massive's crypto ticker list
+        (`unlisted_symbols`). For each pair's latest trade alone, use `last_trade()`.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` reads
@@ -374,8 +374,8 @@ class CryptoNamespace(Namespace):
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, and weeks run
-        Sunday to Saturday. Crypto has no splits, so there's no `adjusted`. A pair that isn't on
-        Massive's crypto ticker list gives no rows by default.
+        Sunday to Saturday. Crypto has no splits, so there's no `adjusted`. A stream skips a pair
+        that isn't on Massive's crypto ticker list (`unlisted_symbols`).
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` takes

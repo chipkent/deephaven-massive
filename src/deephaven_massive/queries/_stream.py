@@ -364,8 +364,8 @@ class SymbolStreamQuery(StreamQuery):
 
     The symbols can be a list, a static table, which is read once at the call, or a live table,
     which works as a watchlist: the stream subscribes and unsubscribes as you add and delete
-    rows. A watchlist row that is empty or holds `,` or `*` is skipped and
-    listed in `m.streams()`.
+    rows. By default, a watchlist row that is empty or holds `,` or `*` is
+    skipped and listed in `m.streams()`.
     Massive allows 1,000 option contracts on one connection, and the library counts a
     contract's trades and quotes as two. More contracts than that, passed as a list or a static
     table, raise `ValueError`; a watchlist's extra contracts wait for room, and `Deferred` in
