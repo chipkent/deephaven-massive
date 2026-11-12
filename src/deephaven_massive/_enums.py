@@ -436,10 +436,11 @@ class SymbolConvention(StrEnum):
 
     Massive writes a share class as `.B` (`BRK.B`) and a preferred as a lower-case `p` and its
     series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. The
-    other members name one other US stock convention; only its share classes and preferreds
-    convert, because Massive documents no spelling for warrants, units, rights, or when-issued
-    shares. Other text comes back unchanged, except a spelling Massive reads as another
-    instrument (Yahoo's `VOD.L`, Nasdaq's `ABC.U`), which raises `ValueError`.
+    other members name one other US stock convention: `YAHOO` and `CMS` convert its share
+    classes and preferreds, and `NASDAQ` its preferreds, whose classes Nasdaq writes as Massive
+    does. None converts warrants, units, rights, or when-issued shares, for which Massive
+    documents no spelling. Other text comes back unchanged, except a spelling Massive reads as
+    another instrument (Yahoo's `VOD.L`, Nasdaq's `ABC.U`), which raises `ValueError`.
 
     - `MASSIVE`: Massive's own spelling, the default. A forex, crypto, index, or option symbol in
       another unambiguous spelling of its class converts (`EUR/USD` to `C:EURUSD`, `SPX` to

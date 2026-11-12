@@ -277,9 +277,8 @@ Set `raise` when a stream must not run without every pair you asked for.
 
 - `log` skips the pair and logs a warning naming it.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` makes a stream raise `MassiveError` at the call. A `fetch()` or
-  `poll()` raises it at the call for a pair you pass in code, and fails its table
-  for a pair in a table. A live table fails when such a pair is added later.
+- `raise` fails the call or the table, including when such a pair is added
+  to a live table later.
 
 It applies to streams and to calls for a pair's last trade or daily open and close.
 
@@ -291,8 +290,8 @@ other pairs are read as usual. A stream lists the skipped pairs in its `m.stream
 row's `Error`, and so does a `poll()`. A `fetch()` of a live table shows the pair
 `DONE` with 0 rows in `m.symbol_reads()`.
 
-If the library can't read Massive's crypto ticker list, the stream or read fails
-under any setting.
+If Massive's crypto ticker list can't be read, the call or table fails, whatever the
+setting.
 
 #### unreadable_symbols
 
