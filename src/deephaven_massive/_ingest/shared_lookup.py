@@ -373,7 +373,7 @@ class SharedLookup(Generic[K, V]):
 
         Once a pause of the lookup outlasts this caller's patience, it raises the public error
         of a request that gives up: `MassiveError("rate limited: ...")` with status 429, or
-        `"... is closed"` if the session closed meanwhile. Once `cancel` is set, it raises
+        `"... is closed; ..."` if the session closed meanwhile. Once `cancel` is set, it raises
         `MassiveError("waiting for <what>: cancelled")`, or the closed session's error.
         """
         logger.debug(

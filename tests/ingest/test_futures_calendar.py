@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 from typing_extensions import override
 
-from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, ErrorSource, MassiveError
 from deephaven_massive._ingest import futures_calendar
 from deephaven_massive._ingest.futures_calendar import (
     RELOAD_SPACING,
@@ -685,7 +685,10 @@ def test_a_close_that_does_not_wait_leaves_the_worker_to_end_on_its_own(
 
 @pytest.mark.parametrize(
     "failure",
-    [MassiveError("MassiveSession #1 is closed"), RuntimeError("cannot schedule new futures")],
+    [
+        MassiveError("MassiveSession #1 is closed; " + NEW_SESSION),
+        RuntimeError("cannot schedule new futures"),
+    ],
     ids=["closed-client", "unexpected"],
 )
 def test_a_lookup_cut_short_by_close_is_not_logged(

@@ -61,6 +61,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     CutShortError,
     ErrorSource,
@@ -629,7 +630,7 @@ def symbol_outcomes(
         )
         raise refused
     if core.closed:
-        raise SessionClosedError(f"{core.label} is closed")
+        raise SessionClosedError(f"{core.label} is closed; {NEW_SESSION}")
     expected = col_defs(core.dataset_schema(spec))
     outcomes: dict[str, SymbolOutcome] = {}
     for symbol in symbols:

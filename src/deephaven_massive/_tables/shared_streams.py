@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from deephaven.dherror import DHError
 
-from deephaven_massive._errors import MassiveError, SessionClosedError, copy_error
+from deephaven_massive._errors import NEW_SESSION, MassiveError, SessionClosedError, copy_error
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
@@ -218,7 +218,7 @@ class SharedStreams:
         `RuntimeError` from the described copy; that error is wrapped in the same
         `MassiveError`. Either way `m.streams()` shows `FAILED`. When the session has closed
         by the time such a Deephaven error reaches this call, the error is wrapped in the
-        closed session's `MassiveError` (`"MassiveSession #1 is closed"`) instead, whether or
+        closed session's `MassiveError` (`"MassiveSession #1 is closed; ..."`) instead, whether or
         not the stream's row records the close yet. A session that closes while the result is
         built is checked once more after the result is tracked: the result is released and the
         closed session's `MassiveError` raised, so a close that started before that check never
@@ -247,7 +247,7 @@ class SharedStreams:
         Raises:
             MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
             SessionClosedError: If the session closed while the result was built
-                (`"MassiveSession #1 is closed"`).
+                (`"MassiveSession #1 is closed; ..."`).
         """
         core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
         key: StreamKey = (spec.name, channel, request.symbol_key())
@@ -286,7 +286,7 @@ class SharedStreams:
             # The close failed the stream's tables: its row may not read `CLOSED` yet, or may
             # be gone already, so the close is named whether or not a failure was recorded.
             if deephaven and core.closed:
-                raise SessionClosedError(f"{self._label} is closed") from error
+                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}") from error
             if failure is not None:
                 named = copy_error(
                     failure, f"{spec.name} stream {handle.stream_id} failed: {failure}"
@@ -295,7 +295,7 @@ class SharedStreams:
             raise
         if core.closed:  # close() ran while the result was built; it is released on the reaper
             self._results.release(result)
-            raise SessionClosedError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
         return result
 
     def _require_unfailed(self, spec: DatasetSpec, stream_id: int) -> None:
@@ -329,7 +329,9 @@ class SharedStreams:
             if state is None or state.row.state not in {StreamState.FAILED, StreamState.CLOSED}:
                 return None
             if state.row.state is StreamState.CLOSED:
-                return SessionClosedError(state.row.error or f"{self._label} is closed")
+                return SessionClosedError(
+                    state.row.error or f"{self._label} is closed; {NEW_SESSION}"
+                )
             return state.failure
 
     def _acquire(
@@ -543,7 +545,7 @@ class SharedStreams:
         """
         with self._lock:
             if core.closed:
-                raise SessionClosedError(f"{self._label} is closed")
+                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
             existing = self._stream_ids.get(key)
             if existing is not None:
                 state = self._streams[existing]
@@ -657,7 +659,9 @@ class SharedStreams:
             raise
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self._label)
-            raise SessionClosedError(f"{self._label} was closed while a stream was opening")
+            raise SessionClosedError(
+                f"{self._label} was closed while a stream was opening; {NEW_SESSION}"
+            )
         return opened
 
     def _release_hold(self, stream_id: int) -> None:

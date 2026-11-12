@@ -751,18 +751,16 @@ class FlatFileClient:
                     kind=WireFailure.NO_ANSWER,
                 )
                 return _Retryable(failure, error)
+            proxy_setting = isinstance(error, InvalidProxiesConfigError)
+            fix = "; check the proxy in HTTPS_PROXY" if proxy_setting else ""
             raise WireError(
-                f"cannot {verb} {location}: {self._clean(_describe(error, proxy))}",
+                f"cannot {verb} {location}: {self._clean(_describe(error, proxy))}{fix}",
                 host=self._host,
                 path=key,
                 # A proxy setting botocore cannot use is this machine's to fix; any other
                 # botocore failure before S3 answered is a request it refused to send, or a
                 # failure inside it.
-                kind=(
-                    WireFailure.LOCAL
-                    if isinstance(error, InvalidProxiesConfigError)
-                    else WireFailure.CLIENT_DEFECT
-                ),
+                kind=WireFailure.LOCAL if proxy_setting else WireFailure.CLIENT_DEFECT,
             ) from error
         except _RESPONSE_CUT_SHORT as error:
             return _Retryable(
@@ -885,7 +883,8 @@ class FlatFileClient:
                 built, proxy_shown = len(self._clients), self._proxy
         except BotoCoreError as error:
             raise WireError(
-                f"cannot create the S3 client for {self._endpoint_shown}: {self._clean(error)}",
+                f"cannot create the S3 client for {self._endpoint_shown}: {self._clean(error)}; "
+                "check AWS_PROFILE and the proxy in HTTPS_PROXY",
                 host=self._host,
                 # botocore builds a client from this machine's settings alone, such as
                 # `AWS_PROFILE` or the proxy settings, before any request is sent.

@@ -135,6 +135,7 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
     ErrorSource,
@@ -410,11 +411,11 @@ class Pollers:
             poller: The new poller.
 
         Raises:
-            SessionClosedError: If the session has closed (`"MassiveSession #1 is closed"`).
+            SessionClosedError: If the session has closed (`"MassiveSession #1 is closed; ..."`).
         """
         with self._lock:
             if self._closed:
-                raise SessionClosedError(f"{self._label} is closed")
+                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
             self._live.add(poller)
             watch = None
             if self._watch is None:
@@ -1690,7 +1691,7 @@ def open_poll(
 
     Raises:
         MassiveError: If the session closed after the poll was registered but before its
-            poller started (`"MassiveSession #1 is closed"`). One closed before the poll could
+            poller started (`"MassiveSession #1 is closed; ..."`). One closed before the poll could
             be registered raises the `MassiveError` of `WorkerTables.track` or
             `Pollers.add`.
     """

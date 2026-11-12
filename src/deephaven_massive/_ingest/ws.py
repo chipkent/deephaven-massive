@@ -83,6 +83,7 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
     ErrorSource,
@@ -515,7 +516,7 @@ class WsConnections:
         calendar.watch(contracts)
         loaded = calendar.wait_loaded(contracts, wait, stop=self._closing)
         if self._closing.is_set():  # close() ended the wait: the stream goes with the session
-            raise SessionClosedError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
         if not loaded:
             logger.warning(
                 "futures stream %d: the schedules of %s did not load within %.0f s%s; their "
@@ -631,7 +632,7 @@ class WsConnections:
             SessionClosedError: If `close()` has run.
         """
         if self._closed:
-            raise SessionClosedError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
 
     @staticmethod
     def _check_cap(

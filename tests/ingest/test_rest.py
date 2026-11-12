@@ -46,7 +46,14 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG, CutShortError, RowDataError, UnlistedPairError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    READ_STOPPED,
+    CutShortError,
+    RowDataError,
+    UnlistedPairError,
+)
 from deephaven_massive._ingest import (
     crypto_tickers,
     host_decision,
@@ -1175,7 +1182,9 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         stop.set()
         stopped = joiner.join()
         assert isinstance(stopped, dm.MassiveError)
-        assert str(stopped).endswith("waiting for the crypto ticker list: cancelled")
+        assert str(stopped).endswith(
+            f"waiting for the crypto ticker list: cancelled; {READ_STOPPED}"
+        )
         clock.advance(60.0)
         assert maker.join() == ("DOT", "USD")
     finally:
@@ -2127,7 +2136,9 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
-    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
+    with pytest.raises(
+        dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
+    ):
         transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1, unlisted=dm.OnError.RAISE)
 
 
@@ -2741,7 +2752,10 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     with (
         caplog.at_level(logging.DEBUG, LOGGER),
         ThreadPoolExecutor(1) as pool,
-        pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"),
+        pytest.raises(
+            dm.MassiveError,
+            match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$",
+        ),
     ):
         reader.read(
             CRYPTO_LAST,

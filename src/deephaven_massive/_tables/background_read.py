@@ -587,7 +587,7 @@ def open_read(
 
     Raises:
         MassiveError: If the session closed after the read was registered but before the
-            read was submitted (`"MassiveSession #1 is closed"`). One closed before the read
+            read was submitted (`"MassiveSession #1 is closed; ..."`). One closed before the read
             could be registered raises the `MassiveError` of `WorkerTables.track`.
             A close after the read was submitted fails its table instead.
     """

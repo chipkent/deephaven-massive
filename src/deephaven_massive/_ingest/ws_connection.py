@@ -69,6 +69,7 @@ from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
     ErrorSource,
@@ -2099,7 +2100,9 @@ class ConnectionGroup:
         if found is not candidate:
             candidate.close()
         if found is None:
-            raise SessionClosedError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return found
 
     def _fetch_rows(
@@ -2127,7 +2130,9 @@ class ConnectionGroup:
         with self.lock:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
-            raise SessionClosedError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:

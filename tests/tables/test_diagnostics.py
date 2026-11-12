@@ -27,6 +27,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
@@ -1356,7 +1357,7 @@ def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
     died = thread_died("MassiveSession #1", "reaper", RuntimeError("boom"))
     assert str(died) == (
         "MassiveSession #1: its reaper thread died (RuntimeError('boom')); this table no longer "
-        "updates"
+        f"updates. {LIBRARY_BUG}"
     )
     assert (died.source, died.is_bug) == (dm.ErrorSource.LIBRARY, True)
     # An interrupt ends the thread too, but is no bug of the library.

@@ -80,7 +80,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LIBRARY_BUG",
+    "NEW_SESSION",
     "RAISES_THROUGH",
+    "READ_STOPPED",
     "AuthenticationError",
     "CutShortError",
     "EntitlementError",
@@ -106,6 +108,16 @@ RAISES_THROUGH: Final = "raises_through"
 """The attribute in which `raises_through` records a function's helpers."""
 
 _F = TypeVar("_F", bound="Callable[..., object]")
+
+
+NEW_SESSION: Final = "open a new dm.MassiveSession() to read again"
+"""What ends every message of a `SessionClosedError`: the fix for a closed session."""
+
+READ_STOPPED: Final = (
+    "the read was stopped when its table was released or its session closed; call the method "
+    "again for a new table"
+)
+"""What ends the message of a read that was stopped before it finished: why, and the fix."""
 
 
 LIBRARY_BUG: Final = (
@@ -159,8 +171,7 @@ class ErrorSource(StrEnum):
     USER = "user"
     """Your code or settings stopped the call, such as a missing API key, delayed data your
     `MassiveConfig` doesn't allow, a certificate or proxy setting that fails, a closed session,
-    or a watchlist table of yours that failed. For a setting or a bug of yours, the message
-    names the fix; for a closed session, create a new one."""
+    or a watchlist table of yours that failed. The message names the fix."""
 
     LIBRARY = "library"
     """A bug in the library, or data from Massive it can't read. The message says how to report
@@ -178,9 +189,9 @@ class MassiveError(Exception):
     answered. To branch on the failure, read `is_retryable`, `is_bug`, `source`, or `status`
     instead of the message.
 
-    A `fetch()` or `history()` with `wait=True` raises the error. A live table, including the
-    table `fetch()` and `history()` return by default, fails with it instead: the table shows the
-    error, the log records it, and `m.streams()` lists it.
+    A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True` their
+    table fails with it instead, as a live table does: the table shows the error, the log
+    records it, and `m.streams()` lists it.
 
     Example:
         Catch any `MassiveError`, and branch on the HTTP status::
@@ -264,9 +275,10 @@ class MassiveError(Exception):
 
         True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
         504), a `NETWORK` error, a flat file Massive hasn't published yet, and a few rarer
-        failures whose message says to retry. A read of a watchlist whose every symbol failed
-        is retryable only when every symbol's error is. False for any other HTTP status, an
-        `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or a bug.
+        failures whose message says to retry. A `fetch()` or `history()` of a watchlist whose
+        every symbol failed is retryable only when every symbol's error is. False for any other
+        HTTP status, an `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or
+        a bug.
 
         Before it raises, the library has retried a server failure or a lost connection a few
         times. It raises a rate limit as soon as waiting it out would take the read past 10
@@ -282,8 +294,8 @@ class MassiveError(Exception):
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
         or a parameter that the request for one of a watchlist's symbols doesn't take; its
-        message names the fix. The
-        library logs a bug at ERROR, and any other error below ERROR.
+        message names the fix. The library logs a bug at ERROR, and any other error below
+        ERROR.
         """
         return self._is_bug
 
@@ -317,8 +329,8 @@ class AuthenticationError(MassiveError):
 class EntitlementError(MassiveError):
     """Your key is valid, but your plan doesn't include what you asked for.
 
-    Massive refused the request: a REST request with HTTP 403, a flat file, or a stream
-    subscription, which fails only the table that asked while other tables on the same
+    Massive refused a REST request with HTTP 403, a flat file, or a stream subscription. A
+    refused subscription fails only the table that asked, and other tables on the same
     connection keep running. The library raises it too when Massive marks current data as
     delayed and its subscription isn't in `MassiveConfig.delayed_subscriptions`. The message
     then names the setting to change. Its `source` is `ErrorSource.MASSIVE` when Massive
@@ -386,7 +398,8 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
         `WireEntitlementError`, and `MassiveError` for any other `WireError`, with the wire
         error's message, `status`, `request_id`, and `source`, and retryable as
-        `MassiveError` decides from them.
+        `MassiveError` decides from them. The message of a stopped request ends with
+        `READ_STOPPED`, which says why and what to do.
     """
     public: type[MassiveError]
     if isinstance(error, WireAuthError):
@@ -395,8 +408,11 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         public = EntitlementError
     else:
         public = MassiveError
+    message = error.message
+    if error.kind is WireFailure.STOPPED:
+        message = f"{message}; {READ_STOPPED}"
     return public(
-        error.message,
+        message,
         status=error.status,
         request_id=error.request_id,
         source=wire_source(error) if source is None else source,
@@ -656,9 +672,9 @@ class SessionClosedError(MassiveError):
 
     A query method such as `fetch()`, or `m.streams()`, called after `m.close()` raises it,
     and so does a call that the close cut short. A live table that was running when the session
-    closed fails with it. The message names the session, such as `"MassiveSession #1 is
-    closed"`. Create a new `dm.MassiveSession()` to read again. Its `source` is
-    `ErrorSource.USER`, and `is_retryable` is False.
+    closed fails with it. The message names the session and the fix, such as
+    `"MassiveSession #1 is closed; open a new dm.MassiveSession() to read again"`. Its
+    `source` is `ErrorSource.USER`, and `is_retryable` is False.
 
     Example:
         ::

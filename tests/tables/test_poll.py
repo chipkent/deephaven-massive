@@ -31,7 +31,7 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import PermanentError, RowDataError
+from deephaven_massive._errors import NEW_SESSION, PermanentError, RowDataError
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
@@ -1327,7 +1327,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
     )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1580,7 +1580,7 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = massive_session._core
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     failures: list[Exception] = []
     publisher = poller._publisher

@@ -34,7 +34,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
@@ -1656,7 +1656,9 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
     name = other._core.label
-    assert all(f"{name} is closed" in t or f"{name} was closed" in t for t in closed_errors)
+    assert all(
+        f"{name} is closed; " + NEW_SESSION in t or f"{name} was closed" in t for t in closed_errors
+    )
     core = ws_session.session._core
     drained = threading.Event()
     core.defer(drained.set)
@@ -1998,14 +2000,14 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     (stream_id,) = ws_session.connections.group.streams
 
     def closed() -> futures_calendar.FuturesCalendar:
-        raise dm.MassiveError("MassiveSession #1 is closed")
+        raise dm.MassiveError("MassiveSession #1 is closed; " + NEW_SESSION)
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        "is closing (MassiveSession #1 is closed)"
+        f"is closing (MassiveSession #1 is closed; {NEW_SESSION})"
     ) in caplog.text
     ws_session.session.release(result)
 
@@ -2033,7 +2035,7 @@ def test_a_futures_watchlist_change_whose_schedule_wait_a_close_ends_is_dropped(
     assert waits == [frozenset({"NQZ5"})]
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        f"is closing ({ws_session.session._core.label} is closed)"
+        f"is closing ({ws_session.session._core.label} is closed; {NEW_SESSION})"
     ) in caplog.text
     ws_session.session.release(result)
 
@@ -3458,7 +3460,9 @@ def close_under_load(harness: WsSession, round_: int) -> float:
                 result = harness.query(TRADES, [SOAK_SYMBOLS[(worker * 3 + step) % 40]], other)
                 other.release(result.blink())
             except dm.MassiveError as error:  # a verb that races the close may find it closed
-                if " is closed" not in str(error) and " was closed" not in str(error):
+                if " is closed; " + NEW_SESSION not in str(error) and " was closed" not in str(
+                    error
+                ):
                     errors.append(str(error))
                 return
 

@@ -310,12 +310,18 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     if isinstance(error, InvalidProxyStatus):
         status = error.response.status_code
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
+    kind = _fatal_kind(error)
+    fix = (
+        "; check the proxy, and its user and password, in HTTPS_PROXY"
+        if kind is WireFailure.LOCAL
+        else ""
+    )
     return WireError(
-        f"WebSocket connection to {host}{path} failed: {reason}",
+        f"WebSocket connection to {host}{path} failed: {reason}{fix}",
         status=status,
         host=host,
         path=path,
-        kind=_fatal_kind(error),
+        kind=kind,
     )
 
 

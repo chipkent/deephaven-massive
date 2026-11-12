@@ -81,6 +81,7 @@ from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     ErrorSource,
     MassiveError,
     SessionClosedError,
@@ -472,7 +473,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
-            raise SessionClosedError(f"{self.label} is closed")
+            raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
         if not holds_update_graph_lock(self.exec_ctx):
             return body()
         began = time.monotonic()
@@ -776,7 +777,7 @@ class SessionCore:
             The view: the schema's columns of `table`, the same rows.
 
         Raises:
-            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed"`),
+            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`),
                 also when the close ran while the view was built.
             MassiveError: If the diagnostics writer died and failed the table
                 (`"MassiveSession #1: its diagnostics tables failed when their writer thread died
@@ -784,7 +785,7 @@ class SessionCore:
         """
         with self.registry_lock:
             if self._closed:
-                raise SessionClosedError(f"{self.label} is closed")
+                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
             self._views += 1
             live_set.sync(self)
         scope: LivenessScope | None = None
@@ -801,12 +802,12 @@ class SessionCore:
                 self._drop_view()
             died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
-                raise SessionClosedError(f"{self.label} is closed") from error
+                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}") from error
             if isinstance(error, DHError) and died is not None:
                 logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
                 raise MassiveError(
                     f"{self.label}: its diagnostics tables failed when their writer thread died "
-                    f"({died!r}); see the ERROR logged then",
+                    f"({died!r}); see the ERROR logged then; {NEW_SESSION}",
                     source=source_of(died),
                 ) from error
             raise
@@ -937,7 +938,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
-        text = f"{self.label} was closed; this table no longer updates"
+        text = f"{self.label} was closed; this table no longer updates; {NEW_SESSION}"
         with self.registry_lock:
             if self._closed:
                 return

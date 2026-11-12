@@ -926,7 +926,7 @@ def open_followed_read(
 
     Raises:
         MassiveError: If the session closed before the result could be registered, or after
-            (`"MassiveSession #1 is closed"`).
+            (`"MassiveSession #1 is closed; ..."`).
     """
     stop = core.read_stop()
     read = FollowedRead(

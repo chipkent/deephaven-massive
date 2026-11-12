@@ -50,6 +50,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
 from deephaven_massive._massive import Source, WsClient
 from deephaven_massive._tables.transports import HostDecision
@@ -774,7 +775,7 @@ def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
             break
         pace.wait(0.02)
     for failure in failures.values():
-        assert "was closed; this table no longer updates" in str(failure.text())
+        assert "was closed; this table no longer updates; " + NEW_SESSION in str(failure.text())
     assert dh_to_pylist(news["latest"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
     news.clear()

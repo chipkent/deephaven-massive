@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import gc
 import logging
+import re
 import threading
 import weakref
 from collections import UserDict
@@ -32,7 +33,7 @@ from typing_extensions import override
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import MassiveError, UnlistedPairError
+from deephaven_massive._errors import NEW_SESSION, MassiveError, UnlistedPairError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
@@ -836,7 +837,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     view = massive_session.symbol_reads()
     massive_session.close()
     until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
-    with pytest.raises(MassiveError, match=r"is closed$"):
+    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
         massive_session.symbol_reads()
     massive_session.release(view)
     del result

@@ -1660,7 +1660,8 @@ def test_a_stopped_read_stops_its_roll_forward(
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(
-        dm.MassiveError, match=r"futures\.trades history: the read was cancelled"
+        dm.MassiveError,
+        match=r"futures\.trades history: the read was stopped",
     ) as cancelled:
         session._core.flat_file_transport().history(
             FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
@@ -1729,7 +1730,10 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades history: the read was stopped",
+    ):
         session._core.flat_file_transport().history(
             FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
         )
@@ -3630,7 +3634,10 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     window = history_window(STOCK_TRADES, request, start=day, end=day, classes=())
     stop = _massive.Cancel()
     stop.set()
-    with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"stocks\.trades history: the read was stopped",
+    ):
         session._core.flat_file_transport().history(
             STOCK_TRADES, request, window, dates=[day], call=1, infer_holidays=True, stop=stop
         )

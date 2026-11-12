@@ -13,6 +13,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     RAISES_THROUGH,
     AuthenticationError,
     EntitlementError,
@@ -245,7 +246,7 @@ def test_from_wire_says_whether_the_call_may_succeed_later(
 
 def test_a_closed_session_error_is_public_the_users_and_never_retryable() -> None:
     assert dm.SessionClosedError is SessionClosedError
-    error = SessionClosedError("MassiveSession #1 is closed")
+    error = SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
     assert isinstance(error, dm.MassiveError)
     assert (error.source, error.is_bug, error.is_retryable) == (ErrorSource.USER, False, False)
 
