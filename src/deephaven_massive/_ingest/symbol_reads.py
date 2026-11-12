@@ -193,9 +193,12 @@ def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveErro
         error: The planning error, which names the path and the parameter.
 
     Returns:
-        Each symbol with one shared `UnsupportedParameterError`.
+        Each symbol with one shared `UnsupportedParameterError`, whose message ends with the
+        fix: leave the parameter out, or read these symbols in a call without it.
     """
-    refusal = UnsupportedParameterError(str(error))
+    refusal = UnsupportedParameterError(
+        f"{error}; leave that parameter out, or read these symbols in a call without it"
+    )
     return dict.fromkeys(symbols, refusal)
 
 

@@ -148,7 +148,7 @@ class ErrorSource(StrEnum):
     MASSIVE = "massive"
     """Massive refused or failed the request: an HTTP error such as 403 or 503, a rejected key,
     a plan without the data, a WebSocket status message, or Massive's reference data lacking
-    what you asked for. The message quotes Massive's answer."""
+    what you asked for. When Massive answered, the message quotes it."""
 
     NETWORK = "network"
     """No answer came: a connection failed through every retry the library made, or a live
@@ -159,7 +159,8 @@ class ErrorSource(StrEnum):
     USER = "user"
     """Your code or settings stopped the call, such as a missing API key, delayed data your
     `MassiveConfig` doesn't allow, a certificate or proxy setting that fails, a closed session,
-    or a watchlist table of yours that failed. The message names the fix."""
+    or a watchlist table of yours that failed. For a setting or a bug of yours, the message
+    names the fix; for a closed session, create a new one."""
 
     LIBRARY = "library"
     """A bug in the library, or data from Massive it can't read. The message says how to report
@@ -169,11 +170,13 @@ class ErrorSource(StrEnum):
 class MassiveError(Exception):
     """The base class of every error Massive or the library reports.
 
-    One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for
-    other failures, such as a network error, an HTTP error other than 401 or 403, a rate limit
-    that lasted longer than the read waits, or a bug in the library. The
-    message names what failed, and quotes Massive's text when Massive answered. To branch on
-    the failure, read `is_retryable`, `is_bug`, `source`, or `status` instead of the message.
+    One `except dm.MassiveError` catches them all. Its subclasses `AuthenticationError`,
+    `EntitlementError`, and `SessionClosedError` name three failures you can act on; the
+    library raises `MassiveError` itself for every other, such as a network error, an HTTP
+    error other than 401 or 403, a rate limit longer than the read waits out, or a bug in the
+    library. The message names what failed, and quotes Massive's text when Massive
+    answered. To branch on the failure, read `is_retryable`, `is_bug`, `source`, or `status`
+    instead of the message.
 
     A `fetch()` or `history()` with `wait=True` raises the error. A live table, including the
     table `fetch()` and `history()` return by default, fails with it instead: the table shows the
@@ -259,16 +262,15 @@ class MassiveError(Exception):
     def is_retryable(self) -> bool:
         """Whether the same call may succeed if you make it again later.
 
-        True for exactly these: a rate limit (HTTP 429); a failure on Massive's side (HTTP 500,
-        502, 503, or 504); a `NETWORK` error; a flat file Massive has not published yet; pages
-        of one read that disagreed on `adjusted`; a `poll()` stopped by cycles that kept
-        failing, when its latest cycle's error is retryable; and a watchlist read that failed
-        because every symbol failed, when every symbol's error is retryable. False for every
-        other error, such as any other HTTP status, an `AuthenticationError`, an
-        `EntitlementError`, a `SessionClosedError`, or a bug.
+        True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
+        504), a `NETWORK` error, a flat file Massive hasn't published yet, and a few rarer
+        failures whose message says to retry. A read of a watchlist whose every symbol failed
+        is retryable only when every symbol's error is. False for any other HTTP status, an
+        `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or a bug.
 
-        The library has already retried a server failure or a lost connection a few times, and
-        you see a rate limit only when its pause lasted longer than the read waits, so wait
+        Before it raises, the library has retried a server failure or a lost connection a few
+        times. It raises a rate limit as soon as waiting it out would take the read past 10
+        minutes of pauses in all, or 90 seconds for a console command with `wait=True`. Wait
         before you call again.
         """
         return self._is_retryable
@@ -279,7 +281,8 @@ class MassiveError(Exception):
 
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
-        or a parameter one symbol's endpoint doesn't take; its message names the fix. The
+        or a parameter that the request for one of a watchlist's symbols doesn't take; its
+        message names the fix. The
         library logs a bug at ERROR, and any other error below ERROR.
         """
         return self._is_bug
@@ -290,11 +293,12 @@ class AuthenticationError(MassiveError):
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
     `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
-    401), and so does `history(..., wait=True)` when Massive's flat-file server rejects the S3
-    keys, whose message then names `s3_access_key_id` and `s3_secret_access_key`; without
-    `wait=True`, the table fails with it. A live table fails with it when Massive's streaming
-    server rejects the key, and so does every other stream on that connection. Massive gives
-    the same answer to a plan with no streams of the asset class, and the message says so.
+    401). A `history(..., wait=True)` raises it when Massive's flat-file server rejects the S3
+    keys, and the message then names `s3_access_key_id` and `s3_secret_access_key`. Without
+    `wait=True`, the table fails with it instead. A live table fails with it when Massive's
+    streaming server rejects the key, and so does every other stream on that connection.
+    Massive gives the same answer to a plan with no streams of the asset class, and the message
+    says so.
     Its `source` is `ErrorSource.USER` when the key is missing, and `ErrorSource.MASSIVE` when
     Massive refused it.
 
@@ -320,8 +324,8 @@ class EntitlementError(MassiveError):
     then names the setting to change. Its `source` is `ErrorSource.MASSIVE` when Massive
     refused, and `ErrorSource.USER` when `delayed_subscriptions` refused delayed data.
 
-    The message says what Massive refused, in Massive's own words. A refused flat-file `history()`
-    also names `source=dm.HistorySource.REST` when REST can serve the read.
+    When Massive refused, the message quotes its answer. A refused flat-file `history()` also
+    names `source=dm.HistorySource.REST` when REST can serve the read.
 
     Example:
         Read a day of trades, and report it when your plan lacks them::
@@ -650,11 +654,11 @@ class UnlistedPairError(PermanentError):
 class SessionClosedError(MassiveError):
     """The session is closed, so it reads nothing more.
 
-    A call on a session after `m.close()` raises it, and so does a call that the close cut
-    short. A live table that was running when the session closed fails with it.
-    The message names the session, such as `"MassiveSession #1 is closed"`. Create a new
-    `dm.MassiveSession()` to read again. Its `source` is `ErrorSource.USER`, and
-    `is_retryable` is False.
+    A query method such as `fetch()`, or `m.streams()`, called after `m.close()` raises it,
+    and so does a call that the close cut short. A live table that was running when the session
+    closed fails with it. The message names the session, such as `"MassiveSession #1 is
+    closed"`. Create a new `dm.MassiveSession()` to read again. Its `source` is
+    `ErrorSource.USER`, and `is_retryable` is False.
 
     Example:
         ::

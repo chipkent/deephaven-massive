@@ -79,7 +79,14 @@ from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError, SessionClosedError, source_of
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+    library_bug,
+    source_of,
+)
 from deephaven_massive._log_limits import BoundedLog, bounded_list
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
@@ -246,6 +253,21 @@ def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> Non
             logger.exception("%s: a transport failed to close. %s", label, LIBRARY_BUG)
 
 
+def _unexpected(error: BaseException) -> bool:
+    """Tell whether an exception escaping a verb is a bug in the library.
+
+    Args:
+        error: What escaped the verb.
+
+    Returns:
+        True for an `Exception` that is neither a `MassiveError` nor the `TypeError` or
+        `ValueError` of a wrong argument; False for those, and for an interrupt.
+    """
+    return isinstance(error, Exception) and not isinstance(
+        error, MassiveError | TypeError | ValueError
+    )
+
+
 class SessionCore:
     """The internal engine of one `MassiveSession`, shared by its namespaces and queries.
 
@@ -405,7 +427,10 @@ class SessionCore:
         rate-limited key, logs one WARNING saying so, whether it returned or raised: once per
         pause, so one console command of several long verbs warns once, and the next command
         that pauses the tables again warns again. Any exception that escapes the verb, its
-        guard's included, is logged at DEBUG with the verb and re-raised.
+        guard's included, is logged at DEBUG with the verb and re-raised, except an unexpected
+        one: an `Exception` that is neither a `MassiveError` nor the `TypeError` or
+        `ValueError` of a wrong argument is a bug in the library, logged at ERROR with its
+        traceback and raised as a `MassiveError` (`ErrorSource.LIBRARY`) chained to it.
 
         Args:
             call: The verb, as the warning names it, such as
@@ -417,13 +442,20 @@ class SessionCore:
 
         Raises:
             SessionClosedError: If the session is closed.
+            MassiveError: If the verb failed on an unexpected exception: a bug in the library,
+                whose message says how to report it, chained to the exception.
         """
         try:
             return self._guarded_verb(call, body)
         except BaseException as error:
-            # The caller receives the error; the log keeps which verb raised it, and why.
-            logger.debug("%s raised %s: %s", call, type(error).__name__, error)
-            raise
+            if not _unexpected(error):
+                # The caller receives the error; the log keeps which verb raised it, and why.
+                logger.debug("%s raised %s: %s", call, type(error).__name__, error)
+                raise
+            logger.exception("%s failed on an unexpected exception. %s", call, LIBRARY_BUG)
+            raise MassiveError(
+                library_bug(f"{call} failed: {error!r}"), source=ErrorSource.LIBRARY
+            ) from error
 
     def _guarded_verb(self, call: str, body: Callable[[], _T]) -> _T:
         """Run a verb's guard and body, timing it under the UG lock (`run_verb`).

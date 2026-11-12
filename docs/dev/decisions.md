@@ -560,12 +560,16 @@ two questions: whose move it is, and whether to log at ERROR.
   retryable too: neither is an HTTP status, and both messages say to retry. A read that fails
   because every symbol failed is retryable only when every symbol's error is, and raises the
   first bug among them when there is one. The library has already retried a server failure
-  or a lost connection before it raises, and a rate limit reaches the user only when its
-  pause lasted longer than the read waits.
+  or a lost connection before it raises, and it raises a rate limit as soon as waiting it out
+  would take the read past its patience (10 minutes of pauses, or 90 seconds for a console
+  command).
 - `is_bug`: true for every `LIBRARY` error and for a user's bug the library caught (a failing
   symbol table, a parameter a path does not take, a symbol table row that is not Massive's
   ticker, a session made outside a server). The library logs a failure at ERROR exactly when
   `is_bug` is true.
 
 A call on a closed session, and a live table whose session closes, raise or fail with the new
-public `dm.SessionClosedError` (source `USER`). A wrong argument type stays a `TypeError`.
+public `dm.SessionClosedError` (source `USER`). A wrong argument type stays a `TypeError`, and a
+wrong value a `ValueError`; any other exception escaping a query method is a bug, logged at
+ERROR with its traceback and raised as a `MassiveError` (`LIBRARY`) chained to it, so every
+failure inside a query method is a `MassiveError`.

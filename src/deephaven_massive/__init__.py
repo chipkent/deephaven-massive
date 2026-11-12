@@ -73,15 +73,13 @@ Enums:
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Every error Massive reports, and every failure the library catches, is a
-    `dm.MassiveError`. `dm.AuthenticationError` means your keys are missing or Massive refused
+    Every error Massive reports, and every failure inside a query method such as `fetch()`,
+    is a `dm.MassiveError`. `dm.AuthenticationError` means your keys are missing or Massive refused
     them. `dm.EntitlementError` means your plan doesn't include the data.
     `dm.SessionClosedError` means the session is closed. Each error's `source`, a
     `dm.ErrorSource`, says what stopped the call, its `is_retryable` says whether the same call
     may succeed later, and its `is_bug` says whether a bug caused it.
-    A wrong argument raises `TypeError` or `ValueError` at the call instead. In a read of
-    several symbols, a parameter only some symbols' endpoint lacks fails those symbols with a
-    `dm.MassiveError` whose `is_bug` is `True`.
+    A wrong argument raises `TypeError` or `ValueError` at the call instead.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 
 Server:

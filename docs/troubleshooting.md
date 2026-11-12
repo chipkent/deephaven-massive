@@ -69,11 +69,9 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 ## Handle errors in code
 
 In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
-failing the table. Every error Massive reports, and every failure the library catches, is a
-`dm.MassiveError`. A wrong argument raises `TypeError` or `ValueError` at the call. In a read
-of several symbols, a parameter only some symbols' endpoint lacks fails those symbols with a
-`dm.MassiveError` whose `is_bug` is `True`. These
-attributes of a `dm.MassiveError` tell your code what to do:
+failing the table. Every error Massive reports, and every failure inside a query method such
+as `fetch()` or `last_by()`, is a `dm.MassiveError`. A wrong argument raises `TypeError` or
+`ValueError` at the call. These attributes of a `dm.MassiveError` tell your code what to do:
 
 | Attribute | What it says |
 |---|---|
@@ -83,8 +81,13 @@ attributes of a `dm.MassiveError` tell your code what to do:
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
 Wait before you call again. The library has already retried a server failure or a lost
-connection a few times. You see a rate limit only when its pause lasted longer than the read
-waits.
+connection a few times. It raises a rate limit as soon as waiting it out would take the read
+past 10 minutes of pauses in all, or 90 seconds for a console command with `wait=True`.
+
+A `fetch()` or `history()` of a watchlist can fail for some symbols and not others, such as
+when the request for one symbol doesn't take a parameter you passed. Those symbols show their
+errors in `m.symbol_reads()`, the log names them, and the read fails only when every symbol on
+the watchlist when you called failed.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 
@@ -106,7 +109,8 @@ for attempt in range(3):
         time.sleep(60)
 ```
 
-A call on a session after `m.close()` raises `dm.SessionClosedError`. Create a new session to
+A query method such as `fetch()`, or `m.streams()`, raises `dm.SessionClosedError` after
+`m.close()`. Create a new session to
 read again.
 
 <a id="diagnostics"></a>

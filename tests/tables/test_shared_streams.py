@@ -362,7 +362,9 @@ def test_a_waiter_opens_the_stream_when_the_opener_fails(
         assert gated.entered.wait(TIMEOUT)
         helper = _when_waiting(core, monkeypatch, gated.gate.set)
         waiter = q.append_only()  # wakes when the open fails, then opens the stream itself
-        assert opener.exception(TIMEOUT) is failure
+        raised = opener.exception(TIMEOUT)
+        # An interrupt passes through; any other exception is a bug, raised as one chained to it.
+        assert raised is failure or (raised is not None and raised.__cause__ is failure)
     helper.join(TIMEOUT)
     assert gated.calls == 2
     # The failed open left nothing behind: no row, no record; the waiter's stream is id 2.
@@ -613,7 +615,7 @@ def test_an_open_that_raises_leaves_no_row(
         raise RuntimeError("socket closed")
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
-    with pytest.raises(RuntimeError, match="socket closed"):
+    with pytest.raises(dm.MassiveError, match="socket closed"):
         stream_query(massive_session).blink()
     assert core.streams._streams == {}
     assert stream_rows() == []

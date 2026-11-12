@@ -356,7 +356,10 @@ def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request
     aapl, msft = _failure(out["AAPL"]), _failure(out["MSFT"])
     assert aapl.error is msft.error
     assert isinstance(aapl.error, UnsupportedParameterError)
-    assert str(aapl.error) == "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']"
+    assert str(aapl.error) == (
+        "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']; leave that "
+        "parameter out, or read these symbols in a call without it"
+    )
     assert aapl.kind is FailureKind.PERMANENT
     assert fake_rest.get_queries() == []
 
@@ -611,5 +614,8 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
     out = _by_value(rest_session, ["ES"], adjusted=False)
     error = _failure(out["ES"]).error
     assert isinstance(error, UnsupportedParameterError)
-    assert str(error) == "futures.products: /futures/v1/products does not take ['adjusted']"
+    assert str(error) == (
+        "futures.products: /futures/v1/products does not take ['adjusted']; leave that "
+        "parameter out, or read these symbols in a call without it"
+    )
     assert fake_rest.get_queries() == []

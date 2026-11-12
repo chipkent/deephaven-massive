@@ -979,3 +979,44 @@ def test_rows_written_while_close_runs_leave_one_row_per_key(
     assert len(keys) == len(set(keys))
     assert all(0 <= r["Reconnects"] < 200 for r in rows)
     del view
+
+
+def test_an_unexpected_exception_escaping_a_verb_is_raised_as_a_library_bug(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    broken = RuntimeError("the index broke")
+
+    def body() -> None:
+        raise broken
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"),
+        pytest.raises(dm.MassiveError, match=r"^m\.x\(\)\.fetch\(\) failed: RuntimeError") as bug,
+    ):
+        core.run_verb("m.x().fetch()", body)
+    assert (bug.value.source, bug.value.is_bug, bug.value.is_retryable) == (
+        dm.ErrorSource.LIBRARY,
+        True,
+        False,
+    )
+    assert bug.value.__cause__ is broken
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.exc_info is not None  # logged with its traceback
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("bad start"), TypeError("not a bool"), KeyboardInterrupt()],
+    ids=["value", "type", "interrupt"],
+)
+def test_a_wrong_argument_or_an_interrupt_escapes_a_verb_unchanged(
+    massive_session: dm.MassiveSession, error: BaseException
+) -> None:
+    def body() -> None:
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        massive_session._core.run_verb("m.x().fetch()", body)
+    assert raised.value is error
+    error.__traceback__ = None  # the parameter outlives the test; its traceback holds the core

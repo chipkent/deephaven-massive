@@ -941,7 +941,8 @@ def test_a_failed_open_returns_its_lease(
         raise RuntimeError("no tables")
 
     monkeypatch.setattr(ws, "open_stream_tables", broken)
-    with pytest.raises(RuntimeError, match="no tables"):
+    # An unexpected exception is a bug in the library, raised as one.
+    with pytest.raises(dm.MassiveError, match="no tables"):
         ws_session.query(TRADES, ["AAPL"]).blink()
     assert ws_session.connection().leases == 0
     assert ws_session.connections.group.streams == {}
@@ -957,7 +958,7 @@ def test_a_watch_that_cannot_start_releases_the_stream(
 
     monkeypatch.setattr(SymbolWatch, "start", broken)
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    with pytest.raises(RuntimeError, match="no watch"):
+    with pytest.raises(dm.MassiveError, match="no watch"):
         ws_session.query(TRADES, watchlist).blink()
     assert ws_session.connection().leases == 0
 
@@ -1828,7 +1829,9 @@ def test_a_first_futures_stream_failing_in_its_schedule_wait_leaves_a_working_co
         real(self, contracts, stream_id=stream_id, holding_lock=holding_lock)
 
     monkeypatch.setattr(ws.WsConnections, "_load_schedules", interrupted)
-    with pytest.raises(error, match="interrupted"):
+    # An interrupt passes through; any other exception is a bug in the library, raised as one.
+    expected = error if not issubclass(error, Exception) else dm.MassiveError
+    with pytest.raises(expected, match="interrupted"):
         ws_session.query(FUTURES, ["ESZ5"]).blink()
     result = ws_session.query(FUTURES, ["ESZ5"]).blink()
     ws_session.subscribed("T.ESZ5")
