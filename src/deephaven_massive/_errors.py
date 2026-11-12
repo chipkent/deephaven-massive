@@ -25,9 +25,10 @@ Every `MassiveError` also says whose problem it is, through `cause`, an `ErrorCa
 The cause sets the level a failure is logged at: ERROR for a defect, so that a broad `except`
 never hides one, and below ERROR for an expected condition (`_log_limits.log_failure`).
 `library_bug` and `user_defect` build the two kinds of defect message, `cause_of` reads the
-cause of any exception, and `failure_text` is the text a log record gives it. `required`
-returns a value the library's design guarantees, such as a dataset's REST path or the session a
-caller holds, and raises a library defect when it is missing.
+cause of any exception, and `failure_text` is the text a log record gives it. `required` and
+`required_instance` return a value the library's design guarantees, such as a dataset's REST
+path or the session a caller holds, and raise a library defect when it is missing or of
+another type.
 
 The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
 `WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
@@ -83,6 +84,7 @@ __all__ = [
     "library_bug",
     "raises_through",
     "required",
+    "required_instance",
     "user_defect",
     "wire_cause",
 ]
@@ -381,6 +383,29 @@ def required(value: _V | None, what: str) -> _V:
     """
     if value is None:
         raise MassiveError(library_bug(f"{what} is missing"), cause=ErrorCause.LIBRARY_DEFECT)
+    return value
+
+
+def required_instance(value: object, kind: type[_V], what: str) -> _V:
+    """Return a value the library's design guarantees is of a type, raising a library defect if not.
+
+    Args:
+        value: The value.
+        kind: The type the design guarantees, such as `datetime`.
+        what: What the value is, for the message, such as `"the request's start"`.
+
+    Returns:
+        `value`.
+
+    Raises:
+        MassiveError: A library defect (`ErrorCause.LIBRARY_DEFECT`) naming `what`, `kind`, and
+            the value's type, when `value` is not an instance of `kind`.
+    """
+    if not isinstance(value, kind):
+        raise MassiveError(
+            library_bug(f"{what} is a {type(value).__name__}, not a {kind.__name__}"),
+            cause=ErrorCause.LIBRARY_DEFECT,
+        )
     return value
 
 

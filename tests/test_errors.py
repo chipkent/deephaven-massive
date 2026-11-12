@@ -25,6 +25,7 @@ from deephaven_massive._errors import (
     library_bug,
     raises_through,
     required,
+    required_instance,
     user_defect,
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
@@ -159,6 +160,16 @@ def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> 
     with pytest.raises(MassiveError) as raised:
         required(None, "stocks.trades's history path")
     assert str(raised.value) == f"stocks.trades's history path is missing. {LIBRARY_BUG}"
+    assert raised.value.cause is ErrorCause.LIBRARY_DEFECT
+
+
+def test_required_instance_returns_a_value_and_names_another_type_a_library_defect() -> None:
+    assert required_instance(3, int, "a count") == 3
+    with pytest.raises(MassiveError) as raised:
+        required_instance(None, str, "stocks.trades's history path")
+    assert str(raised.value) == (
+        f"stocks.trades's history path is a NoneType, not a str. {LIBRARY_BUG}"
+    )
     assert raised.value.cause is ErrorCause.LIBRARY_DEFECT
 
 

@@ -17,7 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeAlias
 
-from deephaven_massive._errors import required
+from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._errors import ErrorCause, MassiveError, library_bug, required
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols
     from deephaven_massive._enums import FuturesVenue, Timespan
 
 __all__ = ["ParamValue", "Request", "StreamKey", "ValueTable"]
@@ -141,6 +142,23 @@ class Request:
         parameter = required(self.value_table, "the request's value table").parameter
         params = {**dict(self.params), parameter: value}
         return replace(self, value_table=None, params=tuple(sorted(params.items())))
+
+    @property
+    def static_symbols(self) -> tuple[str, ...] | AllSymbols | None:
+        """The symbols of a read that names them in code: a tuple, `ALL`, or None.
+
+        A read of a symbol table's symbols reads each symbol on its own, with requests built
+        from its symbols in code, so only a stream's request holds a table.
+
+        Raises:
+            MassiveError: A library defect, if `symbols` is a symbol table.
+        """
+        if isinstance(self.symbols, SymbolTable):
+            raise MassiveError(
+                library_bug("a read that names its symbols in code holds a symbol table"),
+                cause=ErrorCause.LIBRARY_DEFECT,
+            )
+        return self.symbols
 
     def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.

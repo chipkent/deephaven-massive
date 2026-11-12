@@ -172,7 +172,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._datasets.symbols import AllSymbols
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -314,7 +314,7 @@ class CycleReader(Protocol):
     def __call__(
         self,
         *,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
@@ -916,7 +916,7 @@ class Poller:
         with entered(self._exec_ctx):
             self._fail_fatal(core, error)
 
-    def _symbols(self) -> tuple[NormalizedSymbols | None, tuple[str, ...]]:
+    def _symbols(self) -> tuple[tuple[str, ...] | AllSymbols | None, tuple[str, ...]]:
         """Return the cycle's symbols, reading a reactive table once.
 
         A row of a reactive table that is not Massive's exact ticker follows the session's

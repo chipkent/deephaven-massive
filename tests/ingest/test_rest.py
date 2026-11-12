@@ -2642,7 +2642,7 @@ def test_a_read_fans_out_on_the_callers_pool(
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest_requests.plan_calls(
-        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+        CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
         table, requests = reader.read(
@@ -2723,7 +2723,7 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
     calls = rest_requests.plan_calls(
-        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+        CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
 
     def pages(*_: object, **__: object) -> NoReturn:

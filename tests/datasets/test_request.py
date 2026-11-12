@@ -18,6 +18,15 @@ def test_symbol_keys(dh_exec_ctx: object) -> None:
         Request().symbol_key()
 
 
+def test_static_symbols_refuse_a_symbol_table_as_a_library_defect(dh_exec_ctx: object) -> None:
+    assert Request(symbols=("A",)).static_symbols == ("A",)
+    assert Request(symbols=dm.ALL).static_symbols is dm.ALL
+    assert Request().static_symbols is None
+    table = SymbolTable(new_table([string_col("Symbol", ["A"])]))
+    with pytest.raises(dm.MassiveError, match=r"^a read that names its symbols in code holds a "):
+        _ = Request(symbols=table).static_symbols
+
+
 def test_requests_are_hashable_values() -> None:
     assert Request(symbols=("A",)) == Request(symbols=("A",))
     assert hash(Request(symbols=("A",))) == hash(Request(symbols=("A",)))
