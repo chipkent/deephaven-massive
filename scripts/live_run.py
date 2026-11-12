@@ -56,6 +56,9 @@ def main() -> int:
     script = Path(__file__).resolve()
     # `tests._live` is importable only once the root is on the path, so it is imported by name.
     if argv[:1] and argv[0] in CHILD_COMMANDS:
+        # Read before the server's slow start: a parent that ends meanwhile would leave the
+        # child a new parent, and its watch would never see the old one go.
+        parent = os.getppid()
         server = importlib.import_module("tests._live.live_run.server")
         problem = server.start_server(argv)
         if problem is not None:
@@ -63,7 +66,7 @@ def main() -> int:
             return 1
         # Imported only now: it imports the library, and so Deephaven, which needs the JVM.
         child = importlib.import_module("tests._live.live_run.child_commands")
-        child_status: int = child.main(argv)
+        child_status: int = child.main(argv, parent=parent)
         return child_status
     cli = importlib.import_module("tests._live.live_run.cli")
     status: int = cli.main(argv, root=ROOT, script=script)

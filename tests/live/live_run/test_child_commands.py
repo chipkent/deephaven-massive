@@ -41,10 +41,11 @@ def test_the_group_child_watches_its_parent_then_runs_its_group(
     code = child_commands.main(
         ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"],
         environ={},
-        watch=lambda: events.append("watching"),
+        parent=4321,
+        watch=lambda parent: events.append(f"watching {parent}"),
     )
     assert code == 0
-    assert events == ["watching", "a"]
+    assert events == ["watching 4321", "a"]
 
 
 def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
@@ -108,9 +109,9 @@ def test_the_parent_watch_runs_on_a_thread_of_its_own(monkeypatch: pytest.Monkey
         done.set()
 
     monkeypatch.setattr(child_commands, "watch_parent", watch_parent)
-    child_commands.start_parent_watch()
+    child_commands.start_parent_watch(4321)
     assert done.wait(10.0)
-    assert seen == [os.getppid()]
+    assert seen == [4321]  # the pid the script read, not the parent the child has now
 
 
 def test_the_probe_child_writes_its_probe_for_the_parent(
@@ -124,14 +125,15 @@ def test_the_probe_child_writes_its_probe_for_the_parent(
 
     monkeypatch.setattr(child_commands, "probe_key", probe_key)
     result = tmp_path / "probe.json"
-    watched: list[str] = []
+    watched: list[int] = []
     code = child_commands.main(
         ["_probe", "--result", str(result)],
         environ={"MASSIVE_API_KEY": KEY},
-        watch=lambda: watched.append("watching"),
+        parent=4321,
+        watch=watched.append,
     )
     assert code == 0
-    assert watched == ["watching"]  # a probe child ends with its parent too
+    assert watched == [4321]  # a probe child watches its parent too
     assert seen == [Credentials(api_key=KEY, s3_pair=None)]
     assert read_result(result).tiers == {"stocks": "starter"}
 
@@ -140,5 +142,5 @@ def test_a_refused_child_command_line_returns_its_status(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # The script exits through os._exit, so argparse's SystemExit must come back as a status.
-    assert child_commands.main(["_probe"], environ={}) == 2
+    assert child_commands.main(["_probe"], parent=1, environ={}) == 2
     assert "--result" in capsys.readouterr().err

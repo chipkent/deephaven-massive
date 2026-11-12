@@ -3,7 +3,8 @@
 `scripts/live_run.py` runs one of these in the embedded Deephaven server it started, sized by
 `server.jvm_args`, and then leaves through `os._exit`. They import the library, and so
 Deephaven, so only a child that started a server imports this module; the parent never does.
-Every child first watches its parent (`start_parent_watch`), so it ends when the parent does.
+Every child first watches the parent the script saw before its server started
+(`start_parent_watch`), so it ends soon after that parent does.
 
 - `_group --out OUT --attempt FOLDER --token T`: a built-in group's child (`attempts`). It
   opens sessions on the key (declaring its Basic subscriptions, except for
@@ -94,16 +95,21 @@ def run_probe_child(result: Path, *, environ: Mapping[str, str]) -> None:
     write_result(result, probe_key(credentials(environ), now=datetime.now(UTC)))
 
 
-def start_parent_watch() -> None:
-    """Start a thread that ends this child at once if its parent goes away.
+def start_parent_watch(parent: int) -> None:
+    """Start a thread that ends this child once its parent goes away.
 
     The child runs in a session of its own, so a closed terminal never reaches it; without
     the watch it would outlive the program that would stop it, holding its server, the key's
     connection, and a folder a resumed run uses again.
+
+    Args:
+        parent: The parent's pid, read by the script before the server started: a parent that
+            ends while the server starts leaves the child a new parent, which this pid tells
+            apart.
     """
     threading.Thread(
         target=watch_parent,
-        args=(os.getppid(),),
+        args=(parent,),
         kwargs={"orphaned": lambda: os._exit(3), "wait": threading.Event().wait},
         name="live run parent watch",
         daemon=True,
@@ -116,7 +122,7 @@ def watch_parent(
     """Call `orphaned` once the process's parent is no longer `parent`.
 
     Args:
-        parent: The parent's pid when the child started.
+        parent: The parent's pid when the script started.
         orphaned: Called once, when the parent is gone.
         wait: Waits a number of seconds between checks.
     """
@@ -128,15 +134,17 @@ def watch_parent(
 def main(
     argv: list[str],
     *,
+    parent: int,
     environ: Mapping[str, str] = os.environ,
-    watch: Callable[[], None] = start_parent_watch,
+    watch: Callable[[int], None] = start_parent_watch,
 ) -> int:
     """Parse a child's command line and run it.
 
     Args:
         argv: The arguments, without the program's name.
+        parent: The parent's pid, read by the script before its server started.
         environ: The environment, secrets included.
-        watch: Starts the child's watch of its parent (`start_parent_watch`).
+        watch: Starts the child's watch of `parent` (`start_parent_watch`).
 
     Returns:
         0 once the command finished; 2 when the parser refused the command line, after the
@@ -146,7 +154,7 @@ def main(
         arguments = parser().parse_args(argv)
     except SystemExit as stop:
         return int(stop.code or 0)
-    watch()
+    watch(parent)
     if arguments.command == "_group":
         out = arguments.out.expanduser().resolve()
         run_group_child(out, arguments.attempt, environ=environ)

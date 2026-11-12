@@ -118,8 +118,8 @@ def probe_in_child(
     """Probe the key in a child process, `script _probe --result FILE`, and read its result.
 
     The child inherits the environment, secrets included, since it probes with them. Its
-    output, cleaned of the secrets, is shown only in the error of a failed child. Control-C
-    stops the child (`children.wait`).
+    last output lines, cleaned of the secrets, are shown only in the error of a failed or
+    stopped child. Control-C stops the child (`children.wait`).
 
     Args:
         python: The child's interpreter.
@@ -149,11 +149,11 @@ def probe_in_child(
         )
         deadline = datetime.now(UTC) + limit
         code, stopped = children.wait(child, deadline=deadline, now=lambda: datetime.now(UTC))
+        shown = " | ".join(line.strip() for line in lines[-SHOWN_OUTPUT:] if line.strip())
         if stopped:
-            msg = f"the probe's child did not end within {limit}"
+            msg = f"the probe's child did not end within {limit}: {shown}"
             raise ProbeChildError(msg)
         if code != 0 or not path.exists():
-            shown = " | ".join(line.strip() for line in lines[-SHOWN_OUTPUT:] if line.strip())
             msg = f"the probe's child exited with status {code}: {shown}"
             raise ProbeChildError(msg)
         return read_result(path)
