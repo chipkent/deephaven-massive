@@ -33,7 +33,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency, SymbolConvention
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, RowDataError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
@@ -2360,6 +2360,15 @@ def test_a_defect_in_a_pair_lookup_at_the_call_raises_to_the_verb(
     with pytest.raises(dm.MassiveError, match="the split broke") as raised:
         ws_session.query(CRYPTO, watchlist).append_only()
     assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+
+
+def test_a_permanent_defect_in_a_pair_lookup_at_the_call_is_never_a_skipped_pair(
+    ws_session: WsSession,
+) -> None:
+    # A defect is the library's, even when it is a permanent error such as a pair's.
+    ws_session.pair_answers["X:DOTUSD"] = RowDataError("the split broke")
+    with pytest.raises(RowDataError, match="the split broke"):
+        ws_session.query(CRYPTO, ["X:DOTUSD"]).append_only()
 
 
 def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
