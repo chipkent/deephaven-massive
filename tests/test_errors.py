@@ -269,6 +269,19 @@ def test_every_symbol_failing_is_retryable_only_when_each_symbol_is() -> None:
     assert (str(first), first.status, first.is_retryable) == ("AAPL: HTTP 503", 503, False)
 
 
+def test_every_symbol_failing_reports_a_bug_among_them() -> None:
+    busy = MassiveError("AAPL: HTTP 429", status=429)
+    broken = MassiveError("MSFT: a row broke", source=ErrorSource.LIBRARY)
+    first = every_symbol_failed([busy, broken])
+    # A bug is never hidden behind another symbol's rate limit.
+    assert (str(first), first.source, first.is_bug) == (
+        "MSFT: a row broke",
+        ErrorSource.LIBRARY,
+        True,
+    )
+    assert not first.is_retryable
+
+
 def test_a_library_bug_message_ends_with_how_to_report_it() -> None:
     assert library_bug("the flush thread died") == f"the flush thread died. {LIBRARY_BUG}"
     assert library_bug("it died.") == f"it died. {LIBRARY_BUG}"

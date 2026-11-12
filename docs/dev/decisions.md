@@ -558,9 +558,10 @@ two questions: whose move it is, and whether to log at ERROR.
   other status, authentication, entitlement, a closed session, and a taken connection, and
   always for a bug. A flat file not yet published and pages that disagree on `adjusted` are
   retryable too: neither is an HTTP status, and both messages say to retry. A read that fails
-  because every symbol failed is retryable only when every symbol's error is. The library has
-  already retried a server failure or a lost connection before it raises, and a rate limit
-  reaches the user only after its pause outlasted how long the read waits.
+  because every symbol failed is retryable only when every symbol's error is, and raises the
+  first bug among them when there is one. The library has already retried a server failure
+  or a lost connection before it raises, and a rate limit reaches the user only when its
+  pause lasted longer than the read waits.
 - `is_bug`: true for every `LIBRARY` error and for a user's bug the library caught (a failing
   symbol table, a parameter a path does not take, a symbol table row that is not Massive's
   ticker, a session made outside a server). The library logs a failure at ERROR exactly when

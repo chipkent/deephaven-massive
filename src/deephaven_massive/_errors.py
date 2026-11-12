@@ -489,15 +489,20 @@ def copy_error(
 def every_symbol_failed(errors: Sequence[MassiveError]) -> MassiveError:
     """Return the error a read raises when every one of its symbols failed.
 
-    The first symbol's error stands for them all, as a copy that is retryable only when every
-    symbol's error is: calling again helps only if each symbol may then succeed.
+    One error stands for them all, as a copy (`copy_error`). It is the first bug among them,
+    when any symbol failed of one, so a bug is never hidden behind another symbol's refusal;
+    otherwise the first symbol's, retryable only when every symbol's error is: calling again
+    helps only if each symbol may then succeed.
 
     Args:
         errors: Each symbol's error, the first symbol's first; at least one.
 
     Returns:
-        A copy of the first error (`copy_error`).
+        A copy of the first bug's error, or of the first symbol's.
     """
+    bug = next((e for e in errors if e.is_bug), None)
+    if bug is not None:
+        return copy_error(bug)
     return copy_error(errors[0], is_retryable=all(e.is_retryable for e in errors))
 
 
@@ -645,8 +650,8 @@ class UnlistedPairError(PermanentError):
 class SessionClosedError(MassiveError):
     """The session is closed, so it reads nothing more.
 
-    A call on a session after `m.close()` raises it, and so does a call that was running when
-    the session closed. A live table that was running when the session closed fails with it.
+    A call on a session after `m.close()` raises it, and so does a call that the close cut
+    short. A live table that was running when the session closed fails with it.
     The message names the session, such as `"MassiveSession #1 is closed"`. Create a new
     `dm.MassiveSession()` to read again. Its `source` is `ErrorSource.USER`, and
     `is_retryable` is False.
