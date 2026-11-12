@@ -50,7 +50,7 @@ import deephaven_massive.namespaces._stock_filings as stock_filings
 import deephaven_massive.namespaces._stock_financials as stock_financials
 import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive import _snapshots as snapshots
-from deephaven_massive._config import MassiveConfig
+from deephaven_massive._config import MassiveConfig, shown_setting
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError, raises_through
@@ -138,7 +138,8 @@ def _next_number() -> int:
 def _log_session(label: str, config: MassiveConfig) -> None:
     """Log, at INFO, a new session's label and its configuration, without its credentials.
 
-    The line holds every field the configuration's `repr` shows except `s3_access_key_id`; the
+    The line holds every field the configuration's `repr` shows except `s3_access_key_id`, each
+    as `shown_setting` shows it, so a URL never shows a user and password; the
     API key, the S3 access key id, and the S3 secret are each shown only as set or unset, since
     a log is attached to bug reports. The two S3 credentials are set together or not at all.
     The process itself (versions, the GIL, the snapshot, the proxy and CA settings) is
@@ -149,7 +150,7 @@ def _log_session(label: str, config: MassiveConfig) -> None:
         config: The session's configuration.
     """
     shown = ", ".join(
-        f"{field.name}={getattr(config, field.name)!r}"
+        f"{field.name}={shown_setting(field.name, getattr(config, field.name))}"
         for field in dataclasses.fields(config)
         if field.repr and field.name != "s3_access_key_id"
     )

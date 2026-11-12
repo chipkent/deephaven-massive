@@ -101,19 +101,9 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = [
-    "CONNECT_TIMEOUT",
-    "MAX_BODY_BYTES",
-    "READ_TIMEOUT",
-    "REST_BASE_URL",
-    "RefusalHook",
-    "RestClient",
-]
+__all__ = ["CONNECT_TIMEOUT", "MAX_BODY_BYTES", "READ_TIMEOUT", "RefusalHook", "RestClient"]
 
 _log = logging.getLogger(__name__)
-
-REST_BASE_URL: Final = "https://api.massive.com"
-"""Massive's REST API, the base URL every session's `RestClient` is given."""
 
 # The source of retry jitter. `SystemRandom` draws from the OS and keeps no state, so threads
 # share it safely; jitter needs no cryptographic strength, only independence.
@@ -319,7 +309,7 @@ class RestClient:
                 host that is not loopback.
         """
         check_api_key(api_key, setting="api_key")
-        origin = check_rest_base_url(base_url)
+        origin = check_rest_base_url(base_url, setting="base_url")
         if max_concurrency < 1:
             raise ValueError(f"max_concurrency must be at least 1, not {max_concurrency}")
         self._origin = origin
@@ -455,11 +445,6 @@ class RestClient:
             raise ValueError(f"limit must be at least 1, not {limit}")
         target = request_target(rest_path, path_params, query_params)
         return self._pages(_Job(rest_path, bucket, cancel, patience), target, limit)
-
-    @property
-    def host(self) -> str:
-        """The host this client sends its requests to, such as `"api.massive.com"`."""
-        return self._host
 
     @property
     def governor(self) -> RequestGovernor:

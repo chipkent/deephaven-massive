@@ -61,7 +61,9 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import AuthenticationError
 from deephaven_massive._massive import (
     check_api_key,
+    check_rest_base_url,
     without_userinfo,
+    without_userinfo_or_query,
 )
 
 if TYPE_CHECKING:
@@ -84,6 +86,7 @@ __all__ = [
     "require_positive_int",
     "require_positive_number",
     "settings_reference",
+    "shown_setting",
     "with_settings_reference",
 ]
 
@@ -329,6 +332,19 @@ class MassiveConfig:
 
             A shorter interval shows each row sooner, and a longer one adds more rows in each
             update.
+        rest_base_url: Sets the URL REST requests go to. Defaults to `https://api.massive.com`.
+
+            Change it only to reach a server other than Massive's, such as a local test server.
+            The config refuses a URL with a path, a query, a fragment, a user and password, or
+            port 0. It also refuses an `http` URL of a host that isn't on your own machine. The
+            error shows `***` in place of the URL's query and password.
+        s3_endpoint_url: Sets the URL flat files are read from. Defaults to
+            `https://files.massive.com`.
+
+            Change it only to reach a server other than Massive's.
+        s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
+
+            Change it only with `s3_endpoint_url`.
         noncanonical_symbols: Decides what happens when a watchlist or other table you pass holds
             a value that isn't Massive's exact ticker or futures product code: `SPX` for `I:SPX`,
             say. Defaults to `LOG`.
@@ -433,6 +449,9 @@ class MassiveConfig:
     rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
     delayed_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
+    rest_base_url: str = "https://api.massive.com"
+    s3_endpoint_url: str = "https://files.massive.com"
+    s3_bucket: str = "flatfiles"
     noncanonical_symbols: OnError = OnError.LOG
     unlisted_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
@@ -459,9 +478,12 @@ class MassiveConfig:
                 interval, or count is not positive, only one of the two S3 credentials is set,
                 `api_key` or an S3 credential has leading or trailing whitespace (or an S3
                 credential is blank), `api_key` holds whitespace or a character outside
-                visible ASCII, which no header can carry, a `websocket_hosts` value is not a
-                bare lower-case hostname, an environment variable read for a default has
-                leading or trailing whitespace,
+                visible ASCII, which no header can carry, `rest_base_url` or `s3_endpoint_url`
+                is not an `http` or `https` URL with a host, `rest_base_url` names port 0 or
+                more than a scheme, host, and port (a user and password, a path, or a query),
+                or is `http` to a host other than this machine, `s3_bucket` is blank, a
+                `websocket_hosts` value is not a bare lower-case hostname, an environment
+                variable read for a default has leading or trailing whitespace,
                 `delayed_subscriptions` holds `dm.Subscription.CURRENCIES`, or a
                 `websocket_hosts` pin of a delayed host does not match `delayed_subscriptions`.
         """
@@ -514,6 +536,10 @@ class MassiveConfig:
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
         _require_enum(self.malformed_rows, OnError, "malformed_rows")
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
+        _check_url("rest_base_url", self.rest_base_url)
+        check_rest_base_url(self.rest_base_url, setting="rest_base_url")
+        _check_url("s3_endpoint_url", self.s3_endpoint_url)
+        _check_bucket(self.s3_bucket)
         object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))
         basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
         object.__setattr__(self, "rest_basic_subscriptions", basic)
@@ -587,16 +613,49 @@ class MassiveConfig:
 
     @override
     def __repr__(self) -> str:
-        """Show every setting but the secrets.
+        """Show every setting but the secrets, with no user or password in a URL.
 
-        The API key and the S3 secret are left out, as the fields declare, so the text is safe
-        to log.
+        The API key and the S3 secret are left out, as the fields declare, and a URL
+        (`rest_base_url`, `s3_endpoint_url`) shows `***@` in place of a user and password in
+        it, so the text is safe to log (`shown_setting`).
 
         Returns:
             `"MassiveConfig(s3_access_key_id=None, websocket_hosts={}, ...)"`, field by field.
         """
-        shown = ", ".join(f"{f.name}={getattr(self, f.name)!r}" for f in fields(self) if f.repr)
+        shown = ", ".join(
+            f"{f.name}={shown_setting(f.name, getattr(self, f.name))}"
+            for f in fields(self)
+            if f.repr
+        )
         return f"MassiveConfig({shown})"
+
+
+_URL_SETTINGS: Final[dict[str, Callable[[str], str]]] = {
+    "rest_base_url": without_userinfo_or_query,
+    "s3_endpoint_url": without_userinfo,
+}
+"""The `MassiveConfig` fields that hold a URL, which a user may write with credentials, and
+how each is shown. `rest_base_url` may hold no query or fragment, so a value that has one is
+refused, and its query can carry the API key (`?apiKey=<key>`): it is shown with them hidden
+too. An S3 endpoint may hold a query, which is shown."""
+
+
+def shown_setting(name: str, value: object) -> str:
+    """Return the text a log line or `repr` shows for one `MassiveConfig` setting.
+
+    Args:
+        name: The field's name.
+        value: Its value.
+
+    Returns:
+        The value's `repr`; for a URL setting, with `***@` in place of a user and password
+        (`without_userinfo`), and for `rest_base_url` with `***` in place of a query and a
+        fragment as well (`without_userinfo_or_query`).
+    """
+    show = _URL_SETTINGS.get(name)
+    if show is not None and isinstance(value, str):
+        return repr(show(value))
+    return repr(value)
 
 
 def require_positive_int(name: str, value: object, *, maximum: int | None = None) -> int:
@@ -809,6 +868,55 @@ def _check_s3_credential(name: str, value: str | None) -> None:
             f"{name} is blank or has leading or trailing whitespace; pass the credential "
             "exactly, or None for no flat files (the value is not shown)"
         )
+
+
+_HTTP_URL: Final = re.compile(
+    r"https?://(?:[^/?#\s]*@)?(?:\[[0-9A-Fa-f:.]+\]|[^/?#@:\s\[\]]+)(?::[0-9]*)?(?:[/?#]\S*)?"
+)
+"""An `http` or `https` URL with a host and no whitespace: the scheme, an optional user and
+password, a host name or bracketed IPv6 address, an optional port, and an optional path."""
+
+
+def _check_url(name: str, value: object) -> None:
+    """Refuse a base URL that is not an `http` or `https` URL with a host.
+
+    Every request the library makes is built on the URL, so a value such as `""`, `~`, or
+    `api.massive.com` (no scheme) is refused here rather than failing on the first request.
+
+    Args:
+        name: The field's name (`rest_base_url` or `s3_endpoint_url`), for the message.
+        value: The field's value.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` holds whitespace, or its scheme is not `http` or `https`, or it
+            names no host. The message shows the value with `***@` in place of a user and
+            password, and a `rest_base_url` with `***` in place of a query and a fragment
+            (`shown_setting`).
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    if not _HTTP_URL.fullmatch(value):
+        raise ValueError(
+            f"{name} must be an http or https URL with a host, such as "
+            f"'https://api.massive.com', not {shown_setting(name, value)}"
+        )
+
+
+def _check_bucket(value: object) -> None:
+    """Refuse an `s3_bucket` that is not text or is blank.
+
+    Args:
+        value: The field's value.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` is blank.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"s3_bucket must be a str, not {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"s3_bucket must name a bucket, such as 'flatfiles', not {value!r}")
 
 
 def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, str]:
@@ -1250,6 +1358,37 @@ def _count(node: yaml.Node) -> int:
         ) from None
 
 
+_NULL_WORDS: Final = frozenset({"", "~", "null", "Null", "NULL"})
+"""The plain (unquoted) scalars YAML reads as no value at all."""
+
+
+def _text(node: yaml.Node) -> str:
+    """Convert a text setting (a URL or the bucket), taken exactly as written.
+
+    A plain value YAML means as empty (`rest_base_url:` with nothing after it, `~`, or
+    `null`) is refused rather than taken as the text `""` or `"~"`: a user who writes one
+    means the default, which the file gives by leaving the setting out.
+
+    Args:
+        node: The value's node.
+
+    Returns:
+        The text.
+
+    Raises:
+        _SettingsFileError: If the node is a list or mapping, is empty quoted text (`''`), or
+            is a plain empty value (`_NULL_WORDS`).
+    """
+    text = _scalar(node, "text")
+    plain = isinstance(node, yaml.ScalarNode) and node.style is None
+    if not text or (plain and text in _NULL_WORDS):
+        raise _SettingsFileError(
+            "is empty; write the value, or leave the setting out for its default",
+            node.start_mark,
+        )
+    return text
+
+
 _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "websocket_hosts": _hosts,
     "subscription_confirmation_timeout": _seconds,
@@ -1262,6 +1401,9 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "rest_basic_subscriptions": _subscriptions,
     "delayed_subscriptions": _subscriptions,
     "flush_interval": _seconds,
+    "rest_base_url": _text,
+    "s3_endpoint_url": _text,
+    "s3_bucket": _text,
     "noncanonical_symbols": _on_error,
     "unlisted_symbols": _on_error,
     "unreadable_symbols": _on_error,
@@ -1490,6 +1632,16 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         ConnectionTaken.FAIL,
         "When another program with this key takes a stream's connection: fail, or reconnect.",
     ),
+    "rest_base_url": _Example(
+        "https://api.massive.com", "Where REST requests go: change it only for another server."
+    ),
+    "s3_endpoint_url": _Example(
+        "https://files.massive.com",
+        "Where flat files are read from: change it only for another server.",
+    ),
+    "s3_bucket": _Example(
+        "flatfiles", "The flat files' S3 bucket: change it only with s3_endpoint_url."
+    ),
 }
 """The example settings file: every setting a file may hold, each once, in the order of the
 page's table, the ones a new user sets first. Its values agree with one account
@@ -1505,7 +1657,7 @@ _ENTRY_INDENT: Final = " " * 8
 _DEFAULT_SENTENCE: Final = re.compile(r" ?Defaults to [^.]*(?:\.[^ ][^.]*)*\.$")
 """An entry's last sentence when it gives the default, which the reference shows from the code.
 
-A period followed by a character other than a space (`0.05`, `business.massive.com`) does not end
+A period followed by a character other than a space (`0.05`, `api.massive.com`) does not end
 the sentence."""
 
 _ENUM_IN_CODE: Final = re.compile(
@@ -1644,6 +1796,10 @@ def _value_forms() -> dict[str, str]:
     """
     delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
     error_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
+    url = (
+        "An `https` URL of a host alone, or `http` for your own machine, such as "
+        "`https://api.massive.com`"
+    )
     forms = {
         "delayed_subscriptions": f"A list of any of {_spellings(delayed)}, such as "
         "`[stocks]`, or `[]` for none",
@@ -1664,6 +1820,9 @@ def _value_forms() -> dict[str, str]:
         "`max_reconnect_backoff`, such as `60`",
         "max_reconnect_backoff": "A number of seconds, at least `reconnect_backoff`, such as `300`",
         "connection_taken": _spellings([ConnectionTaken.FAIL, ConnectionTaken.RECONNECT]),
+        "rest_base_url": url,
+        "s3_endpoint_url": "An `http` or `https` URL, such as `https://files.massive.com`",
+        "s3_bucket": "A bucket name, such as `flatfiles`",
     }
     for asset_class in AssetClass:
         subscription = subscription_of(asset_class)

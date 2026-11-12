@@ -808,6 +808,7 @@ OTHER_SETTINGS: dict[str, object] = {
     "max_reconnect_backoff": 300.0,
     "max_outage": 60.0,
     "flush_interval": 0.2,
+    "rest_base_url": "https://rest.example.com",
 }
 
 

@@ -62,14 +62,13 @@ class SessionClients:
     core's `registry_lock`, and the clients themselves are thread-safe.
     """
 
-    __slots__ = ("_base_url", "_core", "_flat_files", "_label", "_lease", "_rest", "_streams")
+    __slots__ = ("_core", "_flat_files", "_label", "_lease", "_rest", "_streams")
 
     def __init__(self, core: SessionCore) -> None:
         """Bind the clients to their session and take the session's lease on its REST governor.
 
-        No client is created yet. It reads Massive's REST base URL (`_massive.REST_BASE_URL`)
-        once, for the lease and the session's REST client. The lease comes from the process's
-        registry (`rate_limits.GOVERNORS`), keyed by the configuration's API key and that URL,
+        No client is created yet. The lease comes from the process's registry
+        (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
         declaring its `rest_basic_subscriptions`; its release is registered as a session
         closer. The governor's listener and the source of the `m.rate_limits()` rows are the
         core's diagnostics, which hold no reference to the core.
@@ -82,10 +81,9 @@ class SessionClients:
         self._label = core.label
         config = core.config
         diagnostics = core.diagnostics
-        self._base_url = _massive.REST_BASE_URL
         self._lease = rate_limits.GOVERNORS.lease(
             api_key=config.api_key,
-            base_url=self._base_url,
+            base_url=config.rest_base_url,
             basic=config.rest_basic_subscriptions,
             label=core.label,
             listener=diagnostics.rate_limits_changed,
@@ -134,9 +132,10 @@ class SessionClients:
         Returns:
             The transport.
 
-        A garbage-collected core raises the `MassiveError` of `_live_core`. An API key the
-        client cannot use never reaches it: `MassiveConfig` applies the client's rule
-        (`_massive.check_api_key`) and refuses the key when the config is built.
+        A garbage-collected core raises the `MassiveError` of `_live_core`. An API key or
+        `rest_base_url` the client cannot use never reaches it: `MassiveConfig` applies the
+        client's rules (`_massive.check_api_key`, `_massive.check_rest_base_url`) and refuses
+        the value when the config is built.
         """
         core = self._live_core()
         with core.registry_lock:
@@ -147,7 +146,7 @@ class SessionClients:
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,
-                    base_url=self._base_url,
+                    base_url=config.rest_base_url,
                     max_concurrency=config.max_concurrency,
                     governor=self._lease.governor,
                     on_refused=warnings.refused,
@@ -286,8 +285,8 @@ class SessionClients:
                 client = self._flat_files = factory(
                     access_key_id=access_key_id,
                     secret_access_key=secret_access_key,
-                    endpoint_url=_massive.S3_ENDPOINT_URL,
-                    bucket=_massive.S3_BUCKET,
+                    endpoint_url=config.s3_endpoint_url,
+                    bucket=config.s3_bucket,
                     max_pool=config.max_concurrency,
                 )
         if created:

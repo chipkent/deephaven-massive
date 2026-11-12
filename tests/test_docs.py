@@ -181,7 +181,9 @@ def readme_server(
         )
 
     def session(*_args: object, **_kwargs: object) -> dm.MassiveSession:
-        config = dm.MassiveConfig(api_key="test-key", flush_interval=0.01)
+        config = dm.MassiveConfig(
+            api_key="test-key", rest_base_url=fake_rest.url, flush_interval=0.01
+        )
         made = real(config)
         connections = ws.WsConnections(
             made._core,

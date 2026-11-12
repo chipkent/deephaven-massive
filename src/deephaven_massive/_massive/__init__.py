@@ -32,13 +32,8 @@ Interface:
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
       dataset's file for a day lives.
-    - `S3_ENDPOINT_URL`, `S3_BUCKET`: Massive's flat-file endpoint and bucket, which every
-      session's flat-file client reads. They are not settings.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
-    - `REST_BASE_URL`: Massive's REST API, which the library calls. It is not a setting.
-      Each session reads it once, when it is created, for its REST client and its rate-limit
-      lease.
     - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
@@ -55,9 +50,15 @@ Interface:
     - `check_api_key`: the rule of an API key (non-empty visible ASCII, as a header needs),
       which the REST client and `MassiveConfig.api_key` both apply. It is part of `net` and
       loads no client.
+    - `check_rest_base_url`: the rule of a REST base URL (an origin alone, and `https` unless
+      the host is loopback), which the REST client and `MassiveConfig.rest_base_url` both
+      apply. It is part of `net` and loads no client.
     - `without_userinfo`: a URL with its user and password replaced by `***`, the one rule
       every message and log line that shows a configured URL uses. It is part of `net` and
       loads no client.
+    - `without_userinfo_or_query`: a URL with its query and fragment hidden as well, for a
+      URL that may hold neither, such as `MassiveConfig.rest_base_url`. It is part of `net`
+      and loads no client.
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
@@ -80,10 +81,11 @@ Example:
             assert error.status == 503
 """
 
-from deephaven_massive._massive.flatfiles.client import S3_BUCKET, S3_ENDPOINT_URL, FlatFileClient
+from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.object_keys import object_key
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.api_keys import check_api_key
+from deephaven_massive._massive.net.base_urls import check_rest_base_url
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import CapturedReply, set_reply_capture
 from deephaven_massive._massive.net.errors import (
@@ -92,9 +94,9 @@ from deephaven_massive._massive.net.errors import (
     WireError,
 )
 from deephaven_massive._massive.net.origins import origin_of
-from deephaven_massive._massive.net.redaction import without_userinfo
+from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
 from deephaven_massive._massive.rest.batch import to_batch
-from deephaven_massive._massive.rest.client import REST_BASE_URL, RestClient
+from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import (
     BASIC_REQUESTS_PER_MINUTE,
     RATE_WINDOW,
@@ -122,9 +124,6 @@ from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
     "RATE_WINDOW",
-    "REST_BASE_URL",
-    "S3_BUCKET",
-    "S3_ENDPOINT_URL",
     "BucketState",
     "Cancel",
     "CapturedReply",
@@ -155,6 +154,7 @@ __all__ = [
     "WsClient",
     "WsState",
     "check_api_key",
+    "check_rest_base_url",
     "encode_value",
     "object_key",
     "origin_of",
@@ -164,4 +164,5 @@ __all__ = [
     "sources",
     "to_batch",
     "without_userinfo",
+    "without_userinfo_or_query",
 ]

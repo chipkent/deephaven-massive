@@ -162,7 +162,7 @@ def test_forget_clears_the_globals_of_the_scripts_functions(tmp_path: Path) -> N
 def test_recorded_sessions_close_every_session_the_examples_open(
     fake_rest: FakeRestServer,
 ) -> None:
-    config = dm.MassiveConfig(api_key="test-key")
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with doc_examples.recorded_sessions():
         first = dm.MassiveSession(config)
         dm.MassiveSession(config)  # unreachable at once, as a console's replaced `m` is

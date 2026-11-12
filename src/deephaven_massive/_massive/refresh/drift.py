@@ -54,7 +54,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._massive.flatfiles.client import S3_BUCKET, S3_ENDPOINT_URL, FlatFileClient
+from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.refresh import docs, fetch, generate, knowledge_base, ws_sources
 from deephaven_massive._massive.refresh.flat_file_sources import venue_template
 from deephaven_massive._massive.refresh.gates import Gate, Problem, RefreshError
@@ -78,7 +78,9 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import JsonObject
 
 __all__ = [
+    "S3_BUCKET",
     "S3_CREDENTIAL_VARIABLES",
+    "S3_ENDPOINT",
     "Committed",
     "Drift",
     "Report",
@@ -92,6 +94,11 @@ __all__ = [
 S3_CREDENTIAL_VARIABLES: Final = ("MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY")
 """The environment variables of the S3 access key id and secret access key, the library's own."""
 
+S3_ENDPOINT: Final = "https://files.massive.com"
+"""Massive's flat-file S3 endpoint."""
+
+S3_BUCKET: Final = "flatfiles"
+"""Massive's flat-file bucket."""
 
 # The documentation pages that describe an area rather than one endpoint, feed, or dataset.
 _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
@@ -852,7 +859,7 @@ def check(
         client = FlatFileClient(
             access_key_id=access_key,
             secret_access_key=secret_key,
-            endpoint_url=S3_ENDPOINT_URL,
+            endpoint_url=S3_ENDPOINT,
             bucket=S3_BUCKET,
             max_pool=1,
         )

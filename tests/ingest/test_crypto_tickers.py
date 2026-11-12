@@ -28,7 +28,7 @@ DELISTED_QUERY = {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}
 
 @pytest.fixture
 def session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
     m.close()
 

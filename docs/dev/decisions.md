@@ -531,18 +531,3 @@ the agent says whether it breaks code and, if so, which version comes next, befo
 Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
-
-**106. Massive's endpoints are constants, not settings** (2026-11-12). `MassiveConfig` had
-`rest_base_url`, `s3_endpoint_url`, and `s3_bucket`, documented as "change it only to reach a
-server other than Massive's", which no user has. A setting is cheap to add and breaking to
-remove, so before `0.1.0` they leave the public settings. Massive's REST API, flat-file
-endpoint, and bucket are wire constants, `_massive.REST_BASE_URL`, `S3_ENDPOINT_URL`, and
-`S3_BUCKET`. A session reads `REST_BASE_URL` once, when it is created, for its REST client and
-its rate-limit lease; the host a `poll()` row shows comes from that client. Nothing a user can
-reach changes where the key is sent: no hidden setting, environment variable, or private
-constructor argument replaces the constants. Tests reach the fake REST server by replacing
-`REST_BASE_URL` before they create a session, the one place a test changes an endpoint; the
-flat-file tests replace the flat-file client itself. A 404 from the flat-file endpoint that is
-not a missing file is reported as Massive's answer, since no setting is left to check.
-`dm.Market.FX` became `dm.Market.FOREX`, one spelling of forex as in `dm.AssetClass.FOREX`, and
-`enable_debug_logging(filename=None)` replaced the one-member enum `dm.LogOutput`.

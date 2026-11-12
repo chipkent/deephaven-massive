@@ -8,7 +8,7 @@ from deephaven_massive import _massive
 from deephaven_massive._massive import spec, ws
 from deephaven_massive._massive.flatfiles import client as flatfiles_client
 from deephaven_massive._massive.flatfiles import object_keys, reader
-from deephaven_massive._massive.net import api_keys, errors
+from deephaven_massive._massive.net import api_keys, base_urls, errors
 from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
 
@@ -27,15 +27,12 @@ EXPECTED_INTERFACE = [
     "Patience",
     "Provenance",
     "RATE_WINDOW",
-    "REST_BASE_URL",
     "ReadColumn",
     "ReadPlan",
     "Reject",
     "RequestGovernor",
     "RestClient",
     "RestPath",
-    "S3_BUCKET",
-    "S3_ENDPOINT_URL",
     "Source",
     "Status",
     "StatusKind",
@@ -48,6 +45,7 @@ EXPECTED_INTERFACE = [
     "WsClient",
     "WsState",
     "check_api_key",
+    "check_rest_base_url",
     "encode_value",
     "object_key",
     "origin_of",
@@ -57,6 +55,7 @@ EXPECTED_INTERFACE = [
     "sources",
     "to_batch",
     "without_userinfo",
+    "without_userinfo_or_query",
 ]
 
 
@@ -83,19 +82,15 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WireType is types.WireType
     assert _massive.WireUnit is types.WireUnit
     assert _massive.FlatFileClient is flatfiles_client.FlatFileClient
-    assert (
-        _massive.S3_ENDPOINT_URL == flatfiles_client.S3_ENDPOINT_URL == "https://files.massive.com"
-    )
-    assert _massive.S3_BUCKET == flatfiles_client.S3_BUCKET == "flatfiles"
     assert _massive.FlatFile is reader.FlatFile
     assert _massive.ReadPlan is reader.ReadPlan
     assert _massive.ReadColumn is reader.ReadColumn
     assert _massive.object_key is object_keys.object_key
     assert _massive.RestClient is client.RestClient
-    assert _massive.REST_BASE_URL == client.REST_BASE_URL == "https://api.massive.com"
     assert _massive.Page is response.Page
     assert _massive.to_batch is batch.to_batch
     assert _massive.encode_value is values.encode_value
+    assert _massive.check_rest_base_url is base_urls.check_rest_base_url
     assert _massive.check_api_key is api_keys.check_api_key
 
 

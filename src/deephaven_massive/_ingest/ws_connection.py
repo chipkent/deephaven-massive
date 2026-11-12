@@ -172,10 +172,12 @@ CONNECTION_SETTINGS: Final = (
     "max_reconnect_backoff",
     "max_outage",
     "flush_interval",
+    "rest_base_url",
 )
 """The `MassiveConfig` fields that shape a group's WebSocket connections. A connection carries
 one value of each, so only sessions whose values are all equal share connections
-(`ConnectionGroup`)."""
+(`ConnectionGroup`). `rest_base_url` is one because the group's futures schedule calendar reads
+through any of its sessions' REST clients, which must all read the same API."""
 
 _FMV_CHANNEL: Final = "FMV"
 """The fair-market-value channel, every class's one channel of the FMV family."""

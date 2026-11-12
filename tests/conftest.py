@@ -852,18 +852,14 @@ def fake_ws_server() -> Iterator[FakeMassiveServer]:
 
 
 @pytest.fixture
-def fake_rest(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeRestServer]:
+def fake_rest() -> Iterator[FakeRestServer]:
     """Yield a started `FakeRestServer` (`tests/_fakes/rest.py`) on 127.0.0.1, closed at teardown.
-
-    Every session created while it runs sends its REST requests there: the fixture replaces
-    `_massive.REST_BASE_URL`, Massive's REST API, with the server's URL until teardown.
 
     Yields:
         The server; script it with `reply` and read `requests` afterwards.
     """
     server: FakeRestServer = FakeRestServer()
     server.start()
-    monkeypatch.setattr(_massive, "REST_BASE_URL", server.url)
     yield server
     server.close()
 
@@ -879,7 +875,7 @@ def rest_session(fake_rest: FakeRestServer) -> Iterator[MassiveSession]:
         An open session with a test key, closed at teardown; read what it sent with
         `fake_rest.get_queries()`.
     """
-    config = dm.MassiveConfig(api_key="test-key")
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     session: MassiveSession = dm.MassiveSession(config)
     yield session
     session.close()
@@ -1698,13 +1694,13 @@ def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
     """
     lease = _live_governors().lease(
         api_key=config.api_key,
-        base_url=_massive.REST_BASE_URL,
+        base_url=config.rest_base_url,
         basic=frozenset(dm.Subscription),
         label="live plan probe",
         listener=_ignore,
     )
     client = RestClient(
-        config.api_key, base_url=_massive.REST_BASE_URL, max_concurrency=1, governor=lease.governor
+        config.api_key, base_url=config.rest_base_url, max_concurrency=1, governor=lease.governor
     )
     try:
         tiers = probe.probe_tiers(client, now=datetime.now(_NEW_YORK).time())
@@ -1716,8 +1712,8 @@ def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
         flat_files = FlatFileClient(
             access_key_id=config.s3_access_key_id,
             secret_access_key=config.s3_secret_access_key,
-            endpoint_url=_massive.S3_ENDPOINT_URL,
-            bucket=_massive.S3_BUCKET,
+            endpoint_url=config.s3_endpoint_url,
+            bucket=config.s3_bucket,
             max_pool=1,
         )
         try:
@@ -2040,7 +2036,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
     config = _live_massive_config(request.getfixturevalue("live_plans"))
     lease = _live_governors().lease(
         api_key=config.api_key,
-        base_url=_massive.REST_BASE_URL,
+        base_url=config.rest_base_url,
         basic=config.rest_basic_subscriptions,
         label="live test progress",
         listener=_ignore,
@@ -2783,21 +2779,21 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
     of its data.
 
     Args:
-        live_config: The live configuration, for the key and the Basic classes.
+        live_config: The live configuration, for the key, the base URL, and the Basic classes.
 
     Yields:
         A `RestClient` with one connection.
     """
     lease = _live_governors().lease(
         api_key=live_config.api_key,
-        base_url=_massive.REST_BASE_URL,
+        base_url=live_config.rest_base_url,
         basic=live_config.rest_basic_subscriptions,
         label="live tests",
         listener=_ignore,
     )
     client = RestClient(
         live_config.api_key,
-        base_url=_massive.REST_BASE_URL,
+        base_url=live_config.rest_base_url,
         max_concurrency=1,
         governor=lease.governor,
     )
@@ -2815,7 +2811,7 @@ def rest_for_key(live_config: MassiveConfig) -> Iterator[Callable[[str], RestCli
     governor of that key.
 
     Args:
-        live_config: The live configuration, requested so the test is skipped without a key.
+        live_config: The live configuration, for the base URL.
 
     Yields:
         A function taking an API key and returning a `RestClient` with one connection.
@@ -2825,13 +2821,13 @@ def rest_for_key(live_config: MassiveConfig) -> Iterator[Callable[[str], RestCli
     def open_client(api_key: str) -> RestClient:
         lease = _live_governors().lease(
             api_key=api_key,
-            base_url=_massive.REST_BASE_URL,
+            base_url=live_config.rest_base_url,
             basic=frozenset(dm.Subscription),
             label="live tests, another key",
             listener=_ignore,
         )
         client = RestClient(
-            api_key, base_url=_massive.REST_BASE_URL, max_concurrency=1, governor=lease.governor
+            api_key, base_url=live_config.rest_base_url, max_concurrency=1, governor=lease.governor
         )
         opened.append((client, lease))
         return client
@@ -2861,8 +2857,8 @@ def live_flat_files(live_s3_config: MassiveConfig) -> Iterator[FlatFileClient]:
     client = FlatFileClient(
         access_key_id=live_s3_config.s3_access_key_id,
         secret_access_key=live_s3_config.s3_secret_access_key,
-        endpoint_url=_massive.S3_ENDPOINT_URL,
-        bucket=_massive.S3_BUCKET,
+        endpoint_url=live_s3_config.s3_endpoint_url,
+        bucket=live_s3_config.s3_bucket,
         max_pool=1,
     )
     yield client

@@ -125,7 +125,9 @@ def session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     # One request at a time, so a script of replies for one path answers them in plan order.
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", max_concurrency=1))
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=1)
+    )
     yield m
     m.close()
 

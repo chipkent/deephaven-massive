@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 import urllib3
 
-from deephaven_massive._massive import REST_BASE_URL, Transport, source
+from deephaven_massive._massive import Transport, source
 from deephaven_massive._massive.net.http import new_ssl_context
 from deephaven_massive._massive.rest.query import request_target
 
@@ -88,7 +88,7 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
     def run(request: Request) -> tuple[int, str]:
         path, path_params, query = request
         target = request_target(source(Transport.REST, path), path_params, query)
-        response = pool.request("GET", REST_BASE_URL + target, headers=headers)
+        response = pool.request("GET", live_config.rest_base_url + target, headers=headers)
         limits = {
             name: value
             for name, value in response.headers.items()

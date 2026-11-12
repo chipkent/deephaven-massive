@@ -213,16 +213,6 @@ def test_plain_http_is_allowed_for_loopback() -> None:
 
 
 @pytest.mark.parametrize(
-    ("base_url", "host"),
-    [("https://API.Massive.com:8443/", "api.massive.com"), ("http://[::1]:8080", "::1")],
-)
-def test_the_host_is_the_base_url_s_host(base_url: str, host: str) -> None:
-    client = RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
-    assert client.host == host
-    client.close()
-
-
-@pytest.mark.parametrize(
     "api_key",
     ["", "s3cr3t\n", " s3cr3t", "s3cr3t ", "s3c r3t", "s3c\tr3t", "s3cr\u00e9t", "s3cr3t\r\nX: y"],
 )

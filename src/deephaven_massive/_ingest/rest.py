@@ -122,6 +122,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, TypeVar, cast
+from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -2802,7 +2803,7 @@ class RestEndpoints:
             used = [path for path in candidates if path is not None]
         else:
             used = [path.template for path, _ in reader.plan_fetch(spec, request, request.symbols)]
-        host = self._state.client.host
+        host = urlsplit(self._core.config.rest_base_url).hostname
         paths = ", ".join(dict.fromkeys(used))
         return poll.open_poll(
             self._core,
