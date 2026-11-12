@@ -178,9 +178,10 @@ class StreamQuery(Query):
         A reactive symbol table is read first, so a row no request can carry
         fails the call before any stream starts. A crypto pair takes its split from Massive's
         crypto ticker list when the stream starts (read once per session). A pair the list does
-        not hold, or that a failed read cannot split, at the call or added later, follows
-        `MassiveConfig.unlisted_symbols`: skipped and listed in `m.streams()` under `LOG` and
-        `IGNORE`, and raised as `MassiveError` before any topic is subscribed under `RAISE`.
+        not hold, at the call or added later, follows `MassiveConfig.unlisted_symbols`: skipped
+        and listed in `m.streams()` under `LOG` and `IGNORE`, and raised as `MassiveError` before
+        any topic is subscribed under `RAISE`. A list that cannot be read fails the call or the
+        stream under any setting.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for

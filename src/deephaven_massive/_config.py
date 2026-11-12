@@ -375,8 +375,9 @@ class MassiveConfig:
               for a pair in a table. A live table fails when such a pair is added later.
 
             It applies to streams and to calls for a pair's last trade or daily open and close.
-            To convert another spelling, such as `BTC-USD`, to Massive's `X:BTCUSD`, use
-            `dm.canonical_symbol_crypto`.
+
+            A pair in another spelling, such as `btcusd` or `BTC-USD`, isn't on the list. Convert
+            it first with `dm.canonical_symbol_crypto`.
 
             Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a skipped pair gives no rows, and the
             other pairs are read as usual. A stream lists the skipped pairs in its `m.streams()`

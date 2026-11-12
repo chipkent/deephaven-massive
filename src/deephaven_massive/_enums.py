@@ -438,7 +438,8 @@ class SymbolConvention(StrEnum):
     series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. The
     other members name one other US stock convention; only its share classes and preferreds
     convert, because Massive documents no spelling for warrants, units, rights, or when-issued
-    shares, and other text comes back unchanged.
+    shares. Other text comes back unchanged, except a spelling Massive reads as another
+    instrument (Yahoo's `VOD.L`, Nasdaq's `ABC.U`), which raises `ValueError`.
 
     - `MASSIVE`: Massive's own spelling, the default. A forex, crypto, index, or option symbol in
       another unambiguous spelling of its class converts (`EUR/USD` to `C:EURUSD`, `SPX` to

@@ -254,8 +254,9 @@ class FetchQuery(Query):
                 plan doesn't include Massive's list of crypto tickers.
             MassiveError: At the call, if:
                 - the session is closed;
-                - for those two crypto datasets, under `unlisted_symbols=dm.OnError.RAISE`,
-                  Massive's list of crypto tickers can't be read, or lacks a crypto pair.
+                - for those two crypto datasets, under `unlisted_symbols=dm.OnError.RAISE`, for
+                  pairs passed as a `str` or list, Massive's list of crypto tickers can't be read
+                  or lacks one of them.
                 With `wait=True`, also if:
                 - a rate limit outlasts the retries;
                 - a request fails in any other way;
@@ -517,7 +518,7 @@ class FetchQuery(Query):
                 crypto tickers.
             MassiveError: If the session is closed, or, under
                 `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers can't be read
-                or lacks a crypto pair.
+                or lacks a crypto pair passed as a `str` or list.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")
