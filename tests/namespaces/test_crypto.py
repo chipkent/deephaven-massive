@@ -12,6 +12,7 @@ S3 server (one block of each flat-file prefix round-trips through `history()`).
 from __future__ import annotations
 
 import csv
+import dataclasses
 import io
 import itertools
 import json
@@ -301,13 +302,14 @@ def test_no_dataset_keeps_a_stand_in_for_its_keys() -> None:
 # --- Factories -------------------------------------------------------------------------------
 
 
-def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) -> None:
+def test_trades_send_their_tickers_as_written(massive_session: dm.MassiveSession) -> None:
     q = massive_session.crypto.trades(["X:ETHUSD", "X:BTCUSD", "X:BTCUSD"])
     assert type(q) is StreamHistoryQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
-    for spelling in ("BTC-USD", "BTC/USD", "x:btcusd"):
-        with pytest.raises(ValueError, match=r"use 'X:BTCUSD' .*dm\.canonical_symbol_crypto"):
-            massive_session.crypto.trades(spelling)
+    for spelling in ("BTC-USD", "x:btcusd"):  # Massive answers them
+        assert request_of(massive_session.crypto.trades(spelling)).symbols == (spelling,)
+    with pytest.raises(ValueError, match=r"^cannot send the symbol 'BTC/USD' to Massive"):
+        massive_session.crypto.trades("BTC/USD")
 
 
 @pytest.mark.parametrize("method", ["trades", "quotes", "fmv", "snapshots"])
@@ -471,12 +473,11 @@ def test_no_symbols_is_refused(
         call(massive_session.crypto)
 
 
-@pytest.mark.parametrize("bad", ["BTC-XYZ", "C:EURUSD", "O:AAPL250117C00150000"])
-def test_a_symbol_that_is_no_crypto_pair_is_refused(
-    massive_session: dm.MassiveSession, bad: str
+@pytest.mark.parametrize("text", ["BTC-XYZ", "C:EURUSD", "O:AAPL250117C00150000"])
+def test_a_symbol_that_is_no_crypto_pair_is_sent_as_written(
+    massive_session: dm.MassiveSession, text: str
 ) -> None:
-    with pytest.raises(ValueError, match=bad):
-        massive_session.crypto.trades(bad)
+    assert request_of(massive_session.crypto.trades(text)).symbols == (text,)
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
@@ -1131,11 +1132,14 @@ def serve_pairs(server: FakeRestServer) -> None:
     server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}), empty)
 
 
-def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed_under_raise(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and
-    # Massive's crypto ticker list does not hold this one, so the stream is refused.
+    # Massive's crypto ticker list does not hold this one, so under RAISE the stream is refused.
+    core = rest_session._core
+    strict = dataclasses.replace(core.config, unlisted_symbols=dm.OnError.RAISE)
+    monkeypatch.setattr(core, "config", strict)
     empty = Reply({"status": "OK", "results": []})
     fake_rest.reply("/v3/reference/tickers", empty, empty)
     q = rest_session.crypto.trades("X:BTCXYZ")

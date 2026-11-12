@@ -269,7 +269,13 @@ def test_every_example_runs_against_the_fake_market(
     assert query in printed["02_explore_datasets"]
     assert printed["10_plan_refusals"].count(": EntitlementError: ") == 2
     assert "live minute bars: opened;" in printed["10_plan_refusals"]
-    assert printed["11_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
+    assert printed["11_symbols"].splitlines()[:5] == [
+        "C:EURUSD",
+        "X:BTCUSD",
+        "I:SPX",
+        "BRK.B",
+        "BRK-B",
+    ]
     assert "0 copies of the key" in printed["12_check_the_log"]
     assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
     assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])

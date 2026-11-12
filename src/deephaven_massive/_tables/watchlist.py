@@ -3,15 +3,15 @@
 A user may pass a Deephaven `Table` with a `Symbol` column as a dataset's symbols, and edit it
 while results are live. A table passed where a dataset takes one value (`ValueTable`: an option
 chain's underlyings in `Symbol`, futures product codes in `ProductCode`) is read and watched the
-same way, through a rule made by `SymbolRowRule.for_values`. A row should hold Massive's exact
-ticker, as `symbols=` must (`check_symbol` in `_datasets/symbols.py`): the library never rewrites
-a watchlist, so what the table says is what the stream subscribes and what `last_by()` matches. A
-null row is ignored.
-A row that is not canonical is never subscribed or requested; what else it does follows the
-session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
+same way, through a rule made by `SymbolRowRule.for_values`. Each row is sent as written, as
+`symbols=` is (`check_symbol` in `_datasets/symbols.py`), and Massive answers it: the library never
+rewrites a watchlist, so what the table says is what the stream subscribes and what `last_by()`
+matches. A null row is ignored. A row no request can carry (`is_sendable`: empty, or holding `,`,
+`/`, or `*`) is never subscribed or requested; what else it does follows the session's
+`MassiveConfig.unsendable_symbols`, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
-  later fails the result, with a message that names the row and `canonicalize_symbols`.
+  later fails the result, with a message that names the row.
 - `OnError.LOG` and `OnError.IGNORE`: the row is skipped and the result keeps following the
   others. `LOG` logs each distinct value once at WARNING, `IGNORE` at DEBUG (a bounded number
   per process), and the skipped values are listed in the result's `m.streams()` row until they
@@ -55,15 +55,8 @@ from typing import TYPE_CHECKING, Final
 from deephaven.table_listener import TableListener, TableListenerHandle
 from typing_extensions import override
 
-from deephaven_massive._datasets.row_times import ISSUES_URL
-from deephaven_massive._datasets.symbols import (
-    UNDERLYING_CLASSES,
-    canonical_symbol,
-    check_symbol,
-    is_canonical,
-    symbol_class,
-)
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._datasets.symbols import is_sendable, unsendable_reason
+from deephaven_massive._enums import OnError
 from deephaven_massive._log_limits import BoundedLog
 
 if TYPE_CHECKING:
@@ -116,70 +109,19 @@ _ignored_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.DE
 """The skipped values of `OnError.IGNORE`: logged at DEBUG only."""
 
 
-def invalid_row_message(
-    asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
-) -> str:
-    """Say why a symbol table's row is refused, and how to convert such a table.
+def invalid_row_message(symbol: str) -> str:
+    """Say why a symbol table's row is refused: no request can carry it.
 
     Args:
-        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans
-            classes.
-        symbol: The row's symbol, which `check_symbol` refuses.
-        as_written: True for a dataset whose symbols are kept as Massive writes them.
+        symbol: The row's value, which `is_sendable` refuses.
 
     Returns:
-        The reason (with the canonical form when the class's converter gives one) and the
-        remedy: fix the row, or convert the table; and, unless the class's converter turns the
-        row into a ticker, where to report it, since the value can also be a ticker Massive
-        writes in a form the library does not know yet. For a
-        dataset of one class the remedy is `dm.canonicalize_symbols`, which by default nulls
-        the rows it cannot convert; for a dataset that spans classes, whose rows may mix them, it
-        is `dm.canonical_symbol` per row with each row's class.
+        The reason (`unsendable_reason`) and the remedy, fix or delete the row.
     """
-    reason = ""
-    try:
-        check_symbol(asset_class, symbol, as_written=as_written)
-    except ValueError as error:
-        reason = f" ({error})"
-    if asset_class is ClassFromPrefix.ANY:
-        remedy = (
-            "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
-            "class, since this dataset's rows may mix classes"
-        )
-    else:
-        remedy = (
-            f"pass the table through dm.canonicalize_symbols(table, "
-            f"dm.AssetClass.{asset_class.name}), which converts what it can and nulls the rest"
-        )
-    message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
-    if as_written or _converts(asset_class, symbol):
-        return message
     return (
-        f"{message}. If Massive itself writes {symbol!r}, the library does not know its form "
-        f"yet: report it at {ISSUES_URL}"
+        f"a symbol table holds {symbol!r}, which no request to Massive can carry "
+        f"({unsendable_reason(symbol)}). Fix or delete the row"
     )
-
-
-def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
-    """Tell whether a refused row is another spelling the class's converter turns into a ticker.
-
-    Such a row (`EUR/USD`) is the caller's spelling, not an unknown form of Massive's, so its
-    message needs no request to report the form.
-
-    Args:
-        asset_class: The dataset's class, or `ClassFromPrefix.ANY`, where the row's prefix
-            selects it.
-        symbol: The refused row.
-
-    Returns:
-        True when `dm.canonical_symbol` converts the row for its class.
-    """
-    resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
-    try:
-        canonical_symbol(symbol, resolved)
-    except ValueError:
-        return False
-    return True
 
 
 _FAILED_TABLE: Final = (
@@ -199,114 +141,81 @@ def skipped_rows_text(values: Iterable[str]) -> str:
 
     Returns:
         Their count and the first five in sorted order, and what to do, such as
-        `skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that
-        row, or report it at <issues> if Massive itself writes it`. The value is not called
-        wrong: Massive may write a form the library does not know yet.
+        `skipping 1 symbol-table value no request can carry: ''; fix or delete that row`.
     """
     texts = sorted(values)
     shown = ", ".join(repr(text) for text in texts[:_SHOWN])
     more = f", and {len(texts) - _SHOWN} more" if len(texts) > _SHOWN else ""
     if texts[1:]:
         return (
-            f"skipping {len(texts)} symbol-table values this dataset does not take: "
-            f"{shown}{more}; fix or delete those rows, or report them at {ISSUES_URL} if "
-            "Massive itself writes them"
+            f"skipping {len(texts)} symbol-table values no request can carry: {shown}{more}; "
+            "fix or delete those rows"
         )
-    return (
-        f"skipping 1 symbol-table value this dataset does not take: {shown}; fix or delete "
-        f"that row, or report it at {ISSUES_URL} if Massive itself writes it"
-    )
+    return f"skipping 1 symbol-table value no request can carry: {shown}; fix or delete that row"
 
 
 @dataclass(frozen=True, slots=True)
 class SymbolRowRule:
-    """How one dataset treats the rows of a symbol table: the grammar and the session's setting.
+    """How one dataset treats the rows of a symbol table: the session's setting for a bad row.
 
-    Built by the transport that reads the table (`SymbolRowRule.of`), on any thread; immutable,
-    so a watch's listener and a poller share it freely.
+    Every row is sent as written, and Massive answers it; the one row refused is a value no
+    request can carry (`is_sendable`). Built by the transport that reads the table
+    (`SymbolRowRule.of`), on any thread; immutable, so a watch's listener and a poller share it
+    freely.
 
     Attributes:
         dataset: The dataset's name, such as `stocks.quotes`, for messages and log records.
-        asset_class: The class whose grammar the rows must follow, or `ClassFromPrefix.ANY`
-            for a dataset that spans classes (each symbol's prefix selects its class).
-        as_written: True for a dataset whose symbols are kept as Massive writes them.
-        noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+        unsendable: The session's `MassiveConfig.unsendable_symbols`.
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
-        underlying: True when each value must be a stock or index ticker, the underlying of
-            an option chain; False for any value of the grammar.
     """
 
     dataset: str
-    asset_class: AssetClass | ClassFromPrefix
-    as_written: bool
-    noncanonical: OnError
+    unsendable: OnError
     column: str = _SYMBOL
-    underlying: bool = False
 
     @classmethod
-    def of(cls, spec: DatasetSpec, noncanonical: OnError) -> SymbolRowRule:
+    def of(cls, spec: DatasetSpec, unsendable: OnError) -> SymbolRowRule:
         """Return the rule of a dataset in a session.
 
         Args:
             spec: The dataset.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            unsendable: The session's `MassiveConfig.unsendable_symbols`.
 
         Returns:
             The rule.
         """
-        return cls(spec.name, spec.asset_class, spec.symbols_as_written, noncanonical)
+        return cls(spec.name, unsendable)
 
     @classmethod
     def for_values(
-        cls, spec: DatasetSpec, values: ValueTable, noncanonical: OnError
+        cls, spec: DatasetSpec, values: ValueTable, unsendable: OnError
     ) -> SymbolRowRule:
         """Return the rule of a table passed where a dataset takes one value.
 
-        An underlying must be Massive's exact stock or index ticker, as `underlying=` takes
-        it in code. A product code is kept as written: any text without surrounding
-        whitespace or a class prefix (`AS_WRITTEN`), since Massive publishes no grammar for
-        product codes. A value the rule refuses follows `noncanonical`, as a symbol table's
-        row does.
+        An underlying or a futures product code is sent as written, as a symbol is.
 
         Args:
             spec: The dataset.
             values: The table and the argument it stands for.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            unsendable: The session's `MassiveConfig.unsendable_symbols`.
 
         Returns:
             The rule, reading the table's `values.column`.
         """
-        if values.underlying:
-            return cls(
-                spec.name,
-                ClassFromPrefix.ANY,
-                as_written=False,
-                noncanonical=noncanonical,
-                column=values.column,
-                underlying=True,
-            )
-        return cls(
-            spec.name,
-            AssetClass.FUTURES,
-            as_written=True,
-            noncanonical=noncanonical,
-            column=values.column,
-        )
+        return cls(spec.name, unsendable, column=values.column)
 
-    def accepts(self, symbol: str) -> bool:
-        """Tell whether a row's value is one the dataset takes.
+    @staticmethod
+    def accepts(symbol: str) -> bool:
+        """Tell whether a row's value can be sent (`is_sendable`).
 
         Args:
             symbol: The row's value, never null.
 
         Returns:
-            True for Massive's exact ticker of the dataset's class; for a rule of
-            underlyings, a stock or index ticker only.
+            True for any non-empty value without `,`, `/`, or `*`.
         """
-        if self.underlying and symbol_class(symbol) not in UNDERLYING_CLASSES:
-            return False
-        return is_canonical(self.asset_class, symbol, as_written=self.as_written)
+        return is_sendable(symbol)
 
     def refusal(self, symbol: str) -> str:
         """Say why a row is refused and how to fix it (`invalid_row_message`).
@@ -317,25 +226,7 @@ class SymbolRowRule:
         Returns:
             The message, prefixed with the dataset's name.
         """
-        return f"{self.dataset}: {self._reason(symbol)}"
-
-    def _reason(self, symbol: str) -> str:
-        """Say why a row is refused, without the dataset's name.
-
-        Args:
-            symbol: The row's value, which `accepts` refuses.
-
-        Returns:
-            For a rule of underlyings, that an underlying is a stock or index ticker; else
-            the reason of `invalid_row_message`.
-        """
-        if self.underlying:
-            return (
-                f"a table of underlyings holds {symbol!r}, which is not a stock or index ticker "
-                "such as 'AAPL' or 'I:SPX'. Fix the row, or convert it with "
-                "dm.canonical_symbol(text, asset_class)"
-            )
-        return invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
+        return f"{self.dataset}: {invalid_row_message(symbol)}"
 
     def skip(self, symbol: str, *, stream_id: int | None) -> None:
         """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.
@@ -352,24 +243,24 @@ class SymbolRowRule:
                 read of the table before any stream exists (`fetch()`, or the check a live
                 verb makes first).
         """
-        rows = _logged_rows if self.noncanonical is OnError.LOG else _ignored_rows
+        rows = _logged_rows if self.unsendable is OnError.LOG else _ignored_rows
         reader = "a call's read" if stream_id is None else f"stream {stream_id}"
         rows.log(
             f"{self.dataset}\0{symbol}",
             "%s %s: %s; the row is skipped until it is fixed or deleted",
             self.dataset,
             reader,
-            self._reason(symbol),
+            invalid_row_message(symbol),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CurrentSymbols:
-    """A symbol table's current canonical symbols and skipped values, as one read found them.
+    """A symbol table's current symbols and skipped values, as one read found them.
 
     Attributes:
-        symbols: The canonical symbols, sorted and de-duplicated.
-        skipped: The distinct values that are not canonical, sorted; always empty under
+        symbols: The symbols, sorted and de-duplicated.
+        skipped: The distinct values no request can carry, sorted; always empty under
             `OnError.RAISE`, which raises instead.
     """
 
@@ -386,20 +277,19 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     Under `LOG` and `IGNORE` each skipped value is logged once (`SymbolRowRule.skip`).
 
     Args:
-        rule: The dataset's rule: its grammar and the session's `noncanonical_symbols`.
+        rule: The dataset's rule: the column and the session's `unsendable_symbols`.
         table: The user's table with the rule's column (`Symbol`, or `ProductCode`).
         stream_id: The stream or `poll()` table the read is for, named in a skipped row's
             record; None for a verb's read before any stream exists.
 
     Returns:
-        The table's canonical symbols and, under `LOG` and `IGNORE`, its skipped values; both
+        The table's symbols and, under `LOG` and `IGNORE`, its skipped values; both
         empty for a table of no or only null rows.
 
     Raises:
         ValueError: If the table has failed (a `canonicalize_symbols` table under
-            `OnError.RAISE` that met a bad row), or, under `OnError.RAISE`, a row is not
-            Massive's exact ticker of the class (`invalid_row_message`, for the first such row
-            in sorted order).
+            `OnError.RAISE` that met a bad row), or, under `OnError.RAISE`, a row cannot be
+            sent (`invalid_row_message`, for the first such row in sorted order).
     """
     if table.j_table.isFailed():
         raise ValueError(_FAILED_TABLE.format(dataset=rule.dataset, cause="it is failed"))
@@ -409,7 +299,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     for symbol in found:
         if rule.accepts(symbol):
             good.append(symbol)
-        elif rule.noncanonical is OnError.RAISE:
+        elif rule.unsendable is OnError.RAISE:
             raise ValueError(rule.refusal(symbol))
         else:
             rule.skip(symbol, stream_id=stream_id)
@@ -429,9 +319,9 @@ class SymbolWatch:
 
     `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table now
     holds and did not before, and those it no longer holds. It is never called with both empty. A
-    row whose symbol is not Massive's exact ticker of the class is never counted (the transport
-    looks up a crypto pair's split before it subscribes). What else it does follows the rule's
-    `noncanonical` setting: under `OnError.RAISE`, `on_invalid(message)` receives the reason each
+    row no request can carry is never counted (the transport looks up a crypto pair's split
+    before it subscribes). What else it does follows the rule's
+    `unsendable` setting: under `OnError.RAISE`, `on_invalid(message)` receives the reason each
     time such a row arrives, and its owner fails the stream; under `LOG` and `IGNORE` the value
     is logged once (`SymbolRowRule.skip`), and `on_skipped(values)` receives the sorted distinct
     values skipped now each time that set changes, empty once every bad row is fixed or deleted.
@@ -458,14 +348,12 @@ class SymbolWatch:
 
             from deephaven import time_table
 
-            from deephaven_massive._enums import AssetClass, OnError
+            from deephaven_massive._enums import OnError
             from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch
 
             # A live watchlist that adds a row every second, alternating two pairs.
             watchlist = time_table("PT1s").view("Symbol = ii % 2 == 0 ? `X:BTCUSD` : `X:ETHUSD`")
-            rule = SymbolRowRule(
-                "crypto.trades", AssetClass.CRYPTO, as_written=False, noncanonical=OnError.LOG
-            )
+            rule = SymbolRowRule("crypto.trades", unsendable=OnError.LOG)
             watch = SymbolWatch(
                 rule,
                 watchlist,
@@ -496,7 +384,7 @@ class SymbolWatch:
         that should own the view and the listener, and outside every library lock.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's column and the session's `unsendable_symbols`.
             table: The user's refreshing table with the rule's column (`Symbol`, or
                 `ProductCode`).
             on_change: Receives each change of the set of symbols; see the class documentation.
@@ -575,7 +463,7 @@ class _SymbolCounter(TableListener):
         """Start with no value counted.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's column and the session's `unsendable_symbols`.
             on_change: Receives each change of the set of symbols.
             stream_id: The stream that follows the table, named in the log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
@@ -643,9 +531,9 @@ class _SymbolCounter(TableListener):
     def _count(self, columns: Mapping[str, Iterable[object]], step: int) -> None:
         """Add `step` to the count of each value, forgetting counts that reach zero.
 
-        A canonical symbol is counted among the symbols. Any other value is counted among the
-        skipped ones under `LOG` and `IGNORE`, and logged once when it arrives; under `RAISE` an
-        arriving one is reported to `on_invalid` and a leaving one is ignored.
+        A value a request can carry is counted among the symbols. Any other value is counted
+        among the skipped ones under `LOG` and `IGNORE`, and logged once when it arrives; under
+        `RAISE` an arriving one is reported to `on_invalid` and a leaving one is ignored.
 
         Args:
             columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
@@ -656,7 +544,7 @@ class _SymbolCounter(TableListener):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
             counts = self._counts
             if not self._rule.accepts(symbol):
-                if self._rule.noncanonical is OnError.RAISE:
+                if self._rule.unsendable is OnError.RAISE:
                     if step > 0:
                         self._on_invalid(self._rule.refusal(symbol))
                     continue

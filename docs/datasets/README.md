@@ -214,7 +214,7 @@ These arguments follow the same rules on every dataset that takes them. A datase
 
 ### symbols
 
-Each symbol is Massive's ticker, spelled exactly:
+Each symbol is Massive's ticker, spelled as Massive does:
 
 | Asset class | Ticker |
 | --- | --- |
@@ -228,7 +228,8 @@ Each symbol is Massive's ticker, spelled exactly:
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
 - A live table works as a watchlist. Symbols you add are read, and symbols you delete stop being read.
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
-- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, unless the dataset's page says it takes another source's tickers. In a table, that row is skipped and logged.
+- Each symbol is sent as you write it, and Massive decides whether it names an instrument. A symbol Massive has no data for gives no rows.
+- A symbol that is empty or holds `,`, `/`, or `*` can't be sent: in text or a list it raises `ValueError`, and in a table its row is skipped and logged.
 - To convert another source's tickers, such as Yahoo's `BRK-B`, use `dm.canonical_symbol`.
 
 <a id="start"></a>

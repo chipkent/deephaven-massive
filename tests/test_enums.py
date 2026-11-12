@@ -325,7 +325,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.noncanonical_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unsendable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unlisted_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,

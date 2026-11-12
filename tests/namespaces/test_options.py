@@ -397,16 +397,9 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
         assert type(q) is cls
         assert q._request.symbols == ("O:AAPL250117C00150000", "O:AAPL250117P00150000")
         assert factory(dm.ALL)._request.symbols is dm.ALL
-        with pytest.raises(
-            ValueError, match=r"use 'O:AAPL250117C00150000' .*canonical_symbol_option"
-        ):
-            factory("AAPL250117C00150000")
-        with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
-            factory("AAPL")
-        with pytest.raises(ValueError, match=r"is a crypto ticker; this dataset takes option"):
-            factory("X:BTCUSD")
-        with pytest.raises(ValueError, match="not an OCC option symbol with a real expiry"):
-            factory("O:BRK.B250117C00400000")  # an OCC root has no dot
+        # Massive answers any other text: the library judges no ticker's shape.
+        for text in ("AAPL250117C00150000", "AAPL", "X:BTCUSD", "O:BRK.B250117C00400000"):
+            assert factory(text)._request.symbols == (text,)
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
@@ -510,12 +503,10 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain(cast("str", dm.ALL))
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
         chain(cast("str", 1))
-    with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
-        chain("  ")
-    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
-        chain("aapl")
-    with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
-        chain("i:SPX")
+    with pytest.raises(ValueError, match=r"^cannot send the symbol '' to Massive"):
+        chain("")
+    for text in ("aapl", "i:SPX"):  # Massive answers them
+        assert request_of(chain(text))["params"]["underlyingAsset"] == text
     with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
         chain("C:EURUSD")
     with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
@@ -543,9 +534,9 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
     assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
-    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
         snapshots(dm.ALL, filters={"type": "stocks"})
-    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
         snapshots([CONTRACT], filters={"type": "options"})
     with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
@@ -582,22 +573,16 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
+def test_contracts_send_a_stock_ticker_as_written(massive_session: dm.MassiveSession) -> None:
+    # Massive answers it (HTTP 404 "Option Ticker not found."), so the library sends it.
+    for text in ("AAPL", "I:SPX", "aapl"):
+        assert massive_session.options.contracts(text)._request.symbols == (text,)
+
+
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
-            r"m\.options\.contracts\(underlying='AAPL'\)$"
-        ),
-    ):
-        contracts("AAPL")
-    with pytest.raises(ValueError, match=r"'I:SPX' is an underlying"):
-        contracts("I:SPX")
-    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
-        contracts("aapl")  # not canonical: the symbol check explains it
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
         contracts(underlying=cast("str", dm.ALL))
     with pytest.raises(TypeError, match="expired must be a bool, not int"):

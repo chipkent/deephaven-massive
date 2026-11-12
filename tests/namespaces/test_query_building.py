@@ -152,8 +152,7 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     # Indicators, reference data, and the unified snapshot span asset classes.
     q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
-    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
-        build(massive_session, INDICATOR, symbols=["i:spx"])
+    assert build(massive_session, INDICATOR, symbols=["i:spx"])._request.symbols == ("i:spx",)
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
@@ -187,7 +186,9 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
     assert q._request.timespan is Timespan.DAY
 
 
-def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
+def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
+    massive_session: dm.MassiveSession,
+) -> None:
     fx = DatasetSpec(
         name="forex.quotes",
         summary="A dataset for the tests.",
@@ -195,12 +196,11 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
-    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+    with pytest.raises(ValueError, match=r"^cannot send the symbol 'EUR/USD' to Massive"):
         build(massive_session, fx, symbols="EUR/USD")
-    # A dataset without an asset class reads the class from each prefix; none is a stock.
+    # Every ticker is sent as written, whatever its shape: Massive answers it.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
-    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
-        build(massive_session, INDICATOR, symbols="aapl")
+    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("aapl",)
 
 
 def test_none_is_refused_where_the_dataset_needs_symbols(

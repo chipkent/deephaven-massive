@@ -572,9 +572,7 @@ def _by_value(
     # Reads futures products for each code of a table of product codes.
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", codes)])
-    values = ValueTable(
-        "product_code", "product_code", "ProductCode", underlying=False, table=table
-    )
+    values = ValueTable("product_code", "product_code", "ProductCode", table=table)
     request = Request(adjusted=adjusted, value_table=values)
     rest = m._core.rest_transport()
     return rest.fetch_by_value(futures.PRODUCTS, request, values=codes, call=7)

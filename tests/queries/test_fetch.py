@@ -175,17 +175,27 @@ def test_a_one_row_fetch_passes_its_symbols(
     ]
 
 
-def test_only_symbols_in_code_have_their_crypto_pairs_split_at_the_call(
-    massive_session: dm.MassiveSession, rest: Recorder
+@pytest.mark.parametrize(
+    ("setting", "split"), [(OnError.RAISE, [True, False, True]), (OnError.LOG, [False] * 3)]
+)
+def test_only_symbols_in_code_under_raise_have_their_crypto_pairs_split_at_the_call(
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    setting: OnError,
+    split: list[bool],
 ) -> None:
-    # A pair in code is code: one Massive does not list raises at the call. A table's pairs
-    # are data, which the read takes as MassiveConfig.unlisted_symbols says.
+    # Under RAISE a pair in code Massive does not list raises at the call; otherwise, and for
+    # a table's pairs, the read leaves it out as MassiveConfig.unlisted_symbols says.
+    core = massive_session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
     in_code = news(massive_session).fetch()
     table = new_table([string_col("Symbol", ["AAPL"])])
     from_table = trades(massive_session, table).history("2025-03-03", source=HistorySource.REST)
     listed = trades(massive_session).history("2025-03-03", source=HistorySource.REST)
     join_reads(massive_session)
-    assert rest.split_pairs == [True, False, True]
+    assert rest.split_pairs == split
     released(massive_session, in_code, from_table, listed)
 
 
@@ -204,8 +214,8 @@ def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
     assert isinstance(q, FetchQuery)
     assert not q.fetch(wait=True).is_refreshing
     assert not last_trade(massive_session).fetch(wait=True).is_refreshing
-    # A symbol table's crypto pairs follow the session's setting; symbols in code always raise.
-    assert rest.unlisted == [OnError.LOG, OnError.RAISE]
+    # Crypto pairs follow the session's setting, in a table or in code.
+    assert rest.unlisted == [OnError.LOG, OnError.LOG]
     assert rest.fetched == []
 
 
@@ -541,11 +551,11 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
     empty = new_table([string_col("ProductCode", [None])])
     with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
         massive_session.futures.products(product_code=empty).fetch(wait=True)
-    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
-    q = massive_session.options.chain(options)
-    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+    unsendable = new_table([string_col("Symbol", ["AAPL,MSFT"])])
+    q = massive_session.options.chain(unsendable)
+    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
         q.fetch(wait=True)
-    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
         q.poll(5)
     assert rest.valued == []
 

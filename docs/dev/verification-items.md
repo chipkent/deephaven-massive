@@ -57,10 +57,6 @@ settles it.
 - **42.** Whether `IssuerCik` and `TransactionDate` key insider activity, and `IssuerCik` and
   `OwnerCik` insider holdings. `poll()` keys on them; a null key fails the table. Settled by
   `tests/namespaces/test_stocks_integration.py`.
-- **43.** Massive's spelling of US stock tickers in partner datasets (Benzinga, ETF Global). The
-  stock types were settled 2026-11-02 (all 1,276 warrant, unit, right, and preferred tickers fit
-  the grammar); a partner row spelled otherwise follows `unreadable_symbols`. Settled by
-  `tests/namespaces/test_reference_integration.py` with the partner add-ons.
 - **45.** `Underlying` of the options datasets for `BRK.B`, index roots, and adjusted contracts.
   Massive's field in canonical form; nothing maps a root to an underlying. Settled by
   `tests/namespaces/test_options_integration.py`.
@@ -211,9 +207,6 @@ settles it.
   the underlying. An `underlying` that is no stock or index ticker is refused until read.
   Settled by `tests/namespaces/test_options_integration.py` (Options Starter for the chain,
   Options Basic for the contracts), which sends `C:EURUSD` and `X:BTCUSD`.
-- **104.** What the contract overview answers to a stock ticker (`AAPL`). `m.options.contracts`
-  refuses an underlying passed as `symbols` until read. Settled by
-  `tests/namespaces/test_options_integration.py` (Options Basic).
 - **105.** What Massive answers to a range whose start is after its end. Refused by
   `dates.check_order` until read. Settled by `tests/datasets/test_dates_integration.py` (Stocks
   Basic), on AAPL's day bars and on the dividends' `ex_dividend_date.gte` and `.lte`.
@@ -273,6 +266,9 @@ settles it.
   session. Settled 2026-10-31 and 2026-11-02 on ESZ6; the rest is item 81.
 - **41.** An IPO keeps its `issuer_name` across statuses. Settled 2026-11-02: 349 IPOs, none
   renamed.
+- **43.** Massive's spelling of US stock tickers in partner datasets. Settled 2026-11-11 as no
+  longer open: the library reads no ticker's shape and keeps every row's ticker as Massive
+  writes it (decision 104).
 - **44.** Every indices dataset reads a bare ticker as `I:`. Settled 2026-11-02: `Symbol` was
   `I:SPX` on five endpoints.
 - **46.** Contract deliverable fields. Settled 2026-11-02: adjusted contracts carry deliverable
@@ -300,3 +296,6 @@ settles it.
   far-dated ES rows had none.
 - **79.** The futures snapshot's `last_minute.last_updated` is in nanoseconds. Settled
   2026-11-02, against the sample.
+- **104.** What the contract overview answers to a stock ticker (`AAPL`). Settled 2026-11-12:
+  HTTP 404 "Option Ticker not found.", so `m.options.contracts("AAPL")` sends it, and the 404
+  gives no rows under `unavailable_symbols` (decision 104).

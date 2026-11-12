@@ -377,15 +377,11 @@ def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, nam
 
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
-def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
-    # The TMX calendar keeps tickers as written, but no class prefix passes there either.
-    message = (
-        "is not a ticker as Massive writes it"
-        if name == "partners.tmx.corporate_events"
-        else "is a crypto ticker; this dataset takes stock tickers"
-    )
-    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
-        factory(massive_session, name)("X:BTCUSD")
+def test_stock_datasets_send_another_class_ticker_as_written(
+    massive_session: dm.MassiveSession, name: str
+) -> None:
+    # Massive answers a ticker of another class; the library judges no ticker's shape.
+    assert factory(massive_session, name)("X:BTCUSD")._request.symbols == ("X:BTCUSD",)
 
 
 def test_the_tmx_calendar_takes_and_keeps_global_tickers_as_written(
@@ -393,9 +389,6 @@ def test_the_tmx_calendar_takes_and_keeps_global_tickers_as_written(
 ) -> None:
     q = factory(massive_session, "partners.tmx.corporate_events")(["ERIC B", "7203"])
     assert q._request.symbols == ("7203", "ERIC B")
-    assert partners.TMX_CORPORATE_EVENTS.symbols_as_written
-    others = [s.name for s in partners.DATASETS if s.symbols_as_written]
-    assert others == ["partners.tmx.corporate_events"]
 
 
 @pytest.mark.parametrize("name", WITH_SYMBOLS)
@@ -733,8 +726,7 @@ def test_consensus_ratings_send_one_request_per_symbol(
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    # `Symbol` is the row's own ticker; one Massive spells in a way the library cannot read
-    # leaves `Symbol` null and keeps the spelling in `RawSymbol`.
+    # `Symbol` is the row's own ticker, kept as Massive writes it, whatever its shape.
     echoes = {
         "BRK.B": {"ticker": "BRK/B", "buy_ratings": 6},
         "MSFT": {"ticker": "MSFT", "buy_ratings": 9},
@@ -751,9 +743,9 @@ def test_consensus_ratings_send_one_request_per_symbol(
     ]
     assert "Ticker" not in table.column_names
     out = dh_to_pylist(table.view(["Symbol", "RawSymbol", "BuyRatings"]))
-    assert sorted((r["RawSymbol"] or "", r["Symbol"], r["BuyRatings"]) for r in out) == [
-        ("", "MSFT", 9),
+    assert sorted((r["Symbol"], r["RawSymbol"], r["BuyRatings"]) for r in out) == [
         ("BRK/B", None, 6),
+        ("MSFT", None, 9),
     ]
 
 
@@ -808,8 +800,7 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
 def test_tmx_rows_keep_global_tickers_as_written(
     rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Under the default FAIL, a ticker outside the US stock grammar would fail the request; the
-    # global calendar keeps it as Massive writes it.
+    # Every row keeps its ticker as Massive writes it, a global calendar's included.
     def event(ticker: str, record: str, venue: str) -> dict[str, object]:
         return {
             "company_name": "A company",

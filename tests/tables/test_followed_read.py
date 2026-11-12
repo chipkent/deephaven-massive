@@ -159,7 +159,7 @@ def follow(
         call=core.next_stream_id(),
         query="m.test.trades(<table>)",
         symbol_table=table,
-        rule=SymbolRowRule.of(SPEC, core.config.noncanonical_symbols),
+        rule=SymbolRowRule.of(SPEC, core.config.unsendable_symbols),
         reread=reread,
         plan=plan,
         note=note,
@@ -426,20 +426,18 @@ def test_a_bad_row_added_under_raise_fails_the_table(
     stream_rows: Rows,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = dataclasses.replace(
-        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
-    )
+    config = dataclasses.replace(massive_session._core.config, unsendable_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(massive_session._core, "config", config)
     script = Script(massive_session)
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
-    add(wl, "msft")
+    add(wl, "MSFT,NVDA")
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
-    assert "a symbol table holds 'msft'" in stream_rows()[0]["Error"]
+    assert "a symbol table holds 'MSFT,NVDA'" in stream_rows()[0]["Error"]
 
 
-def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
+def test_a_row_no_request_can_carry_is_skipped_and_listed(
     *,
     watchlist: Callable[..., Table],
     massive_session: dm.MassiveSession,
@@ -447,11 +445,11 @@ def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
     dh_to_pylist: ToList,
 ) -> None:
     script = Script(massive_session)
-    wl = watchlist("AAPL", "msft")
+    wl = watchlist("AAPL", "MSFT,NVDA")
     result = follow(massive_session, wl, script)
     wait_rows(dh_to_pylist, result, {"AAPL": 2})
-    until(lambda: "'msft'" in (stream_rows()[0]["Error"] or ""))
-    delete(wl, "msft")
+    until(lambda: "'MSFT,NVDA'" in (stream_rows()[0]["Error"] or ""))
+    delete(wl, "MSFT,NVDA")
     until(lambda: stream_rows()[0]["Error"] is None)
     assert script.calls == [("AAPL",)]
     massive_session.release(result)

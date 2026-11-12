@@ -1,15 +1,16 @@
 """The table form of the symbol converters: `canonicalize_symbols`.
 
-`_datasets/symbols.py` holds the symbol grammar and the scalar converters (`canonical_symbol`
+`_datasets/symbols.py` holds the scalar converters (`canonical_symbol`
 and one function per class and convention), which make no Deephaven call. A user whose
 watchlist is written in another spelling (`EUR/USD`, Yahoo's `BRK-B`) needs the same conversion
 over a whole table, static or refreshing, before passing it as `symbols=`; that is table code,
 which reads rows and adds a formula column, so it lives here, on the Deephaven side.
-Under `OnError.LOG`, the default, or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows
-it cannot convert instead of failing, so one bad row never fails the table; `OnError.RAISE`
-fails instead. It takes its own `on_error` argument rather than a session's
-`MassiveConfig.noncanonical_symbols`, since it needs no session. The tables it returns are what
-the symbol-table check in `_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
+A converter returns text it does not recognize unchanged, so the one row it refuses is a stock
+convention's spelling that Massive reads as another instrument (Yahoo's `VOD.L`). Under
+`OnError.LOG`, the default, or `OnError.IGNORE`, `canonicalize_symbols` nulls such a row instead
+of failing, so one bad row never fails the table; `OnError.RAISE` fails instead. It takes its
+own `on_error` argument rather than a session's `MassiveConfig.unsendable_symbols`, since it
+needs no session.
 
 Every function here runs on the caller's thread, inside a Deephaven execution context, and the
 formula it installs is pure, so Deephaven may run it on several threads at once.
@@ -67,12 +68,15 @@ def canonicalize_symbols(
     convention: SymbolConvention = SymbolConvention.MASSIVE,
     on_error: OnError = OnError.LOG,
 ) -> Table:
-    """Return a table whose symbol column holds Massive's exact tickers, converted row by row.
+    """Return a table whose symbol column holds Massive's ticker spellings, converted row by row.
 
     The table form of `canonical_symbol`: use it to turn a watchlist written in another
-    spelling (`EUR/USD`, Yahoo's `BRK-B`) into one a dataset accepts as `symbols=`. The
+    spelling (`EUR/USD`, Yahoo's `BRK-B`) into Massive's before passing it as `symbols=`. The
     converted column keeps its name. Each row converts as `canonical_symbol(value, asset_class,
-    convention=convention)` would; a null stays null.
+    convention=convention)` would: a value no spelling of the class or convention matches stays
+    as it is, for Massive to answer, and a null stays null. The one bad value is a stock
+    convention's spelling that Massive reads as another instrument (Yahoo's `VOD.L`, Nasdaq's
+    `ABC.U`).
 
     The table's current rows are checked when you call, and on a live table every row added
     later converts as it arrives. Under `OnError.LOG`, the default, a bad row gets a null
@@ -81,7 +85,7 @@ def canonicalize_symbols(
     `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. Under
     `OnError.RAISE`, a current bad value raises `ValueError` here, and a bad row added later
     fails the live table, along with any dataset that follows it as a watchlist. This
-    function's `on_error` is its own: a session's `MassiveConfig.noncanonical_symbols` doesn't
+    function's `on_error` is its own: a session's `MassiveConfig.unsendable_symbols` doesn't
     apply to it.
 
     Example:
@@ -106,16 +110,16 @@ def canonicalize_symbols(
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
             for stocks only, `YAHOO`, `NASDAQ`, or `CMS`.
-        on_error: What a value that does not convert does. `OnError.LOG`, the default,
+        on_error: What a bad value does. `OnError.LOG`, the default,
             writes a null symbol for it and logs the value once at WARNING; `OnError.IGNORE`
             writes a null symbol and logs it at DEBUG only; `OnError.RAISE` fails.
 
     Returns:
-        A table with the same rows and columns, whose `column` holds canonical tickers (or
+        A table with the same rows and columns, whose `column` holds the converted symbols (or
         nulls): static for a static table, live for a live one.
 
     Raises:
-        ValueError: Under `OnError.RAISE`, if a current value of the table does not convert
+        ValueError: Under `OnError.RAISE`, if a current value of the table is bad
             (the message lists up to five values and their reasons).
 
     A `table` that is not a Deephaven `Table`, a `column` that is not a `str`, or an
@@ -144,7 +148,7 @@ def canonicalize_symbols(
     if refused and mode is OnError.RAISE:
         shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
-            f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
+            f"{len(refused)} value(s) of {column} do not convert to {resolved.value} symbols: "
             f"{shown}. Pass on_error=dm.OnError.LOG to null them instead"
         )
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none

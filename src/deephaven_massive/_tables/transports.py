@@ -262,10 +262,9 @@ class RestTransport(Protocol):
                 the call ends soon with an error the caller ignores. None for a call only the
                 session's close stops.
             unlisted: What a crypto pair that Massive's crypto ticker list does not hold does,
-                on a path that takes the pair as two currencies: `OnError.RAISE` raises (always
-                for symbols passed in code); `LOG` and `IGNORE`, the session's
-                `MassiveConfig.unlisted_symbols` for a symbol table's pairs, leave it out and
-                log it once, at WARNING or at DEBUG.
+                on a path that takes the pair as two currencies: the session's
+                `MassiveConfig.unlisted_symbols`. `OnError.RAISE` raises; `LOG` and `IGNORE`
+                leave it out and log it once, at WARNING or at DEBUG.
 
         Returns:
             A static table with the dataset's columns, in its schema's order.
@@ -277,8 +276,7 @@ class RestTransport(Protocol):
             EntitlementError: If the plan does not include the endpoint (HTTP 403).
             MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
                 schema, a symbol's later page answers HTTP 404, a crypto pair cannot be split
-                under `RAISE`, every symbol is a pair Massive does not list under `LOG` or
-                `IGNORE`, or a request fails in any other way.
+                under `RAISE`, or a request fails in any other way.
         """
         ...
 
@@ -291,11 +289,11 @@ class RestTransport(Protocol):
         Args:
             spec: The dataset.
             request: The normalized arguments, with static symbols.
-            split_pairs: True for crypto pairs passed in code: each is split by Massive's
-                crypto ticker list, as the read splits it, which may read that list once per
-                session, so a pair the list does not hold raises at the call. False for a
-                table's pairs, which follow `MassiveConfig.unlisted_symbols` in the read:
-                nothing is requested.
+            split_pairs: True for crypto pairs passed in code under
+                `unlisted_symbols=RAISE`: each is split by Massive's crypto ticker list, as the
+                read splits it, which may read that list once per session, so a pair the list
+                does not hold raises at the call. False otherwise: the read follows
+                `MassiveConfig.unlisted_symbols`, and nothing is requested here.
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
@@ -554,31 +552,6 @@ class StreamTransport(Protocol):
                 real-time only.
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
-        """
-        ...
-
-    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
-        """Return the pairs of a static symbol table, read at the call, a stream can subscribe.
-
-        Called only for a crypto dataset. A pair that Massive's crypto ticker list does not
-        hold, or that a failed read of the list cannot split, follows
-        `MassiveConfig.unlisted_symbols`: left out (and logged once) under `LOG` and `IGNORE`,
-        raised under `RAISE`. Runs on the verb's thread, before the stream starts; may block for
-        one read of the list.
-
-        Args:
-            spec: A crypto dataset.
-            symbols: The table's canonical symbols, sorted.
-
-        Returns:
-            The symbols a stream can subscribe, in order.
-
-        Raises:
-            AuthenticationError: Under `RAISE`, if Massive rejects the key on the read of the
-                list.
-            EntitlementError: Under `RAISE`, if the plan does not include reference data.
-            MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
-                if no pair can, so the result would follow nothing.
         """
         ...
 

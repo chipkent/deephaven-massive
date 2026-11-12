@@ -19,10 +19,8 @@ import deephaven_massive.namespaces._crypto as crypto
 import deephaven_massive.namespaces._forex as forex
 import deephaven_massive.namespaces._futures as futures
 import deephaven_massive.namespaces._options as options
-import deephaven_massive.namespaces._partners as partners
 from deephaven_massive._datasets.request import ValueTable
-from deephaven_massive._datasets.row_times import ISSUES_URL
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
@@ -86,7 +84,7 @@ def rule(spec: DatasetSpec = FOREX, mode: OnError = OnError.RAISE) -> SymbolRowR
 
 def spanning(mode: OnError = OnError.RAISE) -> SymbolRowRule:
     # A dataset whose symbols span classes: each symbol's prefix selects its class.
-    return SymbolRowRule("snapshots", ClassFromPrefix.ANY, as_written=False, noncanonical=mode)
+    return SymbolRowRule("snapshots", unsendable=mode)
 
 
 def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object) -> None:
@@ -97,12 +95,11 @@ def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object)
     ) == CurrentSymbols(())
 
 
-def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
-    table = new_table([string_col("Symbol", ["ERIC B", "7203"])])
-    events = rule(partners.TMX_CORPORATE_EVENTS)
-    assert read_symbols(events, table, stream_id=7).symbols == ("7203", "ERIC B")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
-        read_symbols(events, new_table([string_col("Symbol", [" x"])]), stream_id=None)
+def test_read_symbols_sends_any_row_a_request_can_carry(dh_exec_ctx: object) -> None:
+    # No ticker's shape is judged: Massive answers each row, so each is read as written.
+    table = new_table([string_col("Symbol", ["ERIC B", "7203", "eurusd", "X:BTCUSD"])])
+    got = read_symbols(rule(), table, stream_id=7)
+    assert got == CurrentSymbols(("7203", "ERIC B", "X:BTCUSD", "eurusd"))
 
 
 @pytest.mark.parametrize("mode", list(OnError))
@@ -112,8 +109,10 @@ def test_read_symbols_refuses_a_failed_table(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        watch = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
-    source.add(new_table([string_col("Symbol", ["no pe!"])]))
+        watch = dm.canonicalize_symbols(
+            source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
+        )
+    source.add(new_table([string_col("Symbol", ["VOD.L"])]))
     wait_for(lambda: bool(watch.j_table.isFailed()))
     with pytest.raises(
         ValueError,
@@ -124,14 +123,12 @@ def test_read_symbols_refuses_a_failed_table(
     scope.release()
 
 
-def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
+def test_read_symbols_refuses_a_row_no_request_can_carry(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     with pytest.raises(
         ValueError,
-        match=r"^forex\.quotes: a symbol table holds 'EUR/USD' \('EUR/USD' is not Massive's "
-        r"ticker; use 'C:EURUSD' .*\)\. Fix the row, or pass the table through "
-        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX\), "
-        r"which converts what it can and nulls the rest$",
+        match=r"^forex\.quotes: a symbol table holds 'EUR/USD', which no request to Massive can "
+        r"carry \('EUR/USD' holds '/': .*\)\. Fix or delete the row$",
     ):
         read_symbols(rule(), table, stream_id=7)
 
@@ -148,7 +145,7 @@ def test_a_skipped_row_read_before_any_stream_names_the_call(
 
 
 @pytest.mark.parametrize(("mode", "level"), [(OnError.LOG, "WARNING"), (OnError.IGNORE, "DEBUG")])
-def test_read_symbols_skips_a_row_that_is_not_canonical(
+def test_read_symbols_skips_a_row_no_request_can_carry(
     dh_exec_ctx: object, *, caplog: pytest.LogCaptureFixture, mode: OnError, level: str
 ) -> None:
     # A value of its own per mode: each value is logged once per dataset and process.
@@ -168,28 +165,19 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
 
 
 def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
-    # The value is not called wrong: Massive may write a form the library does not know yet.
-    assert skipped_rows_text(["aapl"]) == (
-        "skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
+    assert skipped_rows_text([""]) == (
+        "skipping 1 symbol-table value no request can carry: ''; fix or delete that row"
     )
     assert skipped_rows_text(["g", "f", "e", "d", "c", "b", "a"]) == (
-        "skipping 7 symbol-table values this dataset does not take: 'a', 'b', 'c', 'd', 'e', "
-        f"and 2 more; fix or delete those rows, or report them at {ISSUES_URL} if Massive "
-        "itself writes them"
-    )
-    assert skipped_rows_text(["b", "a"]).startswith(
-        "skipping 2 symbol-table values this dataset does not take: 'a', 'b'; fix or delete "
+        "skipping 7 symbol-table values no request can carry: 'a', 'b', 'c', 'd', 'e', and 2 "
+        "more; fix or delete those rows"
     )
 
 
-def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
-    message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
-    assert "tickers are case-sensitive" in message
-    assert message.endswith(
-        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
-        "row's own class, since this dataset's rows may mix classes. If Massive itself writes "
-        f"'aapl', the library does not know its form yet: report it at {ISSUES_URL}"
+def test_the_message_of_an_empty_row_says_it_names_no_ticker() -> None:
+    assert invalid_row_message("") == (
+        "a symbol table holds '', which no request to Massive can carry (an empty symbol names "
+        "no ticker, and a request without one asks for no ticker). Fix or delete the row"
     )
 
 
@@ -251,7 +239,7 @@ def test_a_watch_reports_changes_of_the_symbol_set(
     assert skipped == []
 
 
-def test_a_watch_refuses_a_late_row_that_is_not_canonical(
+def test_a_watch_refuses_a_late_row_no_request_can_carry(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
     watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
@@ -262,7 +250,7 @@ def test_a_watch_refuses_a_late_row_that_is_not_canonical(
     )
     wait_for(lambda: len(seen) == 1 and len(refused) == 1)
     assert seen == [(frozenset({"C:GBPUSD"}), frozenset())]  # the bad row is never subscribed
-    assert refused == [f"forex.quotes: {invalid_row_message(AssetClass.FOREX, 'EUR/USD')}"]
+    assert refused == [f"forex.quotes: {invalid_row_message('EUR/USD')}"]
     watchlist.delete(new_table([int_col("Key", [1])]))  # removing it changes nothing
     watchlist.add(new_table([int_col("Key", [3]), string_col("Symbol", ["C:USDJPY"])]))
     wait_for(lambda: len(seen) == 2)
@@ -271,7 +259,7 @@ def test_a_watch_refuses_a_late_row_that_is_not_canonical(
     assert skipped == []
 
 
-def test_a_watch_skips_a_late_row_that_is_not_canonical(
+def test_a_watch_skips_a_late_row_no_request_can_carry(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
     watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
@@ -297,46 +285,35 @@ def test_a_watch_skips_a_late_row_that_is_not_canonical(
 
 
 def underlyings(mode: OnError = OnError.RAISE) -> SymbolRowRule:
-    # The rule of `m.options.chain(underlying=table)`: stock and index tickers in `Symbol`.
+    # The rule of `m.options.chain(underlying=table)`: the values of `Symbol`, sent as written.
     table = new_table([string_col("Symbol", ["AAPL"])])
-    values = ValueTable("underlying", "underlyingAsset", "Symbol", underlying=True, table=table)
+    values = ValueTable("underlying", "underlyingAsset", "Symbol", table=table)
     return SymbolRowRule.for_values(options.CHAIN, values, mode)
 
 
 def product_codes(mode: OnError = OnError.RAISE) -> SymbolRowRule:
     # The rule of a futures `product_code=table`: any code as written, in `ProductCode`.
     table = new_table([string_col("ProductCode", ["ES"])])
-    values = ValueTable(
-        "product_code", "product_code", "ProductCode", underlying=False, table=table
-    )
+    values = ValueTable("product_code", "product_code", "ProductCode", table=table)
     return SymbolRowRule.for_values(futures.PRODUCTS, values, mode)
 
 
-def test_a_table_of_underlyings_takes_only_stock_and_index_tickers(dh_exec_ctx: object) -> None:
-    table = new_table([string_col("Symbol", ["I:SPX", "BRK.B", None, "AAPL"])])
-    assert read_symbols(underlyings(), table, stream_id=7).symbols == ("AAPL", "BRK.B", "I:SPX")
-    option = "O:AAPL250117C00150000"
-    for refused in (option, "X:BTCUSD", "aapl"):
-        assert not underlyings().accepts(refused)
-    with pytest.raises(
-        ValueError,
-        match=r"^options\.chain: a table of underlyings holds 'O:AAPL250117C00150000', which is "
-        r"not a stock or index ticker such as 'AAPL' or 'I:SPX'\. Fix the row, or convert it with "
-        r"dm\.canonical_symbol\(text, asset_class\)$",
-    ):
-        read_symbols(underlyings(), new_table([string_col("Symbol", [option])]), stream_id=7)
+def test_a_table_of_underlyings_sends_every_value_as_written(dh_exec_ctx: object) -> None:
+    # Massive answers an underlying of another class; the library judges no ticker's shape.
+    table = new_table([string_col("Symbol", ["I:SPX", "X:BTCUSD", None, "aapl"])])
+    assert read_symbols(underlyings(), table, stream_id=7).symbols == ("I:SPX", "X:BTCUSD", "aapl")
 
 
 def test_a_skipped_underlying_is_logged_with_its_reason(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bad = "X:ETHUSD"  # a value of its own: each value is logged once per dataset and process
+    bad = "AAPL,MSFT"  # a value of its own: each value is logged once per dataset and process
     table = new_table([string_col("Symbol", [bad, "AAPL"])])
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)
     assert rows == CurrentSymbols(("AAPL",), (bad,))
     [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
-    assert record.startswith(f"options.chain a call's read: a table of underlyings holds {bad!r}")
+    assert record.startswith(f"options.chain a call's read: a symbol table holds {bad!r}")
 
 
 def test_a_table_of_product_codes_is_read_from_its_product_code_column(
@@ -344,8 +321,10 @@ def test_a_table_of_product_codes_is_read_from_its_product_code_column(
 ) -> None:
     table = new_table([string_col("ProductCode", ["NQ", "6E", None, "ES"])])
     assert read_symbols(product_codes(), table, stream_id=7).symbols == ("6E", "ES", "NQ")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
-        read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
+    with pytest.raises(ValueError, match="no request to Massive can carry"):
+        read_symbols(
+            product_codes(), new_table([string_col("ProductCode", ["ES,NQ"])]), stream_id=7
+        )
 
 
 def test_a_watch_of_product_codes_reports_changes_of_its_codes(
@@ -401,14 +380,16 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
-    source.add(new_table([string_col("Symbol", ["EUR/USD"])]))
+    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
     scope = new_scope()
     with scope.open():
-        watch_table = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
+        watch_table = dm.canonicalize_symbols(
+            source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
+        )
         watch, seen, refused, _ = watching(watch_table, OnError.IGNORE)
     watch.start()
-    assert seen == [(frozenset({"C:EURUSD"}), frozenset())]
-    source.add(new_table([string_col("Symbol", ["no pe!"])]))
+    assert seen == [(frozenset({"BRK.B"}), frozenset())]
+    source.add(new_table([string_col("Symbol", ["VOD.L"])]))
     wait_for(lambda: len(refused) == 1)
     assert refused[0].startswith("the symbol table passed to forex.quotes failed upstream")
     scope.release()
@@ -454,10 +435,10 @@ class _Update:
 
 
 _UPDATES = [
-    _Update(added=["A", "A", "B", "b"]),
-    _Update(removed=["A", "b"]),  # one of A's two rows remains; the bad row leaves
+    _Update(added=["A", "A", "B", "b,c"]),
+    _Update(removed=["A", "b,c"]),  # one of A's two rows remains; the bad row leaves
     _Update(modified=["C"], modified_prev=["A"]),  # A's last row now holds C
-    _Update(modified=["x:btc"], modified_prev=["C"]),  # C's row now holds a bad symbol
+    _Update(modified=["x/btc"], modified_prev=["C"]),  # C's row now holds a bad symbol
 ]
 
 
@@ -480,8 +461,8 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
         (frozenset(), frozenset({"C"})),
     ]
     assert refused == [
-        f"snapshots: {invalid_row_message(ClassFromPrefix.ANY, 'b')}",
-        f"snapshots: {invalid_row_message(ClassFromPrefix.ANY, 'x:btc')}",
+        f"snapshots: {invalid_row_message('b,c')}",
+        f"snapshots: {invalid_row_message('x/btc')}",
     ]
     assert skipped == []
 
@@ -504,7 +485,7 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
         (frozenset({"C"}), frozenset({"A"})),
         (frozenset(), frozenset({"C"})),
     ]
-    assert skipped == [("b",), (), ("x:btc",)]  # only when the set of skipped values changes
+    assert skipped == [("b,c",), (), ("x/btc",)]  # only when the set of skipped values changes
     assert refused == []
 
 

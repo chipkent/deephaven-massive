@@ -61,8 +61,6 @@ class ValueTable:
             chain's path segment), `"underlying_ticker"`, or `"product_code"`.
         column: The table's column that holds the values: `"Symbol"` for underlyings,
             `"ProductCode"` for product codes, as `m.futures.products()` rows carry them.
-        underlying: True when each value must be a stock or index ticker (an underlying);
-            False for a product code, which is kept as written.
         table: The user's table.
         table_id: `id(table)`, the identity for equality and hashing.
     """
@@ -70,7 +68,6 @@ class ValueTable:
     argument: str
     parameter: str
     column: str
-    underlying: bool
     table: Table = field(compare=False)
     table_id: int = field(init=False)
 

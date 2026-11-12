@@ -477,17 +477,15 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
 @pytest.mark.parametrize(
     "name", ["values", "bars", "previous_day_bar", "snapshots", "daily_open_close"]
 )
-def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
+def test_index_symbols_are_sent_as_written(m: dm.MassiveSession, name: str) -> None:
     method = cast("Callable[..., object]", getattr(m.indices, name))
     extras: dict[str, tuple[object, ...]] = {
         "daily_open_close": ("2025-06-02",),
         "bars": (dm.Timespan.MINUTE,),
     }
     extra = extras.get(name, ())
-    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
-        method("X:BTCUSD", *extra)
-    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
-        method("SPX", *extra)
+    for text in ("X:BTCUSD", "SPX"):  # Massive answers them
+        method(text, *extra)
     with pytest.raises(ValueError, match="no symbols"):
         method([], *extra)
 

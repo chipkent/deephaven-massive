@@ -603,22 +603,18 @@ print(dm.canonical_symbol("EUR/USD", dm.AssetClass.FOREX))
 print(dm.canonical_symbol("btc-usd", dm.AssetClass.CRYPTO))
 print(dm.canonical_symbol("SPX", dm.AssetClass.INDICES))
 print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO))
+print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS))
 
-try:
-    dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS)
-except ValueError as error:
-    print(f"ValueError: {error}")
-
-yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
+yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "VOD.L"])])
 converted = dm.canonicalize_symbols(
     yahoo_symbols, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )
 ```
 
-You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line, then a line
-that starts `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another convention's
-separators`. `converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no
-convention could convert. The debug log records a `WARNING` for it.
+You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, and `BRK-B`, each on its own line: with
+no convention named, a stock ticker comes back as written. `converted` holds `BRK.B`, `AAPL`, and
+a null `Symbol` for `VOD.L`, Yahoo's London listing, which Massive would read as a share class.
+The debug log records a `WARNING` for it.
 
 #### 12. Check the debug log for your key
 

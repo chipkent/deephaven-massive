@@ -279,7 +279,7 @@ def test_history_reads_a_static_symbol_table_once_for_every_source(
     assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
 
 
-def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
+def test_history_refuses_a_symbol_table_row_no_request_can_carry_under_raise(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -287,28 +287,28 @@ def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     strict(massive_session, monkeypatch)
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA", None])]))
     for source in HistorySource:
         with pytest.raises(
             ValueError,
-            match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
+            match=r"^stocks\.trades: a symbol table holds 'MSFT,NVDA', which no request",
         ):
             q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
 
 
-def test_history_skips_a_symbol_table_row_that_is_not_canonical(
+def test_history_skips_a_symbol_table_row_no_request_can_carry(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA", None])]))
     q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[0][2].symbols == ("AAPL",)
     assert flat.calls == []
-    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["MSFT,NVDA"])]))
     with pytest.raises(
         ValueError,
-        match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
+        match=r"^m\.stocks\.trades\(\): no row of the symbol table can be sent",
     ):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
 
@@ -751,12 +751,14 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    only_bad = live("msft")
-    with pytest.raises(ValueError, match="no row of the symbol table is a ticker"):
+    only_bad = live("MSFT,NVDA")
+    with pytest.raises(ValueError, match="no row of the symbol table can be sent"):
         trades(massive_session, only_bad).history("2025-03-03", "2025-03-03", wait=True)
     strict(massive_session, monkeypatch)
-    with pytest.raises(ValueError, match="a symbol table holds 'msft'"):
-        trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03", wait=True)
+    with pytest.raises(ValueError, match="a symbol table holds 'MSFT,NVDA'"):
+        trades(massive_session, live("AAPL", "MSFT,NVDA")).history(
+            "2025-03-03", "2025-03-03", wait=True
+        )
     assert rest.by_symbol == []
 
 

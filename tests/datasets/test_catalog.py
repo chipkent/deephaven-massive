@@ -290,20 +290,6 @@ def test_spec_validation() -> None:
     with pytest.raises(ValueError, match=r"^stocks\.trades: option_rows is for a dataset of every"):
         change(STOCK_TRADES, option_rows=True)
     assert change(EXCHANGES, option_rows=True).option_rows
-    for transports in (
-        {"channels": {NotBars.ANY: "T"}},
-        {"flat_file_prefixes": {NotBars.ANY: "us/x"}},
-    ):
-        with pytest.raises(
-            ValueError, match=r"^test\.x: symbols kept as written are for REST datasets only$"
-        ):
-            DatasetSpec(
-                name="test.x",
-                summary="A dataset for the tests.",
-                asset_class=AssetClass.STOCKS,
-                symbols_as_written=True,
-                **cast("dict[str, Any]", transports),
-            )
     with pytest.raises(ValueError, match=r"test\.x: a dataset in a kind needs a class"):
         DatasetSpec(
             name="test.x",

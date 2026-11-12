@@ -180,7 +180,7 @@ def follow(
         call=core.next_stream_id(),
         query="m.test.trades(<table>)",
         symbol_table=table,
-        rule=SymbolRowRule.of(SPEC, core.config.noncanonical_symbols),
+        rule=SymbolRowRule.of(SPEC, core.config.unsendable_symbols),
         reread=reread,
         plan=plan,
         note="Follows a test.",
@@ -1266,14 +1266,12 @@ def test_two_bad_rows_fail_the_table_once(
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = dataclasses.replace(
-        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
-    )
+    config = dataclasses.replace(massive_session._core.config, unsendable_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(massive_session._core, "config", config)
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, Script(massive_session))
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
+    add(wl, "MSFT,X", "NVDA,X")  # two refusals in one update: the second finds the table failed
     until(lambda: bool(result.j_table.isFailed()))
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
 

@@ -577,9 +577,9 @@ class RestReader:
             read (`MassiveConfig.unreadable_symbols`).
         unavailable_symbols: The session's setting for a symbol the library cannot read from
             Massive (`MassiveConfig.unavailable_symbols`), which every read follows.
-        unlisted_symbols: The session's setting for a crypto pair of a symbol table that
-            Massive's crypto ticker list does not hold (`MassiveConfig.unlisted_symbols`), which
-            a `poll()` cycle follows (`_plan_cycle`).
+        unlisted_symbols: The session's setting for a crypto pair that Massive's crypto ticker
+            list does not hold (`MassiveConfig.unlisted_symbols`), which a `poll()` cycle
+            (`_plan_cycle`) and a `history()` read (`listed_split`) follow.
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -1844,7 +1844,7 @@ class RestReader:
         `ValueError`) is left out with its symbols, and the cycle reads every other path, as
         `MassiveConfig.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
         one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
-        A crypto pair of a symbol table that Massive's crypto ticker list does not hold follows
+        A crypto pair that Massive's crypto ticker list does not hold follows
         `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE` it is left out of the cycle
         (`_skip_unlisted`); under `RAISE` its `UnlistedPairError` fails the table.
 
@@ -1860,7 +1860,7 @@ class RestReader:
             ['adjusted'])"`.
 
         A crypto pair that cannot be split raises the `MassiveError` of `crypto_pair` (a pair
-        of a symbol table that the list does not hold only under `unlisted_symbols=RAISE`), and
+        the list does not hold only under `unlisted_symbols=RAISE`), and
         a refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.
         """
         if symbols == ():
@@ -1868,9 +1868,7 @@ class RestReader:
         planned = []
         left_out: list[str] = []
         unlisted: dict[str, UnlistedPairError] = {}
-        skips = (
-            isinstance(request.symbols, SymbolTable) and self.unlisted_symbols is not OnError.RAISE
-        )
+        skips = self.unlisted_symbols is not OnError.RAISE
         split = self._unlisted_recorder(unlisted, cancel) if skips else None
         for template, own in fetch_paths(spec, symbols):
             try:
@@ -1893,6 +1891,38 @@ class RestReader:
                 f"{name} (not in Massive's crypto ticker list)" for name in sorted(unlisted)
             )
         return planned, left_out
+
+    def listed_split(
+        self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
+    ) -> CryptoSplit:
+        """Return the crypto split a read uses under the session's `unlisted_symbols`.
+
+        Under `RAISE` a pair Massive's crypto ticker list does not hold raises its
+        `UnlistedPairError`; under `LOG` and `IGNORE` it is recorded, so the read leaves its
+        requests out (`_without`) and logs it (`skip_unlisted`).
+
+        Args:
+            unlisted: Receives each pair recorded, with its error.
+            cancel: The read's stop token, which the list's read listens to.
+
+        Returns:
+            The split.
+        """
+        if self.unlisted_symbols is OnError.RAISE:
+            return functools.partial(self.crypto_pair, cancel=cancel)
+        return self._unlisted_recorder(unlisted, cancel)
+
+    def skip_unlisted(
+        self, spec: DatasetSpec, unlisted: Mapping[str, UnlistedPairError], *, verb: str
+    ) -> None:
+        """Log the crypto pairs a read leaves out under the session's `unlisted_symbols`.
+
+        Args:
+            spec: The dataset.
+            unlisted: The pairs, with their errors.
+            verb: The verb that leaves them out, such as `"history()"`.
+        """
+        self._skip_unlisted(spec, unlisted, verb=verb, setting=self.unlisted_symbols)
 
     def _unlisted_recorder(
         self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
@@ -1920,7 +1950,7 @@ class RestReader:
         verb: str,
         setting: OnError,
     ) -> None:
-        """Log the crypto pairs of a symbol table a read leaves out, each once per session.
+        """Log the crypto pairs a read leaves out, each once per session.
 
         At WARNING under `unlisted_symbols=LOG` the first time a pair is left out in the
         session, and at DEBUG after that and under `IGNORE`. Never called under `RAISE`.
@@ -1935,8 +1965,9 @@ class RestReader:
             first = self.state.first("unlisted", spec.name, symbol)
             logger.log(
                 logging.WARNING if first and setting is OnError.LOG else logging.DEBUG,
-                "%s %s: %s; it is left out and the table's other symbols are read. Delete its "
-                "row, or set dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead",
+                "%s %s: %s; it is left out, as a pair Massive has no data for, and the other "
+                "symbols are read. Set dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to "
+                "fail instead",
                 spec.name,
                 verb,
                 error,
@@ -2084,20 +2115,15 @@ class RestReader:
                 console command), so the read pauses every live table of the server while it
                 runs.
             unlisted: What a crypto pair Massive's crypto ticker list does not hold does:
-                `RAISE` (always for symbols passed in code) raises its
-                `UnlistedPairError`; `LOG` and `IGNORE`, for a symbol table's pairs under
-                `MassiveConfig.unlisted_symbols`, leave it out (`_skip_unlisted`).
+                `RAISE` raises its `UnlistedPairError`; `LOG` and `IGNORE` leave it out
+                (`_skip_unlisted`), so a read whose every pair is left out reads nothing.
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit` (each symbol's
             rows where a request names one symbol, each request's rows for a dataset whose
             symbols overlap; `_read_planned`), and the request count.
 
-        Raises:
-            MassiveError: Under `LOG` and `IGNORE`, when every symbol is a pair the list does
-                not hold, so the read would read nothing.
-
-        Other errors are those of `read`, and a parameter a path does not take raises the
+        Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
         """
         found: dict[str, UnlistedPairError] = {}
@@ -2105,12 +2131,6 @@ class RestReader:
         split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
-            asked = cast("tuple[str, ...]", symbols)  # only named pairs are split
-            if set(asked) <= found.keys():
-                raise MassiveError(
-                    f"{spec.name} fetch(): no symbol of the symbol table is a crypto pair "
-                    f"Massive lists, so the call would read nothing: {bounded_list(found)}"
-                )
             self._skip_unlisted(spec, found, verb="fetch()", setting=unlisted)
             planned = [_without(path, found) for path in planned]
         patience = self.patience()  # once for every path, on this thread, before any fan-out
@@ -2459,8 +2479,7 @@ class RestEndpoints:
                 which ends the read's waits when set; None when only the session's close
                 should.
             unlisted: What a crypto pair Massive's crypto ticker list does not hold does
-                (`RestReader.read_fetch`): `RAISE` for symbols passed in code, the session's
-                `MassiveConfig.unlisted_symbols` for a symbol table's.
+                (`RestReader.read_fetch`): the session's `MassiveConfig.unlisted_symbols`.
 
         Returns:
             A static table in the dataset's schema.
@@ -2652,14 +2671,18 @@ class RestEndpoints:
         cut short.
         """
         reader = self._reader(f"call-{call}")
+        unlisted: dict[str, UnlistedPairError] = {}
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
             request,
             window=window,
-            split=functools.partial(reader.crypto_pair, cancel=_token(stop)),
+            split=reader.listed_split(unlisted, _token(stop)),
             days=days,
         )
+        if unlisted:
+            reader.skip_unlisted(spec, unlisted, verb="history()")
+            rest_path, calls = _without((rest_path, calls), unlisted)
         announce(
             self._state.client.governor,
             f"{spec.name} history",
@@ -2802,7 +2825,11 @@ class RestEndpoints:
             candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
             used = [path for path in candidates if path is not None]
         else:
-            used = [path.template for path, _ in reader.plan_fetch(spec, request, request.symbols)]
+            # A pair Massive's crypto ticker list does not hold raises now only under RAISE;
+            # otherwise each cycle leaves it out (`_plan_cycle`).
+            split = None if reader.unlisted_symbols is OnError.RAISE else _unsplit
+            planned = reader.plan_fetch(spec, request, request.symbols, split=split)
+            used = [path.template for path, _ in planned]
         host = urlsplit(self._core.config.rest_base_url).hostname
         paths = ", ".join(dict.fromkeys(used))
         return poll.open_poll(

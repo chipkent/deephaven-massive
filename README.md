@@ -198,8 +198,9 @@ busiest = (
 are left out.
 
 A dataset's `symbols` argument names what to read: `dm.ALL` for every symbol, one symbol as
-text, or several as a list, each spelled as Massive does. Daily bars take `dm.ALL`, and each
-dataset's page says whether it takes it. The ranking is ordinary Deephaven table operations.
+text, or several as a list, each spelled as Massive does. A symbol Massive has no data for
+gives no rows. Daily bars take `dm.ALL`, and each dataset's page says whether it takes it. The
+ranking is ordinary Deephaven table operations.
 
 Next, a list of three stocks over a longer range.
 

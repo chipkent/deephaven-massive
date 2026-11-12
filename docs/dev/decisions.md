@@ -217,7 +217,7 @@ aggregates page's `adjusted` echo is checked.
 is Massive's exact REST ticker; a non-canonical one raises `ValueError` naming the canonical
 form. `canonical_symbol`, per-class and per-convention converters, and `canonicalize_symbols`
 convert explicitly. A crypto pair is split only from Massive's crypto ticker list. *Its failure
-defaults are superseded by 66.*
+defaults are superseded by 66, and its refusal of non-canonical symbols by 104.*
 
 **59. Live tables keep their session running, and `close()` fails them** (2026-10-28). A live
 table keeps alive what it needs and nothing else does; `m.close()` fails every live table with a
@@ -258,7 +258,8 @@ that the other fills; a feed's `poll()` needs `start` or `limit`.
 (2026-10-29). `MassiveConfig.noncanonical_symbols`, `unreadable_symbols`, and
 `unavailable_symbols` use it. A bad row is skipped (or kept with a null `Symbol` and its
 `RawSymbol`) and listed in `m.streams()` `Error`; a symbol table whose rows are all bad raises.
-A `str` or list in code always raises.
+A `str` or list in code always raises. *Its `noncanonical_symbols` is superseded by
+104.*
 
 **67. One name, form, and default per parameter** (2026-10-29). `symbols` is positional
 everywhere; `as_of` is the point-in-time parameter; Massive's spec defaults show in signatures;
@@ -531,3 +532,22 @@ the agent says whether it breaks code and, if so, which version comes next, befo
 Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
+
+**104. A ticker is sent as written, and Massive judges it** (2026-11-11). The owner, on
+2026-11-11: "I agree on not erroring on missing symbols. That should be a significant
+simplification." The library judges no ticker's shape: no prefix, character class, or option
+symbol pattern refuses or rewrites a value Massive could answer. A ticker Massive has no data
+for is no error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it
+in `m.symbol_reads()`. The library refuses only a value of the wrong Python type, and one no
+request can carry: an empty symbol, or one holding `,` (Massive's list parameters and WebSocket
+subscriptions split on it), `/` (Massive answers HTTP 404 for it inside a path segment), or `*`
+(the WebSocket's every-ticker wildcard). Such a value raises `ValueError` in code, and a table's
+row follows `MassiveConfig.unsendable_symbols`, which replaces `noncanonical_symbols`. A row's
+ticker is kept as Massive writes it, except the spellings a transport writes differently from
+the REST ticker (`EUR/USD` in WebSocket forex frames), which are read back into it. The
+converters convert the spellings they know and return other text unchanged; a stock convention
+still refuses a spelling Massive reads as another instrument (Yahoo's `VOD.L`, Nasdaq's
+`ABC.U`), since that would read the other instrument's data with no error.
+`canonical_symbol_stock`, `canonical_symbol_future`, and `canonical_symbol_future_spread`, which
+only checked text, are removed, and so is `DatasetSpec.symbols_as_written`, since every dataset
+now keeps its symbols as written. Supersedes 58's refusal and 66's `noncanonical_symbols`.

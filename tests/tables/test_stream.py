@@ -230,6 +230,11 @@ FOREX_ROWS = [
 ]
 
 
+def quote(ticker: str, **fields: object) -> dict[str, object]:
+    # One forex quote as Massive's WebSocket writes it, the pair as given.
+    return {**FOREX_ROWS[0], "Ticker": ticker, **fields}
+
+
 @pytest.mark.parametrize(
     ("mode", "level"), [(OnError.LOG, logging.ERROR), (OnError.IGNORE, logging.DEBUG)]
 )
@@ -370,13 +375,15 @@ def make_sink(
     plan: ChannelPlan | None = None,
     *,
     stream_id: int = 1,
+    spec: DatasetSpec = TRADES,
 ) -> tuple[StreamSink, Table]:
-    # A trades stream; streams given one `plan` share each flush's batch, as one dataset's do.
+    # A trades stream, or one of `spec`; streams given one `plan` share each flush's batch, as
+    # one dataset's do.
     if plan is None:
         plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
     opened = open_stream_tables(
         plan,
-        core.catalog.dataset_schema(TRADES, raw_symbol=False),
+        core.catalog.dataset_schema(spec, raw_symbol=False),
         symbols,
         core=core,
         stream_id=stream_id,
@@ -451,10 +458,14 @@ def test_a_failed_sink_drops_the_rows_it_held(massive_session: dm.MassiveSession
 
 
 def shared_batch(
-    plan: ChannelPlan, rows: list[dict[str, object]], *, splits: bool = True
+    plan: ChannelPlan,
+    rows: list[dict[str, object]],
+    *,
+    splits: bool = True,
+    source_key: str = "stocks/T",
 ) -> stream.SharedBatch:
     # A flush's batch of the rows, as the flusher shares it among its streams.
-    converted = plan.convert(frame(rows), {}, arrived=arrivals(rows))
+    converted = plan.convert(frame(rows, source_key), {}, arrived=arrivals(rows))
     return stream.SharedBatch(to_table(converted.batch), converted, splits=splits)
 
 
@@ -483,15 +494,16 @@ def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.Massiv
     assert some._select(batch) is batch.table
     some.set_symbols(frozenset())
     assert some._select(batch) is None
-    # A session that keeps unreadable symbols (`LOG`) gives their rows a null Symbol: a stream
-    # that holds every readable symbol of the batch still needs the filter to leave them out.
-    warned = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.LOG)
-    nameless = shared_batch(warned, [trade("AAPL"), trade("MSFT"), trade("not a symbol")])
+    # A session that keeps unreadable forex pairs (`LOG`) gives their rows a null Symbol: a
+    # stream that holds every readable symbol of the batch still needs the filter to leave
+    # them out.
+    warned = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.LOG)
+    nameless = shared_batch(warned, FOREX_ROWS, source_key="forex/C")
     assert nameless.converted.null_symbols
-    some.set_symbols(frozenset({"AAPL", "MSFT"}))
+    some.set_symbols(frozenset({"C:EURUSD"}))
     filtered = some._select(nameless)
     assert filtered is not None
-    assert filtered.size == 2
+    assert filtered.size == 1
 
 
 def test_streams_of_one_batch_symbol_share_one_partition(
@@ -1327,17 +1339,17 @@ def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
     massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
 ) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
-    every, _ = make_sink(core, ALL, plan)
-    flusher.routes.add("T", every)
+    plan = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan, spec=FOREX)
+    flusher.routes.add("C", every)
     limit = stream.DROPPED_RUN_LIMIT
-    flusher.rows(
-        "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), generation=1
-    )
+    rows = [quote("EUR/USD"), *[quote("GBP/USD", ParticipantTimestamp=5)] * limit]
+    flusher.rows("C", frame(rows, "forex/C"), generation=1)
     flusher.flush()
     with caplog.at_level(logging.INFO, logger=stream.__name__):
-        # A spelling the library cannot read fails the stream before ILLQ's row could publish.
-        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]), generation=1)
+        # A pair the library cannot read fails the stream before GBP/USD's row could publish.
+        rows = [quote("GBP/USD"), quote("nonsense pair")]
+        flusher.rows("C", frame(rows, "forex/C"), generation=1)
         flusher.flush()
     assert every.failed
     assert "published again" not in caplog.text
@@ -1442,35 +1454,35 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
     # Deephaven refuses one stream's failure for an unreadable symbol, which fails every stream
     # of the dataset on the channel: the other stream is failed all the same.
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    plan = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.RAISE)
 
     def sink(stream_id: int, symbol: str) -> StreamSink:
         # The two streams share the dataset's plan, as the streams of one connection do.
         opened = open_stream_tables(
             plan,
-            core.catalog.dataset_schema(TRADES, raw_symbol=False),
+            core.catalog.dataset_schema(FOREX, raw_symbol=False),
             (symbol,),
             core=core,
             stream_id=stream_id,
             host="socket.test",
             evidence="test host",
             recency=Recency.REALTIME,
-            path="/stocks",
+            path="/forex",
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
         )
         opened.sink.publish_held()
         return opened.sink
 
-    aapl, msft = sink(1, "AAPL"), sink(2, "MSFT")
+    aapl, msft = sink(1, "C:EURUSD"), sink(2, "C:GBPUSD")
 
     def refused(_: Exception) -> None:
         raise RuntimeError("refused")
 
     monkeypatch.setattr(aapl, "publisher", types.SimpleNamespace(publish_failure=refused))
-    flusher.routes.add("T", aapl)
-    flusher.routes.add("T", msft)
-    flusher.rows("T", frame([trade("!!"), trade("MSFT")]), generation=1)
+    flusher.routes.add("C", aapl)
+    flusher.routes.add("C", msft)
+    flusher.rows("C", frame([quote("!!"), quote("GBP/USD")], "forex/C"), generation=1)
     flusher.flush()
     assert aapl.failed
     assert msft.failed

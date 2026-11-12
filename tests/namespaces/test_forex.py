@@ -213,11 +213,9 @@ def test_conversion_keeps_the_vendor_symbol() -> None:
 # --- factories ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "symbols", ["EUR/USD", "eur-usd", "EURUSD", "eurusd", "c:eurusd", ["EUR/USD", "C:EURUSD"]]
-)
-def test_only_the_canonical_ticker_is_taken(
-    massive_session: dm.MassiveSession, symbols: str | list[str]
+@pytest.mark.parametrize("symbols", ["eur-usd", "EURUSD", "eurusd", "c:eurusd"])
+def test_any_pair_spelling_is_sent_as_written(
+    massive_session: dm.MassiveSession, symbols: str
 ) -> None:
     forex_ns = massive_session.forex
     factories: tuple[Callable[[str | list[str]], Query], ...] = (
@@ -228,8 +226,7 @@ def test_only_the_canonical_ticker_is_taken(
     )
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
-        with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
-            factory(symbols)
+        assert factory(symbols)._request.symbols == (symbols,)  # Massive answers it
 
 
 def test_quotes(massive_session: dm.MassiveSession) -> None:
@@ -382,14 +379,13 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
-        ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
-        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
-        ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
+        ("EUR/USD", "cannot send the symbol 'EUR/USD'"),
+        (["C:EURUSD", "C:GBPUSD,C:USDJPY"], "cannot send the symbol 'C:GBPUSD,C:USDJPY'"),
+        ("", "cannot send the symbol ''"),
         ([], "no symbols"),
     ],
 )
-def test_invalid_pairs_fail_at_construction(
+def test_pairs_no_request_can_carry_fail_at_construction(
     massive_session: dm.MassiveSession, symbols: str | list[str], message: str
 ) -> None:
     forex_ns = massive_session.forex

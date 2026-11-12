@@ -306,7 +306,7 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
             f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
         )
     _require_text_column(table, column, what=f"a table passed as {argument}")
-    return ValueTable(argument, parameter, column, underlying, table)
+    return ValueTable(argument, parameter, column, table)
 
 
 def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
@@ -472,7 +472,11 @@ def _filters(
     reserved = {
         filter_key(form): arguments.get(name, name) for name in typed for form in param_family(name)
     }
-    library = {filter_key(form) for name in spec.fixed_params for form in param_family(name)}
+    library = {
+        filter_key(form)
+        for name in (*spec.fixed_params, *spec.library_params)
+        for form in param_family(name)
+    }
     symbol_keys = (
         set()
         if spec.symbol_param is None
@@ -647,7 +651,7 @@ def _normalized_symbols(
         _require_text_column(symbols, "Symbol", what="a symbol table")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
-        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
+        normalized = check_symbols(symbols)
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     return normalized

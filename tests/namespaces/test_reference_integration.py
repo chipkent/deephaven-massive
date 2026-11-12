@@ -1,10 +1,10 @@
-"""Live checks of reference data against Massive: keys, repeated rows, and ticker spellings.
+"""Live checks of reference data against Massive: keys and repeated rows.
 
 Each test records what Massive sent (`evidence`). Most assert only that the requests worked,
 so the evidence, not a pass, settles the open question; the condition key test asserts the
 answer the library relies on. The library's tables serve where they show the answer; raw rows
-from the wire REST client serve where the library renames or rejects the very keys or
-spellings in question. The asset-class test sends values the library refuses
+from the wire REST client serve where the library renames or rejects the very keys in
+question. The asset-class test sends values the library refuses
 (`tests/_live/bad_values.py`) and records whether Massive refuses them too. How to run these
 tests is in `docs/live-tests.md`.
 """
@@ -16,12 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-import deephaven_massive as dm
 from deephaven_massive._massive import (
     RestClient,
     Transport,
-    WireEntitlementError,
-    WireError,
     source,
 )
 from tests._live import bad_values
@@ -31,6 +28,8 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    import deephaven_massive as dm
 
 pytestmark = pytest.mark.integration
 
@@ -43,13 +42,11 @@ _TICKERS = "/v3/reference/tickers"
 _RENAMED = "META"
 """A ticker with a ticker-change event (FB became META in 2022)."""
 
-_TYPES = ("WARRANT", "UNIT", "RIGHT", "PFD")
 _LIMIT = 10_000
 """The most rows read of a listing; a result of exactly this many is cut short."""
 
 _BASIC_LIMIT = 5_000
 """The most rows read of a listing with Stocks on Basic: five pages of 1,000, five requests."""
-_PARTNER_PAGES = ("/benzinga/v1/ratings", "/etf-global/v1/constituents", "/tmx/v1/corporate-events")
 
 
 def _repeated(keys: Iterable[tuple[object, ...]]) -> list[tuple[tuple[object, ...], int]]:
@@ -193,76 +190,6 @@ def _hashable(value: object) -> object:
         The value, a list made a tuple.
     """
     return tuple(value) if isinstance(value, list) else value
-
-
-@pytest.mark.needs("stocks:basic")
-@pytest.mark.verifies("43")
-@pytest.mark.requests(4)
-@pytest.mark.timeout(110)
-def test_stock_ticker_spellings_the_library_cannot_read(
-    live_rest: RestClient, *, classes_on_basic: frozenset[str], evidence: Evidence
-) -> None:
-    """Which stock ticker spellings fall outside the library's canonical stock grammar.
-
-    Reads one page of stock tickers of each type `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and
-    one page of three partner datasets, and records every ticker `dm.canonical_symbol_stock`
-    refuses: a row with such a ticker gets a null `Symbol` and keeps the text in `RawSymbol`.
-    Passes when the grammar reads every ticker of the four types; another spelling must join
-    the grammar or be left to the handling of unknown symbols. The partner pages are evidence
-    only, since they also hold tickers of other markets (ETF Global's currency instruments,
-    TMX's Canadian listings). A refused partner page (no entitlement) is recorded and skipped.
-    With Stocks on Basic, which allows 5 requests a minute, the partner pages are left out, so
-    the test sends 4 requests.
-    """
-    seen = 0
-    unread: dict[str, list[str]] = {}
-    for ticker_type in _TYPES:
-        rows = live_rest.get(
-            source(Transport.REST, _TICKERS),
-            {},
-            {"market": "stocks", "type": ticker_type, "limit": 1000},
-            bucket="other",
-        ).rows
-        seen += len(rows)
-        tickers = sorted({str(row.get("ticker")) for row in rows})
-        odd = [ticker for ticker in tickers if _unreadable(ticker)]
-        evidence(f"{ticker_type}: {len(tickers)} tickers, e.g. {tickers[:10]}")
-        evidence(f"    outside the stock grammar: {odd}")
-        if odd:
-            unread[ticker_type] = odd
-    if "stocks" in classes_on_basic:
-        evidence("Stocks on Basic: the partner pages are not read")
-    for path in () if "stocks" in classes_on_basic else _PARTNER_PAGES:
-        try:
-            rows = live_rest.get(
-                source(Transport.REST, path), {}, {"limit": 100}, bucket="other"
-            ).rows
-        except WireEntitlementError as error:
-            evidence(f"{path}: not entitled: needs the partner's $99/month add-on ({error})")
-            continue
-        except WireError as error:
-            evidence(f"{path}: {type(error).__name__}: {error}")
-            continue
-        values = sorted(
-            {str(v) for row in rows for k, v in row.items() if "ticker" in k and v is not None}
-        )
-        odd = [value for value in values if _unreadable(value)]
-        evidence(f"{path}: {len(values)} ticker values; outside the stock grammar: {odd}")
-    assert seen
-    assert not unread, f"stock tickers outside the grammar: {unread}"
-
-
-def _unreadable(ticker: str) -> bool:
-    """Tell whether the library refuses a ticker as a canonical stock ticker.
-
-    Returns:
-        True when `dm.canonical_symbol_stock` raises `ValueError` for it.
-    """
-    try:
-        dm.canonical_symbol_stock(ticker)
-    except ValueError:
-        return True
-    return False
 
 
 @pytest.mark.needs("stocks:basic")

@@ -289,7 +289,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -319,7 +319,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -367,7 +367,7 @@ class ForexNamespace(Namespace):
             ValueError: If:
                 - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair.
+                - a ticker is empty or holds `,`, `/`, or `*`.
 
         Example:
             ::
@@ -404,7 +404,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -442,7 +442,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -470,7 +470,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - a table has no `Symbol` column.
 
         Example:

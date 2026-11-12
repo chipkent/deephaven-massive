@@ -482,8 +482,8 @@ class StreamRow:
             (`transport:field+` for an extra field, `transport:field-` for a missing one,
             `transport:field?` for one that held a value that does not fit); null while there
             is none. Separate from `error`, so drift never hides a failure.
-        skipped: The symbol-table values the stream or poll skips because they are not
-            Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
+        skipped: The symbol-table values the stream or poll skips because no request
+            can carry them (`skipped_rows_text` in `_tables/watchlist.py`); null while none
             is. Not a column of its own: the `Error` column shows it after `notes` while the
             stream runs (`as_row`).
         notes: The current warnings that leave the stream running, each a named part, in

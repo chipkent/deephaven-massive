@@ -1449,15 +1449,12 @@ def _failed_soon(table: Table) -> bool:
 def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A pair passed in code is planned at the call and raises. A symbol table's pairs are
-    # planned each cycle: under LOG the unlisted one is left out with one WARNING, and under
-    # RAISE the table fails at its first cycle.
+    # A pair Massive's list does not hold has no data. Under LOG, the default, a poll of it
+    # opens and each cycle leaves it out with one WARNING a session, whether it was passed in
+    # code or in a table; under RAISE a pair in code raises at the call, and a table's fails
+    # the table at its first cycle.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
-    assert isinstance(static, FetchQuery)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
-        static.poll(60)
     reader = cast("Any", session._core.rest_transport())._reader("poll")
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
@@ -1472,16 +1469,23 @@ def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
     assert [r.getMessage() for r in warned] == [
         (
             "crypto.daily_open_close poll(): 'X:DOTUSD' cannot be split into its two "
-            "currencies: Massive's reference data does not list it; it is left out and the "
-            "table's other symbols are read. Delete its row, or set "
+            "currencies: Massive's reference data does not list it; it is left out, as a pair "
+            "Massive has no data for, and the other symbols are read. Set "
             "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
         )
     ]  # once a session: the second cycle logs at DEBUG
+    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(static, FetchQuery)
+    session.release(static.poll(60))  # a pair in code opens too
     config = dm.MassiveConfig(
         api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
     )
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
+        in_code = query(strict, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(in_code, FetchQuery)
+        with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+            in_code.poll(60)
         table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
         assert isinstance(table, FetchQuery)
         assert _failed_soon(table.poll(60))
@@ -1507,11 +1511,10 @@ def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
     assert [path for path, _ in sent_data(fake_rest)] == ["/v1/last/crypto/BTC/USD"]
     assert len(caplog.records) == 1
     assert caplog.messages[0].startswith("crypto.last fetch(): 'X:DOTUSD' cannot be split")
-    # A pair in code always raises; a table whose every pair is unlisted would read nothing.
-    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
-        fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"])
-    with pytest.raises(dm.MassiveError, match=r"no symbol of the symbol table is a crypto pair"):
-        fetch(session, CRYPTO_LAST, symbols=new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    # A pair Massive has no data for gives no rows, passed in code or in a table, alone too.
+    assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    unlisted = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    assert fetch(session, CRYPTO_LAST, symbols=unlisted) == []
     for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
         config = dm.MassiveConfig(
             api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=setting
@@ -1813,25 +1816,27 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert fake_rest.get_queries()[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
-    # A row that is not Massive's ticker is skipped, so the request names only the others.
-    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX", "I:VIX"])]))
+    # A row no request can carry is skipped, so the request names only the others.
+    rows = ["I:SPX,I:NDX", "I:VIX"]
+    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", rows)]))
     assert fake_rest.get_queries()[1][1]["ticker.any_of"] == ["I:VIX"]
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
-        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
-        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
+        match=r"^m\.indices\.snapshots\(\): no row of the symbol table can be sent, so the result "
+        r"would follow nothing: skipping 1 symbol-table value no request can carry: "
+        r"'I:SPX,I:NDX'; fix or delete that row$",
     ):
-        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
+        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", rows[:1])]))
     # Under RAISE, a bad row raises at once, naming the fix.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
+        api_key="test-key", rest_base_url=fake_rest.url, unsendable_symbols=dm.OnError.RAISE
     )
     with dm.MassiveSession(config) as strict:
-        bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
+        bad = new_table([string_col("Symbol", rows)])
         with pytest.raises(
-            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
+            ValueError,
+            match=r"^indices\.snapshots: a symbol table holds 'I:SPX,I:NDX', which no request",
         ):
             fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
@@ -3878,26 +3883,43 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     assert session._core.workers._workers == {}
 
 
-def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call(
+def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call_under_raise(
+    *, fake_rest: FakeRestServer
+) -> None:
+    # As poll() does under RAISE: a pair passed in code that Massive does not list raises
+    # before any table exists, whatever wait is. Only the crypto ticker list is read.
+    serve_pairs(fake_rest)
+    params = {"date": "2025-03-03"}
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as session:
+        pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(pair, FetchQuery)
+        with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
+            pair.fetch()
+        assert sent_data(fake_rest) == []
+        assert session._core.workers._workers == {}
+        # A table's pair is split when the read reads the table: the call returns.
+        table = new_table([string_col("Symbol", ["X:DOTUSD"])])
+        from_table = query(session, CRYPTO_OPEN_CLOSE, symbols=table, params=params)
+        assert isinstance(from_table, FetchQuery)
+        result = from_table.fetch()
+        assert result.is_refreshing
+        session.release(result)
+
+
+def test_a_fetch_of_an_unlisted_pair_in_code_gives_no_rows(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # As poll() does: a pair passed in code is code, so one Massive does not list raises
-    # before any table exists, whatever wait is. Only the crypto ticker list is read.
+    # Massive has no data for a pair its crypto ticker list does not hold: under the default
+    # LOG it gives no rows, and only the crypto ticker list is read.
     serve_pairs(fake_rest)
     params = {"date": "2025-03-03"}
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
     assert isinstance(pair, FetchQuery)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
-        pair.fetch()
+    assert pair.fetch(wait=True).size == 0
     assert sent_data(fake_rest) == []
-    assert session._core.workers._workers == {}
-    # A table's pair is data: the call returns, and the read follows unlisted_symbols.
-    table = new_table([string_col("Symbol", ["X:DOTUSD"])])
-    from_table = query(session, CRYPTO_OPEN_CLOSE, symbols=table, params=params)
-    assert isinstance(from_table, FetchQuery)
-    result = from_table.fetch()
-    assert result.is_refreshing
-    session.release(result)
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(
@@ -4553,7 +4575,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     # One poll() cycle of futures products over a table of product codes, read as it holds them.
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
-    boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
+    boxed = ValueTable("product_code", "product_code", "ProductCode", table=table)
     reader = cast("rest.RestEndpoints", m._core.rest_transport())._reader("poll")
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(

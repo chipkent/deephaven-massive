@@ -33,7 +33,6 @@ from deephaven_massive._massive import (
 )
 from tests._live import futures_bar_buckets
 from tests._live.calendar import months_before
-from tests._live.ticker_lists import accepts
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -43,7 +42,6 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from tests._live.futures_bar_buckets import Bar
-    from tests._live.ticker_lists import SpreadRead
 
 pytestmark = pytest.mark.integration
 
@@ -53,14 +51,8 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
-SpreadReads: TypeAlias = (
-    "Callable[[Sequence[Mapping[str, Any]]], tuple[list[SpreadRead], list[str]]]"
-)
 RestRows: TypeAlias = (
     "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
-)
-SpreadReport: TypeAlias = (
-    "Callable[[Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]]"
 )
 
 _PRODUCTS = ("ES", "NQ", "CL", "NG", "GC", "SI", "ZN", "ZC", "6E")
@@ -479,67 +471,6 @@ def test_how_massive_writes_a_contracts_year(
         answered[other] = len(answer)
     assert rows, "Massive listed no ES contract"
     assert not any(answered.values()), f"Massive answered another spelling: {answered}"
-
-
-@pytest.mark.needs("futures:basic")
-@pytest.mark.verifies("48")
-@pytest.mark.requests(5)
-@pytest.mark.timeout(100)
-def test_forms_of_futures_spread_tickers_on_every_venue(
-    live_rest: RestClient,
-    *,
-    futures_spread_reads: SpreadReads,
-    futures_spread_report: SpreadReport,
-    evidence: Evidence,
-) -> None:
-    """Which forms futures spread (combo) tickers take on each venue, and how they name their legs.
-
-    Massive documents no grammar for spreads; the library accepts any combo shape (runs of
-    upper-case letters and digits joined by single `-`, `:`, or spaces, such as `GCQ6-GCZ6`,
-    `BOB 02-01 U6`, `1Y:SA 03M F6`, `10YF5-10YG5XXX`) and
-    builds no spread from its legs. Reads every combo product (`/futures/v1/products?type=combo`,
-    one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
-    COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of
-    two of its single products (whose calendar spreads may carry their legs' product code)
-    and up to 20 of its combo products, taken in turn from each strategy type. On a paid
-    plan it also reads the combo contracts of any other venue the products name; with
-    Futures on Basic, which allows 5 requests a minute, those are left out and named, so
-    the test sends 5 requests.
-
-    Records each venue's combo products by strategy type, and, per venue read, every ticker
-    form (each run of letters written `A`, each run of digits `9`) with its count, how many
-    of its tickers `canonical_symbol_future_spread` accepts, and examples with their contract
-    name, product code, and the legs written out whole in the ticker; then every ticker the
-    library refuses. Passes when the library accepts every combo ticker read: a refused form
-    must join the grammar (or stay a ticker kept as written). The names and legs say whether
-    a builder from legs could produce each form.
-    """
-    products = _page(live_rest, _PRODUCTS_PATH, query={"type": "combo", "limit": 50_000})
-    reads, left_out = futures_spread_reads(products)
-    contracts = {
-        read.venue: _page(
-            live_rest,
-            _CONTRACTS,
-            query={"type": "combo", "product_code.any_of": list(read.product_codes), "limit": 1000},
-        )
-        for read in reads
-    }
-    for read in reads:
-        evidence(f"{read.venue} combo contracts read for products {list(read.product_codes)}")
-    if left_out:
-        evidence(f"Futures on Basic: the combo contracts of {left_out} are not read")
-    for line in futures_spread_report(products, contracts):
-        evidence(line)
-    assert products, "Massive listed no combo product"
-    refused = sorted(
-        {
-            str(row["ticker"])
-            for rows in contracts.values()
-            for row in rows
-            if row.get("ticker") and not accepts(dm.canonical_symbol_future_spread, row["ticker"])
-        }
-    )
-    assert not refused, f"combo tickers the library refuses: {refused[:20]}"
 
 
 _CHICAGO = ZoneInfo("America/Chicago")

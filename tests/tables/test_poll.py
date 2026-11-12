@@ -28,7 +28,6 @@ import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._errors import PermanentError, RowDataError
@@ -1086,9 +1085,7 @@ def product_codes(
     # A refreshing table of futures product codes, and its box.
     table = dh_input_table({"ProductCode": dtypes.string}, key_cols="ProductCode")
     table.add(new_table([string_col("ProductCode", list(codes))]))
-    values = ValueTable(
-        "product_code", "product_code", "ProductCode", underlying=False, table=table
-    )
+    values = ValueTable("product_code", "product_code", "ProductCode", table=table)
     return table, values
 
 
@@ -1101,17 +1098,15 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
-    codes, values = product_codes(dh_input_table, "NQ", "ES", " CL")
+    codes, values = product_codes(dh_input_table, "NQ", "ES", "CL,NG")
     script.rows()
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
     )
     clock.wait_for_sleepers(1)
-    assert script.values == [("ES", "NQ")]  # the code with a leading space is never requested
+    assert script.values == [("ES", "NQ")]  # the code no request can carry is never requested
     (row,) = stream_rows()
-    assert row["Error"].startswith(
-        "skipping 1 symbol-table value this dataset does not take: ' CL'"
-    )
+    assert row["Error"].startswith("skipping 1 symbol-table value no request can carry: 'CL,NG'")
     codes.add(new_table([string_col("ProductCode", ["6E"])]))
     until(lambda: codes.size == 4)
     script.rows()
@@ -1131,7 +1126,7 @@ def test_a_bad_value_fails_the_poll_under_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    strict = dataclasses.replace(core.config, unsendable_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(core, "config", strict)
     codes, values = product_codes(dh_input_table, "ES")
     script.rows()
@@ -1139,14 +1134,14 @@ def test_a_bad_value_fails_the_poll_under_raise(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
     )
     clock.wait_for_sleepers(1)
-    codes.add(new_table([string_col("ProductCode", [" CL"])]))
+    codes.add(new_table([string_col("ProductCode", ["CL,NG"])]))
     until(lambda: codes.size == 2)
     clock.advance(60)
     poller_of(pollers).thread.join(TIMEOUT)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds ' CL'")
+    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'CL,NG'")
     assert script.values == [("ES",)]
 
 
@@ -1161,13 +1156,18 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watch = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS, on_error=dm.OnError.RAISE)
+    watch = dm.canonicalize_symbols(
+        source,
+        dm.AssetClass.STOCKS,
+        convention=dm.SymbolConvention.YAHOO,
+        on_error=dm.OnError.RAISE,
+    )
     script.rows()
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
     )
     clock.wait_for_sleepers(1)
-    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    source.add(new_table([string_col("Symbol", ["VOD.L"])]))
     until(lambda: bool(watch.j_table.isFailed()))
     clock.advance(60)
     poller_of(pollers).thread.join(TIMEOUT)
@@ -1178,7 +1178,7 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     assert script.symbols == [("AAPL",)]
 
 
-def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_raise(
+def test_a_late_symbol_table_row_no_request_can_carry_fails_the_table_under_raise(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -1189,7 +1189,7 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    strict = dataclasses.replace(core.config, unsendable_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(core, "config", strict)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
@@ -1198,19 +1198,19 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
     )
     clock.wait_for_sleepers(1)
-    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT,NVDA"])]))
     until(lambda: watch.size == 2)
     clock.advance(60)
     poller_of(pollers).thread.join(TIMEOUT)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
+    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'MSFT,NVDA'")
+    assert "no request to Massive can carry" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
-def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
+def test_a_symbol_table_row_no_request_can_carry_is_skipped_and_shown(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -1220,7 +1220,7 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    watch.add(new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA"])]))
     script.rows()
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
@@ -1229,12 +1229,11 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     assert script.symbols == [("AAPL",)]  # the bad row is never requested
     (row,) = stream_rows()
     assert row["Error"] == (
-        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
+        "skipping 1 symbol-table value no request can carry: 'MSFT,NVDA'; fix or delete that row"
     )
-    watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it clears the text
+    watch.delete(new_table([string_col("Symbol", ["MSFT,NVDA"])]))  # deleting it clears the text
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested
-    until(lambda: watch.size == 2 and "msft" not in [r[0] for r in watch.iter_tuple()])
+    until(lambda: watch.size == 2 and "MSFT,NVDA" not in [r[0] for r in watch.iter_tuple()])
     script.rows()
     next_cycle(clock)
     assert script.symbols[-1] == ("AAPL", "MSFT")
@@ -1729,10 +1728,10 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
         rest_session._core,
         DIVIDENDS,
         query_type=FetchQuery,
-        symbols=new_table([string_col("Symbol", ["aapl"])]),
+        symbols=new_table([string_col("Symbol", ["AAPL,MSFT"])]),
     )
     with pytest.raises(
-        ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table is"
+        ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table can be sent"
     ):
         bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
@@ -2445,23 +2444,25 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
-    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
-    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
+    # Under WARN a forex row whose pair the library cannot read keeps a null Symbol and its
+    # text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
     # merges with another such row, and REPLACE removes it by its text.
     monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
+    spec = dataclasses.replace(FEED, asset_class=AssetClass.FOREX, poll_keys=("Symbol",))
     rows = [
-        {"id": "a", "ticker": "AAPL"},
+        {"id": "a", "ticker": "C:EURUSD"},
         {"id": "b", "ticker": "@@1"},
         {"id": "c", "ticker": "@@2"},
     ]
     fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m:
-        q = build_query(m._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02")
+        q = build_query(
+            m._core, spec, query_type=FetchQuery, symbols=["C:EURUSD"], start="2025-01-02"
+        )
         table = q.poll(60, mode=mode)
-        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
+        expected = [("a", "C:EURUSD", None), ("b", None, "@@1"), ("c", None, "@@2")]
 
         def held() -> list[tuple[str, str | None, str | None]]:
             return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))

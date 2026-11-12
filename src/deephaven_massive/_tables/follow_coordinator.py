@@ -45,7 +45,7 @@ changes nothing.
 
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
-`noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
+`unsendable_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
 the coordinator records the failure and publishes it, never the listener. So does a crypto pair
 Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`. So does a call that
 did not wait whose call-time symbols (the table's symbols when the watch started) all end
@@ -196,7 +196,7 @@ class _Changed:
 
 @dataclass(frozen=True, slots=True)
 class _Skipped:
-    """The table's values the result skips now, because they are not Massive's tickers."""
+    """The table's values the result skips now, because no request can carry them."""
 
     read: FollowedRead
     text: str | None
@@ -204,7 +204,7 @@ class _Skipped:
 
 @dataclass(frozen=True, slots=True)
 class _Invalid:
-    """A bad row under `noncanonical_symbols=RAISE`, or the symbol table's own failure."""
+    """A bad row under `unsendable_symbols=RAISE`, or the symbol table's own failure."""
 
     read: FollowedRead
     message: str

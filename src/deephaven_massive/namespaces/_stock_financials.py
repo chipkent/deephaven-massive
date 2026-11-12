@@ -421,7 +421,7 @@ class StocksFinancialsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker isn't Massive's exact ticker;
+                - a ticker is empty or holds `,`, `/`, or `*`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 

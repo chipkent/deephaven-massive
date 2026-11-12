@@ -21,7 +21,7 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._tables.columns import (
     describe,
@@ -144,11 +144,11 @@ class StreamQuery(Query):
         which has none, gets `ALL`: the stream subscribes its channel's every topic. A static
         table cannot be listened to, so it is read now, like `fetch()` reads one
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
-        stays reactive. A static table with no symbol, with only rows that are not canonical,
-        or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair of
-        the table that Massive's crypto ticker list does not hold follows
-        `unlisted_symbols` (`StreamTransport.tradable_pairs`).
+        stays reactive. A static table with no symbol, with only rows no request can carry,
+        or with any such row under `unsendable_symbols=RAISE`, raises the `ValueError` of
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair that
+        Massive's crypto ticker list does not hold follows `unlisted_symbols` when the stream
+        opens.
 
         Args:
             verb: The stream method called, such as `"blink"`, which a refusal names.
@@ -166,8 +166,6 @@ class StreamQuery(Query):
             return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
             read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
-            if self._spec.asset_class is AssetClass.CRYPTO:
-                read = self._core.stream_transport().tradable_pairs(self._spec, read)
             return replace(request, symbols=read)
         return request
 
@@ -177,13 +175,12 @@ class StreamQuery(Query):
         The result is the shape, described last (`describe`): an append-only or ring table
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
-        A reactive symbol table is read first, so a row that is not Massive's exact ticker
+        A reactive symbol table is read first, so a row no request can carry
         fails the call before any stream starts. A crypto pair takes its split from Massive's
-        crypto ticker list when the stream starts (read once per session); a failed read, or a
-        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A pair
-        of a symbol table, at the call or added later, follows `MassiveConfig.unlisted_symbols`
-        instead: skipped (and, for a reactive table, listed in `m.streams()`) under `LOG` and
-        `IGNORE`.
+        crypto ticker list when the stream starts (read once per session). A pair the list does
+        not hold, or that a failed read cannot split, at the call or added later, follows
+        `MassiveConfig.unlisted_symbols`: skipped and listed in `m.streams()` under `LOG` and
+        `IGNORE`, and raised as `MassiveError` before any topic is subscribed under `RAISE`.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -225,7 +222,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
     )
     def blink(self) -> Table:
         """Return the stream as a blink table, which holds only the latest update cycle's rows.
@@ -239,8 +235,7 @@ class StreamQuery(Query):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols is Massive's
-                  exact ticker;
+                - a static table of symbols is empty, or no row of a table of symbols can be sent;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
@@ -256,11 +251,8 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
+                  can't be read, or lacks a crypto pair.
         """
         return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
 
@@ -273,7 +265,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
     )
     def append_only(self) -> Table:
         """Return every row the stream sends after the call, oldest first.
@@ -286,8 +277,7 @@ class StreamQuery(Query):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols is Massive's
-                  exact ticker;
+                - a static table of symbols is empty, or no row of a table of symbols can be sent;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
@@ -303,11 +293,8 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
+                  can't be read, or lacks a crypto pair.
         """
         return self._stream(
             blink_to_append_only, self._stream_request("append_only"), verb="append_only"
@@ -322,7 +309,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
         require_positive_int,
     )
     def ring(self, capacity: int) -> Table:
@@ -339,8 +325,7 @@ class StreamQuery(Query):
             ValueError: At the call, before the table exists, if:
                 - `capacity` is out of range;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols is Massive's
-                  exact ticker;
+                - a static table of symbols is empty, or no row of a table of symbols can be sent;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
@@ -356,11 +341,8 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
+                  can't be read, or lacks a crypto pair.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -378,8 +360,8 @@ class SymbolStreamQuery(StreamQuery):
 
     The symbols can be a list, a static table, which is read once at the call, or a live table,
     which works as a watchlist: the stream subscribes and unsubscribes as you add and delete
-    rows. A watchlist row that isn't Massive's exact ticker is skipped and listed in
-    `m.streams()`.
+    rows. A watchlist row that is empty or holds `,`, `/`, or `*` is skipped and
+    listed in `m.streams()`.
     Massive allows 1,000 option contracts on one connection, and the library counts a
     contract's trades and quotes as two. More contracts than that, passed as a list or a static
     table, raise `ValueError`; a watchlist's extra contracts wait for room, and `Deferred` in
@@ -441,7 +423,6 @@ class SymbolStreamQuery(StreamQuery):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
         _last_by_keys,
     )
     def last_by(self, by: str | Sequence[str] = "Symbol") -> Table:
@@ -465,8 +446,7 @@ class SymbolStreamQuery(StreamQuery):
             ValueError: At the call, before the table exists, if:
                 - `by` is empty, repeats a column, or names a column the dataset doesn't have;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols is Massive's
-                  exact ticker;
+                - a static table of symbols is empty, or no row of a table of symbols can be sent;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
@@ -480,11 +460,8 @@ class SymbolStreamQuery(StreamQuery):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
+                  can't be read, or lacks a crypto pair.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request("last_by")

@@ -32,8 +32,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.row_times import ISSUES_URL
-from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency, SymbolConvention
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._log_limits import BoundedLog
@@ -610,36 +609,41 @@ def test_a_row_received_while_a_stream_opens_reaches_its_first_result(
     ws_session.session.release(latest)
 
 
+def fx_quote(pair: str) -> dict[str, object]:
+    # One forex quote frame, its pair as Massive's WebSocket writes it.
+    return {"ev": "C", "p": pair, "a": 1.1, "b": 1.0, "t": 1_700_000_000_000, "x": 1}
+
+
 def failed_after_flush(ws_session: WsSession, table: Table) -> bool:
     # Flush the connections, so a failure the flush thread was handed is applied.
     ws_session.flush()
     return bool(table.j_table.isFailed())
 
 
-def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise(
+def test_a_late_watchlist_row_no_request_can_carry_fails_the_stream_under_raise(
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    ws_session = make_ws_session(noncanonical_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(unsendable_symbols=dm.OnError.RAISE)
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
-    watchlist.add(new_table([string_col("Symbol", ["msft"])]))
+    watchlist.add(new_table([string_col("Symbol", ["MSFT,GOOG"])]))
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
-    # The row that is not canonical never became a topic.
+    assert row["Error"].startswith("test.trades: a symbol table holds 'MSFT,GOOG'")
+    assert "no request to Massive can carry" in row["Error"]
+    # The row no request can carry never became a topic.
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
     assert sent == {"T.AAPL"}
 
 
-def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
+def test_a_watchlist_row_no_request_can_carry_is_skipped_and_shown(
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -647,12 +651,11 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    watchlist.add(new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA"])]))
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     skipped = (
-        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
+        "skipping 1 symbol-table value no request can carry: 'MSFT,NVDA'; fix or delete that row"
     )
 
     def error() -> object:
@@ -661,14 +664,14 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
         return row["Error"]
 
     wait_for(lambda: error() == skipped)
-    watchlist.delete(new_table([string_col("Symbol", ["msft"])]))  # fixed: the text clears
+    watchlist.delete(new_table([string_col("Symbol", ["MSFT,NVDA"])]))  # fixed: the text clears
     watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
     ws_session.subscribed("T.MSFT")
     wait_for(lambda: error() is None)
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] != "FAILED"
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
-    assert "T.msft" not in ",".join(sent)  # the bad row never became a topic
+    assert "MSFT,NVDA" not in ",".join(sent)  # the bad row never became a topic
     failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
 
@@ -677,13 +680,13 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_rais
     make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
     ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
-    every = ws_session.query(TRADES, dm.ALL).append_only()
-    ws_session.subscribed("T.*")
-    ws_session.send(trade("BRK/B"))
+    every = ws_session.query(FOREX, dm.ALL).append_only()
+    ws_session.subscribed("C.*")
+    ws_session.send(fx_quote("!!"))
     wait_for(lambda: failed_after_flush(ws_session, every))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+    assert row["Error"].startswith("test.forex: Massive sent the symbol '!!', a spelling")
 
 
 def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
@@ -691,13 +694,13 @@ def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
 ) -> None:
     ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
     # The row cannot be routed, so no symbol stream may starve on it silently.
-    one = ws_session.query(TRADES, ["AAPL"]).append_only()
-    ws_session.subscribed("T.AAPL")
-    ws_session.send(trade("BRK/B"))
+    one = ws_session.query(FOREX, ["C:EURUSD"]).append_only()
+    ws_session.subscribed("C.EUR-USD")
+    ws_session.send(fx_quote("!!"))
     wait_for(lambda: failed_after_flush(ws_session, one))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+    assert row["Error"].startswith("test.forex: Massive sent the symbol '!!', a spelling")
 
 
 def test_a_failing_upstream_watchlist_fails_the_stream(
@@ -711,11 +714,13 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
     # it rather than keep its old topics, and the failure is one ERROR, the stream's.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS, on_error=dm.OnError.RAISE)
+    watchlist = dm.canonicalize_symbols(
+        source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=dm.OnError.RAISE
+    )
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
-        source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+        source.add(new_table([string_col("Symbol", ["VOD.L"])]))
         wait_for(lambda: failed_after_flush(ws_session, result))
         (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
@@ -740,14 +745,16 @@ def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_follow
     # and logs it once, and both it and the stream that follows it keep updating.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
+    watchlist = dm.canonicalize_symbols(
+        source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO
+    )
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
-        source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+        source.add(new_table([string_col("Symbol", ["VOD.L"])]))
         wait_for(lambda: len(caplog.records) == 1)  # logged on an update-graph thread
     assert [r.levelname for r in caplog.records] == ["WARNING"]
-    assert "'BRK-B'" in caplog.records[0].getMessage()
+    assert "'VOD.L'" in caplog.records[0].getMessage()
     source.add(new_table([string_col("Symbol", ["MSFT"])]))
     ws_session.subscribed("T.MSFT")
     assert [r["Symbol"] for r in dh_to_pylist(watchlist)] == ["AAPL", None, "MSFT"]
@@ -784,11 +791,13 @@ def test_a_failing_watchlist_fails_a_last_by_stream_once(
     # and Deephaven ends the process on it.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
-    watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS, on_error=dm.OnError.RAISE)
+    watchlist = dm.canonicalize_symbols(
+        source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=dm.OnError.RAISE
+    )
     result = ws_session.query(TRADES, watchlist).last_by(*keys)
     ws_session.subscribed("T.AAPL")
     blink = stream_blink(ws_session)
-    source.add(new_table([string_col("Symbol", ["BRK-B"])]))
+    source.add(new_table([string_col("Symbol", ["VOD.L"])]))
     wait_for(lambda: failed_after_flush(ws_session, blink))
     cycle_ended(ws_session)
     assert result.j_table.isFailed()
@@ -845,12 +854,12 @@ def test_a_frame_symbol_the_library_cannot_read_is_kept_by_default(
     make_ws_session: Callable[..., WsSession], *, rows_when: RowsWhen
 ) -> None:
     warned = make_ws_session()
-    every = warned.query(TRADES, dm.ALL).append_only()
-    warned.subscribed("T.*")
-    warned.send(trade("BRK/B"), trade("AAPL"))
+    every = warned.query(FOREX, dm.ALL).append_only()
+    warned.subscribed("C.*")
+    warned.send(fx_quote("!!"), fx_quote("EUR/USD"))
     warned.flush()
     shown = rows_when(every, lambda rows: len(rows) == 2)
-    assert [(r["Symbol"], r["RawSymbol"]) for r in shown] == [(None, "BRK/B"), ("AAPL", None)]
+    assert [(r["Symbol"], r["RawSymbol"]) for r in shown] == [(None, "!!"), ("C:EURUSD", None)]
 
 
 def test_a_derived_table_keeps_following_the_watchlist(
@@ -1469,10 +1478,9 @@ def test_a_stream_waiting_for_a_slot_says_so(
 
 
 SKIPPED_SPY = (
-    "skipping 1 symbol-table value this dataset does not take: 'spy'; fix or delete that "
-    f"row, or report it at {ISSUES_URL} if Massive itself writes it"
+    "skipping 1 symbol-table value no request can carry: 'SPY,QQQ'; fix or delete that row"
 )
-"""The `Error` text of a stream whose options watchlist holds the bad row `spy`."""
+"""The `Error` text of a stream whose options watchlist holds the bad row `SPY,QQQ`."""
 
 
 def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
@@ -1487,7 +1495,7 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
     ws_session = make_ws_session()
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "spy"]
+    contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "SPY,QQQ"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
@@ -1507,9 +1515,9 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
         return re.fullmatch(pattern, cast("str", error() or "")) is not None
 
     wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
-    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    watchlist.delete(new_table([string_col("Symbol", ["SPY,QQQ"])]))
     wait_for(lambda: stalled(""))  # fixing the row keeps the stall
-    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    watchlist.add(new_table([string_col("Symbol", ["SPY,QQQ"])]))
     wait_for(lambda: stalled(skipped))
     fake_ws_server.hold_slot(held=False)
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
@@ -1527,7 +1535,7 @@ def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
     monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    contracts = ["O:SPY251219C00610000", "O:SPY251219C00600000", "spy"]
+    contracts = ["O:SPY251219C00610000", "O:SPY251219C00600000", "SPY,QQQ"]
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     result = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
@@ -1539,9 +1547,9 @@ def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
 
     cap = "over capacity: 2/1; 1 deferred"
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
-    watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
+    watchlist.delete(new_table([string_col("Symbol", ["SPY,QQQ"])]))
     wait_for(lambda: error() == cap)  # fixing the row keeps the cap's warning
-    watchlist.add(new_table([string_col("Symbol", ["spy"])]))
+    watchlist.add(new_table([string_col("Symbol", ["SPY,QQQ"])]))
     wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
     watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
     ws_session.subscribed("T.O:SPY251219C00610000")
@@ -2067,14 +2075,15 @@ def test_an_ambiguous_crypto_pair_subscribes_the_topic_massive_gives(ws_session:
         ws_session.session.release(table)
 
 
-def test_a_failed_crypto_pair_lookup_refuses_the_stream(ws_session: WsSession) -> None:
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^cannot stream 'X:DOTUSD': 'X:DOTUSD' cannot be split into its two currencies: "
-        r"Massive's reference data does not list it$",
-    ):
-        ws_session.query(CRYPTO, ["X:DOTUSD"]).blink()
-    assert ws_session.urls == []  # no connection opened, so no topic guessed
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_a_pair_massive_does_not_list_gives_no_rows_and_is_shown(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # Massive has no data for it: the stream opens without it, and no topic is guessed.
+    result = ws_session.query(CRYPTO, ["X:DOTUSD"]).blink()
+    assert stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR.replace("ETHT", "DOT")
+    assert not any("DOT" in json.loads(f)["params"] for f in ws_session.server.frames())
+    ws_session.session.release(result)
 
 
 def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
@@ -2087,19 +2096,19 @@ def test_a_watchlist_row_of_an_ambiguous_pair_is_looked_up_off_the_update_graph(
     watchlist.add(new_table([string_col("Symbol", ["X:SHIBUSD"])]))
     ws_session.pair_answers["X:SHIBUSD"] = ("SHIB", "USD")
     result = ws_session.query(CRYPTO, watchlist).append_only()
-    ws_session.subscribed("XT.SHIB-USD")  # the current row, looked up before the stream started
+    ws_session.subscribed("XT.SHIB-USD")  # the current row, looked up as the watch reports it
     watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
-    ws_session.subscribed("XT.DOT-USD")  # a later row, looked up on the lookup worker
-    (_, caller), (_, worker) = lookups(ws_session)
-    assert caller == threading.current_thread().name
-    assert worker.startswith(f"{ws_session.session._core.thread_prefix} symbol changes")
+    ws_session.subscribed("XT.DOT-USD")  # a later row, looked up on the lookup worker too
+    worker = f"{ws_session.session._core.thread_prefix} symbol changes"
+    assert all(thread.startswith(worker) for _, thread in lookups(ws_session))
+    assert len(lookups(ws_session)) == 2
     assert "XT.DO-TUSD" not in {json.loads(f)["params"] for f in ws_session.server.frames()}
     ws_session.session.release(result)
 
 
 UNLISTED_ERROR = (
     "skipped crypto pairs 1 [X:ETHTUSD], which Massive's crypto ticker list does not hold; a "
-    "skipped pair stays skipped until its row is deleted and added again"
+    "watchlist's skipped pair is looked up again when its row is added again"
 )
 
 
@@ -2175,8 +2184,8 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_a
         wait_for(lambda: stream_error(ws_session, dh_to_pylist) is not None)
     assert stream_error(ws_session, dh_to_pylist) == (
         "skipped crypto pairs 3 [X:ADAUSD, X:DOTUSD, X:SOLUSD], since Massive's crypto ticker "
-        "list could not be read (cannot stream 'X:ADAUSD': the list read timed out); a skipped "
-        "pair stays skipped until its row is deleted and added again"
+        "list could not be read (cannot stream 'X:ADAUSD': the list read timed out); a watchlist's "
+        "skipped pair is looked up again when its row is added again"
     )
     # The first try and one retry after each delay, each stopped by its first failed read.
     tried = [symbol for symbol, _ in lookups(ws_session) if symbol != "X:BTCUSD"]
@@ -2457,13 +2466,13 @@ def test_an_unlisted_pair_at_the_call_is_skipped(
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         result = ws_session.query(CRYPTO, watchlist).append_only()
         ws_session.subscribed("XT.BTC-USD")
-        if reactive:  # the stream's worker looks it up again, and lists it in its Error
-            wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
-        else:  # a static table is read once, at the call
-            assert stream_error(ws_session, dh_to_pylist) is None
+        # The stream lists it in its Error: a static table's at the call, a live table's once
+        # the stream's worker looks it up.
+        wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
     skipped = [r for r in caplog.records if "the pair is skipped until its row" in r.getMessage()]
-    assert [(r.levelno, r.getMessage().split(":")[0]) for r in skipped] == [
-        (logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG, "test.crypto call")
+    reader = "crypto stream" if reactive else "test.crypto call"
+    assert [(r.levelno, r.getMessage().startswith(reader)) for r in skipped] == [
+        (logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG, True)
     ]
     sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
     assert not any("ETHT" in topic for topic in sent)
@@ -2472,27 +2481,26 @@ def test_an_unlisted_pair_at_the_call_is_skipped(
 
 @pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
 @pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
-def test_a_symbol_table_whose_pairs_are_all_unlisted_is_refused(
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_a_symbol_table_whose_pairs_are_all_unlisted_streams_nothing(
     make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     setting: dm.OnError,
     reactive: bool,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
+    # Massive has no data for any of them: the stream opens, gives no rows, and lists them.
     ws_session = make_ws_session(unlisted_symbols=setting)
     watchlist = crypto_watchlist(
         ["X:ETHTUSD"],
         reactive=reactive,
         dh_input_table=dh_input_table,
     )
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^test\.crypto: no crypto pair of the symbol table can be streamed, so the result "
-        r"would follow nothing: crypto pairs 1 \[X:ETHTUSD\], which Massive's crypto ticker list "
-        r"does not hold$",
-    ):
-        ws_session.query(CRYPTO, watchlist).append_only()
-    assert ws_session.urls == []  # no connection opened
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
+    assert not any("ETHT" in json.loads(f)["params"] for f in ws_session.server.frames())
+    ws_session.session.release(result)
 
 
 @pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
@@ -2513,10 +2521,10 @@ def test_an_unlisted_pair_at_the_call_raises_under_raise(
     assert ws_session.urls == []  # no connection opened
 
 
-def test_an_unlisted_pair_in_a_list_raises_whatever_the_setting(
+def test_an_unlisted_pair_in_a_list_raises_under_raise(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
-    ws_session = make_ws_session(unlisted_symbols=dm.OnError.IGNORE)
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
     with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot"):
         ws_session.query(CRYPTO, ["X:BTCUSD", "X:ETHTUSD"]).append_only()
 

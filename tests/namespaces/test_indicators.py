@@ -155,8 +155,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         i.sma("AAPL", 20, filters={"adjusted": True})
     with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
-    with pytest.raises(ValueError, match=r"^'Q:NOPE' is not a Massive stock ticker"):
-        i.sma("Q:NOPE", 20)
+    assert i.sma("Q:NOPE", 20)._request.symbols == ("Q:NOPE",)  # Massive answers it
 
 
 def test_a_timespan_passed_as_the_window_names_the_keyword(
