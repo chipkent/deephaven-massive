@@ -23,7 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Option contracts to describe; leave it out to list contracts. `dm.ALL` is refused; leave `symbols` out instead. |
-| `underlying` | Only contracts of this underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column is read value by value. A live table is followed. In a static table, one failed value fails the call. |
+| `underlying` | Only contracts of this underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column is read value by value, each row sent as written: a currency or crypto pair row gives no rows. A live table is followed. In a static table, one failed value fails the call. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
 | `expired` | True lists only expired contracts; False, the default, those still trading. |
