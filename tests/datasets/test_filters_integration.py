@@ -56,3 +56,18 @@ def test_massive_answers_a_filter_list_item_with_a_space(
     error.
     """
     assert bad_values.ask_all(live_rest, bad_values.FILTER_WHITESPACE, evidence)
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("118")
+@pytest.mark.requests(1)
+def test_massive_answers_a_filter_list_with_an_empty_item(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the dividends answer to `ticker.any_of=AAPL,,MSFT`, a list with an empty item.
+
+    The library sends an empty item as written. DATA counts the rows of AAPL or MSFT: rows of
+    any other ticker mean Massive read the empty item as no filter, so wrong data with no error,
+    and the library should refuse it.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.FILTER_EMPTY_ITEM, evidence)

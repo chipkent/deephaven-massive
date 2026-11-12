@@ -201,6 +201,16 @@ def test_bars_take_the_day_timespan(
     assert hours._request.multiplier == 0
 
 
+def test_every_contract_s_day_bars_point_to_session_bars(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Day bars are read from REST only, which needs explicit contracts; the session files
+    # hold every contract's session bars.
+    query = massive_session.futures.bars(dm.ALL, dm.Timespan.DAY)
+    with pytest.raises(ValueError, match=r"use dm\.Timespan\.SESSION for every contract's daily"):
+        query.history("2025-02-04", "2025-02-05", wait=True)
+
+
 def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.snapshots(
         ["ESZ5"], sort="ticker", order=dm.Order.DESC, limit=10, filters={"ticker_gte": "E"}

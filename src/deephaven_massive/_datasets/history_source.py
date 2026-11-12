@@ -482,7 +482,11 @@ def _flat_file_problems(
     if flat_file_prefix(spec, request) is None:
         if spec.is_bars and spec.flat_file_prefixes:
             spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
-            problems.append(f"{spec.name} flat files hold only {spans} bars")
+            # Futures day bars are read from REST; the session files hold session bars, which
+            # are not yet shown to be the same bars.
+            day = request.timespan is Timespan.DAY and Timespan.SESSION in spec.flat_file_prefixes
+            hint = "; use dm.Timespan.SESSION for every contract's daily bars" if day else ""
+            problems.append(f"{spec.name} flat files hold only {spans} bars{hint}")
         else:
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:

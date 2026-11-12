@@ -405,17 +405,19 @@ class FuturesNamespace(Namespace):
         """Open, high, low, close, and volume bars of futures contracts.
 
         Each row is one bar of `multiplier` times `timespan`. Daily bars are
-        `dm.Timespan.SESSION` or `dm.Timespan.DAY`; both give one bar per trading session. There
-        is no `previous_day_bar()`. With dates, `history()` keeps a bar of a session or longer
-        only when all its sessions are in the range. The dataset's page, linked below, says how
-        each bar's window and `Date` are set.
+        `dm.Timespan.SESSION` or `dm.Timespan.DAY`; both give one bar per trading session.
+        `DAY` bars are read from REST only, so for `dm.ALL` use `SESSION`, which flat files
+        serve. There is no `previous_day_bar()`. With dates, `history()` keeps a bar of a
+        session or longer only when all its sessions are in the range. The dataset's page,
+        linked below, says how each bar's window and `Date` are set.
 
         Massive refuses a multiplier above its unit's maximum, such as 60 minutes, and the call
         raises `MassiveError`. Use the next unit instead.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL` for every contract.
-            timespan: The bar's unit.
+            timespan: The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use
+                `SESSION`.
             multiplier: Units per bar.
             venues: The exchanges whose flat files `history()` reads.
 

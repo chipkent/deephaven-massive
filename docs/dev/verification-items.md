@@ -160,11 +160,20 @@ settles it.
   sent as `day` and its bars are dated and kept as session bars. Settled by
   `tests/namespaces/test_futures_integration.py` (Futures Basic), which compares `1day` with
   `1session` and `5day` with `5session` on the front E-mini contract, and records the library's
-  `DAY` bars beside them.
+  `DAY` bars beside them. The same test records what the futures aggregates answer to a
+  multiplier below 1 (`0session`), which the library sends for Massive to judge.
 - **108.** What the option chain answers to an option contract as its underlying. Sent to
   Massive for it to judge; if it answers with no error, the chain should refuse a contract.
   Settled by `tests/namespaces/test_options_integration.py` (Options Starter), which sends
   `O:AAPL250117C00150000`.
+- **109.** What the options contracts list answers to an option contract as its
+  `underlying_ticker`. Sent to Massive for it to judge; if it answers with no error,
+  `m.options.contracts` should refuse a contract as `underlying`. Settled by
+  `tests/namespaces/test_options_integration.py` (Options Basic), which sends
+  `O:AAPL250117C00150000`.
+- **118.** What Massive answers to a filter list with an empty item (`ticker.any_of=AAPL,,MSFT`).
+  Sent as written; if Massive reads the empty item as no filter, the library should refuse it.
+  Settled by `tests/datasets/test_filters_integration.py` (Stocks Basic).
 
 ## Settled
 

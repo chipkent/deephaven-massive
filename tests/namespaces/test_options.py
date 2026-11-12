@@ -598,8 +598,11 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     contracts = massive_session.options.contracts
     # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
     for pair in ("C:EURUSD", "X:BTCUSD"):
-        with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
+        with pytest.raises(ValueError, match=rf"^underlying='{pair}' is a currency or crypto"):
             contracts(underlying=pair)
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(contracts(underlying=contract))["params"]["underlying_ticker"] == contract
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
     with pytest.raises(

@@ -49,6 +49,7 @@ __all__ = [
     "CURRENCY_CODE",
     "ENUM_FILTER",
     "ENUM_SORT",
+    "FILTER_EMPTY_ITEM",
     "FILTER_WHITESPACE",
     "FUTURES_DAY",
     "INDICATOR_TIMESPAN",
@@ -64,6 +65,7 @@ __all__ = [
     "UNDERLYING_CHAIN",
     "UNDERLYING_CHAIN_CONTRACT",
     "UNDERLYING_CONTRACTS",
+    "UNDERLYING_CONTRACTS_CONTRACT",
     "WINDOW",
     "Answer",
     "BadRequest",
@@ -84,6 +86,7 @@ SORT_WHITESPACE: Final = "sort part with surrounding whitespace"
 LIMIT: Final = "limit below 1"
 ENUM_FILTER: Final = "enum filter value the parameter does not list"
 FILTER_WHITESPACE: Final = "filter list item with surrounding whitespace"
+FILTER_EMPTY_ITEM: Final = "filter list with an empty item"
 TRAILING_BALANCE_SHEET: Final = "balance sheets for the trailing twelve months"
 FUTURES_DAY: Final = "futures bars of a day resolution"
 SESSION_OUTSIDE_FUTURES: Final = "session bars outside futures"
@@ -91,6 +94,7 @@ MULTIPLIER: Final = "bar multiplier below 1"
 UNDERLYING_CHAIN: Final = "option chain of a currency or crypto pair"
 UNDERLYING_CHAIN_CONTRACT: Final = "option chain of an option contract"
 UNDERLYING_CONTRACTS: Final = "option contracts of a currency or crypto pair"
+UNDERLYING_CONTRACTS_CONTRACT: Final = "option contracts of an option contract"
 CONTRACT_SYMBOL: Final = "option contract details of a stock ticker"
 START_AFTER_END: Final = "start after end"
 START_AFTER_NOW: Final = "start after now"
@@ -444,6 +448,18 @@ def _field_is(key: str, wanted: object, row: Row) -> bool:
     return found == wanted
 
 
+def _listed_ticker(row: Row) -> bool:
+    """Tell whether a dividend row is of AAPL or MSFT, the tickers beside the empty item.
+
+    Args:
+        row: The row.
+
+    Returns:
+        True when its `ticker` is `AAPL` or `MSFT`.
+    """
+    return row.get("ticker") in ("AAPL", "MSFT")
+
+
 def _never(_row: Row) -> bool:
     """Match no row, for a request whose range holds no time.
 
@@ -634,6 +650,21 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 matching="of MSFT, the item sent with a space",
             ),
         ),
+        FILTER_EMPTY_ITEM: (
+            BadRequest(
+                label="dividends ticker.any_of=['AAPL', '', 'MSFT']",
+                path=_DIVIDENDS,
+                names={},
+                query={
+                    "ticker.any_of": ["AAPL", "", "MSFT"],
+                    "ex_dividend_date.gte": today - timedelta(days=365),
+                    "limit": 50,
+                },
+                bucket="stocks",
+                match=_listed_ticker,
+                matching="of AAPL or MSFT, the tickers sent",
+            ),
+        ),
         TRAILING_BALANCE_SHEET: (
             BadRequest(
                 label="balance sheets timeframe=trailing_twelve_months",
@@ -689,6 +720,17 @@ def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
                 matching=f"with underlying_ticker {pair}",
             )
             for pair in _PAIRS
+        ),
+        UNDERLYING_CONTRACTS_CONTRACT: (
+            BadRequest(
+                label=f"contracts underlying_ticker={_CONTRACT}",
+                path="/v3/reference/options/contracts",
+                names={},
+                query={"underlying_ticker": _CONTRACT, "limit": 5},
+                bucket="options",
+                match=partial(_field_is, "underlying_ticker", _CONTRACT),
+                matching=f"with underlying_ticker {_CONTRACT}",
+            ),
         ),
         CONTRACT_SYMBOL: (
             BadRequest(

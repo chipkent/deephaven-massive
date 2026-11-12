@@ -357,13 +357,18 @@ def _chain_underlying(value: object) -> str:
     return check_symbol(ClassFromPrefix.ANY, value)
 
 
+_PAIR_CLASSES: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes whose tickers the contracts list answers with no error and no rows."""
+
+
 @raises_through(_chain_underlying)
 def _underlying(value: object) -> str:
-    """Check the contracts list's `underlying` argument: a stock or index ticker.
+    """Check the contracts list's `underlying` argument: any of Massive's tickers but a pair.
 
     A currency or crypto pair is refused, because Massive answers it with no error: sent
     `underlying_ticker=C:EURUSD` or `X:BTCUSD`, the contracts list answered HTTP 200 with no
-    rows, which would read as a pair with no options listed.
+    rows, which would read as a pair with no options listed. Every other canonical ticker is
+    sent for Massive to judge, an option contract included.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
@@ -374,13 +379,13 @@ def _underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is not canonical, or is the ticker of an option, a currency
-            pair, or a crypto pair.
+        ValueError: If `value` is not canonical, or is a currency or crypto pair.
     """
     ticker = _chain_underlying(value)
-    if symbol_class(ticker) not in UNDERLYING_CLASSES:
+    if symbol_class(ticker) in _PAIR_CLASSES:
         raise ValueError(
-            f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
+            f"underlying={value!r} is a currency or crypto pair, which has no listed options; "
+            "pass a ticker such as 'AAPL' or 'I:SPX'"
         )
     return ticker
 
@@ -890,7 +895,7 @@ class OptionsNamespace(Namespace):
                 - a ticker in `symbols` isn't Massive's exact ticker of an option contract; a stock
                   or index ticker's message says to pass it as `underlying=`;
                 - a table has no `Symbol` column;
-                - `underlying` isn't Massive's exact ticker;
+                - `underlying` isn't Massive's exact ticker, or is a currency or crypto pair;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

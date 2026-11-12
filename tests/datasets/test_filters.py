@@ -283,7 +283,9 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             "takes whole ms since the epoch",
         ),
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
-        (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
+        # An all-empty list sends no value, so it would ask for no filter at all.
+        (DIVIDENDS, "distribution_type_any_of", "", "has no value in"),
+        (DIVIDENDS, "distribution_type_any_of", ",", "has no value in"),
         # ISO-8601 text of no documented precision cannot end a day exactly.
         (
             NEWS,
@@ -428,9 +430,11 @@ def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
         ("a, b", ("a", " b")),
         (("a", " b"), ("a", " b")),
         (" ", (" ",)),
+        # An empty item is sent too, for Massive to read.
+        ("a,,b", ("a", "", "b")),
     ],
 )
-def test_a_list_item_with_surrounding_whitespace_is_sent_as_written(
+def test_a_list_item_with_whitespace_or_none_is_sent_as_written(
     value: object, sent: tuple[str, ...]
 ) -> None:
     # Massive reads the item it names: `ticker.any_of` of AAPL and " MSFT" returned MSFT's rows.

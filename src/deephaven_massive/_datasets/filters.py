@@ -203,7 +203,9 @@ def _list_items(
     The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
     `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas makes them one
     value, so equal filters give equal queries. An item is sent exactly as written, surrounding
-    whitespace included, for Massive to read: it trims it. On a list of dates
+    whitespace and an empty item (`"a,,b"`) included, for Massive to read. A list whose every
+    item is empty (`""`) is refused: its wire text is empty, which, like the empty list the
+    encoder refuses, would ask Massive for no filter at all. On a list of dates
     (`date.any_of`), a `date` item is its ISO-8601 day; on a list of numbers
     (`strike_price.any_of`), an `int` or `float` item is written as the base parameter writes one
     number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
@@ -223,10 +225,9 @@ def _list_items(
         The tuple of text items.
 
     Raises:
-        ValueError: If an item is empty (`"a,,b"` or `""`), which Massive would read as a
-            value of its own, or is of a kind the base parameter does not take: a `date` for a
-            list that is not of dates, a number for a list that is not of numbers, or a `float`
-            for a list of integers.
+        ValueError: If every item is empty (`""`), or an item is of a kind the base parameter
+            does not take: a `date` for a list that is not of dates, a number for a list that
+            is not of numbers, or a `float` for a list of integers.
     """
     if isinstance(value, str):
         value = (value,)
@@ -250,8 +251,8 @@ def _list_items(
             texts.extend(item.split(","))
         else:
             return value  # the encoder names the item it cannot send
-    if "" in texts:
-        raise ValueError(f"{spec.name} filter {key!r} has an empty value in {value!r}")
+    if texts and not any(texts):  # an empty tuple is the encoder's to refuse
+        raise ValueError(f"{spec.name} filter {key!r} has no value in {value!r}")
     return tuple(texts)
 
 
