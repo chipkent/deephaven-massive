@@ -1054,7 +1054,7 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
     # A streaming dataset declared as a REST one would lie to its caller.
     with pytest.raises(dm.MassiveError) as info:
         build_query(massive_session._core, TRADES_SPEC, query_type=FetchQuery, symbols=["AAPL"])
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
     assert str(info.value).startswith(
         "m.stocks.trades gives a SymbolStreamQuery, not the FetchQuery it declares. "
     )

@@ -1299,7 +1299,7 @@ def test_a_verb_never_sees_a_failed_table_before_its_failure(
     proceed = threading.Event()
     real = core.fail_stream
 
-    def gated(stream_id: int, error: str) -> None:
+    def gated(stream_id: int, error: dm.MassiveError) -> None:
         recording.set()
         assert proceed.wait(TIMEOUT)
         real(stream_id, error)
@@ -2209,10 +2209,10 @@ def test_a_retry_tries_only_the_pairs_not_yet_split(ws_session: WsSession) -> No
 
     ws_session.connections._crypto_pair = flaky
     ws_session.pair_answers.update({"X:ADAUSD": ("ADA", "USD"), "X:DOTUSD": ("DOT", "USD")})
-    skipped = ws_session.connections._split_pairs(
+    skipped, unread = ws_session.connections._split_pairs(
         {"X:ADAUSD", "X:DOTUSD"}, reader="crypto stream 1", delays=(0.0,)
     )
-    assert skipped == {}
+    assert (skipped, unread) == ({}, None)
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:ADAUSD", "X:DOTUSD"]
 
 
@@ -2250,7 +2250,7 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
     ws_session: WsSession, error: dm.MassiveError
 ) -> None:
     ws_session.pair_answers["X:DOTUSD"] = error
-    skipped = ws_session.connections._split_pairs(
+    skipped, unread = ws_session.connections._split_pairs(
         {"X:DOTUSD", "X:SOLUSD"},
         reader="crypto stream 1",
         delays=(3600.0,),  # would hang
@@ -2260,13 +2260,14 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
     assert skipped == {"X:DOTUSD": (ws._SkipReason.LIST_UNREAD, why)} | {
         "X:SOLUSD": (ws._SkipReason.LIST_UNREAD, why)
     }
+    assert type(unread) is type(error)  # the read's own failure, for the error raised
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
 def test_a_close_stops_the_wait_to_retry_a_pair(ws_session: WsSession) -> None:
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
     ws_session.connections.close()
-    skipped = ws_session.connections._split_pairs(
+    skipped, _ = ws_session.connections._split_pairs(
         {"X:DOTUSD"},
         reader="crypto stream 1",
         delays=(3600.0,),  # only a close ends it
@@ -2323,7 +2324,7 @@ def test_a_change_defect_after_its_stream_ended_fails_nothing(
 
 
 def test_a_defect_in_a_pair_lookup_is_never_retried_or_skipped(ws_session: WsSession) -> None:
-    defect = dm.MassiveError("the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT)
+    defect = dm.MassiveError("the split broke", source=dm.ErrorSource.LIBRARY)
     ws_session.pair_answers["X:DOTUSD"] = defect
     with pytest.raises(dm.MassiveError, match="the split broke") as raised:
         ws_session.connections._split_pairs(
@@ -2331,7 +2332,7 @@ def test_a_defect_in_a_pair_lookup_is_never_retried_or_skipped(ws_session: WsSes
             reader="crypto stream 1",
             delays=(3600.0,),  # would hang
         )
-    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert raised.value.source is dm.ErrorSource.LIBRARY
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
@@ -2339,14 +2340,14 @@ def test_a_defect_in_a_pair_lookup_at_the_call_raises_to_the_verb(
     ws_session: WsSession, dh_input_table: Callable[..., InputTable]
 ) -> None:
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "the split broke", source=dm.ErrorSource.LIBRARY
     )
     watchlist = crypto_watchlist(
         ["X:BTCUSD", "X:DOTUSD"], reactive=False, dh_input_table=dh_input_table
     )
     with pytest.raises(dm.MassiveError, match="the split broke") as raised:
         ws_session.query(CRYPTO, watchlist).append_only()
-    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert raised.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
@@ -2359,7 +2360,7 @@ def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
     # Not a skipped pair: the stream fails with the defect's own message, asking once for a
     # bug report, and the lookup is not tried again.
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "the split broke", source=dm.ErrorSource.LIBRARY
     )
     watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True, dh_input_table=dh_input_table)
     result = ws_session.query(CRYPTO, watchlist).append_only()
@@ -2490,9 +2491,23 @@ def test_a_symbol_table_whose_pairs_are_all_unlisted_is_refused(
         match=r"^test\.crypto: no crypto pair of the symbol table can be streamed, so the result "
         r"would follow nothing: crypto pairs 1 \[X:ETHTUSD\], which Massive's crypto ticker list "
         r"does not hold$",
-    ):
+    ) as refused:
         ws_session.query(CRYPTO, watchlist).append_only()
+    assert not refused.value.is_retryable  # Massive's list answered: no retry changes it
     assert ws_session.urls == []  # no connection opened
+
+
+def test_a_symbol_table_whose_pairs_the_unread_list_left_unsplit_keeps_the_reads_failure(
+    make_ws_session: Callable[..., WsSession], dh_input_table: Callable[..., InputTable]
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.LOG)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    watchlist = crypto_watchlist(["X:DOTUSD"], reactive=False, dh_input_table=dh_input_table)
+    with pytest.raises(dm.MassiveError, match="could not be read") as unread:
+        ws_session.query(CRYPTO, watchlist).append_only()
+    # The list may be read on the next call: the error keeps the read's status and flags.
+    assert (unread.value.status, unread.value.is_retryable) == (503, True)
+    assert ws_session.urls == []
 
 
 @pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])

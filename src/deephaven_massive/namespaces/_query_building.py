@@ -54,7 +54,7 @@ from deephaven_massive._datasets.filters import (
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
-from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import ErrorSource, MassiveError, library_bug
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive.queries import FetchQuery, Query
@@ -734,7 +734,7 @@ def _query_class(spec: DatasetSpec, query_type: type[_Q]) -> type[_Q]:
     cls = query_class(spec)
     if not issubclass(cls, query_type):
         message = f"m.{spec.name} gives a {cls.__name__}, not the {query_type.__name__} it declares"
-        raise MassiveError(library_bug(message), cause=ErrorCause.LIBRARY_DEFECT)
+        raise MassiveError(library_bug(message), source=ErrorSource.LIBRARY)
     return cls
 
 

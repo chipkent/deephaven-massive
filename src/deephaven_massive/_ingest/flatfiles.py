@@ -108,7 +108,7 @@ gathering a file's rows (out of memory, say) is a failed read of that file.
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
 next block, and reads not yet started are cancelled. After a close, no request starts once a
 reader has seen it; a request already in flight is discarded, and the call raises
-`MassiveError("MassiveSession #1 is closed")`.
+`SessionClosedError("MassiveSession #1 is closed")`.
 
 The module is one subject although it runs past 1,000 lines: it is one transport, from the
 read plan of a call to its table, and every step shares the plan's columns and its failure
@@ -162,9 +162,10 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     RowDataError,
+    SessionClosedError,
     from_wire,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
@@ -643,7 +644,7 @@ class _Transform:
                 if read.unreadable and not self.symbols.keeps:
                     raise MassiveError(
                         unreadable_symbol_message(self.dataset, read.unreadable),
-                        cause=ErrorCause.LIBRARY_DEFECT,  # a spelling the library cannot read
+                        source=ErrorSource.LIBRARY,  # a spelling the library cannot read
                     )
                 values, raw = read.symbols, read.raw
             else:
@@ -1027,7 +1028,9 @@ class FlatFileHistory:
         # any outcome (a row, a missing file, a refusal): report the close instead.
         self._check_open()
         if stop is not None and stop.is_set():  # the reads stopped early: report no result
-            raise MassiveError(f"{spec.name} history: the read was cancelled")
+            raise MassiveError(
+                f"{spec.name} history: the read was cancelled", source=ErrorSource.USER
+            )
         parts = [_outcome(future) for future in futures]
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)
@@ -1240,7 +1243,9 @@ class FlatFileHistory:
                 )
             except _CancelledError:
                 logger.debug("%s history: stopped before reading %s", spec.name, key.key)
-                raise MassiveError(f"{spec.name} history: the read was cancelled") from None
+                raise MassiveError(
+                    f"{spec.name} history: the read was cancelled", source=ErrorSource.USER
+                ) from None
             if found is not None:
                 logger.info(
                     "%s: %s is missing and %s exists, so it was a day without trading%s",
@@ -1283,10 +1288,10 @@ class FlatFileHistory:
         """Reject further work once the session's flat-file client is closed.
 
         Raises:
-            MassiveError: `"MassiveSession #1 is closed"` once the session has closed.
+            SessionClosedError: `"MassiveSession #1 is closed"` once the session has closed.
         """
         if self._client.closed:
-            raise MassiveError(f"{self._core.label} is closed")
+            raise SessionClosedError(f"{self._core.label} is closed")
 
     def _check(self, cancel: threading.Event) -> None:
         """Stop a read if the session was closed or another read of the call failed.
@@ -1394,7 +1399,7 @@ class FlatFileHistory:
                     return self._gather(batches, transform, key=key, cancel=cancel, file=file)
                 except pa.ArrowException as error:
                     raise MassiveError(
-                        f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
+                        f"cannot read {file.location}: {error}", source=ErrorSource.LIBRARY
                     ) from error
         except WireError as error:
             if file is not None and file.dropped:
@@ -1515,7 +1520,7 @@ def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
 def _malformed_message(dataset: str, file: FlatFile) -> str:
     """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
 
-    A `RowDataError` carries it (`ErrorCause.LIBRARY_DEFECT`: data from Massive the library
+    A `RowDataError` carries it (`ErrorSource.LIBRARY`: data from Massive the library
     can't read), and a retry of the read would meet the same line.
 
     Args:

@@ -28,7 +28,7 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     CutShortError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     RowDataError,
     UnlistedPairError,
@@ -182,7 +182,9 @@ def _monday() -> HistoryWindow:
     [
         (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
         (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
-        (MassiveError("connection reset"), FailureKind.TRANSIENT),
+        (MassiveError("connection reset", source=ErrorSource.NETWORK), FailureKind.TRANSIENT),
+        # A certificate this machine does not trust fails alike until its settings change.
+        (MassiveError("TLS failed", source=ErrorSource.USER), FailureKind.PERMANENT),
         (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
         # Any other 404, such as one for a request of several symbols or of none (a path
         # Massive retired), would answer the same again.
@@ -191,11 +193,11 @@ def _monday() -> HistoryWindow:
         (RowDataError("every row was dropped"), FailureKind.PERMANENT),
         (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
         (UnlistedPairError("X:NOPEUSD is not listed"), FailureKind.PERMANENT),
-        (MassiveError("unreadable", cause=ErrorCause.LIBRARY_DEFECT), FailureKind.PERMANENT),
+        (MassiveError("unreadable", source=ErrorSource.LIBRARY), FailureKind.PERMANENT),
         (MassiveError("HTTP 400", status=400), FailureKind.PERMANENT),
     ],
 )
-def test_a_failure_is_transient_only_when_its_cause_may_pass(
+def test_a_failure_is_transient_only_when_it_is_retryable(
     error: MassiveError, kind: FailureKind
 ) -> None:
     assert failure_kind(error) is kind
@@ -552,7 +554,7 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
         )
     failure = _failure(out["AAPL"])
     assert failure.kind is FailureKind.PERMANENT
-    assert failure.error.cause is ErrorCause.LIBRARY_DEFECT
+    assert failure.error.source is ErrorSource.LIBRARY
     assert str(failure.error) == (
         "stocks.trades: AAPL's rows from flat files lack Price; have Extra, which the dataset "
         f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"

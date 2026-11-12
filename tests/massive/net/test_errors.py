@@ -35,9 +35,15 @@ def test_every_attribute_is_kept(cls: type[WireError]) -> None:
 def test_the_context_defaults_to_none(cls: type[WireError]) -> None:
     error = cls("connection reset")
     assert (error.status, error.host, error.path, error.request_id) == (None, None, None, None)
+    assert not error.transient  # a failure is not taken to pass unless the client says so
+    assert not error.local
+    assert cls("connection reset", transient=True).transient
+    assert cls("certificate failed", local=True).local
 
 
-@pytest.mark.parametrize("attribute", ["message", "status", "host", "path", "request_id"])
+@pytest.mark.parametrize(
+    "attribute", ["message", "status", "host", "path", "request_id", "transient", "local"]
+)
 def test_attributes_are_read_only(attribute: str) -> None:
     error = WireError("x", status=500)
     with pytest.raises(AttributeError):

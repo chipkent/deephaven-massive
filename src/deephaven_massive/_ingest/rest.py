@@ -138,9 +138,10 @@ from deephaven_massive._errors import (
     AuthenticationError,
     CutShortError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
+    SessionClosedError,
     UnlistedPairError,
     failure_text,
     from_wire,
@@ -241,8 +242,8 @@ line shows it whole."""
 class UnavailableSymbolError(PermanentError):
     """A symbol Massive cannot serve, under `MassiveConfig.unavailable_symbols=RAISE`.
 
-    Massive answered HTTP 404 for it (`ErrorCause.EXPECTED`), or, in a `poll()` cycle, its path
-    does not take a parameter the poll sends (`ErrorCause.USER_DEFECT`). Under `LOG` and
+    Massive answered HTTP 404 for it (`ErrorSource.MASSIVE`), or, in a `poll()` cycle, its path
+    does not take a parameter the poll sends (`ErrorSource.USER`, a bug). Under `LOG` and
     `IGNORE` the read leaves the symbol out instead, and a `poll()` table's `Error` lists it.
     A `fetch()` or `history()` raises it, a followed `fetch()` marks the symbol `FAILED` with
     it, and a `poll()` table fails with it.
@@ -268,7 +269,7 @@ def _missing_error(
         f"{spec.name}: no data for {names}: Massive answered HTTP 404 from {template}. "
         "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to "
         "leave it out and read the others",
-        cause=ErrorCause.EXPECTED,
+        source=ErrorSource.MASSIVE,
     )
 
 
@@ -715,7 +716,7 @@ class RestReader:
         adjustment basis, its `CutShortError` for a symbol whose data was cut short, the
         `EntitlementError` of `_check_recency` for delayed data, and, with no `on_missing`, the
         `UnavailableSymbolError` of `_report_missing` for a symbol Massive answered HTTP 404. A
-        closed session raises `MassiveError("... is closed")`.
+        closed session raises `SessionClosedError("... is closed")`.
         """
         converter = RowConverter.build(
             self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
@@ -1042,7 +1043,7 @@ class RestReader:
 
         A failed request otherwise raises the public error of its `WireError` (`public_error`), and
         once the session is closed every failed request does, a 404 included: the call raises
-        `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
+        `SessionClosedError("... is closed")` rather than dropping its symbol. A row that breaks the
         schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, a page on
         another adjustment basis the `MassiveError` of `_check_adjusted`, and delayed data the
         `EntitlementError` of `_check_recency`.
@@ -1157,7 +1158,7 @@ class RestReader:
                 data was cut short: the message names the dataset, the symbol, the path, and
                 how many pages had arrived.
 
-        A 404 that arrives after the session closed raises the `MassiveError("... is closed")`
+        A 404 that arrives after the session closed raises the `SessionClosedError("... is closed")`
         of `public_error`, and any other failure the error of `_dataset_error`.
         """
         if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
@@ -1459,7 +1460,8 @@ class RestReader:
             raise MassiveError(
                 f"{spec.name}: Massive answered {template} with adjusted={echoed} although "
                 f"adjusted={sent} was requested, so the call would mix split-adjusted and "
-                "as-traded prices; retry it"
+                "as-traded prices; retry it",
+                is_retryable=True,
             )
 
     def _warn_error_rows(
@@ -1506,7 +1508,7 @@ class RestReader:
     def public_error(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.
 
-        A closed session's error is `MassiveError("MassiveSession #1 is closed")`, whatever
+        A closed session's error is `SessionClosedError("MassiveSession #1 is closed")`, whatever
         the request returned. A pause that outlasts the read's patience is
         `MassiveError("rate limited: ...")` with status 429: the governor's message (which
         requests, the latest refusal, when its next request (a probe) goes, the read's
@@ -1520,7 +1522,7 @@ class RestReader:
             The public error, with the wire error's status and request id.
         """
         if self.state.closed:
-            return MassiveError(f"{self.state.label} is closed")
+            return SessionClosedError(f"{self.state.label} is closed")
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
                 f"rate limited: {error.message}. m.rate_limits() shows each subscription's state",
@@ -1563,7 +1565,7 @@ class RestReader:
                 "in more plans"
             )
         return EntitlementError(
-            message, status=public.status, request_id=public.request_id, cause=public.cause
+            message, status=public.status, request_id=public.request_id, source=public.source
         )
 
     def rows(
@@ -1813,7 +1815,8 @@ class RestReader:
                 f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
                 "the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
                 "it out and keep polling the others",
-                cause=ErrorCause.EXPECTED if missing else ErrorCause.USER_DEFECT,
+                source=ErrorSource.MASSIVE if missing else ErrorSource.USER,
+                is_bug=not missing,
             )
         if missing:
             level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
@@ -2348,9 +2351,7 @@ class RestEndpoints:
             failure = (
                 error
                 if isinstance(error, MassiveError)
-                else MassiveError(
-                    library_bug(f"{context}: {error!r}"), cause=ErrorCause.LIBRARY_DEFECT
-                )
+                else MassiveError(library_bug(f"{context}: {error!r}"), source=ErrorSource.LIBRARY)
             )
             _report_host_failure(failure)
             self._core.diagnostics.write(
@@ -2465,7 +2466,7 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors, which the verb's call logs at the level their cause gives (DEBUG for an
+        Errors, which the verb's call logs at the level their `is_bug` gives (DEBUG for an
         expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
         not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
@@ -2984,7 +2985,7 @@ def _report_host_failure(error: MassiveError) -> None:
     Args:
         error: The failure.
     """
-    level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+    level = logging.DEBUG if not error.is_bug else logging.ERROR
     logger.log(level, "%s", failure_text(error))
 
 

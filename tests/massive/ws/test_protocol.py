@@ -776,6 +776,7 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert error.status is None
     assert (error.host, error.path) == (HOST, PATH)
     assert error.message.startswith(f"TLS certificate verification failed for {HOST}: ")
+    assert error.local  # SSL_CERT_FILE, on this machine, is the fix
     assert error.message.endswith(
         "; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
     )

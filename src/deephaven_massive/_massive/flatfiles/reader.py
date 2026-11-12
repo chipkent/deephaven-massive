@@ -446,6 +446,7 @@ class FlatFile:
                 path=self._key,
                 # A body that broke off is a transport failure; any other is the file's content.
                 unreadable=not self._dropped.is_set(),
+                transient=self._dropped.is_set(),
             ) from error
 
     def _blocks(

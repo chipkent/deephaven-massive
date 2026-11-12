@@ -547,7 +547,7 @@ def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
     )
     with pytest.raises(dm.MassiveError, match="'!!'") as info:
         transform.apply(batch, received=7, key=STOCK_KEY)
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
@@ -713,7 +713,7 @@ def test_a_malformed_line_fails_the_read_under_raise(
         "file's other rows, pass MassiveConfig(malformed_rows=dm.OnError.LOG), or write "
         "'malformed_rows: log' in the settings file"
     )
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
     assert "SECRET" not in str(info.value)
 
 
@@ -786,7 +786,7 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
         r"outside 1990 to 2100$",
     ) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_epoch_zero_is_null_except_in_timestamp(
@@ -1232,8 +1232,9 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(not_published("stocks.trades", "2025-03-04", READ_REST)) + "$",
-    ):
+    ) as unpublished:
         q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
+    assert unpublished.value.is_retryable  # the file appears once Massive publishes it
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
 
 
@@ -1658,10 +1659,13 @@ def test_a_stopped_read_stops_its_roll_forward(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError, match=r"futures\.trades history: the read was cancelled"
+    ) as cancelled:
         session._core.flat_file_transport().history(
             FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
         )
+    assert cancelled.value.source is dm.ErrorSource.USER  # the caller stopped the read
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
@@ -2424,7 +2428,7 @@ def test_a_reread_is_not_made_for_a_broken_file(
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
     # A file that cannot be read is a defect of the library, never an expected failure.
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 @pytest.mark.parametrize(

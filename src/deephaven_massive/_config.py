@@ -58,7 +58,7 @@ from deephaven_massive._enums import (
     _require_enum,
     subscription_of,
 )
-from deephaven_massive._errors import AuthenticationError
+from deephaven_massive._errors import AuthenticationError, ErrorSource
 from deephaven_massive._massive import (
     check_api_key,
     check_rest_base_url,
@@ -491,7 +491,8 @@ class MassiveConfig:
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
         if not self.api_key.strip():
             raise AuthenticationError(
-                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY"
+                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY",
+                source=ErrorSource.USER,
             )
         if self.api_key != self.api_key.strip():
             raise ValueError(

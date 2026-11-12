@@ -522,6 +522,8 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
         f"({code}: Try again)"
     )
     assert (error.status, error.request_id) == (status, fake_s3.request_id)
+    # S3 answers a timeout with HTTP 400, whose status alone does not say it may pass.
+    assert error.transient is (code == "RequestTimeout")
     assert isinstance(error.__cause__, ClientError)
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
@@ -629,6 +631,7 @@ def test_an_unreachable_endpoint_is_a_wire_error_after_the_retries(
     assert type(info.value) is WireError
     assert (info.value.status, info.value.request_id, info.value.path) == (None, None, KEY)
     assert isinstance(info.value.__cause__, EndpointConnectionError)
+    assert info.value.transient
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
 
@@ -653,6 +656,8 @@ def test_a_failure_no_retry_can_fix_is_not_retried(
         client.open(KEY)
     assert info.value.__cause__ is failure
     assert clock.waits == []
+    assert not info.value.transient
+    assert info.value.client_defect  # Massive never answered: the failure is the client's
 
 
 def _certificate_rejected(_key: str) -> None:
@@ -720,6 +725,7 @@ def test_a_tls_failure_is_never_retried(
         client.open(KEY)
     assert (info.value.status, info.value.path) == (None, KEY)
     assert isinstance(info.value.__cause__, BotoCoreError)
+    assert info.value.local
     assert (attempts, clock.waits) == ([KEY], [])
 
 
@@ -770,6 +776,7 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
     assert not info.value.unreadable  # a transport failure, not the file's content
+    assert info.value.transient
     assert (fake_s3.keys(), clock.waits) == ([KEY], [])
     assert fake_s3.closed_bodies == [KEY]
 
@@ -784,6 +791,7 @@ def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3:
         list(file.batches(stocks_plan()))
     assert not file.dropped
     assert info.value.unreadable  # the file's content: a gap in the library
+    assert not info.value.transient
 
 
 def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
@@ -1385,6 +1393,7 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
         "refused its credentials (HTTP 407); check the user and password in HTTPS_PROXY"
     )
     assert (info.value.status, info.value.path) == (407, KEY)
+    assert info.value.local
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tls_server.requests, clock.waits) == ([], [])
     assert not any("wr0ng" in r.getMessage() for r in caplog.records)
@@ -1506,6 +1515,7 @@ def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retrie
     )
     assert isinstance(info.value.__cause__, ProtocolError)
     assert (info.value.status, info.value.path) == (None, KEY)
+    assert info.value.transient  # no answer, so a later request may get one
     assert server.connections == 4
     assert clock.waits == WAITS
 

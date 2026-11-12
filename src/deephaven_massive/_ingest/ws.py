@@ -85,9 +85,11 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
+    SessionClosedError,
+    copy_error,
     failure_text,
     library_bug,
 )
@@ -244,6 +246,29 @@ def _skipped_pairs_parts(skipped: Mapping[str, tuple[_SkipReason, str]]) -> list
             f"be read ({skipped[unread[0]][1]})"
         )
     return parts
+
+
+def _pairs_error(
+    message: str, skipped: Mapping[str, tuple[_SkipReason, str]], unread: MassiveError | None
+) -> MassiveError:
+    """Return the error of crypto pairs a stream cannot subscribe.
+
+    Pairs Massive's crypto ticker list does not hold are Massive's answer, which a retry does
+    not change. When every pair was skipped because the list could not be read, the error is a
+    copy of that read's failure (`copy_error`), so it keeps its source and whether a retry may
+    help.
+
+    Args:
+        message: The error's message.
+        skipped: The skipped pairs, with why; at least one.
+        unread: The failure to read the list, when it left pairs unsplit; else None.
+
+    Returns:
+        The error.
+    """
+    if unread is not None and all(r is _SkipReason.LIST_UNREAD for r, _ in skipped.values()):
+        return copy_error(unread, message)
+    return MassiveError(message)
 
 
 def _skipped_pairs_text(skipped: Mapping[str, tuple[_SkipReason, str]]) -> str:
@@ -482,15 +507,15 @@ class WsConnections:
             holding_lock: Whether the calling thread holds the update graph's lock.
 
         Raises:
-            MassiveError: If the session is closed (`futures_calendar`), or closes during the
-                wait.
+            SessionClosedError: If the session is closed (`futures_calendar`), or closes during
+                the wait.
         """
         wait = SCHEDULE_WAIT_HOLDING_LOCK if holding_lock else SCHEDULE_WAIT
         calendar = self.futures_calendar()
         calendar.watch(contracts)
         loaded = calendar.wait_loaded(contracts, wait, stop=self._closing)
         if self._closing.is_set():  # close() ended the wait: the stream goes with the session
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed")
         if not loaded:
             logger.warning(
                 "futures stream %d: the schedules of %s did not load within %.0f s%s; their "
@@ -603,10 +628,10 @@ class WsConnections:
         """Refuse a stream once the session's side is closed; the group's lock is held.
 
         Raises:
-            MassiveError: If `close()` has run.
+            SessionClosedError: If `close()` has run.
         """
         if self._closed:
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed")
 
     @staticmethod
     def _check_cap(
@@ -817,7 +842,7 @@ class WsConnections:
         Nothing reads the worker's futures, so an exception that escaped here would vanish.
         Any exception of the change is a defect of the library: it is logged at ERROR with its
         trace, and it fails the stream (`Flusher.fail`), if the stream still exists. A
-        `MassiveError` that already names itself a defect (`ErrorCause.LIBRARY_DEFECT`, such as
+        `MassiveError` that already names itself a defect (`ErrorSource.LIBRARY`, such as
         one from the crypto pair lookup) fails the stream with its own message, ended with
         `LIBRARY_BUG` unless it holds it already; any other exception is wrapped once in a
         `MassiveError` that names the change and asks for a bug report. Either way the message
@@ -832,9 +857,9 @@ class WsConnections:
         try:
             change(stream_id, added, removed)
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
-            if isinstance(error, MassiveError) and error.cause is ErrorCause.LIBRARY_DEFECT:
+            if isinstance(error, MassiveError) and error.source is ErrorSource.LIBRARY:
                 # Its own message, ended with how to report it unless it already says so.
-                failure = MassiveError(failure_text(error), cause=ErrorCause.LIBRARY_DEFECT)
+                failure = MassiveError(failure_text(error), source=ErrorSource.LIBRARY)
             else:
                 failure = MassiveError(
                     library_bug(
@@ -842,7 +867,7 @@ class WsConnections:
                         f"{bounded_list(sorted(added))}, removed "
                         f"{bounded_list(sorted(removed))}) failed: {error!r}"
                     ),
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                    source=ErrorSource.LIBRARY,
                 )
             # Logged here, with the trace; the stream's failure then logs it at DEBUG only.
             mark_failure_logged(failure)
@@ -918,12 +943,14 @@ class WsConnections:
             removed: Canonical symbols it no longer holds.
         """
         reader = f"crypto stream {stream_id}"
-        skipped = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
+        skipped, unread = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
         if skipped and self._unlisted is OnError.RAISE:
-            failure = MassiveError(
+            failure = _pairs_error(
                 f"cannot stream the symbol table's {'; '.join(_skipped_pairs_parts(skipped))}; "
                 "set dm.MassiveConfig(unlisted_symbols=dm.OnError.LOG) to skip such a pair "
-                "instead"
+                "instead",
+                skipped,
+                unread,
             )
             logger.debug("%s: fails, under unlisted_symbols=RAISE: %s", reader, failure)
             with self._lock:
@@ -939,7 +966,7 @@ class WsConnections:
 
     def _split_pairs(
         self, symbols: Iterable[str], *, reader: str, delays: Iterable[float]
-    ) -> dict[str, tuple[_SkipReason, str]]:
+    ) -> tuple[dict[str, tuple[_SkipReason, str]], MassiveError | None]:
         """Split the crypto pairs of one change, retrying a failed read of the list as a whole.
 
         Runs on the `symbol changes` worker, or on a verb's thread for a symbol table's pairs
@@ -949,7 +976,7 @@ class WsConnections:
         the try: the thread waits each of `delays` in turn, logged at INFO, and tries again with
         only the pairs not yet split, so each try reads the list at most once. After the last,
         or when a close interrupts the wait, the pairs not yet split are skipped. A
-        `MassiveError` whose cause is `ErrorCause.LIBRARY_DEFECT` is a defect of the library,
+        `MassiveError` whose source is `ErrorSource.LIBRARY` is a defect of the library,
         not a pair Massive does not list: it propagates at once, untried again, so the worker
         fails the stream (`_run_change`) and a verb raises it.
 
@@ -960,10 +987,11 @@ class WsConnections:
                 worker, none at the call.
 
         Returns:
-            The skipped pairs, each with why: its `_SkipReason` and the error's text.
+            The skipped pairs, each with why: its `_SkipReason` and the error's text; and the
+            last failure to read the list, when it left pairs unsplit (`LIST_UNREAD`), else None.
 
         Raises:
-            MassiveError: The lookup's own error, when its cause is `ErrorCause.LIBRARY_DEFECT`.
+            MassiveError: The lookup's own error, when its source is `ErrorSource.LIBRARY`.
         """
         skipped: dict[str, tuple[_SkipReason, str]] = {}
         pending = sorted(symbols)
@@ -974,7 +1002,7 @@ class WsConnections:
                 try:
                     self.resolve_pairs((symbol,))
                 except MassiveError as error:
-                    if error.cause is ErrorCause.LIBRARY_DEFECT:
+                    if error.source is ErrorSource.LIBRARY:
                         raise  # a defect is never retried or shown as a skipped pair
                     if isinstance(error, PermanentError):
                         skipped[symbol] = (_SkipReason.UNLISTED, str(error))
@@ -994,8 +1022,8 @@ class WsConnections:
                 )
             if delay is None or self._closing.wait(delay):
                 skipped.update((s, (_SkipReason.LIST_UNREAD, str(failure))) for s in pending)
-                break
-        return skipped
+                return skipped, failure
+        return skipped, None
 
     def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
         """Return the pairs of a symbol table, read at the call, that a stream can subscribe.
@@ -1023,18 +1051,21 @@ class WsConnections:
             EntitlementError: Under `RAISE`, if the plan does not include reference data.
             MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
                 if no pair can, so the result would follow nothing, or if the lookup meets a
-                defect of the library (`ErrorCause.LIBRARY_DEFECT`), which is never skipped.
+                defect of the library (`ErrorSource.LIBRARY`), which is never skipped.
         """
         if self._unlisted is OnError.RAISE:
             self.resolve_pairs(symbols)
             return symbols
         reader = f"{spec.name} call"
-        skipped = self._split_pairs(symbols, reader=reader, delays=())
+        skipped, unread = self._split_pairs(symbols, reader=reader, delays=())
         if skipped and len(skipped) == len(symbols):
-            raise MassiveError(
+            failure = _pairs_error(
                 f"{spec.name}: no crypto pair of the symbol table can be streamed, so the result "
-                f"would follow nothing: {'; '.join(_skipped_pairs_parts(skipped))}"
+                f"would follow nothing: {'; '.join(_skipped_pairs_parts(skipped))}",
+                skipped,
+                unread,
             )
+            raise failure
         self._note_skipped(skipped, reader=reader)
         return tuple(symbol for symbol in symbols if symbol not in skipped)
 
@@ -1116,12 +1147,8 @@ class WsConnections:
             try:
                 pair = self._crypto_pair(symbol)
             except MassiveError as error:
-                raise type(error)(
-                    f"cannot stream {symbol!r}: {error}",
-                    status=error.status,
-                    request_id=error.request_id,
-                    cause=error.cause,
-                ) from error
+                named = copy_error(error, f"cannot stream {symbol!r}: {error}")
+                raise named from error
             with self._lock:
                 self.group.pairs[symbol] = pair
 

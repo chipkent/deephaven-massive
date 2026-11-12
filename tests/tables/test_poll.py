@@ -161,6 +161,21 @@ def pollers(massive_session: dm.MassiveSession) -> Pollers:
     return RecordingPollers(massive_session._core.label)
 
 
+@pytest.fixture
+def published_failures(monkeypatch: pytest.MonkeyPatch) -> list[dm.MassiveError]:
+    # Records each error a table is failed with, and fails the table with it.
+    published: list[dm.MassiveError] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        assert isinstance(error, dm.MassiveError)  # a poll fails its table with no other
+        published.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
+    return published
+
+
 def start(
     m: dm.MassiveSession,
     *,
@@ -445,6 +460,33 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
     ]
 
 
+def test_a_run_of_failures_warns_once_whatever_their_source_but_a_bug_logs_an_error(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    failures = [
+        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK),
+        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY),
+    ]
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for failure in failures:
+            script.fail(failure)
+            next_cycle(clock)
+    failed = [r for r in caplog.records if "a cycle failed" in r.getMessage()]
+    # One outage of Massive's and the network's: one WARNING. The bug starts a run of its own.
+    assert [r.levelno for r in failed] == [logging.WARNING, logging.ERROR]
+
+
 def test_late_cycles_warn_once_and_on_time_cycles_say_so(
     *,
     massive_session: dm.MassiveSession,
@@ -584,7 +626,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
     core = massive_session._core
     record, publish = core.fail_stream, TablePublisher.publish_failure
 
-    def recording(stream_id: int, error: str) -> None:
+    def recording(stream_id: int, error: dm.MassiveError) -> None:
         order.append("recorded")
         record(stream_id, error)
 
@@ -720,11 +762,12 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
     mode: PollMode,
 ) -> None:
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
-    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends")
+    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503)
     for _ in range(5):  # failures at 60 to 300 s: the table runs and names its last good cycle
         script.fail(error)
         next_cycle(clock)
@@ -748,6 +791,8 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
         f"latest error: {error}"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # Massive's outage may be over by the next call, as the latest error says.
+    assert [e.is_retryable for e in published_failures] == [True]
 
 
 @pytest.mark.parametrize(
@@ -875,6 +920,7 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
@@ -904,6 +950,10 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
         "table"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # No page came: the network's, and data may flow again.
+    assert [(e.source, e.is_retryable) for e in published_failures] == [
+        (dm.ErrorSource.NETWORK, True)
+    ]
     assert (
         "stocks.dividends poll() stream 1: no page for 301 s, max_outage is 300 s; failing it"
         in caplog.messages
@@ -1532,18 +1582,19 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     core = massive_session._core
     closed = f"{core.label} was closed; this table no longer updates"
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = poller._publisher
 
     class _Recording:
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
     poller._publisher = cast("Any", _Recording())
     with caplog.at_level(logging.ERROR, LOGGER):
         assert poller.fail(dm.AuthenticationError("HTTP 401"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], dm.SessionClosedError)
     assert not caplog.records
     until(lambda: bool(table.j_table.isFailed()))
     poller.thread.join(TIMEOUT)

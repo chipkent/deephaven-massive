@@ -64,6 +64,48 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
 | A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
 
+<a id="handle-errors"></a>
+
+## Handle errors in code
+
+In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
+failing the table. Every error Massive reports, and every failure the library catches, is a
+`dm.MassiveError`. A wrong argument raises `TypeError` or `ValueError`. These
+attributes of a `dm.MassiveError` tell your code what to do:
+
+| Attribute | What it says |
+|---|---|
+| `is_retryable` | `True` when the same call may succeed later: a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection to Massive that kept failing, or an answer whose message says to retry. `False` otherwise, such as for a plan that lacks the data. |
+| `is_bug` | `True` when a bug caused the error: in the library, whose message says how to report it, or in your code, whose message names the fix. |
+| `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
+| `status` | The HTTP status of Massive's answer, such as 404, or `None` when there was none. |
+
+Wait before you call again, since the library has already retried a server failure or a lost
+connection a few times, and waited out a rate limit's pause.
+
+This example reads Apple's dividends, up to three times, a minute apart:
+
+```python
+import time
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+for attempt in range(3):
+    try:
+        dividends = m.stocks.dividends("AAPL").fetch(wait=True)
+        break
+    except dm.MassiveError as e:
+        if e.is_bug:
+            print(f"Please report or fix this: {e}")
+        if not e.is_retryable or attempt == 2:
+            raise
+        time.sleep(60)
+```
+
+A call on a session after `m.close()` raises `dm.SessionClosedError`. Create a new session to
+read again.
+
 <a id="diagnostics"></a>
 
 ## Read the diagnostics tables

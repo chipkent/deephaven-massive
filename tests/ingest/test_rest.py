@@ -2022,7 +2022,7 @@ def test_a_refusal_names_the_dataset_and_its_subscription(
         fetch(session, spec, **({} if symbols is None else {"symbols": symbols}))
     assert str(info.value).startswith(refusal)
     assert str(info.value).endswith("upgrade")
-    assert (info.value.status, info.value.cause) == (403, dm.ErrorCause.EXPECTED)
+    assert (info.value.status, info.value.source) == (403, dm.ErrorSource.MASSIVE)
 
 
 def test_a_refusal_names_the_alternative_where_one_exists(
@@ -2061,7 +2061,7 @@ def test_refusals_raise_their_public_errors(
     with caplog.at_level(logging.DEBUG), pytest.raises(error) as info:
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert (info.value.status, info.value.request_id) == (status, "r9")
-    assert info.value.cause is dm.ErrorCause.EXPECTED
+    assert info.value.source is dm.ErrorSource.MASSIVE
     # A refusal the caller receives is expected: the call logs it at DEBUG, never higher.
     failed = [r for r in caplog.records if r.getMessage().startswith("call ")]
     assert [r.levelno for r in failed if "failed" in r.getMessage()] == [logging.DEBUG]
@@ -3670,6 +3670,7 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
     )
     assert info.value.status == 404
+    assert info.value.is_retryable  # unlike any other 404: the page may be there again
 
 
 def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:
@@ -3710,8 +3711,9 @@ def test_every_page_of_bars_must_echo_the_requested_adjustment(
         match=r"^stocks\.bars: Massive answered /v2/aggs/ticker/\{stocksTicker\}/range/.* with "
         r"adjusted=False although adjusted=True was requested, so the call would mix "
         r"split-adjusted and as-traded prices; retry it$",
-    ):
+    ) as mixed:
         daily_bars(session, adjusted=True)
+    assert mixed.value.is_retryable  # the next answer may agree with the request
     assert [r["Close"] for r in daily_bars(session, adjusted=False)] == [1.0, 2.0]
 
 

@@ -4,7 +4,7 @@ import threading
 import pytest
 
 from deephaven_massive import _log_limits
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, MassiveError
 from deephaven_massive._log_limits import (
     LIST_LIMIT,
     BoundedLog,
@@ -94,16 +94,17 @@ def test_a_failure_is_logged_once_however_many_tables_it_fails(
     ("error", "level", "text"),
     [
         (MassiveError("refused"), logging.DEBUG, "refused"),  # the caller's chosen level
-        (MassiveError("fix it", cause=ErrorCause.USER_DEFECT), logging.ERROR, "fix it"),
+        (MassiveError("fix it", source=ErrorSource.USER, is_bug=True), logging.ERROR, "fix it"),
+        (MassiveError("no key", source=ErrorSource.USER), logging.DEBUG, "no key"),  # no bug
         (
-            MassiveError("row broke", cause=ErrorCause.LIBRARY_DEFECT),
+            MassiveError("row broke", source=ErrorSource.LIBRARY),
             logging.ERROR,
             f"row broke. {LIBRARY_BUG}",
         ),
         (KeyError("k"), logging.ERROR, f"KeyError: 'k'. {LIBRARY_BUG}"),
     ],
 )
-def test_a_failure_is_logged_at_the_level_its_cause_gives(
+def test_a_failure_is_logged_at_error_only_when_it_is_a_bug(
     caplog: pytest.LogCaptureFixture, *, error: BaseException, level: int, text: str
 ) -> None:
     log = logging.getLogger("causes")
@@ -117,7 +118,7 @@ def test_a_failure_is_logged_at_the_level_its_cause_gives(
 def test_a_failure_marked_as_logged_is_logged_by_log_failure_at_debug_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    defect = MassiveError("broke", cause=ErrorCause.LIBRARY_DEFECT)
+    defect = MassiveError("broke", source=ErrorSource.LIBRARY)
     assert mark_failure_logged(defect)
     assert not mark_failure_logged(defect)
     assert mark_failure_logged(KeyError("k"))  # only a MassiveError is remembered

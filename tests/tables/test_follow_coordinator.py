@@ -24,6 +24,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.update_graph import exclusive_lock
 from typing_extensions import override
@@ -1246,7 +1247,7 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
 ) -> None:
     # As a read by symbol fails a table without the dataset's columns: a defect, ERROR.
     defect = MassiveError(
-        "test.trades: AAPL's rows from REST lack Price", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "test.trades: AAPL's rows from REST lack Price", source=dm.ErrorSource.LIBRARY
     )
     script = Script(massive_session)
     script.answers["AAPL"] = [SymbolFailure(defect, FailureKind.PERMANENT)]
@@ -1766,10 +1767,22 @@ def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
 
 
 def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    *,
+    watchlist: Callable[..., Table],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # While AAPL is read again, the table waits; once its last retry fails, every call-time
     # symbol has failed, and the table fails, as a call that waits would have raised.
+    failures: list[Exception] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        failures.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(503, "busy")]
     script.answers["MSFT"] = [refused(403, "not in the plan")]
@@ -1782,6 +1795,11 @@ def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
         massive_session._core.follows.wake()
         until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
     until(lambda: bool(result.j_table.isFailed()))
+    # The table fails with AAPL's error, the first by name, but calling again cannot help
+    # MSFT, so the failure is not retryable, though AAPL's HTTP 503 alone would be.
+    (failure,) = failures
+    assert isinstance(failure, dm.MassiveError)
+    assert (failure.status, failure.is_retryable) == (503, False)
 
 
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
@@ -1994,3 +2012,18 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     handle([follow_coordinator._Began(read, {"AAPL": started})])
     assert symbols["AAPL"].state is SymbolReadState.REMOVED
     assert symbols["AAPL"].attempts == 0
+
+
+def test_a_bug_is_a_cause_of_its_own() -> None:
+    # A bug never shares the one WARNING of a failure that is none, so it logs its ERROR.
+    lost = dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK)
+    broken = dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY)
+    misuse = dm.MassiveError("your table failed", source=dm.ErrorSource.USER, is_bug=True)
+    refused = dm.EntitlementError("HTTP 403", status=403)
+    keys = [follow_coordinator._cause(e) for e in (lost, broken, misuse, refused)]
+    assert keys == [
+        "MassiveError network",
+        "MassiveError library bug",
+        "MassiveError user bug",
+        "EntitlementError massive 403",
+    ]

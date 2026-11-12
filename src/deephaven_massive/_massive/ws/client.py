@@ -488,7 +488,7 @@ class WsClient:
             )
             failure.__cause__ = error
         else:
-            if failure is not None:  # the library logs it, at the level its cause gives
+            if failure is not None:  # the library logs it, at the level its `is_bug` gives
                 logger.debug("the WebSocket client for %s failed: %s", self._url, failure)
         if failure is None:
             logger.info("closed the WebSocket client for %s", self._url)

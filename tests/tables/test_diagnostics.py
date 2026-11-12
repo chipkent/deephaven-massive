@@ -58,6 +58,7 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
     gaps_text,
     shown_query,
+    thread_died,
 )
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
@@ -1349,3 +1350,15 @@ def test_the_tables_are_created_under_the_update_graphs_shared_lock(
     diagnostics = _diagnostics(dh_exec_ctx)
     assert blink_creations == [True, True, True, True]
     diagnostics.release()
+
+
+def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
+    died = thread_died("MassiveSession #1", "reaper", RuntimeError("boom"))
+    assert str(died) == (
+        "MassiveSession #1: its reaper thread died (RuntimeError('boom')); this table no longer "
+        "updates"
+    )
+    assert (died.source, died.is_bug) == (dm.ErrorSource.LIBRARY, True)
+    # An interrupt ends the thread too, but is no bug of the library.
+    interrupted = thread_died("MassiveSession #1", "reaper", KeyboardInterrupt())
+    assert (interrupted.source, interrupted.is_bug) == (dm.ErrorSource.USER, False)

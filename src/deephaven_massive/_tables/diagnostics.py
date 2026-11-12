@@ -79,7 +79,7 @@ from deephaven import arrow as dh_arrow
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError, source_of
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
@@ -1591,7 +1591,8 @@ def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
         table no longer updates")`.
     """
     return MassiveError(
-        f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
+        f"{label}: its {thread} thread died ({death!r}); this table no longer updates",
+        source=source_of(death),
     )
 
 

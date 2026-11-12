@@ -40,6 +40,8 @@ Interface:
     - `Patience`: how long one read waits out its buckets' pauses, shared by its requests.
     - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
       per minute) and the seconds a finished request holds its slot (61).
+    - `RETRYABLE_STATUSES`: the HTTP statuses whose request may succeed when sent again later
+      (429, 500, 502, 503, 504), which the library reports as retryable.
     - `Cancel`: the cancellation token that ends a request's waits.
     - `set_reply_capture`, `CapturedReply`: an optional process-wide sink that receives every
       raw reply the REST and WebSocket clients read (each REST body, refusals included, and
@@ -95,6 +97,7 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
+from deephaven_massive._massive.net.retry import RETRYABLE_STATUSES
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import (
@@ -124,6 +127,7 @@ from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
     "RATE_WINDOW",
+    "RETRYABLE_STATUSES",
     "BucketState",
     "Cancel",
     "CapturedReply",

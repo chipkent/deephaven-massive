@@ -12,7 +12,7 @@ from flooding the log:
   row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
   it uses bounded.
 - `log_failure` logs a failure that fails a live table, once per failure object, at the level
-  its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
+  its `is_bug` gives (`_errors.is_bug_of`): one connection failure that fails a hundred streams
   is one record, not a hundred.
 - `bounded_list` renders a list of any length as its count and its first `LIST_LIMIT` items,
   for a record that names symbols, topics, or stream ids: a stream of 5,000 symbols logs one
@@ -31,7 +31,7 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
+from deephaven_massive._errors import MassiveError, failure_text, is_bug_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -190,11 +190,11 @@ def log_failure(
     expected: int = logging.WARNING,
     exc_info: BaseException | None = None,
 ) -> bool:
-    """Log a failure that fails a live table, once per failure, at the level its cause gives.
+    """Log a failure that fails a live table, once per failure, at the level its `is_bug` gives.
 
-    A defect (`ErrorCause.USER_DEFECT` or `ErrorCause.LIBRARY_DEFECT`, and any exception that is
-    not a `MassiveError`) logs at ERROR, a library defect with how to report it
-    (`_errors.failure_text`); an expected failure logs at `expected`. One `MassiveError` object
+    A bug (`MassiveError.is_bug`, and any exception that is not a `MassiveError`) logs at
+    ERROR, a library bug with how to report it (`_errors.failure_text`); any other failure
+    logs at `expected`. One `MassiveError` object
     is logged once: the connection that fails a hundred streams with one error logs one
     record, and every later call with the same object logs at DEBUG instead. Thread-safe; the
     set of failures logged holds them weakly, so it never keeps one alive.
@@ -213,7 +213,7 @@ def log_failure(
         been logged already, and this call logged at DEBUG.
     """
     first = mark_failure_logged(error)
-    level = expected if cause_of(error) is ErrorCause.EXPECTED else logging.ERROR
+    level = expected if not is_bug_of(error) else logging.ERROR
     log.log(
         level if first else logging.DEBUG,
         message,

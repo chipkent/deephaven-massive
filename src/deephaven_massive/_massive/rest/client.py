@@ -34,7 +34,7 @@ pool of a `max_concurrency` of 64 up front would cost about a second and 48 MB.
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
 up at DEBUG: the call that fails raises the error, which the library logs at the level its
-cause gives, so a failure shows once in the console. Nothing logs a header.
+`is_bug` gives, so a failure shows once in the console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -924,6 +924,7 @@ class RestClient:
                 "SSL_CERT_FILE to a bundle that trusts it",
                 host=self._host,
                 path=request.target,
+                local=True,
             ) from error
         if is_proxy_auth_failure(error):
             raise WireError(
@@ -932,12 +933,14 @@ class RestClient:
                 status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                 host=self._host,
                 path=request.target,
+                local=True,
             ) from error
         return _Retryable(
             WireError(
                 f"GET {request.target} on {self._host} failed: {error}",
                 host=self._host,
                 path=request.target,
+                transient=True,
             )
         )
 

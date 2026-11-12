@@ -285,6 +285,7 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
             "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
             host=host,
             path=path,
+            local=True,
         )
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:

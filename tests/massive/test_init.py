@@ -27,6 +27,7 @@ EXPECTED_INTERFACE = [
     "Patience",
     "Provenance",
     "RATE_WINDOW",
+    "RETRYABLE_STATUSES",
     "ReadColumn",
     "ReadPlan",
     "Reject",

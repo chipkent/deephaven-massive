@@ -99,6 +99,8 @@ class WireError(Exception):
         request_id: str | None = None,
         unreadable: bool = False,
         client_defect: bool = False,
+        transient: bool = False,
+        local: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -118,6 +120,14 @@ class WireError(Exception):
                 defect. False, the default, for every failure to reach or hear from Massive.
             client_defect: True when the client itself failed on an unexpected exception (a
                 bug in it, not anything Massive did), which the library reports as a defect.
+            transient: True when the request got no answer for a reason that may pass (a
+                connection that failed or broke off), so the same request may succeed later;
+                the client sets it on the error of a failure it retried until its retries were
+                spent. A failure with a status is told by the status instead
+                (`RETRYABLE_STATUSES`).
+            local: True when the request failed on this machine's network settings, which the
+                user fixes: a certificate it doesn't trust (`SSL_CERT_FILE`), or a proxy that
+                refused its credentials (`HTTPS_PROXY`).
         """
         super().__init__(message)
         self._message = message
@@ -127,6 +137,8 @@ class WireError(Exception):
         self._request_id = request_id
         self._unreadable = unreadable
         self._client_defect = client_defect
+        self._transient = transient
+        self._local = local
 
     @property
     def message(self) -> str:
@@ -162,6 +174,16 @@ class WireError(Exception):
     def client_defect(self) -> bool:
         """True when the client itself failed on an unexpected exception: a bug in it."""
         return self._client_defect
+
+    @property
+    def transient(self) -> bool:
+        """True when the request got no answer for a reason that may pass, after every retry."""
+        return self._transient
+
+    @property
+    def local(self) -> bool:
+        """True when the request failed on this machine's network settings, which the user fixes."""
+        return self._local
 
 
 class WireAuthError(WireError):

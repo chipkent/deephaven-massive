@@ -51,7 +51,7 @@ def _is_loopback(host: str) -> bool:
 def _refusal(setting: str, base_url: str, reason: str) -> str:
     """Log a refused base URL at DEBUG and return the message of the error to raise.
 
-    The caller raises the error, which the library logs at the level its cause gives, so the
+    The caller raises the error, which the library logs at the level its `is_bug` gives, so the
     refusal logs here at DEBUG only.
 
     Args:

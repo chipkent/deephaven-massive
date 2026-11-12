@@ -416,14 +416,19 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     ) -> StreamHandle:
         handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
         if stream_id == 1:
-            core.fail_stream(stream_id, "not authorized")
+            core.fail_stream(stream_id, dm.AuthenticationError("not authorized", status=401))
         return handle
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     q = stream_query(massive_session)
     # As if the failure had come just after the open: no result, and the hold is released.
-    with pytest.raises(dm.MassiveError, match=r"^test\.trades stream 1 failed: not authorized$"):
+    with pytest.raises(
+        dm.MassiveError, match=r"^test\.trades stream 1 failed: not authorized$"
+    ) as failed:
         q.blink()
+    # The stream's own failure, of its class and with its attributes.
+    assert type(failed.value) is dm.AuthenticationError
+    assert (failed.value.status, failed.value.source) == (401, dm.ErrorSource.MASSIVE)
     second = q.blink()  # a fresh stream: the failed one is never reused
     rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["State"], r["Error"], r["HeldResults"]) for r in rows] == [
@@ -602,7 +607,7 @@ def test_an_open_that_raises_leaves_no_row(
         spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:
         if report == "fail":
-            core.fail_stream(stream_id, "not authorized")
+            core.fail_stream(stream_id, dm.MassiveError("not authorized"))
         else:
             core.update_streams({stream_id: StreamUpdate(rows_published=3)})
         raise RuntimeError("socket closed")
@@ -709,7 +714,8 @@ def test_a_failure_that_shuts_the_stream_down_while_held(
     with core.registry_lock:
         assert core.streams._streams[1].shut_down
         assert core.streams._stream_ids == {}  # the dead stream is never reused
-    core.fail_stream(1, "entitlement")  # still shown: the record outlives the shutdown
+    # Still shown: the record outlives the shutdown.
+    core.fail_stream(1, dm.MassiveError("entitlement"))
     second = q.blink()  # a fresh stream, no KeyError
     caplog.set_level(logging.ERROR)
     massive_session.release(first)
@@ -772,7 +778,7 @@ def test_record_lifetime_in_any_order(
             present = not shut
             expect_row = True
         elif event == "fail":
-            core.fail_stream(1, "boom")
+            core.fail_stream(1, dm.MassiveError("boom"))
             mapped = False
             expect_row = present and state != "CLOSED"  # a close is final
             state = "FAILED" if expect_row else state
@@ -979,8 +985,9 @@ def test_a_failed_stream_is_not_reused(
 ) -> None:
     q = stream_query(massive_session)
     first = q.blink()
-    massive_session._core.fail_stream(1, "not authorized")
-    massive_session._core.fail_stream(1, "not authorized")  # its key is already unregistered
+    massive_session._core.fail_stream(1, dm.MassiveError("not authorized"))
+    # Its key is already unregistered.
+    massive_session._core.fail_stream(1, dm.MassiveError("not authorized"))
     second = q.blink()
     assert len(fake_streams.opened) == 2
     rows = stream_rows()
@@ -1011,7 +1018,7 @@ def test_a_failure_after_the_last_release_is_shown(
         derived = result.tail(1)
     massive_session.release(result)
     assert [r["State"] for r in stream_rows()] == ["RELEASED"]
-    massive_session._core.fail_stream(1, "not authorized")
+    massive_session._core.fail_stream(1, dm.MassiveError("not authorized"))
     assert [(r["State"], r["Error"], r["HeldResults"]) for r in stream_rows()] == [
         ("FAILED", "not authorized", 0)
     ]
@@ -1023,7 +1030,7 @@ def test_a_failure_after_the_last_release_is_shown(
     release_scope(massive_session._core.exec_ctx, user_scope)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     # The stream has shut down and left the registry: a failure now is only logged.
-    massive_session._core.fail_stream(1, "later")
+    massive_session._core.fail_stream(1, dm.MassiveError("later"))
     rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["State"], r["Error"]) for r in rows] == [
         (1, "FAILED", "not authorized"),
@@ -1074,7 +1081,7 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
         handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
         fake_streams.publishers[stream_id].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[stream_id].wait(TIMEOUT)
-        core.fail_stream(stream_id, "entitlement")
+        core.fail_stream(stream_id, dm.MassiveError("entitlement"))
         return handle
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
@@ -1100,7 +1107,7 @@ def test_a_failure_while_the_shape_is_derived_is_named(
         blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
-        core.fail_stream(1, "entitlement")
+        core.fail_stream(1, dm.MassiveError("entitlement"))
         return blink_to_append_only(blink)
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
@@ -1186,7 +1193,7 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
         blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
-        core.fail_stream(1, "entitlement")
+        core.fail_stream(1, dm.MassiveError("entitlement"))
         return describe(blink, SPEC, schema)
 
     with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:

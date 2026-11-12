@@ -79,7 +79,7 @@ from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError, SessionClosedError, source_of
 from deephaven_massive._log_limits import BoundedLog, bounded_list
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
@@ -416,7 +416,7 @@ class SessionCore:
             What `body` returned.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
         """
         try:
             return self._guarded_verb(call, body)
@@ -436,11 +436,11 @@ class SessionCore:
             What `body` returned.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
-            raise MassiveError(f"{self.label} is closed")
+            raise SessionClosedError(f"{self.label} is closed")
         if not holds_update_graph_lock(self.exec_ctx):
             return body()
         began = time.monotonic()
@@ -587,7 +587,7 @@ class SessionCore:
         if closed:
             closer()
 
-    def fail_stream(self, stream_id: int, error: str) -> str | None:
+    def fail_stream(self, stream_id: int, error: MassiveError) -> str | None:
         """Record that a stream failed and stop reusing it for new verbs.
 
         Called by the transport just before it fails the stream's table (`publish_failure`),
@@ -610,7 +610,8 @@ class SessionCore:
 
         Args:
             stream_id: The failed stream.
-            error: The failure text for the `Error` column.
+            error: The failure; its text fills the `Error` column, and a stream keeps it for a
+                later verb on the stream to raise.
 
         Returns:
             The close's text when the close came first, so the caller fails the table with it
@@ -624,7 +625,7 @@ class SessionCore:
             if current is not None and current.state is StreamState.CLOSED:
                 return current.error
             recorded = self.streams.record_failure(stream_id, error) or self.workers.change_row(
-                stream_id, functools.partial(replace, state=StreamState.FAILED, error=error)
+                stream_id, functools.partial(replace, state=StreamState.FAILED, error=str(error))
             )
         if not recorded:
             logger.debug(
@@ -743,14 +744,15 @@ class SessionCore:
             The view: the schema's columns of `table`, the same rows.
 
         Raises:
-            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), also when
-                the close ran while the view was built; if the diagnostics writer died and failed
-                the table (`"MassiveSession #1: its diagnostics tables failed when their writer
-                thread died (...)"`).
+            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed"`),
+                also when the close ran while the view was built.
+            MassiveError: If the diagnostics writer died and failed the table
+                (`"MassiveSession #1: its diagnostics tables failed when their writer thread died
+                (...)"`).
         """
         with self.registry_lock:
             if self._closed:
-                raise MassiveError(f"{self.label} is closed")
+                raise SessionClosedError(f"{self.label} is closed")
             self._views += 1
             live_set.sync(self)
         scope: LivenessScope | None = None
@@ -767,12 +769,13 @@ class SessionCore:
                 self._drop_view()
             died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
-                raise MassiveError(f"{self.label} is closed") from error
+                raise SessionClosedError(f"{self.label} is closed") from error
             if isinstance(error, DHError) and died is not None:
                 logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
                 raise MassiveError(
                     f"{self.label}: its diagnostics tables failed when their writer thread died "
-                    f"({died!r}); see the ERROR logged then"
+                    f"({died!r}); see the ERROR logged then",
+                    source=source_of(died),
                 ) from error
             raise
         return result
@@ -916,7 +919,7 @@ class SessionCore:
             self._close_symbol_reads()
         for ready in opening:  # waiting verbs wake and raise MassiveError
             ready.set()
-        failed = self._fail_all(fails, MassiveError(text))
+        failed = self._fail_all(fails, SessionClosedError(text))
         for closer in closers:
             try:
                 closer()

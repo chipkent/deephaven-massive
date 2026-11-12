@@ -214,7 +214,8 @@ class HistoryQuery(Query):
                 keys.
             EntitlementError: With `wait=True`, if your plan doesn't include the data from any
                 source the call can use.
-            MassiveError: At the call, if the session is closed. With `wait=True`, also if:
+            SessionClosedError: If the session is closed.
+            MassiveError: With `wait=True`, if:
                 - a request fails;
                 - adjusted bars come back unadjusted, or the reverse;
                 - a trading day's flat file is missing and REST can't serve that day;

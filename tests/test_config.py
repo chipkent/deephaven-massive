@@ -1132,8 +1132,10 @@ def test_an_environment_problem_names_the_variable_and_not_the_file(
 
 
 def test_a_missing_key_is_still_an_authentication_error(tmp_path: Path) -> None:
-    with pytest.raises(dm.AuthenticationError, match="no Massive API key"):
+    with pytest.raises(dm.AuthenticationError, match="no Massive API key") as missing:
         MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
+    # Massive refused nothing: the settings lack the key, and that is no bug.
+    assert (missing.value.source, missing.value.is_bug) == (dm.ErrorSource.USER, False)
 
 
 @pytest.mark.usefixtures("key")

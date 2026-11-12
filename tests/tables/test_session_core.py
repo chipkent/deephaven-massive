@@ -461,8 +461,9 @@ def test_a_failure_after_the_stream_left_the_registry_is_logged(
     core = massive_session._core
     result = stream_query(massive_session).blink()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"):
-        core.fail_stream(1, "shown")  # in the registry: shown in m.streams(), not logged
-        core.fail_stream(42, "late")  # never registered: only logged
+        # In the registry: shown in m.streams(), not logged.
+        core.fail_stream(1, dm.MassiveError("shown"))
+        core.fail_stream(42, dm.MassiveError("late"))  # never registered: only logged
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.DEBUG, f"{core.label}: stream 42 failed after it left the registry: late")
     ]
@@ -938,7 +939,7 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
         ),
         (
             logging.DEBUG,
-            f"m.stocks.trades('AAPL').fetch() raised MassiveError: {core.label} is closed",
+            f"m.stocks.trades('AAPL').fetch() raised SessionClosedError: {core.label} is closed",
         ),
     ]
 

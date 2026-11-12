@@ -227,8 +227,9 @@ def test_config_must_be_a_massive_config() -> None:
 
 def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
     frozen = make_user_exec_ctx(freeze_vars=["dm"])
-    with frozen, pytest.raises(dm.MassiveError, match="frozen copy"):
+    with frozen, pytest.raises(dm.MassiveError, match="frozen copy") as misuse:
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    assert (misuse.value.source, misuse.value.is_bug) == (dm.ErrorSource.USER, True)
     with make_user_exec_ctx():  # an unfrozen user context shares the script session's scope
         dm.MassiveSession(dm.MassiveConfig(api_key="k")).close()
 
@@ -248,6 +249,8 @@ def test_construction_without_an_execution_context_fails_fast() -> None:
     assert len(errors) == 1
     assert "must be created inside a Deephaven server" in str(errors[0])
     assert "ExecutionContext" in str(errors[0])
+    assert isinstance(errors[0], dm.MassiveError)
+    assert (errors[0].source, errors[0].is_bug) == (dm.ErrorSource.USER, True)
 
 
 def test_construction_on_the_update_graph_thread_fails() -> None:
@@ -475,6 +478,7 @@ def test_close_marks_streams_closed_and_warns_once(
     closed = f"{label(massive_session)} was closed; this table no longer updates"
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
+    assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
     massive_session.release(live)  # release() keeps working after close()
 
 
@@ -710,7 +714,7 @@ def test_a_session_closed_while_a_stream_opens(
 
     closing = transport_of(open_stream)()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: closing)
-    with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
+    with pytest.raises(dm.SessionClosedError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 

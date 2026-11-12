@@ -247,7 +247,8 @@ def _check_published(
         )
         raise MassiveError(
             f"{spec.name}: the flat file for {first} is not published yet. "
-            f"{PUBLICATION_NOTE}. {remedy}"
+            f"{PUBLICATION_NOTE}. {remedy}",
+            is_retryable=True,
         )
 
 

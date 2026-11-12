@@ -540,6 +540,7 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
         "127.0.0.1); check the user and password in HTTPS_PROXY"
     )
     assert (caught.value.status, caught.value.path) == (407, "/v3/trades/AAPL")
+    assert caught.value.local  # the proxy setting on this machine is the fix
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tunnelled.requests, clock.waits) == ([], [])
 
@@ -609,6 +610,8 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert "SSL_CERT_FILE" in caught.value.message
     assert (caught.value.status, caught.value.path) == (None, "/v3/trades/AAPL")
+    assert not caught.value.transient
+    assert caught.value.local  # SSL_CERT_FILE, on this machine, is the fix
     assert clock.waits == []
     assert tls_server.requests == []
 
@@ -763,6 +766,7 @@ def test_a_persistent_connection_failure_names_the_host_and_cause(
     with pytest.raises(WireError, match=r"^GET /v3/trades/AAPL on 127\.0\.0\.1 failed: ") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert (caught.value.status, caught.value.host) == (None, "127.0.0.1")
+    assert caught.value.transient  # no answer, so a later request may get one
     assert len(fake_rest.requests) == 4
     assert len(clock.waits) == 3
 

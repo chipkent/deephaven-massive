@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from deephaven.dherror import DHError
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, SessionClosedError, copy_error
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
@@ -113,6 +113,7 @@ class _StreamEntry:
             opener's included.
         ready: Set once the open finished, whether it succeeded or not, and by `close()`.
         shut_down: True once the blink table has shut down while holds were outstanding.
+        failure: The error the stream failed with, once it has failed; None before.
     """
 
     key: StreamKey
@@ -120,6 +121,7 @@ class _StreamEntry:
     row: StreamRow
     ready: threading.Event
     shut_down: bool = False
+    failure: MassiveError | None = None
 
 
 class SharedStreams:
@@ -243,9 +245,9 @@ class SharedStreams:
             The live result, a distinct Python object per call.
 
         Raises:
-            MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`),
-                or the session closed while the result was built (`"MassiveSession #1 is
-                closed"`).
+            MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
+            SessionClosedError: If the session closed while the result was built
+                (`"MassiveSession #1 is closed"`).
         """
         core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
         key: StreamKey = (spec.name, channel, request.symbol_key())
@@ -284,15 +286,16 @@ class SharedStreams:
             # The close failed the stream's tables: its row may not read `CLOSED` yet, or may
             # be gone already, so the close is named whether or not a failure was recorded.
             if deephaven and core.closed:
-                raise MassiveError(f"{self._label} is closed") from error
+                raise SessionClosedError(f"{self._label} is closed") from error
             if failure is not None:
-                raise MassiveError(
-                    f"{spec.name} stream {handle.stream_id} failed: {failure}"
-                ) from error
+                named = copy_error(
+                    failure, f"{spec.name} stream {handle.stream_id} failed: {failure}"
+                )
+                raise named from error
             raise
         if core.closed:  # close() ran while the result was built; it is released on the reaper
             self._results.release(result)
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed")
         return result
 
     def _require_unfailed(self, spec: DatasetSpec, stream_id: int) -> None:
@@ -303,27 +306,31 @@ class SharedStreams:
             stream_id: The stream.
 
         Raises:
-            MassiveError: If the stream has failed; the message names its failure.
+            MassiveError: If the stream has failed: a copy of its failure, of the same class and
+                attributes (`copy_error`), whose message names the failure.
         """
         failure = self._failure(stream_id)
         if failure is not None:
-            raise MassiveError(f"{spec.name} stream {stream_id} failed: {failure}")
+            named = copy_error(failure, f"{spec.name} stream {stream_id} failed: {failure}")
+            raise named
 
-    def _failure(self, stream_id: int) -> str | None:
-        """Return a stream's failure text, if it has failed and is still in the registry.
+    def _failure(self, stream_id: int) -> MassiveError | None:
+        """Return the error a stream failed with, if it has failed and is still in the registry.
 
         Args:
             stream_id: The stream.
 
         Returns:
-            Its `Error` text when its state is `FAILED` or `CLOSED` (the close's text); None
-            otherwise.
+            The error it failed with when its state is `FAILED`; a `SessionClosedError` with the
+            close's text when it is `CLOSED`; None otherwise.
         """
         with self._lock:
             state = self._streams.get(stream_id)
             if state is None or state.row.state not in {StreamState.FAILED, StreamState.CLOSED}:
                 return None
-            return state.row.error or "failed"
+            if state.row.state is StreamState.CLOSED:
+                return SessionClosedError(state.row.error or f"{self._label} is closed")
+            return state.failure
 
     def _acquire(
         self,
@@ -531,12 +538,12 @@ class SharedStreams:
             the opener's hold, which the caller must pass to `_open`.
 
         Raises:
-            MassiveError: If the session is closed (a verb that passed the guard just before
+            SessionClosedError: If the session is closed (a verb that passed the guard just before
                 `close()` ran, or a waiter woken by `close()`); a closed stream is never reused.
         """
         with self._lock:
             if core.closed:
-                raise MassiveError(f"{self._label} is closed")
+                raise SessionClosedError(f"{self._label} is closed")
             existing = self._stream_ids.get(key)
             if existing is not None:
                 state = self._streams[existing]
@@ -623,8 +630,9 @@ class SharedStreams:
             The opened stream, with the opener's hold.
 
         Raises:
-            MassiveError: If the session was closed while the transport opened the stream; the
-                caller then releases the opener's hold, which releases the new stream's scope.
+            SessionClosedError: If the session was closed while the transport opened the
+                stream; the caller then releases the opener's hold, which releases the new
+                stream's scope.
         """
         opened: StreamHandle | None = None
         stored = False
@@ -649,7 +657,7 @@ class SharedStreams:
             raise
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self._label)
-            raise MassiveError(f"{self._label} was closed while a stream was opening")
+            raise SessionClosedError(f"{self._label} was closed while a stream was opening")
         return opened
 
     def _release_hold(self, stream_id: int) -> None:
@@ -761,7 +769,7 @@ class SharedStreams:
             self._diagnostics.write(row)
         return True
 
-    def record_failure(self, stream_id: int, error: str) -> bool:
+    def record_failure(self, stream_id: int, error: MassiveError) -> bool:
         """Mark a registered stream `FAILED` and stop reusing it; `registry_lock` is held.
 
         Its key is unmapped (when it still maps to this stream), so the next verb with the
@@ -771,7 +779,8 @@ class SharedStreams:
 
         Args:
             stream_id: The stream id.
-            error: The failure text for the `Error` column.
+            error: The failure; its text fills the `Error` column, and a later verb on the
+                stream raises a copy of it (`_failure`).
 
         Returns:
             True if the id is a registered stream.
@@ -779,8 +788,8 @@ class SharedStreams:
         state = self._streams.get(stream_id)
         if state is None:
             return False
-        row = replace(state.row, state=StreamState.FAILED, error=error)
-        self._streams[stream_id] = replace(state, row=row)
+        row = replace(state.row, state=StreamState.FAILED, error=str(error))
+        self._streams[stream_id] = replace(state, row=row, failure=error)
         if self._stream_ids.get(state.key) == stream_id:
             del self._stream_ids[state.key]
         if state.handle is not None:  # an opening stream's row is written by _open
