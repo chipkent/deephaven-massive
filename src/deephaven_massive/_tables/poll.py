@@ -1421,7 +1421,7 @@ _SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
 """The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
 
 
-def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
+def _hashable(column: pa.ChunkedArray) -> list[object]:
     """Return a column's values in a form a set can hold: a list value as a tuple.
 
     A row's identity is a tuple of its key values, held in the poller's sets, so a list key
@@ -1431,13 +1431,13 @@ def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
         column: One key column of a cycle.
 
     Returns:
-        Its values, each list as a tuple and every other value as is.
+        Its values, each list as a tuple and every other value as is. A value a set cannot
+        hold raises the set's `TypeError` where the poller adds it.
     """
-    values = column.to_pylist()
+    values: list[object] = list(column.to_pylist())
     if not pa.types.is_list(column.type):
-        scalars: list[Hashable] = values  # pyarrow's scalars: None, bool, int, str, ...
-        return scalars
-    return [None if value is None else tuple(value) for value in values]
+        return values
+    return [tuple(value) if isinstance(value, list) else value for value in values]
 
 
 def _list_key_text(table: pa.Table, names: Sequence[str]) -> pa.Array:

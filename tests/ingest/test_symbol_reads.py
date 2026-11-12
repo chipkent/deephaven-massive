@@ -134,7 +134,8 @@ def session(
 
 def _rows(outcome: SymbolOutcome) -> list[dict[str, Any]]:
     assert isinstance(outcome, SymbolRows)
-    rows: list[dict[str, Any]] = dh_arrow.to_arrow(outcome.table).to_pylist()
+    rows = dh_arrow.to_arrow(outcome.table).to_pylist()
+    assert isinstance(rows, list)
     return rows
 
 

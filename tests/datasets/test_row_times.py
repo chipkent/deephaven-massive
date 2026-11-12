@@ -778,13 +778,12 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 def stamped(
     rule: StampRule, values: Sequence[datetime | int | None], *, label: str = "stocks.bars"
-) -> list[datetime | None]:
+) -> list[object]:
     # Stamps a batch of one symbol's bars, as the transports hand them over.
     rows = pa.RecordBatch.from_pydict(
         {"Symbol": pa.array(["AAPL"] * len(values)), START: pa.array(values, INSTANT)}
     )
-    stamps: list[datetime | None] = rule.stamp(label, rows, source="s").column(START).to_pylist()
-    return stamps
+    return list(rule.stamp(label, rows, source="s").column(START).to_pylist())
 
 
 def test_known_stamps_move_to_the_days_start_and_log_nothing(
@@ -906,7 +905,7 @@ def test_a_stamp_moved_to_its_day_is_still_expected() -> None:
     rule = StampRule(NEW_YORK, frozenset({CLOSE}), "1-day bar", T.DAY, 1, session_warnings())
     close = instant_ns(datetime(2025, 3, 3, 16, tzinfo=NEW_YORK))
     [moved] = stamped(rule, [close])
-    assert moved is not None
+    assert isinstance(moved, datetime)
     assert rule.expects(close)
     assert rule.expects(instant_ns(moved))
     assert not rule.expects(instant_ns(datetime(2025, 3, 3, 14, 30, tzinfo=NEW_YORK)))
@@ -936,12 +935,11 @@ def instant_ns(moment: datetime) -> int:
     return int(moment.timestamp()) * 10**9 + moment.microsecond * 1000
 
 
-def starts(values: pa.Array, zone: tzinfo, *known: time) -> list[int | None]:
+def starts(values: pa.Array, zone: tzinfo, *known: time) -> list[object]:
     moved, odd = day_starts(values, zone=zone, known=known)
     assert moved.type == values.type
     assert not any(odd.to_pylist())
-    nanos: list[int | None] = moved.cast(pa.int64()).to_pylist()
-    return nanos
+    return list(moved.cast(pa.int64()).to_pylist())
 
 
 def test_utc_day_stamps_move_each_known_stamp_to_its_days_start() -> None:
