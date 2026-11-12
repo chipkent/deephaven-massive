@@ -257,9 +257,10 @@ class FetchQuery(Query):
                 - a request fails in any other way;
                 - for a watchlist, every symbol's read failed.
 
-        Without `wait=True`, an error from Massive fails the table instead of raising: it is
-        logged and shows in `Error` of `m.streams()`. A watchlist's table fails when every symbol
-        it held at the call fails for good, such as on a plan without the dataset.
+        Without `wait=True`, an error the background read meets fails the table instead of
+        raising: it is logged and shows in `Error` of `m.streams()`. A watchlist's table fails
+        when every symbol it held at the call fails for good, such as on a plan without the
+        dataset.
 
         Example:
             ::

@@ -892,12 +892,9 @@ of `streams`:
 1. Add `X:SOLUSD`. An `X:SOLUSD` row joins `latest_trades` with its first trade, and the
    stream's `Symbols` lists it.
 2. Delete `X:SOLUSD`. Its row leaves `latest_trades` at once, and `Symbols` drops it.
-3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` among the
-   pairs Massive's crypto ticker list doesn't hold. The other pairs keep streaming.
-4. Delete `btcusd` and add `X:BTCUSD`. The `Error` clears, and an `X:BTCUSD` row arrives with
-   its first trade.
-5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and the `Error` names it. Delete
-   it, and the `Error` clears.
+3. Add `X:BTCUSD`. An `X:BTCUSD` row arrives with its first trade.
+4. Add `X:ZZZZUSD`, a pair that isn't on Massive's crypto ticker list. No row appears, the
+   `Error` names it, and the other pairs keep streaming. Delete it, and the `Error` clears.
 
 #### 22. Stream the trades of the top gainers
 
