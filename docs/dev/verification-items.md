@@ -242,42 +242,54 @@ settles it.
 - **79.** The futures snapshot's `last_minute.last_updated` is in nanoseconds. Settled
   2026-11-02, against the sample.
 - **87.** A forex conversion `precision` outside 0 to 4. Settled 2026-11-12: `precision=5` was
-  honored (`converted` the amount times `last.bid`, rounded to 5 decimals); now sent.
-- **88.** A forex conversion `amount` of 0 or below. Settled 2026-11-12: 0 converted to 0, and
-  -100 to -68.43; now sent.
+  honored (`converted` the amount times `last.bid`, rounded to 5 decimals); now sent; recorded by
+  `tests/namespaces/test_forex_integration.py`.
+- **88.** A forex conversion `amount` of 0 or below. Settled 2026-11-12: 0 converted to 0, and -100
+  to -68.43; now sent; recorded by `tests/namespaces/test_forex_integration.py`.
 - **89.** A forex conversion currency that is not three upper-case letters. Settled 2026-11-12:
-  `aud` to `usd` answered HTTP 404 "Couldn't find requested currency pair"; now sent.
+  `aud` to `usd` answered HTTP 404 "Couldn't find requested currency pair"; now sent; recorded by
+  `tests/namespaces/test_forex_integration.py`.
 - **90.** An indicator `timespan` its path does not list. Settled 2026-11-12: `second` answered
-  HTTP 200 with no values; still refused.
+  HTTP 200 with no values; still refused; recorded by
+  `tests/namespaces/test_indicators_integration.py`.
 - **91.** An indicator `window` below 1. Settled 2026-11-12: `window=0` answered HTTP 200 with an
-  empty body; still refused.
+  empty body; still refused; recorded by `tests/namespaces/test_indicators_integration.py`.
 - **92.** An `asset_class` a reference endpoint does not list. Settled 2026-11-12: the conditions,
-  the exchanges, and the ticker types each answered HTTP 200 with no rows; still refused.
+  the exchanges, and the ticker types each answered HTTP 200 with no rows; still refused; recorded
+  by `tests/namespaces/test_reference_integration.py`.
 - **93.** A `sort` value outside a path's listed sort fields. Settled 2026-11-12: the conditions
-  answered `sort=exchange` with HTTP 400; now sent.
+  answered `sort=exchange` with HTTP 400; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
 - **94.** A text `sort` part that names no field of the rows. Settled 2026-11-12: the dividends
-  answered `no_such_field.asc` with HTTP 400; now sent.
+  answered `no_such_field.asc` with HTTP 400; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
 - **95.** A `sort` part with surrounding whitespace. Settled 2026-11-12: the dividends served
-  `ticker, ex_dividend_date.desc` as written; now sent.
+  `ticker, ex_dividend_date.desc` as written; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
 - **96.** A `limit` below 1. Settled 2026-11-12: the dividends answered `limit=0` with HTTP 200 and
-  no rows; still refused.
+  no rows; still refused; recorded by `tests/namespaces/test_query_building_integration.py`.
 - **97.** A filter value outside an enum parameter's values. Settled 2026-11-12: the tickers list
-  answered `market=equities` with HTTP 200 and no rows; still refused.
+  answered `market=equities` with HTTP 200 and no rows; still refused; recorded by
+  `tests/datasets/test_filters_integration.py`.
 - **98.** A filter list item with surrounding whitespace. Settled 2026-11-12: ` MSFT` in
-  `ticker.any_of` returned MSFT's dividends; now sent.
+  `ticker.any_of` returned MSFT's dividends; now sent; recorded by
+  `tests/datasets/test_filters_integration.py`.
 - **99.** Balance sheets for `trailing_twelve_months`. Settled 2026-11-12: HTTP 200 with no rows;
-  still refused.
+  still refused; recorded by `tests/namespaces/test_stock_financials_integration.py`.
 - **100.** The futures aggregates' `resolution=1day`. Settled 2026-11-12: five bars, each starting
-  at 00:00 UTC and labelled with the next day's session; `Timespan.DAY` now sent (item 107).
+  at 00:00 UTC and labelled with the next day's session; `Timespan.DAY` now sent (item 107);
+  recorded by `tests/queries/test_choice_integration.py`.
 - **101.** `timespan=session` on the aggregates range outside futures. Settled 2026-11-12: HTTP 400
-  "Invalid time span"; now sent.
-- **102.** A bar multiplier below 1. Settled 2026-11-12: HTTP 400 "The parameter 'multiplier'
-  must be a positive number"; now sent.
+  "Invalid time span"; now sent; recorded by `tests/queries/test_choice_integration.py`.
+- **102.** A bar multiplier below 1. Settled 2026-11-12: HTTP 400 "The parameter 'multiplier' must
+  be a positive number"; now sent; recorded by `tests/queries/test_choice_integration.py`.
 - **103.** A currency or crypto pair as an options underlying. Settled 2026-11-12: the chain
-  answered HTTP 400 "Invalid ticker." and is now sent; the contracts list answered HTTP 200 with
-  no rows and is still refused.
+  answered HTTP 400 "Invalid ticker." and is now sent; the contracts list answered HTTP 200 with no
+  rows and is still refused; recorded by `tests/namespaces/test_options_integration.py`.
 - **105.** A range whose start is after its end. Settled 2026-11-12: the aggregates range answered
   HTTP 400, the dividends' `ex_dividend_date` HTTP 200 with no rows; still refused, since
-  `history()` turns a range into the bars or days inside it and a reversed one has none to send.
+  `history()` turns a range into the bars or days inside it and a reversed one has none to send;
+  recorded by `tests/datasets/test_dates_integration.py`.
 - **106.** A range that starts after now. Settled 2026-11-12: AAPL's day bars 10 to 20 days ahead
-  answered HTTP 200 with no rows; still refused.
+  answered HTTP 200 with no rows; still refused; recorded by
+  `tests/datasets/test_dates_integration.py`.
