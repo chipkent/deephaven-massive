@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -19,6 +19,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
+from deephaven.liveness_scope import LivenessScope
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
@@ -29,9 +30,10 @@ from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
-from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
+from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._errors import PermanentError, RowDataError
+from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
@@ -41,13 +43,14 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
+from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from deephaven.liveness_scope import LivenessScope
+    from deephaven_massive._tables.publisher import BlinkPublisher
 
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -131,7 +134,8 @@ class Script:
             record(DriftReport())
         if isinstance(outcome, BaseException):
             raise outcome
-        return poll.CycleRows(cast("pa.Table", outcome), 3, 600.0, self.left_out)
+        assert isinstance(outcome, pa.Table)
+        return poll.CycleRows(outcome, 3, 600.0, self.left_out)
 
 
 @pytest.fixture
@@ -164,7 +168,7 @@ def pollers(massive_session: dm.MassiveSession) -> Pollers:
 def start(
     m: dm.MassiveSession,
     *,
-    script: Script,
+    script: poll.CycleReader,
     pollers: Pollers,
     clock: FakeClock,
     mode: PollMode = PollMode.REPLACE,
@@ -225,6 +229,13 @@ def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
         return convert(data)
 
     monkeypatch.setattr(dh_arrow, "to_table", flaky)
+
+
+def _pollers_of(m: dm.MassiveSession) -> Pollers:
+    # The session's own pollers, kept by its REST transport.
+    transport = m._core.rest_transport()
+    assert isinstance(transport, RestEndpoints)
+    return transport._state.pollers
 
 
 def poller_of(pollers: Pollers) -> poll.Poller:
@@ -499,7 +510,7 @@ def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
 
     # Held until the end: a table nothing refers to may be collected, which stops its poller
     # before its first cycle.
-    table = start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
+    table = start(massive_session, script=read, pollers=pollers, clock=clock)
     poller, pool = names.get(timeout=TIMEOUT)
     prefix = massive_session._core.thread_prefix
     assert poller == f"{prefix} poll-1"
@@ -1256,7 +1267,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     dh_to_pylist: ToPylist,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    pollers = cast("Any", massive_session._core.rest_transport())._state.pollers
+    pollers = _pollers_of(massive_session)
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
@@ -1297,8 +1308,10 @@ def test_a_poll_racing_close_after_registering_never_starts(
     # fails, its result is released, and the poller never runs.
     track = ResultRegistry.track
 
-    def track_then_close(self: ResultRegistry, *args: object) -> ResultRecord:
-        record = track(self, *cast("tuple[Table, LivenessScope, Callable[[], None]]", args))
+    def track_then_close(
+        self: ResultRegistry, *args: *tuple[Table, LivenessScope, Callable[[], None]]
+    ) -> ResultRecord:
+        record = track(self, *args)
         massive_session.close()
         return record
 
@@ -1438,7 +1451,7 @@ def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
     *, script: Script, clock: FakeClock, fake_rest: FakeRestServer
 ) -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    pollers = cast("Any", m._core.rest_transport())._state.pollers
+    pollers = _pollers_of(m)
     script.rows()
     tables = [start(m, script=script, pollers=pollers, clock=clock)]
     poller = poller_of(pollers)
@@ -1540,7 +1553,8 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
             failures.append(str(error))
             publisher.publish_failure(error)
 
-    poller._publisher = cast("Any", _Recording())
+    recording: BlinkPublisher = _Recording()  # type: ignore[assignment]  # records its failure
+    poller._publisher = recording
     with caplog.at_level(logging.ERROR, LOGGER):
         assert poller.fail(dm.AuthenticationError("HTTP 401"))
     assert failures == [closed]
@@ -1562,10 +1576,14 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
         read=script,
         pollers=pollers,
         clock=poll.CLOCK,
-        publisher=cast("Any", None),
+        publisher=None,  # type: ignore[arg-type]  # never used: the cycle ends first
         stop=Cancel(),
     )
-    poller._core = cast("Any", lambda: None)
+
+    def gone() -> SessionCore | None:
+        return None  # the core was collected
+
+    poller._core = gone  # type: ignore[assignment]  # a weak reference whose core is gone
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
     assert poller._end_reason() == "its session is gone"
@@ -1577,10 +1595,25 @@ def test_a_stop_during_a_cycle_publishes_nothing(
     gate = threading.Event()
     reading = threading.Event()
 
-    def slow(**kwargs: object) -> poll.CycleRows:
+    def slow(
+        *,
+        symbols: tuple[str, ...] | AllSymbols | None,
+        values: tuple[str, ...] | None,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: threading.Event,
+    ) -> poll.CycleRows:
         reading.set()
         gate.wait(TIMEOUT)
-        return script(**cast("dict[str, Any]", kwargs))
+        return script(
+            symbols=symbols,
+            values=values,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=cancel,
+        )
 
     for _ in range(3):
         script.rows(("AAPL", 1.0))
@@ -1661,7 +1694,8 @@ def test_an_error_after_a_stop_is_not_reported(
 def test_pollers_forget_and_ignore_unknown(
     *, massive_session: dm.MassiveSession, pollers: Pollers
 ) -> None:
-    pollers.discard(cast("Any", object()))
+    stranger: poll.Poller = object()  # type: ignore[assignment]  # a poller it never had
+    pollers.discard(stranger)
     assert not pollers.closed
     pollers.close()
     pollers.close()
@@ -2672,11 +2706,11 @@ def open_poll_case(
     # the poller waits for the next; then derives and listens.
     fake_rest.reply(PATH, ROW)
     watchlist: InputTable | None = None
-    symbols: object = ["AAPL"]
+    symbols: dm.SymbolsLike = ["AAPL"]
     if watched:
         symbols = watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
         watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
-    q = build_query(m._core, DIVIDENDS, query_type=FetchQuery, symbols=cast("Any", symbols))
+    q = build_query(m._core, DIVIDENDS, query_type=FetchQuery, symbols=symbols)
     case = PollCase(m, fake_rest, clock, q.poll(60, mode=mode), race, cycles_ended, watchlist)
     until(lambda: case.table.size == 1)
     clock.wait_for_sleepers(1)

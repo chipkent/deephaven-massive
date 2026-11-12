@@ -28,7 +28,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import threading
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
@@ -145,10 +145,12 @@ def _marks(value: object) -> tuple[pytest.Mark, ...]:
         The marks, in order.
     """
     items = value if isinstance(value, list | tuple) else (value,)
-    return tuple(
-        item.mark if isinstance(item, pytest.MarkDecorator) else cast("pytest.Mark", item)
-        for item in items
-    )
+    marks: list[pytest.Mark] = []
+    for item in items:
+        mark = item.mark if isinstance(item, pytest.MarkDecorator) else item
+        assert isinstance(mark, pytest.Mark), mark
+        marks.append(mark)
+    return tuple(marks)
 
 
 def live_cases(module: ModuleType) -> list[LiveCase]:

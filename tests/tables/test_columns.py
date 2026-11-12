@@ -10,7 +10,7 @@ stream's `on_shutdown_callback`, alive exactly as long as it lives.
 import logging
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -324,7 +324,7 @@ def test_the_column_table_lists_every_column(
     assert column_descriptions(table) == dict(COLUMN_TABLE_DESCRIPTIONS)
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
     with pytest.raises(TypeError):  # read-only: no caller can change the header text
-        cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"
+        COLUMN_TABLE_DESCRIPTIONS["Name"] = "changed"  # type: ignore[index]  # the point: read-only
 
 
 def _string_objects(table: Table, column: str) -> int:

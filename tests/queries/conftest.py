@@ -7,7 +7,6 @@ from typing import Any, cast
 import pytest
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
-from deephaven.table import Table
 from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
@@ -48,9 +47,9 @@ def s3_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
 
 
 @pytest.fixture
-def live(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+def live(dh_input_table: Callable[..., InputTable]) -> Callable[..., InputTable]:
     # Makes a refreshing, keyed watchlist holding the symbols.
-    def make(*symbols: str) -> Table:
+    def make(*symbols: str) -> InputTable:
         table = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         if symbols:
             table.add(new_table([string_col("Symbol", list(symbols))]))
