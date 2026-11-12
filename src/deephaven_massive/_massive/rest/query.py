@@ -56,8 +56,8 @@ def request_target(
             encoded by its kind and then percent-encoded whole (`I:SPX` is sent as
             `I%3ASPX`), so no value can leave its segment: a `/` is sent as `%2F` (`BRK/B` as
             `BRK%2FB`), and a value of only dots (`..`) as `%2E`s, which no client or server
-            reads as a step up the path. What Massive answers to a segment holding `%2F` is
-            verification item 115.
+            reads as a step up the path. Massive answers a segment holding `%2F` as it answers
+            any value.
         query_params: Query values by wire name, in the order to send them. A `None` value is
             left out.
 
