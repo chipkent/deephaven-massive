@@ -199,14 +199,14 @@ settles it.
   the other statements take. Refused by `m.stocks.financials.balance_sheets` until read.
   Settled by `tests/namespaces/test_stock_financials_integration.py` (Stocks Advanced).
 - **100.** What the futures aggregates answer to a day `resolution` (`1day`). `Timespan.DAY` is
-  refused for futures bars until read. Settled by `tests/test_query_integration.py` (Futures
-  Basic), on the front E-mini contract.
+  refused for futures bars until read. Settled by `tests/queries/test_choice_integration.py`
+  (Futures Basic), on the front E-mini contract.
 - **101.** What the aggregates range answers to `timespan=session` outside futures.
   `Timespan.SESSION` is refused outside futures until read. Settled by
-  `tests/test_query_integration.py` (Stocks Basic), on AAPL.
+  `tests/queries/test_choice_integration.py` (Stocks Basic), on AAPL.
 - **102.** What the aggregates range answers to a multiplier below 1. Refused by `bars()` until
-  read. Settled by `tests/test_query_integration.py` (Stocks Basic), which sends AAPL's bars
-  with multiplier 0.
+  read. Settled by `tests/queries/test_choice_integration.py` (Stocks Basic), which sends AAPL's
+  bars with multiplier 0.
 - **103.** What the option chain and the contracts list answer to a currency or crypto pair as
   the underlying. An `underlying` that is no stock or index ticker is refused until read.
   Settled by `tests/namespaces/test_options_integration.py` (Options Starter for the chain,
