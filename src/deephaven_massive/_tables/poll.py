@@ -122,7 +122,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -143,6 +143,7 @@ from deephaven_massive._errors import (
     RowDataError,
     cause_of,
     failure_text,
+    required,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
@@ -707,7 +708,7 @@ class Poller:
         result may still use the poll; the poller stops when the poll's blink table shuts down.
         The session is alive: the poll's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).workers.release(self._stream_id)
+        required(self._core(), "the session").workers.release(self._stream_id)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the poller and fail its table, once: the session closed, or a thread died.
@@ -724,7 +725,7 @@ class Poller:
             False when the table had already failed.
         """
         self._stop.set()
-        return self._fail_once(cast("SessionCore", self._core()), error)
+        return self._fail_once(required(self._core(), "the session"), error)
 
     def _run(self) -> None:
         """Run cycles until stopped or failed, waiting `interval` from one start to the next.
@@ -866,7 +867,7 @@ class Poller:
             if not self._running:
                 return
             # The running cycle's frame holds the core (`_cycle`).
-            core = cast("SessionCore", self._core())
+            core = required(self._core(), "the session")
             began, began_at, good = self._watched
             if now - began <= self._interval:
                 return
@@ -1434,7 +1435,8 @@ def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
     """
     values = column.to_pylist()
     if not pa.types.is_list(column.type):
-        return cast("list[Hashable]", values)
+        scalars: list[Hashable] = values  # pyarrow's scalars: None, bool, int, str, ...
+        return scalars
     return [None if value is None else tuple(value) for value in values]
 
 

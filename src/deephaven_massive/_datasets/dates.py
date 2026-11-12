@@ -811,7 +811,7 @@ def day_class(
     return shared.pop()
 
 
-def calendar_day(spec: DatasetSpec, value: DateLike, name: str, *, given: object = None) -> date:
+def calendar_day(spec: DatasetSpec, value: object, name: str, *, given: object = None) -> date:
     """Turn the single day a dataset's path or parameter takes into a calendar date.
 
     Endpoints such as the daily open-close summary take one calendar day (the day of the

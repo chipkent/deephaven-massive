@@ -28,11 +28,11 @@ cycle could run. Every function calls Java, so none of them runs under `registry
 
 from __future__ import annotations
 
-import importlib
 import logging
 import time
 from typing import Final
 
+import jpy
 from deephaven.execution_context import ExecutionContext
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
@@ -48,11 +48,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# jpy, Deephaven's bridge to Java, ships no type stubs; imported by name it is untyped, as
-# every other Java object the library touches is.
-_NANOSECONDS: Final = (
-    importlib.import_module("jpy").get_type("java.util.concurrent.TimeUnit").NANOSECONDS
-)
+_NANOSECONDS: Final = jpy.get_type("java.util.concurrent.TimeUnit").NANOSECONDS
 """The unit of the timed lock wait in `wait_for_update_cycle`."""
 
 

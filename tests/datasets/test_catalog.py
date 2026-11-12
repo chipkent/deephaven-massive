@@ -1446,6 +1446,12 @@ def test_sources_of_a_catalog_can_be_given() -> None:
     assert given.source(R, "/v3/reference/exchanges") is table["/v3/reference/exchanges"]
 
 
+def test_the_single_class_of_a_dataset_of_every_class_is_a_library_defect() -> None:
+    assert STOCK_TRADES.single_class is AssetClass.STOCKS
+    with pytest.raises(MassiveError, match=r"^reference\.exchanges has no one asset class\. "):
+        _ = EXCHANGES.single_class
+
+
 def test_a_generated_rest_source_that_is_no_rest_path_is_a_library_defect() -> None:
     channel = next(iter(sources(Transport.WS).values()))
     given = Catalog((EXCHANGES,), source_tables=lambda _: {"/v3/reference/exchanges": channel})

@@ -649,6 +649,22 @@ class DatasetSpec:
         return None if self.asset_class is ClassFromPrefix.ANY else self.asset_class.value
 
     @property
+    def single_class(self) -> AssetClass:
+        """The dataset's one asset class, which a dataset read by channel, file, or kind has.
+
+        `__post_init__` refuses a dataset with channels, flat files, or a kind whose symbols
+        span classes (`ClassFromPrefix.ANY`).
+
+        Raises:
+            MassiveError: A library defect, for a dataset whose symbols span classes.
+        """
+        if self.asset_class is ClassFromPrefix.ANY:
+            raise MassiveError(
+                library_bug(f"{self.name} has no one asset class"), cause=ErrorCause.LIBRARY_DEFECT
+            )
+        return self.asset_class
+
+    @property
     def rest_paths(self) -> tuple[str, ...]:
         """The REST paths the dataset reads: the role paths, then `extra_paths`.
 
