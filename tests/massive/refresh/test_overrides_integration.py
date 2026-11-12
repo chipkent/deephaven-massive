@@ -95,7 +95,9 @@ def test_updated_is_the_unified_snapshot_s_last_updated(
 ) -> None:
     """Whether the v2 snapshot's `updated` is the unified snapshot's `last_updated`.
 
-    Runs `same_field.updated_times` on stocks, forex pairs, and crypto pairs.
+    Runs `same_field.updated_times` on stocks, forex pairs, and crypto pairs. The evidence
+    gives each ticker's times, then one verdict for each unified update time: the top-level
+    `last_updated` Massive documents, and the nested ones its samples send instead.
     """
     outcome = same_field.updated_times(
         live_rest, evidence, v2_path=v2_path, tickers=tickers, bucket=bucket

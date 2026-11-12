@@ -40,7 +40,7 @@ _DIVIDENDS = "/stocks/v1/dividends"
 _SMA = "/v1/indicators/sma/AAPL"
 
 _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
-    bad_values.PRECISION: [(_CONVERSION, {"amount": "100", "precision": "5"})],
+    bad_values.PRECISION: [(_CONVERSION, {"amount": "1.2345678", "precision": "5"})],
     bad_values.AMOUNT: [(_CONVERSION, {"amount": "0"}), (_CONVERSION, {"amount": "-100"})],
     bad_values.CURRENCY_CODE: [("/v1/conversion/aud/usd", {"amount": "100"})],
     bad_values.INDICATOR_TIMESPAN: [(_SMA, {"timespan": "second", "limit": "5"})],
@@ -103,7 +103,7 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
             },
         ),
     ],
-    bad_values.START_AFTER_NOW: [(f"{_AGGS}/1/day/2026-12-11/2026-11-11", {"limit": "5"})],
+    bad_values.START_AFTER_NOW: [(f"{_AGGS}/1/day/2026-11-21/2026-12-01", {"limit": "5"})],
 }
 """What each check sends, as the fake server decodes it, for requests built on `_DAY`."""
 
@@ -223,21 +223,82 @@ def test_a_conversion_answers_its_amount_when_converted_has_its_sign(
     assert [a.matched for a in answers] == matched
 
 
-@pytest.mark.parametrize(
-    ("check", "matched"),
-    [
-        # A decoded float drops trailing zeros, so its digits cannot show the precision.
-        (bad_values.PRECISION, None),
-        (bad_values.CURRENCY_CODE, 1),
-    ],
-)
-def test_a_conversion_is_compared_by_its_pair_and_never_by_its_digits(
-    fake_rest: FakeRestServer, client: RestClient, *, check: str, matched: int | None
+def test_a_conversion_is_compared_by_its_pair(
+    fake_rest: FakeRestServer, client: RestClient
 ) -> None:
     body = {"status": "success", "request_id": "r", "from": "AUD", "to": "USD"}
     fake_rest.reply_default(Reply({**body, "converted": 72.12345, "initialAmount": 100}))
-    answers = bad_values.ask_all(client, check, _ignore, today=_DAY)
+    answers = bad_values.ask_all(client, bad_values.CURRENCY_CODE, _ignore, today=_DAY)
+    assert answers == (bad_values.Answer("DATA", 200, 1, 1),)
+
+
+# 1.2345678 x 0.68438 = 0.844913510964, and x 0.68442 = 0.844962893676
+_LAST = {"ask": 0.68442, "bid": 0.68438, "exchange": 48, "timestamp": 1794440590000}
+
+
+@pytest.mark.parametrize(
+    ("converted", "last", "matched", "note"),
+    [
+        (
+            0.84491,
+            _LAST,
+            1,
+            (
+                "converted=0.84491: amount x last.bid = 0.844913510964 rounded to 5 decimals; "
+                "amount x last.ask = 0.844962893676 matches no rounding"
+            ),
+        ),
+        (
+            0.84496,
+            _LAST,
+            1,
+            (
+                "converted=0.84496: amount x last.bid = 0.844913510964 matches no rounding; "
+                "amount x last.ask = 0.844962893676 rounded to 5 decimals"
+            ),
+        ),
+        (
+            0.8449,
+            _LAST,
+            0,
+            (
+                "converted=0.8449: amount x last.bid = 0.844913510964 rounded to 4 decimals; "
+                "amount x last.ask = 0.844962893676 matches no rounding"
+            ),
+        ),
+        (
+            0.84,
+            _LAST,
+            0,
+            (
+                "converted=0.84: amount x last.bid = 0.844913510964 rounded to 2 decimals; "
+                "amount x last.ask = 0.844962893676 rounded to 2 decimals"
+            ),
+        ),
+        (
+            0.84,
+            {"bid": True},
+            0,
+            "converted=0.84: no amount x last.bid; no amount x last.ask",
+        ),
+    ],
+)
+def test_a_conversion_s_precision_is_read_from_the_decimals_it_was_rounded_to(
+    fake_rest: FakeRestServer,
+    client: RestClient,
+    *,
+    converted: float,
+    last: dict[str, object],
+    matched: int,
+    note: str,
+) -> None:
+    body = {"status": "success", "request_id": "r", "from": "AUD", "to": "USD"}
+    row = {"converted": converted, "initialAmount": 1.2345678, "last": last}
+    fake_rest.reply_default(Reply({**body, **row}))
+    lines: list[str] = []
+    answers = bad_values.ask_all(client, bad_values.PRECISION, lines.append, today=_DAY)
     assert answers == (bad_values.Answer("DATA", 200, 1, matched),)
+    assert lines[-2] == f"precision=5: {note}"
 
 
 def test_a_server_failure_is_no_judgment_of_the_value_and_raises(

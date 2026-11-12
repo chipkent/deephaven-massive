@@ -20,9 +20,12 @@ from tests._fakes.rest import Reply, envelope
 from tests._live import plans, same_field
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from tests._fakes.rest import FakeRestServer
+
+
+_OWNER = "live/same_field"
 
 
 def _ignore(line: str) -> None:
@@ -140,6 +143,70 @@ def test_updated_times_in_milliseconds_are_compared_in_nanoseconds(
         client, _ignore, v2_path=same_field.V2_FOREX, tickers=tickers, bucket=same_field.FX
     )
     assert outcome.verdict == "DIFFERENT"
+
+
+def test_updated_times_compare_each_time_the_unified_snapshot_sends(
+    fake_rest: FakeRestServer,
+    client: RestClient,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # Massive's own samples of both snapshots: the unified row of a stock sends no top-level
+    # `last_updated`, only nested ones. Its `session` and `last_minute` times are set to the
+    # v2 `updated` and to 30 seconds before it, so the two verdicts differ.
+    fake_rest.reply(same_field.V2_STOCKS, Reply(load_fixture(_OWNER, "v2_stocks_snapshot.json")))
+    fake_rest.reply("/v3/snapshot", Reply(load_fixture(_OWNER, "unified_snapshot.json")))
+    lines: list[str] = []
+    outcome = same_field.updated_times(
+        client, lines.append, v2_path=same_field.V2_STOCKS, tickers=("AAPL",), bucket="stocks"
+    )
+    assert outcome == same_field.Outcome(verdict="INCONCLUSIVE", rows=(1, 2))
+    verdicts = [line for line in lines if line.startswith("v2 updated is")]
+    assert verdicts == [
+        "v2 updated is the unified last_updated: INCONCLUSIVE (0 of 1 tickers compared, 0 equal)",
+        "v2 updated is the unified session.last_updated: SAME (1 of 1 tickers compared, 1 equal)",
+        (
+            "v2 updated is the unified last_minute.last_updated: DIFFERENT "
+            "(1 of 1 tickers compared, 0 equal)"
+        ),
+        (
+            "v2 updated is the unified last_quote.last_updated: DIFFERENT "
+            "(1 of 1 tickers compared, 0 equal)"
+        ),
+        (
+            "v2 updated is the unified last_trade.last_updated: DIFFERENT "
+            "(1 of 1 tickers compared, 0 equal)"
+        ),
+    ]
+
+
+def test_updated_times_record_why_a_ticker_cannot_be_compared(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    stamp = 1_700_000_000_000_000_000
+    v2: list[dict[str, Any]] = [{"ticker": "AAPL"}, {"ticker": "MSFT", "updated": stamp}]
+    fake_rest.reply(same_field.V2_STOCKS, _snapshot(v2))
+    unified = [
+        {"ticker": "AAPL", "last_updated": stamp},
+        {"ticker": "MSFT"},
+        {"ticker": "SPY", "error": "NOT_FOUND", "message": "Ticker not found."},
+    ]
+    fake_rest.reply("/v3/snapshot", Reply(envelope(unified)))
+    lines: list[str] = []
+    outcome = same_field.updated_times(
+        client,
+        lines.append,
+        v2_path=same_field.V2_STOCKS,
+        tickers=("AAPL", "MSFT", "SPY", "IWM"),
+        bucket="stocks",
+    )
+    assert outcome.verdict == "INCONCLUSIVE"
+    absent = dict.fromkeys(same_field.UNIFIED_TIMES)
+    assert lines[:4] == [
+        f"AAPL: updated=None unified {absent | {'last_updated': stamp}}",
+        f"MSFT: updated={stamp} unified {absent}",
+        "SPY: updated=None; unified snapshot: error NOT_FOUND: Ticker not found.",
+        "IWM: updated=None; unified snapshot: no row",
+    ]
 
 
 def _quotes(
