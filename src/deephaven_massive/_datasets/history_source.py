@@ -263,6 +263,12 @@ def history_window(
             whole.latest.isoformat(),
         )
         return HistoryWindow(span, ended, None, instants, whole, now=moment)
+    if request.multiplier < 1 or (timespan is Timespan.SESSION and not futures):
+        # The library has no bar period to fit to the range here: a session outside futures,
+        # or a bar of no units or fewer. The range is requested as given, so Massive answers
+        # it, rather than the library returning no rows without a request.
+        whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
+        return HistoryWindow(span, ended, None, instants, whole, now=moment)
     keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
     # Futures intraday bars named by instants take `window_start` exactly. The aggregates' `{from}`
     # starts where the first whole period's days begin, so the bar of that period is returned

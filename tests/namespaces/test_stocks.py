@@ -513,6 +513,12 @@ def test_bar_periods_massive_refuses_are_sent_and_fail_with_its_answer(
         query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
     ((path, _),) = fake_rest.get_queries(one_value=True)
     assert segment in path
+    # A range shorter than a day holds no whole bar of a day's period, yet it is still sent.
+    hour = (datetime(2020, 1, 2, 15, tzinfo=UTC), datetime(2020, 1, 2, 16, tzinfo=UTC))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid time span"):
+        query.history(*hour, source=dm.HistorySource.REST, wait=True)
+    (_, (path, _)) = fake_rest.get_queries(one_value=True)
+    assert segment in path
 
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
