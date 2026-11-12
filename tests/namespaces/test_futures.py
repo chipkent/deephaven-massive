@@ -188,7 +188,7 @@ def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSes
         massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
 
 
-def test_bars_take_the_day_timespan_and_leave_the_multiplier_to_massive(
+def test_bars_take_the_day_timespan(
     massive_session: dm.MassiveSession,
 ) -> None:
     # Massive serves `1day` futures bars, and answers HTTP 400 to a size it does not serve.

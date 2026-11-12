@@ -347,6 +347,9 @@ def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSes
     [
         ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
         ({"to_currency": None}, (TypeError, "to_currency must be a str, not NoneType")),
+        # The code is a path segment, which can't be empty or hold a slash.
+        ({"from_currency": ""}, (ValueError, r"^from_currency='' can't be sent: the code is a")),
+        ({"to_currency": "US/D"}, (ValueError, r"^to_currency='US/D' can't be sent")),
         # A request cannot carry NaN or an infinity as a number.
         ({"amount": float("inf")}, (ValueError, "amount must be finite, got inf")),
         ({"amount": float("nan")}, (ValueError, "amount must be finite, got nan")),

@@ -224,7 +224,9 @@ def _currency(name: str, value: object) -> str:
     """Return a currency code argument of the conversion, which must be text.
 
     Massive judges the code itself: it answers HTTP 404 ("Couldn't find requested currency
-    pair") to one it does not know, such as `aud`, so any text is sent as written.
+    pair") to one it does not know, such as `aud`, so any text is sent as written. Only text
+    no request can carry is refused: the code is a segment of the request's path, which can't
+    be empty or hold a `/`.
 
     Args:
         name: The parameter's name, for messages.
@@ -235,9 +237,15 @@ def _currency(name: str, value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
+        ValueError: If `value` is empty or holds a `/`.
     """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    if not value or "/" in value:
+        raise ValueError(
+            f"{name}={value!r} can't be sent: the code is a segment of the request's path, "
+            "which can't be empty or hold '/'"
+        )
     return value
 
 
@@ -525,7 +533,7 @@ class ForexNamespace(Namespace):
         Raises:
             TypeError: If a currency isn't a `str`, `amount` isn't an `int` or `float`, or
                 `precision` isn't an `int`. A `bool` is neither number.
-            ValueError: If `amount` is NaN or infinite.
+            ValueError: If a currency is empty or holds a `/`, or `amount` is NaN or infinite.
 
         Example:
             ::
