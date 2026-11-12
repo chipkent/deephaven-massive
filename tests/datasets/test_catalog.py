@@ -31,7 +31,7 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import RestPath, Source, Transport, sources
 from deephaven_massive._session import CATALOG
 
@@ -1475,14 +1475,19 @@ def test_sources_of_a_catalog_can_be_given() -> None:
 
 def test_the_single_class_of_a_dataset_of_every_class_is_a_library_defect() -> None:
     assert STOCK_TRADES.single_class is AssetClass.STOCKS
-    with pytest.raises(MassiveError, match=r"^reference\.exchanges has no one asset class\. "):
+    with pytest.raises(
+        BrokenGuaranteeError,
+        match=r"^reference\.exchanges's asset class is ClassFromPrefix, not AssetClass\. ",
+    ):
         _ = EXCHANGES.single_class
 
 
 def test_a_generated_rest_source_that_is_no_rest_path_is_a_library_defect() -> None:
     channel = next(iter(sources(Transport.WS).values()))
     given = Catalog((EXCHANGES,), source_tables=lambda _: {"/v3/reference/exchanges": channel})
-    with pytest.raises(MassiveError, match=r"^the generated REST source /v3/reference/exchanges "):
+    with pytest.raises(
+        BrokenGuaranteeError, match=r"^the generated REST source /v3/reference/exch"
+    ):
         given.rest_path("/v3/reference/exchanges")
 
 

@@ -54,7 +54,7 @@ from deephaven_massive._enums import (
     Timespan,
     subscription_of,
 )
-from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import required_instance
 from deephaven_massive._massive import ParamKind, RestPath, Transport, WireType, sources
 
 if TYPE_CHECKING:
@@ -655,14 +655,10 @@ class DatasetSpec:
         `__post_init__` refuses a dataset with channels, flat files, or a kind whose symbols
         span classes (`ClassFromPrefix.ANY`).
 
-        Raises:
-            MassiveError: A library defect, for a dataset whose symbols span classes.
+        A dataset whose symbols span classes raises the `BrokenGuaranteeError` of
+        `required_instance`.
         """
-        if self.asset_class is ClassFromPrefix.ANY:
-            raise MassiveError(
-                library_bug(f"{self.name} has no one asset class"), cause=ErrorCause.LIBRARY_DEFECT
-            )
-        return self.asset_class
+        return required_instance(self.asset_class, AssetClass, f"{self.name}'s asset class")
 
     @property
     def rest_paths(self) -> tuple[str, ...]:
@@ -1223,16 +1219,12 @@ class Catalog:
 
         An unknown path raises the `KeyError` of `source`.
 
-        Raises:
-            MassiveError: A library defect, if the generated REST source is not a `RestPath`.
+        A generated REST source that is not a `RestPath` raises the `BrokenGuaranteeError` of
+        `required_instance`.
         """
-        found = self.source(Transport.REST, path)
-        if not isinstance(found, RestPath):
-            raise MassiveError(
-                library_bug(f"the generated REST source {path} is a {type(found).__name__}"),
-                cause=ErrorCause.LIBRARY_DEFECT,
-            )
-        return found
+        return required_instance(
+            self.source(Transport.REST, path), RestPath, f"the generated REST source {path}"
+        )
 
     def problems(self) -> tuple[str, ...]:
         """Run the catalog gates over every dataset; return every failure found.

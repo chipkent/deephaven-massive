@@ -27,8 +27,8 @@ never hides one, and below ERROR for an expected condition (`_log_limits.log_fai
 `library_bug` and `user_defect` build the two kinds of defect message, `cause_of` reads the
 cause of any exception, and `failure_text` is the text a log record gives it. `required` and
 `required_instance` return a value the library's design guarantees, such as a dataset's REST
-path or the session a caller holds, and raise a library defect when it is missing or of
-another type.
+path or the session a caller holds, and raise `BrokenGuaranteeError`, a defect of the library,
+when it is missing or of another type.
 
 The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
 `WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
@@ -71,6 +71,7 @@ __all__ = [
     "LIBRARY_BUG",
     "RAISES_THROUGH",
     "AuthenticationError",
+    "BrokenGuaranteeError",
     "CutShortError",
     "EntitlementError",
     "ErrorCause",
@@ -363,6 +364,16 @@ def library_bug(message: str) -> str:
     return f"{message}{stop} {LIBRARY_BUG}"
 
 
+class BrokenGuaranteeError(Exception):
+    """A guarantee of the library's own code that broke: a defect of the library.
+
+    It is not a `MassiveError`, so no handler of Massive's failures takes it for one symbol's or
+    one cycle's expected failure; every handler of defects logs it with its traceback, as it
+    does any other exception that is not a `MassiveError`. Its message ends with `LIBRARY_BUG`.
+    `required` and `required_instance` raise it.
+    """
+
+
 def required(value: _V | None, what: str) -> _V:
     """Return a value the library's design guarantees, raising a library defect when it is None.
 
@@ -378,11 +389,10 @@ def required(value: _V | None, what: str) -> _V:
         `value`.
 
     Raises:
-        MassiveError: A library defect (`ErrorCause.LIBRARY_DEFECT`) saying `what` is missing,
-            when `value` is None.
+        BrokenGuaranteeError: Saying `what` is missing, when `value` is None.
     """
     if value is None:
-        raise MassiveError(library_bug(f"{what} is missing"), cause=ErrorCause.LIBRARY_DEFECT)
+        raise BrokenGuaranteeError(library_bug(f"{what} is missing"))
     return value
 
 
@@ -398,14 +408,12 @@ def required_instance(value: object, kind: type[_V], what: str) -> _V:
         `value`.
 
     Raises:
-        MassiveError: A library defect (`ErrorCause.LIBRARY_DEFECT`) naming `what`, `kind`, and
-            the value's type, when `value` is not an instance of `kind`.
+        BrokenGuaranteeError: Naming `what`, `kind`, and the value's type, when `value` is not
+            an instance of `kind`.
     """
     if not isinstance(value, kind):
-        raise MassiveError(
-            library_bug(f"{what} is a {type(value).__name__}, not a {kind.__name__}"),
-            cause=ErrorCause.LIBRARY_DEFECT,
-        )
+        problem = f"{what} is {type(value).__name__}, not {kind.__name__}"
+        raise BrokenGuaranteeError(library_bug(problem))
     return value
 
 

@@ -7,6 +7,7 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._errors import BrokenGuaranteeError
 
 
 def test_symbol_keys(dh_exec_ctx: object) -> None:
@@ -23,7 +24,8 @@ def test_static_symbols_refuse_a_symbol_table_as_a_library_defect(dh_exec_ctx: o
     assert Request(symbols=dm.ALL).static_symbols is dm.ALL
     assert Request().static_symbols is None
     table = SymbolTable(new_table([string_col("Symbol", ["A"])]))
-    with pytest.raises(dm.MassiveError, match=r"^a read that names its symbols in code holds a "):
+    table_held = r"^the symbols a read names in code is SymbolTable, "
+    with pytest.raises(BrokenGuaranteeError, match=table_held):
         _ = Request(symbols=table).static_symbols
 
 

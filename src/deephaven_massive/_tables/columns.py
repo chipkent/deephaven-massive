@@ -43,7 +43,7 @@ from deephaven.table import Table
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import Recency
-from deephaven_massive._errors import library_bug
+from deephaven_massive._errors import required_instance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -74,28 +74,9 @@ _ArrayBackedColumnSource = jpy.get_type(
     "io.deephaven.engine.table.impl.sources.ArrayBackedColumnSource"
 )
 
-
-def _checked_dtype(value: object) -> dtypes.DType:
-    """Return a Deephaven type that deephaven-core annotates as some other type.
-
-    `dtypes.Instant` is annotated as `type` although it is a `DType` instance.
-
-    Args:
-        value: The type.
-
-    Returns:
-        `value`.
-
-    Raises:
-        TypeError: A library defect, if `value` is not a `DType`.
-    """
-    if not isinstance(value, dtypes.DType):
-        raise TypeError(library_bug(f"{value!r} is not a Deephaven DType"))
-    return value
-
-
 _DH_TYPES: Final[Mapping[ColumnType, dtypes.DType]] = {
-    ColumnType.INSTANT: _checked_dtype(dtypes.Instant),
+    # deephaven-core annotates `dtypes.Instant` as `type`, though it is a `DType`.
+    ColumnType.INSTANT: required_instance(dtypes.Instant, dtypes.DType, "dtypes.Instant"),
     ColumnType.DOUBLE: dtypes.double,
     ColumnType.LONG: dtypes.long,
     ColumnType.INT: dtypes.int32,

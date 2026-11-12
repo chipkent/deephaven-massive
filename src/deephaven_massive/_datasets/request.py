@@ -17,8 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeAlias
 
-from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._errors import ErrorCause, MassiveError, library_bug, required
+from deephaven_massive._datasets.symbols import AllSymbols
+from deephaven_massive._errors import required, required_instance
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import FuturesVenue, Timespan
 
 __all__ = ["ParamValue", "Request", "StreamKey", "ValueTable"]
@@ -150,15 +150,13 @@ class Request:
         A read of a symbol table's symbols reads each symbol on its own, with requests built
         from its symbols in code, so only a stream's request holds a table.
 
-        Raises:
-            MassiveError: A library defect, if `symbols` is a symbol table.
+        Symbols that are a symbol table raise the `BrokenGuaranteeError` of
+        `required_instance`.
         """
-        if isinstance(self.symbols, SymbolTable):
-            raise MassiveError(
-                library_bug("a read that names its symbols in code holds a symbol table"),
-                cause=ErrorCause.LIBRARY_DEFECT,
-            )
-        return self.symbols
+        symbols = self.symbols
+        if symbols is None or isinstance(symbols, AllSymbols):
+            return symbols
+        return required_instance(symbols, tuple, "the symbols a read names in code")
 
     def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.

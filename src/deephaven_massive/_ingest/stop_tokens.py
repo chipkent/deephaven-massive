@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
-from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import required_instance
 
 if TYPE_CHECKING:
     import threading
@@ -28,12 +28,7 @@ def as_cancel(stop: threading.Event | None) -> _massive.Cancel | None:
     Returns:
         `stop` itself.
 
-    Raises:
-        MassiveError: A library defect, if `stop` is an event no `read_stop` made.
+
+    An event no `read_stop` made raises the `BrokenGuaranteeError` of `required_instance`.
     """
-    if stop is None or isinstance(stop, _massive.Cancel):
-        return stop
-    raise MassiveError(
-        library_bug(f"a read's stop token is {type(stop).__name__}, not Cancel"),
-        cause=ErrorCause.LIBRARY_DEFECT,
-    )
+    return None if stop is None else required_instance(stop, _massive.Cancel, "a read's stop token")

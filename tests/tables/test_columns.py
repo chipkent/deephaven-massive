@@ -83,11 +83,6 @@ def test_every_column_type_has_a_deephaven_type() -> None:
     }
 
 
-def test_a_deephaven_type_that_is_no_dtype_is_a_library_defect() -> None:
-    with pytest.raises(TypeError, match=r"^<class 'int'> is not a Deephaven DType\. This is a bug"):
-        columns._checked_dtype(int)
-
-
 def test_col_defs_keep_the_schema_order() -> None:
     schema = Schema(
         "example",
