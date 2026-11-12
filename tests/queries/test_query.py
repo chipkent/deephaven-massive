@@ -41,6 +41,8 @@ from deephaven_massive.queries import (
     StreamQuery,
     SymbolStreamQuery,
 )
+from deephaven_massive.queries._call import QueryCall
+from deephaven_massive.queries._query import made_query, shown_as
 from tests._fakes.clock import FakeClock
 from tests._fakes.queries import (
     HISTORY_SPEC,
@@ -676,3 +678,29 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
         + BACKGROUND_NOTE
     )
     released(s3_session, files, forced, landed)
+
+
+@pytest.mark.parametrize("cls", [Query, FetchQuery, StreamQuery, HistoryQuery, StreamHistoryQuery])
+def test_a_user_cannot_construct_a_query(cls: type[Query]) -> None:
+    with pytest.raises(TypeError, match=r"^a query comes from a dataset method, such as "):
+        cls()
+
+
+def test_the_library_builds_and_relabels_a_query_whole(massive_session: dm.MassiveSession) -> None:
+    built = massive_session.stocks.dividends("AAPL")
+    again = massive_session.stocks.dividends("AAPL")
+    made = made_query(
+        FetchQuery,
+        core=built._core,
+        spec=built._spec,
+        request=built._request,
+        call=QueryCall("m.stocks.dividends"),
+    )
+    shown = shown_as(made, built._call)
+    assert type(made) is FetchQuery
+    assert repr(made) == "m.stocks.dividends()"
+    assert made == built == again == shown
+    assert hash(made) == hash(built) == hash(shown)
+    assert repr(shown) == repr(built) == "m.stocks.dividends('AAPL')"
+    assert shown is not made
+    assert repr(made) == "m.stocks.dividends()"  # the copy leaves the original as it was

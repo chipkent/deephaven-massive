@@ -56,6 +56,7 @@ from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import SymbolStreamQuery
 from deephaven_massive.queries._call import QueryCall
+from deephaven_massive.queries._query import shown_as
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
@@ -1249,7 +1250,7 @@ def test_a_stream_log_line_cuts_a_long_query(
 ) -> None:
     # A query's text can grow with its arguments; the open and reuse lines cut it as the
     # `Query` column does, so one line never carries thousands of characters.
-    q = dataclasses.replace(stream_query(massive_session), _call=QueryCall("m." + "x" * 500))
+    q = shown_as(stream_query(massive_session), QueryCall("m." + "x" * 500))
     with caplog.at_level(logging.DEBUG, logger=_streams.__name__):
         first = q.blink()
         second = q.append_only()

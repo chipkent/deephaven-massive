@@ -60,6 +60,7 @@ from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive.queries import FetchQuery, Query
 from deephaven_massive.queries._call import QueryCall
 from deephaven_massive.queries._choice import query_class
+from deephaven_massive.queries._query import made_query
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -878,7 +879,7 @@ def build_query(
         limit=None if limit is None else require_positive_int("limit", limit),
         value_table=values,
     )
-    return cls(core, spec, request, QueryCall(f"m.{spec.name}"))
+    return made_query(cls, core=core, spec=spec, request=request, call=QueryCall(f"m.{spec.name}"))
 
 
 def list_query(

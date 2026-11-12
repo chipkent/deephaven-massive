@@ -15,7 +15,7 @@ import inspect
 import logging
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Final, ParamSpec, TypeVar
@@ -25,6 +25,7 @@ from deephaven.table import Table
 
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.symbols import ALL
+from deephaven_massive.queries._query import shown_as
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
@@ -276,7 +277,7 @@ def shows_call(path: str) -> Callable[[Callable[_P, _Q]], Callable[_P, _Q]]:
                 for name, param in list(signature.parameters.items())[1:]
                 if name in given and not _is_default(given[name], param.default)
             )
-            return replace(query, _call=QueryCall(called, arguments, required))
+            return shown_as(query, QueryCall(called, arguments, required))
 
         return factory
 

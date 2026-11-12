@@ -17,6 +17,7 @@ session's rule for a row that is not a ticker.
 
 from __future__ import annotations
 
+import copy
 import functools
 import logging
 import time
@@ -66,7 +67,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries._call import QueryCall
 
-__all__ = ["Query"]
+__all__ = ["Query", "made_query", "shown_as"]
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,28 @@ def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
         )
 
 
-@dataclass(frozen=True, repr=False, slots=True)
+# Why a query has a refusing constructor, and how the library builds one instead.
+#
+# Every type a public signature declares must be public, and `help()` and the API reference
+# render each public class's constructor. The `__init__` a dataclass generates would take the
+# query's four private parts (its session core, its dataset spec, its request, and the call
+# that built it), so it would declare four private types in a public signature. A user never
+# builds a query: a dataset method does. So the dataclass generates no `__init__`
+# (`init=False`), and the public one refuses, saying where queries come from.
+#
+# The library builds a query in `made_query` and re-labels one in `shown_as`, below, through
+# `__new__` and `object.__setattr__`. That is what a frozen dataclass's own generated `__init__`
+# does, since plain assignment to a frozen instance raises `FrozenInstanceError`. Other
+# libraries do the same: pyarrow's `Table` constructor refuses and points to its factory
+# functions, and polars and pydantic build objects through `__new__`. Only this module touches
+# the private fields.
+#
+# Rejected: exempting this constructor from the check that public signatures declare only
+# public types (a rule with an exception stops being a rule); documenting the constructor as
+# internal (`help()` still renders the private types); a public handle type wrapping the four
+# parts (a public name no user needs); and a `ContextVar` that hands the call to the factory so
+# nothing re-labels a query (hidden state whose only job is to avoid this construction).
+@dataclass(frozen=True, repr=False, slots=True, init=False)
 class Query:
     """Any query: the common type of what every dataset method returns.
 
@@ -206,8 +228,9 @@ class Query:
     built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`.
 
     Import it as `from deephaven_massive.queries import Query`. You get a query from a dataset
-    method and never construct one. A query is immutable and hashable, safe to share between
-    threads, and equal to another query of the same class and session that asks for the same data.
+    method, such as `m.stocks.trades("AAPL")`; calling a query class raises `TypeError`. A query
+    is immutable and hashable, safe to share between threads, and equal to another query of the
+    same class and session that asks for the same data.
 
     Example:
         ::
@@ -228,6 +251,14 @@ class Query:
     _spec: DatasetSpec
     _request: Request
     _call: QueryCall = field(compare=False)
+
+    def __init__(self) -> None:
+        """Refuse to build a query: a dataset method builds every query.
+
+        Raises:
+            TypeError: Always. Call a dataset method instead, such as `m.stocks.trades("AAPL")`.
+        """
+        raise TypeError("a query comes from a dataset method, such as m.stocks.trades('AAPL')")
 
     @raises_through(refuse_update_graph_thread)
     def columns(self) -> Table:
@@ -439,3 +470,51 @@ class Query:
                 ),
             )
         return FirstRead(outcomes, began_at, time.monotonic() - started)
+
+
+def made_query(
+    cls: type[_Q], *, core: SessionCore, spec: DatasetSpec, request: Request, call: QueryCall
+) -> _Q:
+    """Build a query of class `cls` from its four parts; the dataset factory's only way to.
+
+    `Query.__init__` refuses every caller (see the comment above `Query`), so the factory builds
+    the instance through `__new__` and sets each frozen field with `object.__setattr__`, as the
+    `__init__` a frozen dataclass generates does.
+
+    Args:
+        cls: The query class to build, `Query` or a subclass.
+        core: The session core the query runs on.
+        spec: The dataset.
+        request: The normalized request.
+        call: The call that built the query, which is its `repr`.
+
+    Returns:
+        The query.
+    """
+    query = cls.__new__(cls)
+    object.__setattr__(query, "_core", core)
+    object.__setattr__(query, "_spec", spec)
+    object.__setattr__(query, "_request", request)
+    object.__setattr__(query, "_call", call)
+    return query
+
+
+def shown_as(query: _Q, call: QueryCall) -> _Q:
+    """Return a copy of `query` whose `repr` is `call`, the call a user typed.
+
+    The dataset factory builds a query whose call names only its dataset; the wrapper of each
+    dataset method (`shows_call` in `_call.py`) then records the call as made. `Query.__init__`
+    refuses every caller (see the comment above `Query`), so the copy is made with `copy.copy`
+    and its frozen `_call` set with `object.__setattr__`, as a frozen dataclass's own `__init__`
+    sets fields. The call is no part of a query's equality, so the copy equals `query`.
+
+    Args:
+        query: The query the dataset method returned.
+        call: The call as made.
+
+    Returns:
+        The copy.
+    """
+    shown = copy.copy(query)
+    object.__setattr__(shown, "_call", call)
+    return shown
