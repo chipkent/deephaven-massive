@@ -833,7 +833,7 @@ def test_the_report_lists_each_section_found_with_its_action() -> None:
         "## Deprecations (1)\n\n"
         "Action: replace the dataset's path, or add it to `EXCLUSIONS` with its reason.\n\n"
         "- REST `/v1/old`: deprecated\n\n"
-        f"Reproduce this report with `{COMMAND} --check` in a source checkout.\n"
+        f"Reproduce this report with `{COMMAND} --check --report drift.md` in a source checkout.\n"
     )
     changes = (Drift(section=Section.CHANGES, area="REST", item="/v1/x", detail="new"),)
     text = Report(items=changes, fetched=FETCHED, bucket_listed=False).text()

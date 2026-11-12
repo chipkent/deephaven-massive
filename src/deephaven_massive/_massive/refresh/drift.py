@@ -1,10 +1,10 @@
 """Compare Massive's live published API with the vendored snapshot: the drift check.
 
-`scripts/refresh.py --check` calls `check`, which downloads the live vendor sources exactly as
-`--fetch` does (into a scratch directory, never over the vendored snapshot), compares them with
-the snapshot, and returns a `Report`. Nothing in the source checkout changes. The report lists
-every difference as one `Drift` item in one of three sections, each with the action a person
-takes:
+`scripts/refresh.py --check --report <file>` calls `check`, which downloads the live vendor
+sources exactly as `--fetch` does (into a scratch directory, never over the vendored
+snapshot), compares them with the snapshot, and returns a `Report`. Nothing in the source
+checkout changes. The report lists every difference as one `Drift` item in one of three
+sections, each with the action a person takes:
 
 - **Unaccounted items** (`Section.UNACCOUNTED`): a REST endpoint, WebSocket feed, or flat-file
   dataset the live documentation names that the committed `spec/*.json` neither generates nor
@@ -223,7 +223,10 @@ class Report:
                     lines += [f"Action: {section.action}", "", *found]
             lines += [
                 "",
-                f"Reproduce this report with `{_COMMAND} --check` in a source checkout.",
+                (
+                    f"Reproduce this report with `{_COMMAND} --check --report drift.md` in a "
+                    "source checkout."
+                ),
             ]
         if not self.bucket_listed:
             lines += [
