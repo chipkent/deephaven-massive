@@ -15,11 +15,13 @@ import tracemalloc
 import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, cast
+from types import MethodType
+from typing import Any, ClassVar, NamedTuple, Protocol
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -39,20 +41,20 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
+from deephaven_massive._datasets.symbols import NormalizedSymbols
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
 from deephaven_massive._ingest import flatfiles
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
+from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
-
-if TYPE_CHECKING:
-    from deephaven_massive._ingest.clients import SessionClients
 
 TIMEOUT = 30.0
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
@@ -218,21 +220,21 @@ def epoch_ns(moment: datetime) -> int:
     return int(moment.timestamp()) * 10**9
 
 
-def config(**overrides: object) -> dm.MassiveConfig:
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    fields.update(overrides)
-    return dm.MassiveConfig(**cast("dict[str, Any]", fields))
+S3_SIGNING = "flat-file-secret"
+CONFIG = dm.MassiveConfig(
+    api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=S3_SIGNING
+)
+
+NO_S3 = dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
 
 
-NO_S3 = config(s3_access_key_id=None, s3_secret_access_key=None)
-
-
-def request(symbols: object = ("AAPL",), **fields: object) -> Request:
-    return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
+def request(
+    symbols: NormalizedSymbols = ("AAPL",),
+    *,
+    timespan: Timespan | None = None,
+    adjusted: bool | None = None,
+) -> Request:
+    return Request(symbols=symbols, timespan=timespan, adjusted=adjusted)
 
 
 def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
@@ -287,7 +289,7 @@ def retry_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 @pytest.fixture
 def session(fake_s3: FakeS3, clock: Callable[[datetime], None]) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     yield m
     m.close()
 
@@ -346,13 +348,52 @@ def applied(monkeypatch: pytest.MonkeyPatch) -> Applied:
 
 def flat_file_client(m: dm.MassiveSession) -> _massive.FlatFileClient:
     # The session's flat-file client, which its first flat-file read created.
-    client = cast("SessionClients", m._core._ports)._flat_files
+    client = clients(m)._flat_files
     assert client is not None
     return client
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> HistoryQuery:
-    return build_query(m._core, spec, query_type=HistoryQuery, **cast("dict[str, Any]", kwargs))
+def clients(m: dm.MassiveSession) -> SessionClients:
+    ports = m._core._ports
+    assert isinstance(ports, SessionClients)
+    return ports
+
+
+def files_transport(m: dm.MassiveSession) -> flatfiles.FlatFileHistory:
+    transport = m._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    return transport
+
+
+def query(
+    m: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    symbols: dm.SymbolsLike | None = None,
+    venues: AbstractSet[FuturesVenue] | None = None,
+    timespan: Timespan | None = None,
+    adjusted: bool | None = None,
+    filters: Mapping[str, dm.FilterValue] | None = None,
+) -> HistoryQuery:
+    return build_query(
+        m._core,
+        spec,
+        query_type=HistoryQuery,
+        symbols=symbols,
+        venues=venues,
+        timespan=timespan,
+        adjusted=adjusted,
+        filters=filters,
+    )
+
+
+def join_reads(m: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end.
+    for state in list(m._core.workers._workers.values()):
+        assert isinstance(state.fail, MethodType)  # a read's own `fail`
+        read = state.fail.__self__
+        assert isinstance(read, BackgroundRead)
+        read.join(TIMEOUT)
 
 
 class ShutdownSignal(ThreadPoolExecutor):
@@ -686,7 +727,7 @@ def test_malformed_lines_are_skipped_with_one_line_per_file_logged_by_the_settin
     # never its text, at WARNING under LOG and only at DEBUG under IGNORE.
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     with (
-        dm.MassiveSession(config(malformed_rows=setting)) as m,
+        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=setting)) as m,
         caplog.at_level(logging.DEBUG, logger=flatfiles.__name__),
     ):
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -703,7 +744,7 @@ def test_a_malformed_line_fails_the_read_under_raise(
 ) -> None:
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     with (
-        dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m,
+        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m,
         pytest.raises(dm.MassiveError) as info,
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -728,7 +769,7 @@ def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
     bad = b"".join(trade(n, 1741012200000000000 + n, "\xff").encode("latin-1") for n in range(20))
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + good + bad))
     with (
-        dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m,
+        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m,
         pytest.raises(dm.MassiveError, match=r"the first: row 21 after the header is not UTF-8"),
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -742,8 +783,8 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3))
     window = whole_days(STOCK_TRADES, "2025-03-03")
-    with dm.MassiveSession(config(malformed_rows=dm.OnError.RAISE)) as m:
-        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+    with dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m:
+        transport = files_transport(m)
         out = transport.history_by_symbol(
             STOCK_TRADES,
             asked,
@@ -842,7 +883,7 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(config(unreadable_symbols=dm.OnError.RAISE)) as m:
+    with dm.MassiveSession(dataclasses.replace(CONFIG, unreadable_symbols=dm.OnError.RAISE)) as m:
         every = query(m, STOCK_TRADES, symbols=dm.ALL)
         with pytest.raises(
             dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
@@ -855,7 +896,7 @@ def test_a_ticker_the_library_cannot_read_is_kept_by_default(
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(config()) as m:
+    with dm.MassiveSession(CONFIG) as m:
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
         )
@@ -1705,7 +1746,7 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     fake_s3.put_dropped(rolled, data[: len(data) // 2])
     stop = _massive.Cancel()
     # The session's client class itself: the session fixture wraps `_massive.FlatFileClient`.
-    transport = cast("flatfiles.FlatFileHistory", session._core.flat_file_transport())
+    transport = files_transport(session)
     client_class = type(transport._client)
     wait_to_reread = client_class.wait_to_reread
     waits: list[int] = []
@@ -1713,7 +1754,9 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     def released_while_rereading(
         self: _massive.FlatFileClient, error: _massive.WireError, *args: object
     ) -> bool:
-        retry, cancel = cast("tuple[int, threading.Event]", args)
+        retry, cancel = args  # `wait_to_reread` takes them positionally
+        assert isinstance(retry, int)
+        assert isinstance(cancel, threading.Event)
         waits.append(retry)
         if retry == stopped_at:
             stop.set()
@@ -2191,7 +2234,7 @@ def test_a_futures_row_without_a_session_is_dropped(
 def test_a_refused_futures_venue_names_the_venue(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
 ) -> None:
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         put(FUTURES_0304.format("cme"), "us_futures_trades_v1_2025-03-04.csv")
         put(FUTURES_0304.format("cbot"), "us_futures_trades_v1_2025-03-04.csv")
@@ -2700,7 +2743,7 @@ def test_reads_run_in_parallel_up_to_max_concurrency(
     fake_s3.before_answer = lambda _key: pair.wait()
     for day in (3, 4, 5, 6):
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-05.csv")
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-06", wait=True)
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
@@ -2755,7 +2798,7 @@ def test_a_failed_read_cancels_the_reads_not_started(
     # still queued when the first failure is raised.
     fake_s3.before_answer = lambda key: pool.shut.wait(TIMEOUT) if key == TRADES_0304 else None
     fake_s3.refuse(TRADES_0303, status=500, code="InternalError", message="first")
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         with pytest.raises(dm.MassiveError, match="HTTP 500"):
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-07", wait=True)
@@ -2781,7 +2824,7 @@ def test_the_earliest_failure_is_raised(
     fake_s3.before_answer = order
     fake_s3.refuse(TRADES_0303, status=501, code="NotImplemented", message="first")
     fake_s3.refuse(TRADES_0304, status=403, code="AccessDenied", message="second")
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
         with pytest.raises(dm.MassiveError, match="HTTP 501") as info:
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
@@ -2825,9 +2868,9 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
     # the connection, and stopping its call ends the wait as a cancellation: it never reads
     # as a missing file, which would send a look for later days on.
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
-        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+        transport = files_transport(m)
         transform = flatfiles._Transform.build(
             CATALOG,
             STOCK_TRADES,
@@ -2894,7 +2937,7 @@ def test_a_failure_stops_the_reads_in_progress(
 
     fake_s3.before_answer = hold
     applied.hook = pause
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
         # The March 3 read stopped rather than failed, so the March 4 failure is raised.
         with pytest.raises(dm.MassiveError, match="HTTP 500"):
@@ -2922,7 +2965,7 @@ def test_an_interrupt_stops_every_read(
 
     monkeypatch.setattr(flatfiles, "wait", interrupted)  # Ctrl-C while the caller waits
     applied.hook = lambda _key: pool.shut.wait(TIMEOUT)
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         with pytest.raises(KeyboardInterrupt):
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -2939,7 +2982,7 @@ def test_closing_the_session_stops_a_read_in_progress(
     applied: Applied,
 ) -> None:
     blocks = many_blocks(TRADES_0303)
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     first_block = threading.Event()
     closed = threading.Event()
 
@@ -2990,7 +3033,7 @@ def test_a_close_during_a_request_reports_the_close(
     # and the call reports the close.
     if stored:
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     fake_s3.before_answer = lambda _key: flat_file_client(m).close()
     when = f"2025-03-{day:02d}"
     try:
@@ -3012,7 +3055,9 @@ def test_the_client_comes_from_the_config_and_is_shared(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
 ) -> None:
     m = dm.MassiveSession(
-        config(s3_endpoint_url="https://s3.example.com", s3_bucket="other", max_concurrency=3)
+        dataclasses.replace(
+            CONFIG, s3_endpoint_url="https://s3.example.com", s3_bucket="other", max_concurrency=3
+        )
     )
     try:
         fake_s3.put(TRADES_0303, b"")
@@ -3081,7 +3126,7 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config(api_key="collected-with-flat-files"))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, api_key="collected-with-flat-files"))
     name = repr(m).removeprefix("<").removesuffix(" open>")
     table = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     client = flat_file_client(m)
@@ -3216,9 +3261,9 @@ def test_memory_per_reader_does_not_grow_with_the_file(
     fake_s3.put(TRADES_0304, stored(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
 
-    def read(symbols: object) -> Callable[[], Table]:
+    def read(symbols: dm.SymbolsLike) -> Callable[[], Table]:
         q = query(m, STOCK_TRADES, symbols=symbols)
         return lambda: q.history(
             "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
@@ -3278,13 +3323,13 @@ def test_outcome_of_a_cancelled_read_is_skipped() -> None:
 def test_a_session_without_a_flat_file_read_creates_no_client(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     rest = RestRecorder()
     monkeypatch.setattr(m._core, "rest_transport", lambda: rest)
     query(m, STOCK_TRADES, symbols=["AAPL"]).history("2025-03-03", "2025-03-03", wait=True)
     assert len(rest.calls) == 1  # AUTO chose REST for one symbol
     m.close()
-    assert cast("SessionClients", m._core._ports)._flat_files is None
+    assert clients(m)._flat_files is None
     assert (fake_s3.clients, fake_s3.closes) == ([], 0)
 
 
@@ -3587,8 +3632,7 @@ def test_a_background_history_lands_the_files_rows(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     table = q.history("2025-03-03", "2025-03-03", wait=False)
-    for state in list(session._core.workers._workers.values()):
-        cast("Any", state.fail).__self__.join(TIMEOUT)
+    join_reads(session)
     # The read's row shows DONE only after the update cycle that added the rows, so the
     # table holds them from then on.
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
@@ -3609,8 +3653,7 @@ def test_a_background_read_rest_could_complete_says_so_in_its_description(
         "A day the flat files cannot serve is read from REST; the log names it."
         in (table.attributes()["TableDescription"])
     )
-    for state in list(session._core.workers._workers.values()):
-        cast("Any", state.fail).__self__.join(TIMEOUT)
+    join_reads(session)
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
     assert row["State"] == "DONE"
     session.release(table)
