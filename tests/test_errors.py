@@ -276,7 +276,7 @@ def test_every_symbol_failing_reports_a_bug_among_them() -> None:
     first = every_symbol_failed([busy, broken])
     # A bug is never hidden behind another symbol's rate limit.
     assert (str(first), first.source, first.is_bug) == (
-        "MSFT: a row broke",
+        f"MSFT: a row broke. {LIBRARY_BUG}",
         ErrorSource.LIBRARY,
         True,
     )

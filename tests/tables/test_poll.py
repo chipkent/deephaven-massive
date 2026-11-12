@@ -31,7 +31,7 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import NEW_SESSION, PermanentError, RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, PermanentError, RowDataError
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
@@ -1098,7 +1098,7 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
         f"stocks.dividends poll(): {NO_GOOD}; every cycle since 2027-01-15T08:00:00Z has "
         "failed, for 0 s, longer than MassiveConfig.max_outage (0 s); the rows since then may "
         "be missing, so this table stopped; call the verb again for a new live table. The "
-        "latest error: a defect"
+        f"latest error: a defect. {LIBRARY_BUG}"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
 
@@ -2403,7 +2403,10 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("FAILED", f"stocks.dividends poll(): {message}")
+    assert (row["State"], row["Error"]) == (
+        "FAILED",
+        f"stocks.dividends poll(): {message}. {LIBRARY_BUG}",
+    )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
 
 
@@ -2461,7 +2464,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     (row,) = stream_rows()
     prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
     assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
-    rendered = row["Error"].removeprefix(prefix)
+    rendered = row["Error"].removeprefix(prefix).removesuffix(f" {LIBRARY_BUG}")
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
 

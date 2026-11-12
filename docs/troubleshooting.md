@@ -82,13 +82,13 @@ do:
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
 Wait before you call again. The library has already retried a server failure or a lost
-connection a few times. It raises a rate limit as soon as waiting it out would take the read
-past 10 minutes of pauses in all, or 90 seconds for a console command with `wait=True`.
+connection a few times. It raises a rate limit as soon as the read would spend more than 10
+minutes in all waiting out rate limits, or 90 seconds for a console command with `wait=True`.
 
 A `fetch()` or `history()` of a watchlist can fail for some symbols and not others, such as
-when the request for one symbol doesn't take a parameter you passed. Those symbols show their
-errors in `m.symbol_reads()`, the log names them, and the read fails only when every symbol on
-the watchlist when you called failed.
+when Massive refuses one symbol's request. Those symbols show their errors in
+`m.symbol_reads()`, the log reports them, and the read fails only when every symbol on the
+watchlist when you called failed.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 
@@ -110,8 +110,7 @@ for attempt in range(3):
         time.sleep(60)
 ```
 
-A refusal that won't change, such as a plan without the data, raises at once. Only a
-retryable error waits and tries again.
+Branch on `is_retryable` and `is_bug`, never on the message.
 
 A query method such as `fetch()`, or `m.streams()`, raises `dm.SessionClosedError` after
 `m.close()`. Create a new session to

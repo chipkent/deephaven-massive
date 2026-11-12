@@ -74,11 +74,11 @@ Enums:
 
 Errors:
     Every error Massive reports, and every failure inside a query method such as `fetch()`,
-    is a `dm.MassiveError`. `dm.AuthenticationError` means your keys are missing or Massive refused
-    them. `dm.EntitlementError` means your plan doesn't include the data.
-    `dm.SessionClosedError` means the session is closed. Each error's `source`, a
-    `dm.ErrorSource`, says what stopped the call, its `is_retryable` says whether the same call
-    may succeed later, and its `is_bug` says whether a bug caused it.
+    is a `dm.MassiveError`. `dm.AuthenticationError` means your API key is missing or Massive
+    refused your keys. `dm.EntitlementError` means your plan doesn't include the data.
+    `dm.SessionClosedError` means the session is closed. Each error's `source` says what
+    stopped the call, as a `dm.ErrorSource`. Its `is_retryable` says whether the same call may
+    succeed later, and its `is_bug` whether a bug caused it.
     A wrong argument raises `TypeError` or `ValueError` at the call instead.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 

@@ -562,7 +562,7 @@ def test_an_unreadable_lookup_answer_is_logged_as_a_library_defect(
     [record] = [r for r in caplog.records if "futures schedules: looking up" in r.getMessage()]
     assert record.levelno == logging.ERROR
     assert record.getMessage() == (
-        f"test: futures schedules: looking up its product failed: bad page (ESM4). {LIBRARY_BUG}"
+        f"test: futures schedules: looking up its product failed: bad page. {LIBRARY_BUG} (ESM4)"
     )
 
 

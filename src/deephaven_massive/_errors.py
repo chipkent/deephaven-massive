@@ -189,9 +189,10 @@ class MassiveError(Exception):
     answered. To branch on the failure, read `is_retryable`, `is_bug`, `source`, or `status`
     instead of the message.
 
-    A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True` their
-    table fails with it instead, as a live table does: the table shows the error, the log
-    records it, and `m.streams()` lists it.
+    A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True`, a
+    failure after the call returns fails their table instead, as it fails a live table: the
+    table shows the error, the log records it, and `m.streams()` lists it. A closed session or
+    a bug still raises at the call.
 
     Example:
         Catch any `MassiveError`, and branch on the HTTP status::
@@ -233,16 +234,21 @@ class MassiveError(Exception):
                 response or it carried none.
             source: What stopped the call, or `None` (absent) for the class's
                 `default_source`, which is `ErrorSource.MASSIVE` unless a subclass sets another.
+                A `LIBRARY` error's message is ended with `LIBRARY_BUG` unless it holds it.
             is_retryable: Whether the same call may succeed later, or `None` (absent) to
                 decide from `status` and `source`: true for a status in `RETRYABLE_STATUSES` or
                 a `NETWORK` source. A bug is never retryable, whatever this says.
             is_bug: Whether a defect caused the error, or `None` (absent) for the class's
                 `default_is_bug`. A `LIBRARY` error is a bug whatever this says.
         """
+        source = self.default_source if source is None else source
+        if source is ErrorSource.LIBRARY and len(args) == 1 and isinstance(args[0], str):
+            # Every library bug's message says how to report it, whoever wrote the rest.
+            args = (args[0] if LIBRARY_BUG in args[0] else library_bug(args[0]),)
         super().__init__(*args)
         self._status = status
         self._request_id = request_id
-        self._source = self.default_source if source is None else source
+        self._source = source
         if is_bug is None:
             is_bug = self.default_is_bug
         self._is_bug = is_bug or self._source is ErrorSource.LIBRARY
@@ -281,8 +287,8 @@ class MassiveError(Exception):
         a bug.
 
         Before it raises, the library has retried a server failure or a lost connection a few
-        times. It raises a rate limit as soon as waiting it out would take the read past 10
-        minutes of pauses in all, or 90 seconds for a console command with `wait=True`. Wait
+        times. It raises a rate limit as soon as the read would spend more than 10 minutes in
+        all waiting out rate limits, or 90 seconds for a console command with `wait=True`. Wait
         before you call again.
         """
         return self._is_retryable
@@ -301,7 +307,7 @@ class MassiveError(Exception):
 
 
 class AuthenticationError(MassiveError):
-    """Your keys are missing, or Massive refused them: the API key, or the S3 keys of flat files.
+    """Your API key is missing, or Massive refused your API key or your flat-file S3 keys.
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
     `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
