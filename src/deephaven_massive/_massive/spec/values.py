@@ -9,7 +9,7 @@ value of the wrong type is refused here instead of reaching Massive as surprisin
 | `INTEGER` | `int` | decimal digits |
 | `NUMBER` | `int` or finite `float` | digits; a `float` positionally (`0.0000001`) |
 | `BOOLEAN` | `bool` | `true` or `false` |
-| `ENUM` | `str` or enum member, one of `Param.values` | the value |
+| `ENUM` | `str` or enum member | the value |
 | `DATE` | `date`, or aware `datetime` | `YYYY-MM-DD`, or ISO-8601 date-time in UTC (`Z`) |
 | `TIMESTAMP` | `date`, or aware `datetime` | `YYYY-MM-DD`, or an integer in `Param.unit` |
 | `LIST` | non-empty sequence of `str` (not a `str` itself) | joined with commas |
@@ -21,7 +21,9 @@ arithmetic on the `timedelta` from the epoch, never through a float. An instant 
 whole number of that unit (a microsecond instant for a millisecond parameter) is refused rather
 than rounded, because rounding a range bound silently moves it. An instant for a `DATE`
 parameter is written in UTC with a `Z`, the form of Massive's own examples, whatever zone the
-`datetime` carries.
+`datetime` carries. An `ENUM` value outside `Param.values` is sent as it is: Massive judges
+the values it takes, and the library's own checks refuse the ones it is known to answer with
+no error and no rows.
 
 The REST client encodes every request with `encode_value` (through `rest.query`), and the
 library's filter check calls the same function when a query is built, so a filter it accepts
@@ -153,11 +155,11 @@ def _number(param: Param, value: object, label: str) -> str:
     return "0" if text == "-0" else text
 
 
-def _text(param: Param, value: object, label: str) -> str:
+def _text(_param: Param, value: object, label: str) -> str:
     """Encode a `STRING` or `ENUM` value.
 
     Args:
-        param: The parameter.
+        _param: The parameter; text of either kind is encoded alike.
         value: A `str` or an enum member whose value is a `str`.
         label: How messages name the value.
 
@@ -166,13 +168,10 @@ def _text(param: Param, value: object, label: str) -> str:
 
     Raises:
         TypeError: If `value` is neither.
-        ValueError: If the parameter is an `ENUM` and the text is not one of its values.
     """
     text = value.value if isinstance(value, Enum) else value
     if not isinstance(text, str):
         raise TypeError(f"{label} takes text, not {value!r}")
-    if param.kind is ParamKind.ENUM and text not in param.values:
-        raise ValueError(f"{label} takes one of {list(param.values)}, not {text!r}")
     return text
 
 
@@ -238,8 +237,8 @@ def encode_value(param: Param, value: object, *, label: str | None = None) -> st
 
     A value of a type the kind does not accept raises `TypeError`. A value of the right type
     that cannot be sent raises `ValueError`: a naive `datetime`, an instant finer than the
-    parameter's unit, an enum value the parameter does not list, a non-finite number, or an
-    empty list.
+    parameter's unit, a non-finite number, or an empty list. An enum value the parameter does
+    not list is sent for Massive to judge.
 
     Args:
         param: The parameter, from the path's `RestPath.params`.

@@ -489,10 +489,40 @@ def test_bars_default_to_streamed_adjusted_minutes(massive_session: dm.MassiveSe
     assert unadjusted._request.adjusted is False
 
 
+@pytest.mark.parametrize(
+    ("timespan", "multiplier", "segment"),
+    [
+        (dm.Timespan.SESSION, 1, "/range/1/session/"),
+        (dm.Timespan.DAY, 0, "/range/0/day/"),
+        (dm.Timespan.MINUTE, -5, "/range/-5/minute/"),
+    ],
+)
+def test_bar_periods_massive_refuses_are_sent_and_fail_with_its_answer(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    timespan: dm.Timespan,
+    multiplier: int,
+    segment: str,
+) -> None:
+    # Massive answers HTTP 400 to session bars outside futures and to a multiplier below 1.
+    refusal = {"status": "ERROR", "request_id": "r", "error": "Invalid time span"}
+    fake_rest.reply_default(Reply(status=400, body=refusal))
+    query = rest_session.stocks.bars("AAPL", timespan, multiplier=multiplier)
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid time span"):
+        query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
+    ((path, _),) = fake_rest.get_queries(one_value=True)
+    assert segment in path
+    # A range shorter than a day holds no whole bar of a day's period, yet it is still sent.
+    hour = (datetime(2020, 1, 2, 15, tzinfo=UTC), datetime(2020, 1, 2, 16, tzinfo=UTC))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid time span"):
+        query.history(*hour, source=dm.HistorySource.REST, wait=True)
+    (_, (path, _)) = fake_rest.get_queries(one_value=True)
+    assert segment in path
+
+
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     bars = cast("Any", massive_session.stocks.bars)
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars("AAPL", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars("AAPL", "minute")
     with pytest.raises(TypeError, match="adjusted must be a bool"):
@@ -500,8 +530,8 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     # None would otherwise mean a path without `adjusted`.
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         bars("AAPL", dm.Timespan.MINUTE, adjusted=None)
-    with pytest.raises(ValueError, match="multiplier"):
-        bars("AAPL", dm.Timespan.MINUTE, multiplier=0)
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bars("AAPL", dm.Timespan.MINUTE, multiplier=1.0)
 
 
 def test_bars_declare_each_transport_by_timespan() -> None:

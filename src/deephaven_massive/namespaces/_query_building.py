@@ -53,7 +53,7 @@ from deephaven_massive._datasets.filters import (
 )
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._tables.time_text import deephaven_time_text
@@ -675,7 +675,7 @@ def _typed_params(
         ValueError: If `params` names `adjusted` or a fixed parameter, or sets `order`
             without `sort` on a dataset whose paths take the direction as a suffix of `sort`.
 
-    An unknown `sort` field raises the `ValueError` of `Catalog.check_sort`.
+    A `sort` with a suffixed part beside `order` raises the `ValueError` of `Catalog.check_sort`.
     """
     if "adjusted" in params:
         raise ValueError("adjusted is set through build_query(adjusted=...), not params")
@@ -692,28 +692,24 @@ def _typed_params(
     return {**params, **library}
 
 
-def _check_bar_period(spec: DatasetSpec, timespan: object, multiplier: object) -> None:
-    """Check a `bars()` call's timespan and multiplier, before any request.
+def _check_bar_period(timespan: object, multiplier: object) -> None:
+    """Check the types of a `bars()` call's timespan and multiplier, before any request.
+
+    Only the types are checked. Massive judges the values: it answers HTTP 400 to a
+    multiplier below 1 and to `session` bars outside futures, so both are sent as given.
 
     Args:
-        spec: The bars dataset.
         timespan: The `timespan` argument as passed.
         multiplier: The `multiplier` argument as passed.
 
     Raises:
-        ValueError: If `Timespan.DAY` is used for futures (the futures endpoint has no day
-            unit; use `Timespan.SESSION`), or `Timespan.SESSION` is used outside futures.
+        TypeError: If `multiplier` is not an `int` (a `bool` is not accepted).
 
-    A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`, and a
-    `multiplier` that is not a positive `int` the error of `require_positive_int`.
+    A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`.
     """
-    span = _require_enum(timespan, Timespan, "timespan")
-    require_positive_int("multiplier", multiplier)
-    futures = spec.asset_class is AssetClass.FUTURES
-    if futures and span is Timespan.DAY:
-        raise ValueError("futures bars have no DAY timespan; use dm.Timespan.SESSION")
-    if not futures and span is Timespan.SESSION:
-        raise ValueError("Timespan.SESSION exists only for futures bars")
+    _require_enum(timespan, Timespan, "timespan")
+    if isinstance(multiplier, bool) or not isinstance(multiplier, int):
+        raise TypeError(f"multiplier must be an int, not {type(multiplier).__name__}")
 
 
 def _query_class(spec: DatasetSpec, query_type: type[_Q]) -> type[_Q]:
@@ -859,7 +855,7 @@ def build_query(
     if timespan is not None:
         _require_enum(timespan, Timespan, "timespan")
     if timespan is not None and spec.is_bars:
-        _check_bar_period(spec, timespan, multiplier)
+        _check_bar_period(timespan, multiplier)
     first = None if start is None else parse_date_like(deephaven_time_text(start, "start"), "start")
     last = (
         None if end is None else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)
@@ -880,6 +876,8 @@ def build_query(
         end=last,
         params=tuple(sorted((k, _value(k, v)) for k, v in sent.items() if v is not None)),
         filters=check_filters(core.catalog, spec, dict(given), typed=params or {}),
+        # Refused below 1: Massive answers `limit=0` with HTTP 200 and no rows, which reads as
+        # an empty result rather than an error (the dividends, sent `limit=0`, did).
         limit=None if limit is None else require_positive_int("limit", limit),
         value_table=values,
     )

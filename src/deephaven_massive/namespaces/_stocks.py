@@ -574,7 +574,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL`.
-            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts volume as well as prices.
 
@@ -586,9 +586,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Raises:
             TypeError: If an argument has the wrong type.
-            ValueError: If:
-                - `timespan` is `SESSION`, or `multiplier` is below 1;
-                - `symbols` is None or empty, or holds an empty ticker or one with `,` or `*`.
+            ValueError: If `symbols` is None or empty, or holds an empty ticker or one with `,` or
+                `*`.
 
         Example:
             ::

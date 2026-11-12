@@ -6,38 +6,30 @@ Massive's servers, the machine checks, the checkout's commit, the keep-awake too
 clock and terminal), and runs one command of `live_run`. A refused command prints why and
 exits 2.
 
-The hidden `_group` command is the child of a built-in group (`attempts`): in the embedded
-Deephaven server the script started, sized to the group (`server.jvm_args`), it opens sessions
-on the key (declaring its Basic subscriptions,
-except for the upgrade check, whose sessions declare nothing), and runs the group
-(`group_child`). The script then leaves through `os._exit`.
+This is the parent's side, which starts no JVM: it imports neither the library nor Deephaven,
+and runs everything that does in a child of its own script (`child_commands`): each probe of
+the key (`probe_result.probe_in_child`) and each built-in group (`attempts`).
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import platform
 import shutil
 import sys
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final
 
-import deephaven_massive as dm
-from tests._live.live_run import children, commands, group_child, machine_checks
+from tests._live.live_run import children, commands, machine_checks
 from tests._live.live_run.context import RunContext, RunRefusedError
-from tests._live.live_run.run_probe import Credentials, ProbeResult, probe_key
+from tests._live.live_run.probe_result import probe_in_child
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.live_run.stream_units import DELAYED, RECENCY
-from tests._live.live_run.upgrade_check import SUBSCRIPTIONS
+from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    from deephaven_massive import MassiveSession
 
 GROUPS: Final = (
     "rate-limits",
@@ -58,22 +50,6 @@ GROUPS: Final = (
 
 REFUSED: Final = 2
 """The exit status of a refused command."""
-
-
-def credentials(environ: Mapping[str, str]) -> Credentials:
-    """Read the probe's credentials from the environment.
-
-    Args:
-        environ: The environment.
-
-    Returns:
-        The API key, and the S3 pair when both are set.
-    """
-    access, secret = (environ.get(name, "").strip() for name in children.S3_VARIABLES)
-    return Credentials(
-        api_key=environ.get("MASSIVE_API_KEY", "").strip(),
-        s3_pair=(access, secret) if access and secret else None,
-    )
 
 
 def nearest_folder(folder: Path) -> Path:
@@ -125,7 +101,9 @@ def real_context(
         environ=environ,
         secrets=secrets,
         commit=children.run_command([git, "-C", str(root), "rev-parse", "HEAD"]).strip(),
-        probe=lambda: probe_key(credentials(environ), now=datetime.now(UTC)),
+        probe=lambda: probe_in_child(
+            python=sys.executable, script=script, root=root, environ=environ, secrets=secrets
+        ),
         machine=lambda folder, offset: machine_checks.check_machine(
             root=root, disk_path=nearest_folder(folder), environ=environ, clock_offset=offset
         ),
@@ -140,8 +118,8 @@ def parser() -> argparse.ArgumentParser:
     """Return the command-line parser.
 
     Returns:
-        The parser of `check`, `run`, `status`, `pack`, `upgrade-check`, and the hidden
-        `_group`.
+        The parser of `check`, `run`, `status`, `pack`, and `upgrade-check`; the hidden
+        commands of a child have their own (`child_commands.parser`).
     """
     top = argparse.ArgumentParser(
         prog="live_run.py",
@@ -176,82 +154,10 @@ def parser() -> argparse.ArgumentParser:
         "upgrade-check", help="the attended upgrade check; only when the owner asks"
     )
     upgrade.add_argument(
-        "subscription", choices=SUBSCRIPTIONS, help="the subscription you will upgrade"
+        "subscription", choices=tuple(TIERS), help="the subscription you will upgrade"
     )
     upgrade.add_argument("--out", type=Path, required=True, help=out_help)
-    child = commands.add_parser("_group")
-    child.add_argument("--out", type=Path, required=True)
-    child.add_argument("--attempt", required=True)
-    child.add_argument("--token", required=True)
     return top
-
-
-def run_group_child(
-    out: Path,
-    attempt: str,
-    *,
-    environ: Mapping[str, str],
-    watch: Callable[[], None],
-) -> None:
-    """Be a built-in group's child: watch the parent, then run the group.
-
-    Args:
-        out: The results folder.
-        attempt: The attempt's folder, relative to `out`.
-        environ: The environment, for the probe of the upgrade check.
-        watch: Starts watching the parent (`start_parent_watch`).
-    """
-    watch()
-    request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
-    tiers = request["tiers"].items()
-    basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
-    # The library serves delayed data only when asked: a delayed plan's streams ask for it.
-    delayed = frozenset(dm.Subscription(n) for n, t in tiers if RECENCY.get((n, t)) == DELAYED)
-
-    def open_session() -> MassiveSession:
-        config = dm.MassiveConfig(rest_basic_subscriptions=basic, delayed_subscriptions=delayed)
-        return dm.MassiveSession(config)
-
-    def tier_of(subscription: str) -> str | None:
-        probe: ProbeResult = probe_key(credentials(environ), now=datetime.now(UTC))
-        return None if probe.tiers is None else probe.tiers[subscription]
-
-    group_child.run_group(out, attempt, open_session=open_session, tier_of=tier_of)
-
-
-PARENT_CHECK: Final = 5.0
-"""Seconds between a built-in child's checks that its parent still runs."""
-
-
-def start_parent_watch() -> None:
-    """Start a thread that ends this child at once if its parent goes away.
-
-    The child runs in a session of its own, so a closed terminal never reaches it; without
-    the watch it would outlive the program that would stop it, holding the key's connection
-    and writing into a folder a resumed run uses again.
-    """
-    threading.Thread(
-        target=watch_parent,
-        args=(os.getppid(),),
-        kwargs={"orphaned": lambda: os._exit(3), "wait": threading.Event().wait},
-        name="live run parent watch",
-        daemon=True,
-    ).start()
-
-
-def watch_parent(
-    parent: int, *, orphaned: Callable[[], None], wait: Callable[[float], bool]
-) -> None:
-    """Call `orphaned` once the process's parent is no longer `parent`.
-
-    Args:
-        parent: The parent's pid when the child started.
-        orphaned: Called once, when the parent is gone.
-        wait: Waits a number of seconds between checks.
-    """
-    while os.getppid() == parent:
-        wait(PARENT_CHECK)
-    orphaned()
 
 
 def main(
@@ -262,7 +168,6 @@ def main(
     environ: Mapping[str, str] = os.environ,
     stdout: IO[str] = sys.stdout,
     make_context: Callable[..., RunContext] = real_context,
-    watch: Callable[[], None] = start_parent_watch,
 ) -> int:
     """Parse the command line and run the command.
 
@@ -273,7 +178,6 @@ def main(
         environ: The environment.
         stdout: Where the program prints.
         make_context: Builds the context (`real_context`); tests pass fakes.
-        watch: Starts a `_group` child's watch of its parent (`start_parent_watch`).
 
     Returns:
         The exit status: 0, 1 when a check, a pack, or an upgrade check failed, 2 when the
@@ -286,9 +190,6 @@ def main(
     except SystemExit as stop:
         return int(stop.code or 0)
     out = arguments.out.expanduser().resolve()
-    if arguments.command == "_group":
-        run_group_child(out, arguments.attempt, environ=environ, watch=watch)
-        return 0
     ctx = make_context(out, root=root, script=script, environ=environ, stdout=stdout)
     actions: dict[str, Callable[[], int]] = {
         "check": lambda: commands.command_check(ctx),

@@ -429,8 +429,8 @@ def test_every_bars_call_is_one_class_and_only_some_stream(
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
     assert bars(CONTRACT, dm.Timespan.MINUTE)._request.adjusted is True
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars(CONTRACT, dm.Timespan.SESSION)
+    # Massive answers HTTP 400 to session bars outside futures, so they are sent.
+    assert bars(CONTRACT, dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars(CONTRACT, cast("dm.Timespan", "minute"))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
@@ -491,6 +491,16 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
         massive_session.options.contracts(underlying=tickers)
 
 
+def test_a_chain_of_a_pair_fails_with_massive_s_answer(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "ERROR", "request_id": "r", "error": "Invalid ticker."}
+    fake_rest.reply_default(Reply(refusal, status=400))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid ticker\."):
+        rest_session.options.chain("C:EURUSD").fetch(wait=True)
+    assert [path for path, _ in fake_rest.get_queries()] == ["/v3/snapshot/options/C:EURUSD"]
+
+
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
     with pytest.raises(
@@ -505,12 +515,14 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain(cast("str", 1))
     with pytest.raises(ValueError, match=r"^cannot send the symbol '' to Massive"):
         chain("")
-    for text in ("aapl", "i:SPX"):  # Massive answers them
+    for text in ("aapl", "i:SPX", "  "):  # Massive answers them
         assert request_of(chain(text))["params"]["underlyingAsset"] == text
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
-        chain("C:EURUSD")
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
-        chain("O:AAPL250117C00150000")
+    # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
+    assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
+    assert request_of(chain("X:BTCUSD"))["params"]["underlyingAsset"] == "X:BTCUSD"
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(chain(contract))["params"]["underlyingAsset"] == contract
     assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
@@ -581,6 +593,13 @@ def test_contracts_send_a_stock_ticker_as_written(massive_session: dm.MassiveSes
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
+    # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
+    for pair in ("C:EURUSD", "X:BTCUSD"):
+        with pytest.raises(ValueError, match=rf"^underlying='{pair}' is a currency or crypto"):
+            contracts(underlying=pair)
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(contracts(underlying=contract))["params"]["underlying_ticker"] == contract
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):

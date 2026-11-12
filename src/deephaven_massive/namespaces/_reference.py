@@ -205,7 +205,10 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
 
     The reference endpoints spell forex `fx`, and each accepts its own set of classes, which
     the generated `asset_class` parameter of the path lists: the exchanges accept futures but
-    not indices, the ticker types indices but not futures, and the conditions neither.
+    not indices, the ticker types indices but not futures, and the conditions neither. A class
+    the path does not list is refused, because Massive answers it with no error: sent futures
+    (the conditions and the ticker types) or indices (the exchanges), each answered HTTP 200
+    with no rows, which would read as a class with nothing in it.
 
     Args:
         core: The session core, whose catalog holds the generated paths.

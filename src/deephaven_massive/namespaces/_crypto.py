@@ -385,7 +385,7 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` takes
                 `dm.ALL` for one-minute and one-day bars.
-            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
 
         Returns:
@@ -397,7 +397,6 @@ class CryptoNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
                 - a ticker is empty or holds `,` or `*`.
 

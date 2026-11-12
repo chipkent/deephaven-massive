@@ -376,6 +376,66 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
 
 
 @pytest.mark.needs("futures:basic")
+@pytest.mark.settles("107")
+@pytest.mark.requests(5)
+@pytest.mark.timeout(100)
+def test_futures_day_bars_against_session_bars(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    recent_month: tuple[date, date],
+    front_contract: Callable[[str, date], str],
+    table_rows: TableRows,
+    instant_text: Text,
+    evidence: Evidence,
+) -> None:
+    """Whether Massive's `day` bars of futures are its `session` bars, at 1 and 5 units.
+
+    Reads the most recent whole month of the ES contract that was front at its end, as
+    `1day`, `1session`, `5day`, and `5session` bars, and records for each pair whether the
+    bars are equal field by field, and the first pair that differs. Then reads the month's
+    `dm.Timespan.DAY` bars through the library, which dates and keeps them as 1-session bars,
+    and records their windows and `Date` beside the raw `1session` labels. Reading it: equal
+    pairs at both multipliers, and library windows that end on each bar's session, settle that
+    `DAY` is `SESSION` for futures; any difference means `DAY` needs its own rules.
+    """
+    contract = front_contract("ES", recent_month[1])
+    start = _midnight(recent_month[0])
+    end = _midnight(recent_month[1] + timedelta(days=1))
+    read = {
+        resolution: _aggregates(
+            live_rest, contract, resolution, start=start, end=end, evidence=evidence
+        )
+        for resolution in ("1day", "1session", "5day", "5session")
+    }
+    for days, sessions in (("1day", "1session"), ("5day", "5session")):
+        pairs = list(zip(read[days], read[sessions], strict=False))
+        differ = next(((a, b) for a, b in pairs if a != b), None)
+        evidence(
+            f"{contract} {days} {len(read[days])} bars, {sessions} {len(read[sessions])} bars; "
+            f"equal: {len(read[days]) == len(read[sessions]) and differ is None}; first "
+            f"difference: {differ}"
+        )
+    labels = [
+        (instant_text(int(bar["window_start"])), bar.get("session_end_date"))
+        for bar in read["1session"]
+    ]
+    evidence(f"{contract} 1session (window_start, session_end_date): {labels}")
+    library = table_rows(
+        live_session.futures.bars(contract, dm.Timespan.DAY).history(
+            recent_month[0], recent_month[1], wait=True
+        )
+    )
+    windows = [
+        (instant_text(r["TimestampStart"]), instant_text(r["TimestampEnd"]), r["Date"])
+        for r in library
+    ]
+    evidence(f"library DAY bars (start, end, Date): {windows}")
+    assert read["1day"]
+    assert library
+
+
+@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)

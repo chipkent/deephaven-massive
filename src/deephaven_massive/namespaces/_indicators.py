@@ -121,8 +121,10 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (SMA, EMA, RSI, MACD)
 def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> Timespan:
     """Validate the bar size an indicator is computed over, against its generated parameter.
 
-    The indicator paths take `timespan` as an enum from `minute` to `year`, so `SECOND` and
-    `SESSION` are refused here, before any request.
+    The indicator paths take `timespan` as an enum from `minute` to `year`, and a timespan
+    they do not list is refused here, before any request, because Massive answers it with no
+    error: sent `timespan=second`, the SMA answered HTTP 200 with no values, which would read
+    as an empty result.
 
     Args:
         core: The session core, whose catalog holds the generated paths.
@@ -151,7 +153,9 @@ def _check_window(name: str, value: object) -> int:
 
     `bars()` takes its timespan as the second positional argument, and an indicator takes its
     window there, with `timespan` keyword-only, so `sma("AAPL", dm.Timespan.MINUTE)` puts the
-    timespan in the window.
+    timespan in the window. A window below 1 is refused because Massive answers it with no
+    error: sent `window=0`, the SMA answered HTTP 200 with an empty body, no values and no
+    message.
 
     Args:
         name: The window's wire name, such as `"window"` or `"short_window"`.

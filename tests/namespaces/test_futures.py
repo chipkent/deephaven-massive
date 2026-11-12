@@ -188,13 +188,27 @@ def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSes
         massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
 
 
-def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"no DAY timespan; use dm\.Timespan\.SESSION"):
-        massive_session.futures.bars("ESZ5", dm.Timespan.DAY)
+def test_bars_take_the_day_timespan(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Massive serves `1day` futures bars, and answers HTTP 400 to a size it does not serve.
+    assert massive_session.futures.bars("ESZ5", dm.Timespan.DAY)._request.timespan is (
+        dm.Timespan.DAY
+    )
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         massive_session.futures.bars("ESZ5", cast("Any", "minute"))
-    with pytest.raises(ValueError, match="multiplier must be positive"):
-        massive_session.futures.bars("ESZ5", dm.Timespan.HOUR, multiplier=0)
+    hours = massive_session.futures.bars("ESZ5", dm.Timespan.HOUR, multiplier=0)
+    assert hours._request.multiplier == 0
+
+
+def test_every_contract_s_day_bars_point_to_session_bars(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # Day bars are read from REST only, which needs explicit contracts; the session files
+    # hold every contract's session bars.
+    query = massive_session.futures.bars(dm.ALL, dm.Timespan.DAY)
+    with pytest.raises(ValueError, match=r"use dm\.Timespan\.SESSION for every contract's daily"):
+        query.history("2025-02-04", "2025-02-05", wait=True)
 
 
 def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> None:
@@ -674,20 +688,27 @@ def test_quotes_rest_rows(
     )
 
 
+@pytest.mark.parametrize(
+    ("timespan", "resolution"),
+    # Massive serves `1day` futures bars as the same one-session buckets as `1session`.
+    [(dm.Timespan.SESSION, "1session"), (dm.Timespan.DAY, "1day")],
+)
 def test_session_bars_over_rest(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     serve: Callable[[str, str], None],
+    timespan: dm.Timespan,
+    resolution: str,
 ) -> None:
     serve("/futures/v1/aggs/GCJ5", "aggs.json")
-    q = rest_session.futures.bars("GCJ5", dm.Timespan.SESSION)
+    q = rest_session.futures.bars("GCJ5", timespan)
     out = rows(q.history("2025-02-04", "2025-02-05", source=dm.HistorySource.REST, wait=True))
     assert fake_rest.get_queries() == [
         (
             "/futures/v1/aggs/GCJ5",
             {
-                "resolution": ["1session"],
+                "resolution": [resolution],
                 "limit": ["50000"],
                 "window_start.gte": [str(chicago_open(date(2025, 1, 30)))],
                 # 18:00 Chicago on the last session date.

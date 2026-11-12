@@ -1,9 +1,9 @@
-"""Tests of the live run's server sizing (`tests/_live/live_run/server.py`)."""
+"""Tests of the live run's child server (`tests/_live/live_run/server.py`)."""
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
@@ -13,16 +13,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        [],
-        ["status", "--out", "~/massive-live"],
-        ["run", "--out", "~/massive-live", "--any-time"],
-    ],
-)
-def test_a_command_other_than_a_group_child_gets_the_parent_heap(argv: list[str]) -> None:
-    assert server.jvm_args(argv) == [f"-Xmx{server.PARENT_HEAP >> 20}m"]
+def test_the_probe_child_gets_the_probe_heap() -> None:
+    assert server.jvm_args(["_probe", "--result", "r.json"]) == [f"-Xmx{server.PROBE_HEAP >> 20}m"]
 
 
 @pytest.mark.parametrize(
@@ -68,3 +60,31 @@ def test_a_missing_or_old_java_is_reported_before_the_server_starts(
     monkeypatch.setattr(server, "run_command", run)
     assert server.java_problem({"JAVA_HOME": "/jdk"}) == problem
     assert asked == [["/jdk/bin/java", "-version"]]
+
+
+class _Server:
+    """Stands in for `deephaven_server.Server`: this process already runs a JVM."""
+
+    started: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self, **options: object) -> None:
+        self.options = options
+
+    def start(self) -> None:
+        _Server.started.append(self.options)
+
+
+@pytest.mark.parametrize(("printed", "starts"), [('openjdk version "21.0.2"', True), ("", False)])
+def test_a_child_starts_its_sized_server_only_with_java(
+    *, printed: str, starts: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_Server, "started", [])
+    monkeypatch.setattr(server, "Server", _Server)
+    monkeypatch.setattr(server, "run_command", lambda _argv: printed)
+    problem = server.start_server(["_probe", "--result", "r.json"], environ={})
+    if starts:
+        assert problem is None
+        assert _Server.started == [{"port": 0, "jvm_args": [f"-Xmx{server.PROBE_HEAP >> 20}m"]}]
+    else:
+        assert problem == "FAIL java: Java not found: install JDK 17 or later"
+        assert _Server.started == []

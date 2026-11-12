@@ -20,15 +20,17 @@ tiers and tries again later. Each request's path, status, and request id are rec
 the wire package's reply-capture hook, never a body or a header; the history each subscription
 keeps comes from the documented windows (`plans.history_start`).
 
-The probe needs no Deephaven server: it uses the wire package's clients directly.
+The probe opens no session: it uses the wire package's clients directly. Importing them still
+imports the library, and so Deephaven, which needs a running JVM, so the live run's parent runs
+the probe in a child process (`probe_result.probe_in_child`).
 """
 
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._massive import (
     FlatFileClient,
@@ -41,11 +43,13 @@ from deephaven_massive._massive import (
     source,
 )
 from tests._live.calendar import NEW_YORK, recent_monday
+from tests._live.live_run.children import S3_VARIABLES
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.plans import TIERS, LivePlans, history_start
 from tests._live.probe import PlanProbeError, probe_tiers, reached_prefixes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from deephaven_massive._massive import CapturedReply
 
@@ -78,51 +82,20 @@ class Credentials:
     s3_bucket: str = S3_BUCKET
 
 
-@dataclass
-class ProbeResult:
-    """What one probe found.
-
-    Attributes:
-        when: When it ran, ISO UTC.
-        tiers: Each subscription's tier, or None when the probe could not tell (*unknown*).
-        flat_files: The flat-file prefixes the S3 pair reached, sorted.
-        history_start: Each subscription's earliest readable date, ISO, or `"all"` for a tier
-            that keeps all history; empty when the tiers are unknown.
-        clock_offset: The machine clock minus Massive's `serverTime`, in seconds, or None.
-        key_rejected: Whether Massive rejected the API key.
-        error: Why the tiers are unknown, `""` otherwise.
-        closures: Massive's upcoming market closures: each ISO date's status, `closed` or
-            `early-close` (a date with both, on different exchanges, is `closed`); None when
-            they could not be read.
-        requests: Each request made: its path, query, status, and request id.
-    """
-
-    when: str
-    tiers: dict[str, str] | None = None
-    flat_files: list[str] = field(default_factory=list)
-    history_start: dict[str, str] = field(default_factory=dict)
-    clock_offset: float | None = None
-    key_rejected: bool = False
-    error: str = ""
-    closures: dict[str, str] | None = None
-    requests: list[dict[str, Any]] = field(default_factory=list)
-
-
-def plans_variable(tiers: dict[str, str], flat_files: list[str]) -> str:
-    """Spell tiers in the `MASSIVE_LIVE_PLANS` grammar the live tests read.
+def credentials(environ: Mapping[str, str]) -> Credentials:
+    """Read the probe's credentials from the environment.
 
     Args:
-        tiers: Each subscription's tier.
-        flat_files: The prefixes the S3 pair reached.
+        environ: The environment.
 
     Returns:
-        Every class with its tier, then each reached flat-file prefix as `s3=<prefix>`, such as
-        `"stocks=starter,options=basic,...,s3=us_stocks_sip/day_aggs_v1"`, so the live tests
-        skip a prefix the credentials do not reach. Basic classes are named too, so the value
-        is never empty: an empty one would make the live tests probe the key again themselves.
+        The API key, and the S3 pair when both are set.
     """
-    entries = [f"{name}={tier}" for name, tier in tiers.items()]
-    return ",".join([*entries, *(f"s3={prefix}" for prefix in sorted(flat_files))])
+    access, secret = (environ.get(name, "").strip() for name in S3_VARIABLES)
+    return Credentials(
+        api_key=environ.get("MASSIVE_API_KEY", "").strip(),
+        s3_pair=(access, secret) if access and secret else None,
+    )
 
 
 def probe_key(credentials: Credentials, *, now: datetime) -> ProbeResult:

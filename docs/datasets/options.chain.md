@@ -23,7 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| `underlying` | The underlying's exact Massive ticker, a stock or an index, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused; use `snapshots(dm.ALL)` for every contract. |
+| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused; use `snapshots(dm.ALL)` for every contract. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`sort`](README.md#sort) | `"ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |

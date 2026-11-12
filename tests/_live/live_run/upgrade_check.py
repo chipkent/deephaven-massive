@@ -35,7 +35,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
+from tests._live.live_run.children import ENTER_PROMPT
 from tests._live.live_run.stream_capture import diagnostics_rows, wait_for_diagnostics
+from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
 
-SUBSCRIPTIONS: Final = ("stocks", "options", "indices", "currencies", "futures")
+SUBSCRIPTIONS: Final = tuple(TIERS)
 
 CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
     "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(wait=True),
@@ -69,7 +71,8 @@ FRESH_MINUTE: Final = 65.0
 TOO_MANY_REQUESTS: Final = 429
 """The HTTP status of Massive's refusal for the per-minute limit."""
 
-PROMPT: Final = "Now upgrade {subscription} on the dashboard, then press Enter"
+PROMPT: Final = "Now upgrade {subscription} on the dashboard, then " + ENTER_PROMPT
+"""What the child prints before it reads Enter; its end tells the parent to wait for Enter."""
 
 
 @dataclass

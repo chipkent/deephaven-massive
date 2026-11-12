@@ -23,7 +23,6 @@ import math
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.symbols import is_forex_currency
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -37,7 +36,6 @@ from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
     SNAPSHOT_SYMBOLS_PER_REQUEST,
-    accepted_values,
     build_query,
 )
 from deephaven_massive.queries import (
@@ -223,28 +221,32 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 def _currency(name: str, value: object) -> str:
-    """Return a currency code in the form the conversion endpoint takes.
+    """Return a currency code argument of the conversion, which must be text.
+
+    Massive judges the code itself: it answers HTTP 404 ("Couldn't find requested currency
+    pair") to one it does not know, such as `aud`, so any text is sent as written. Only an
+    empty code is refused: the code is a segment of the request's path, and an empty segment
+    can't be sent.
 
     Args:
         name: The parameter's name, for messages.
-        value: The code as passed, which must already be exact: nothing is stripped or
-            re-cased.
+        value: The code as passed.
 
     Returns:
-        The code unchanged, three upper-case letters such as `"EUR"`.
+        The code unchanged.
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is not exactly three upper-case letters; when trimming and
-            upper-casing would give a code, the message names it (`write 'USD'`).
+        ValueError: If `value` is empty.
     """
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
-    if is_forex_currency(value):
-        return value
-    meant = value.strip().upper()
-    hint = f"; write {meant!r}" if is_forex_currency(meant) else ", such as 'USD'"
-    raise ValueError(f"{name}={value!r} is not a three-letter upper-case currency code{hint}")
+    if not value:
+        raise ValueError(
+            f"{name} is empty, and an empty code can't be sent: it is a segment of the "
+            "request's path"
+        )
+    return value
 
 
 class ForexNamespace(Namespace):
@@ -353,7 +355,7 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()`
                 takes `dm.ALL` for one-minute and one-day bars.
-            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
 
         Returns:
@@ -365,7 +367,6 @@ class ForexNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
                 - a ticker is empty or holds `,` or `*`.
 
@@ -518,11 +519,12 @@ class ForexNamespace(Namespace):
         bid and ask the conversion used.
 
         Args:
-            from_currency: The currency to convert from, as three upper-case letters, such as
-                `"AUD"`.
-            to_currency: The currency to convert to, such as `"USD"`.
-            amount: The amount to convert, positive and finite; 1.0 by default.
-            precision: The decimal places of the result, 0 to 4; 2 by default.
+            from_currency: The code of the currency to convert from, such as `"AUD"`. Massive
+                answers HTTP 404 to a code it doesn't know, such as `"aud"`, and the read
+                raises `MassiveError`.
+            to_currency: The code of the currency to convert to, such as `"USD"`.
+            amount: The amount to convert, any finite number; 1.0 by default.
+            precision: The decimal places of the result; 2 by default.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -531,10 +533,7 @@ class ForexNamespace(Namespace):
         Raises:
             TypeError: If a currency isn't a `str`, `amount` isn't an `int` or `float`, or
                 `precision` isn't an `int`. A `bool` is neither number.
-            ValueError: If:
-                - a currency isn't exactly three upper-case letters, so `"usd"` is refused;
-                - `amount` isn't positive and finite;
-                - `precision` isn't 0 to 4.
+            ValueError: If a currency is empty, or `amount` is NaN or infinite.
 
         Example:
             ::
@@ -545,14 +544,13 @@ class ForexNamespace(Namespace):
         target = _currency("to_currency", to_currency)
         if isinstance(amount, bool) or not isinstance(amount, int | float):
             raise TypeError(f"amount must be an int or float, not {type(amount).__name__}")
-        if not amount > 0 or amount == math.inf:  # NaN fails the first test
-            raise ValueError(f"amount must be positive and finite, got {amount!r}")
+        # Massive converts any finite amount, 0 and negative ones included; a request cannot
+        # carry NaN or an infinity as a number.
+        if not isinstance(amount, int) and not math.isfinite(amount):
+            raise ValueError(f"amount must be finite, got {amount!r}")
         if isinstance(precision, bool) or not isinstance(precision, int):
             raise TypeError(f"precision must be an int, not {type(precision).__name__}")
-        # An enum of digit strings ("0" to "4" at the snapshot), followed through a refresh.
-        accepted = frozenset(map(int, accepted_values(self._core, CONVERSION, "precision")))
-        if precision not in accepted:
-            raise ValueError(f"precision must be one of {sorted(accepted)}, got {precision}")
-        # The endpoint's `precision` is an enum of digit strings, so it is sent as text.
+        # The endpoint's `precision` is an enum of digit strings, so it is sent as text. Massive
+        # judges the value: it honors 5, which its specification does not list.
         params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
         return build_query(self._core, CONVERSION, query_type=FetchQuery, params=params)

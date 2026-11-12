@@ -375,7 +375,7 @@ ENUM_PARAMETERS = {
     "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.timespan": (
-        "namespaces/test_futures.py::test_bars_reject_the_day_timespan"
+        "namespaces/test_futures.py::test_bars_take_the_day_timespan"
     ),
     "FuturesNamespace.snapshots.order": _FUTURES_ENUMS,
     "FuturesNamespace.contracts.order": _FUTURES_ENUMS,

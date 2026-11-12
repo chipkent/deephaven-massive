@@ -23,7 +23,7 @@ chain, the snapshots, and the contract reference data carry the instrument Massi
 contract to as `Underlying`, Massive's ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
 of it. Neither column is ever mapped to the other. `underlying=` takes a ticker, sent
-as written, or a table of them in a `Symbol` column (`value_table`), each read as if passed alone.
+as written, or a table of them in a `Symbol` column (`value_table`), each row sent as written.
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
@@ -44,7 +44,6 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import (
     ALL,
-    UNDERLYING_CLASSES,
     check_symbol,
     symbol_class,
 )
@@ -334,8 +333,41 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.options`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
 
+@raises_through(check_symbol)
+def _chain_underlying(value: object) -> str:
+    """Check the chain's `underlying` argument: a ticker, sent as written.
+
+    Massive judges the instrument: it answers HTTP 400 ("Invalid ticker.") to the chain of a
+    currency or crypto pair, so any ticker is sent, an option contract included.
+
+    Args:
+        value: The `underlying` argument as passed, such as `"AAPL"` or `"I:SPX"`.
+
+    Returns:
+        The ticker, unchanged.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` can't be sent (`check_symbol`).
+    """
+    if not isinstance(value, str):
+        kind = "dm.ALL" if value is ALL else type(value).__name__
+        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
+    return check_symbol(value)
+
+
+_PAIR_CLASSES: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes whose tickers the contracts list answers with no error and no rows."""
+
+
+@raises_through(_chain_underlying)
 def _underlying(value: object) -> str:
-    """Check an `underlying` argument: the ticker of a stock or an index, sent as written.
+    """Check the contracts list's `underlying` argument: any of Massive's tickers but a pair.
+
+    A currency or crypto pair is refused, because Massive answers it with no error: sent
+    `underlying_ticker=C:EURUSD` or `X:BTCUSD`, the contracts list answered HTTP 200 with no
+    rows, which would read as a pair with no options listed. Every other ticker is
+    sent for Massive to judge, an option contract included.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
@@ -346,17 +378,15 @@ def _underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` has the prefix of an option, a currency pair, or a crypto pair,
-            or no request can carry it (`check_symbol`).
+        ValueError: If `value` can't be sent (`check_symbol`), or is a currency or crypto pair.
     """
-    if not isinstance(value, str):
-        kind = "dm.ALL" if value is ALL else type(value).__name__
-        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
-    if symbol_class(value) not in UNDERLYING_CLASSES:
+    ticker = _chain_underlying(value)
+    if symbol_class(ticker) in _PAIR_CLASSES:
         raise ValueError(
-            f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
+            f"underlying={value!r} is a currency or crypto pair, which has no listed options; "
+            "pass a ticker such as 'AAPL' or 'I:SPX'"
         )
-    return check_symbol(value)
+    return ticker
 
 
 @raises_through(_require_enum)
@@ -540,7 +570,7 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
-            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts for splits of the underlying.
 
@@ -553,7 +583,6 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
                 - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
@@ -668,7 +697,7 @@ class OptionsNamespace(Namespace):
         """
         return build_query(self._core, ADMIN_MESSAGES, query_type=StreamQuery)
 
-    @raises_through(build_query, list_params, _contract_type, _underlying, value_table)
+    @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)
     def chain(
         self,
         underlying: str | Table,
@@ -691,9 +720,9 @@ class OptionsNamespace(Namespace):
         followed. In a static table, one failed underlying fails the call.
 
         Args:
-            underlying: The underlying's exact Massive ticker, a stock or an index, such as `"AAPL"`
-                or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused;
-                use `snapshots(dm.ALL)` for every contract.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
+                table of them in a `Symbol` column works too. `dm.ALL` is
+                refused; use `snapshots(dm.ALL)` for every contract.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
@@ -708,8 +737,7 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL`, has another class's prefix, is empty, or holds `,`
-                  or `*`;
+                - `underlying` is `dm.ALL`, is empty, or holds `,` or `*`;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -734,7 +762,7 @@ class OptionsNamespace(Namespace):
             else None
         )
         params: dict[str, object] = {
-            "underlyingAsset": None if values is not None else _underlying(underlying),
+            "underlyingAsset": None if values is not None else _chain_underlying(underlying),
             "contract_type": _contract_type(contract_type),
         }
         params.update(list_params(sort=sort, order=order))
@@ -843,8 +871,9 @@ class OptionsNamespace(Namespace):
             symbols: Option contracts to describe; leave it out to list contracts. `dm.ALL` is
                 refused; leave `symbols` out instead.
             underlying: Only contracts of this underlying's exact Massive ticker, such as `"AAPL"`
-                or `"I:SPX"`. A table of them in a `Symbol` column is read value by value. A live
-                table is followed. In a static table, one failed value fails the call.
+                or `"I:SPX"`. A table of them in a `Symbol` column is read value by value, each row
+                sent as written: a currency or crypto pair row gives no rows. A live table is
+                followed. In a static table, one failed value fails the call.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True lists only expired contracts; False, the default, those still trading.
@@ -864,7 +893,7 @@ class OptionsNamespace(Namespace):
                 - `symbols` is `dm.ALL` or empty;
                 - a ticker in `symbols` is empty or holds `,` or `*`;
                 - a table has no `Symbol` column;
-                - `underlying` is empty or holds `,` or `*`;
+                - `underlying` is empty, holds `,` or `*`, or is a currency or crypto pair;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
