@@ -15,7 +15,7 @@ import inspect
 import json
 import logging
 from datetime import UTC, date, datetime, time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -33,7 +33,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
+from deephaven_massive._massive import Transport, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
@@ -358,7 +358,7 @@ def test_fixtures_are_shaped_like_the_generated_fields(
 ) -> None:
     required = required_keys(path)
     body = json.loads(load_fixture(OWNER, name))
-    rest = cast("RestPath", source(R, path))
+    rest = CATALOG.rest_path(path)
     if rest.result_key is None:  # the body is the row; its envelope keys are not fields
         rows = [{k: v for k, v in body.items() if k not in {"status", "request_id"}}]
     else:
@@ -373,7 +373,7 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
-    rest = cast("RestPath", source(R, "/v3/snapshot"))
+    rest = CATALOG.rest_path("/v3/snapshot")
     batch, _ = to_batch(rows, rest, required=("Ticker",))
     table = batch.to_pydict()
     assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
@@ -439,13 +439,13 @@ def test_every_bars_call_is_one_class_and_only_some_stream(
     with pytest.raises(ValueError, match="SESSION exists only for futures"):
         bars(CONTRACT, dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars(CONTRACT, cast("dm.Timespan", "minute"))
+        bars(CONTRACT, "minute")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", 1))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     # None would read as a path without `adjusted`: REST would send Massive's default,
     # adjusted, while the flat files, as traded, could serve the same call.
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", None))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
@@ -507,9 +507,9 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
             r"m\.options\.snapshots\(dm\.ALL\) lists every contract$"
         ),
     ):
-        chain(cast("str", dm.ALL))
+        chain(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
-        chain(cast("str", 1))
+        chain(1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
@@ -523,7 +523,7 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        chain("AAPL", contract_type=cast("dm.ContractType", "call"))
+        chain("AAPL", contract_type="call")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^contract_type is set through its own argument"):
         chain("AAPL", filters={"contract_type": "call"})
     with pytest.raises(ValueError, match=r"options\.chain has no filter 'ticker'"):
@@ -599,9 +599,9 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
         contracts("aapl")  # not canonical: the symbol check explains it
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
-        contracts(underlying=cast("str", dm.ALL))
+        contracts(underlying=dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
-        contracts(expired=cast("bool", 1))
+        contracts(expired=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="needs a timezone"):
         contracts(as_of=datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None))
     for key in (
@@ -639,9 +639,9 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     assert q._request.adjusted is True
     assert daily(CONTRACT, "2025-01-02", adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
+        daily(CONTRACT, "2025-01-02", adjusted=0)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", None))
+        daily(CONTRACT, "2025-01-02", adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
     # Massive has no grouped daily endpoint for options: the day's bars serve every contract.
     with pytest.raises(
         ValueError,
@@ -650,31 +650,32 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     ):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
-        daily(CONTRACT, cast("str", 20250102))
+        daily(CONTRACT, 20250102)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession) -> None:
     m = massive_session
-    call, desc = cast("dm.ContractType", "call"), cast("dm.Order", "desc")
+    call, desc = "call", "desc"
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        m.options.bars(CONTRACT, cast("dm.Timespan", "day"))
+        m.options.bars(CONTRACT, "day")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        m.options.chain("AAPL", contract_type=call)
+        m.options.chain("AAPL", contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        m.options.contracts(contract_type=call)
+        m.options.contracts(contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.chain("AAPL", order=desc)
+        m.options.chain("AAPL", order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.snapshots(CONTRACT, order=desc)
+        m.options.snapshots(CONTRACT, order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.contracts(order=desc)
+        m.options.contracts(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- Docstrings ------------------------------------------------------------------------------
 
 
-def _factory(name: str) -> Callable[..., object]:
-    return cast("Callable[..., object]", getattr(options.OptionsNamespace, name))
+def _factory(name: str) -> object:
+    method: object = getattr(options.OptionsNamespace, name)
+    return method
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -700,7 +701,7 @@ def test_typed_filters_are_left_alone_when_no_filters_are_given(
     assert request_of(massive_session.options.chain("AAPL", filters=empty))["filters"] == {}
     # A filters value that is no mapping gets the factory's TypeError, not a key complaint.
     with pytest.raises(TypeError, match="filters must be a mapping, not list"):
-        massive_session.options.chain("AAPL", filters=cast("Mapping[str, Any]", ["contract_type"]))
+        massive_session.options.chain("AAPL", filters=["contract_type"])  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- End to end: REST ------------------------------------------------------------------------
@@ -758,9 +759,9 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
     )
     assert prev(CONTRACT, adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        prev(CONTRACT, adjusted=cast("bool", 1))
+        prev(CONTRACT, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        prev(CONTRACT, adjusted=cast("bool", None))
+        prev(CONTRACT, adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         ValueError,
         match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
@@ -867,7 +868,8 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     end = int(datetime(2021, 9, 25, 4, tzinfo=UTC).timestamp()) * 1000 - 1
     path = f"/v2/aggs/ticker/{contract}/range/1/day/{start}/{end}"
     # The sample echoes `adjusted: true`; unadjusted bars come back saying so.
-    ranged = cast("dict[str, object]", body(load_fixture, "range.json"))
+    ranged = body(load_fixture, "range.json")
+    assert isinstance(ranged, dict)
     fake_rest.reply(wire(path), Reply({**ranged, "adjusted": False}))
     bars = rows(
         rest_session.options.bars(contract, dm.Timespan.DAY, adjusted=False).history(
@@ -1530,12 +1532,11 @@ def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.
         "FlatFileClient",
         functools.partial(_massive.FlatFileClient, clock=FakeClock()),
     )
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    m = dm.MassiveSession(dm.MassiveConfig(**cast("dict[str, Any]", fields)))
+    s3_signing = "flat-file-secret"
+    config = dm.MassiveConfig(
+        api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=s3_signing
+    )
+    m = dm.MassiveSession(config)
     yield m
     m.close()
 

@@ -2,16 +2,12 @@
 
 import inspect
 import typing
-from typing import TYPE_CHECKING, cast
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive.namespaces import StocksNamespace
 from deephaven_massive.namespaces._namespace import Namespace
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
@@ -47,10 +43,10 @@ def test_a_dataset_method_keeps_its_class_name(
     massive_session: dm.MassiveSession,
 ) -> None:
     m = massive_session
-    bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
+    bars = m.stocks.bars
     with pytest.raises(
         TypeError, match=r"^StocksNamespace\.bars\(\) takes 3 positional arguments but 5 were"
     ):
-        bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
+        bars("AAPL", dm.Timespan.MINUTE, 1, "x")  # type: ignore[call-arg, arg-type]  # the point
     assert m.options.chain.__qualname__ == "OptionsNamespace.chain"
     assert typing.get_overloads(inspect.unwrap(StocksNamespace.bars)) == []
