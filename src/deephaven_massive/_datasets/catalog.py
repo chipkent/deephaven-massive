@@ -37,7 +37,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.dates import DAY_ZONES
 from deephaven_massive._datasets.filters import param_base, param_family
@@ -54,13 +54,14 @@ from deephaven_massive._enums import (
     Timespan,
     subscription_of,
 )
-from deephaven_massive._massive import ParamKind, Transport, WireType, sources
+from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
+from deephaven_massive._massive import ParamKind, RestPath, Transport, WireType, sources
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._massive import RestPath, Source
+    from deephaven_massive._massive import Source
 
 __all__ = [
     "NO_NAMED_TICKER",
@@ -1205,9 +1206,17 @@ class Catalog:
             The path.
 
         An unknown path raises the `KeyError` of `source`.
+
+        Raises:
+            MassiveError: A library defect, if the generated REST source is not a `RestPath`.
         """
-        # The REST table of the generated files holds only `RestPath`s.
-        return cast("RestPath", self.source(Transport.REST, path))
+        found = self.source(Transport.REST, path)
+        if not isinstance(found, RestPath):
+            raise MassiveError(
+                library_bug(f"the generated REST source {path} is a {type(found).__name__}"),
+                cause=ErrorCause.LIBRARY_DEFECT,
+            )
+        return found
 
     def problems(self) -> tuple[str, ...]:
         """Run the catalog gates over every dataset; return every failure found.
@@ -1520,9 +1529,11 @@ class Catalog:
         declared = [("time axis", name) for name in spec.time_axis or ()] + [
             ("symbol parameter", name) for name in (spec.symbol_param,) if name is not None
         ]
-        if declared and primary is None:
+        expected: list[tuple[str, str, str]] = []
+        if primary is not None:
+            expected = [(what, primary, name) for what, name in declared]
+        elif declared:
             return [f"wire parameters: {spec.name}: a {declared[0][0]} needs a REST path"]
-        expected = [(what, cast("str", primary), name) for what, name in declared]
         for path in spec.rest_paths:
             for role, key in spec.keys_for(Transport.REST, path).declared():
                 if key.from_request:

@@ -15,7 +15,9 @@ interfaces that receive them live in `_tables/transports.py`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
+
+from deephaven_massive._errors import required
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -136,7 +138,7 @@ class Request:
             The request with no value table and `value` sent as its parameter, exactly the
             request the dataset method builds for that one value.
         """
-        parameter = cast("ValueTable", self.value_table).parameter
+        parameter = required(self.value_table, "the request's value table").parameter
         params = {**dict(self.params), parameter: value}
         return replace(self, value_table=None, params=tuple(sorted(params.items())))
 

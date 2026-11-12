@@ -24,6 +24,7 @@ from deephaven_massive._errors import (
     from_wire,
     library_bug,
     raises_through,
+    required,
     user_defect,
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
@@ -151,6 +152,14 @@ def test_a_user_defect_message_names_the_fix_and_asks_for_no_report() -> None:
     text = user_defect("the symbol table failed upstream: boom", "fix that table")
     assert text == "the symbol table failed upstream: boom; fix that table"
     assert LIBRARY_BUG not in text
+
+
+def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> None:
+    assert required(0, "a count") == 0  # a falsy value is present
+    with pytest.raises(MassiveError) as raised:
+        required(None, "stocks.trades's history path")
+    assert str(raised.value) == f"stocks.trades's history path is missing. {LIBRARY_BUG}"
+    assert raised.value.cause is ErrorCause.LIBRARY_DEFECT
 
 
 def test_failure_text_adds_the_report_only_to_a_library_defect() -> None:
