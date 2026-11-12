@@ -99,12 +99,14 @@ class RefusedVenues:
     def report(self, dataset: str) -> None:
         """Log the venues the call skips: one WARNING under `LOG`, one DEBUG line under `IGNORE`.
 
-        Called once per call, after the read, when S3 refused some venues but not all.
+        Called once per call, after the read; logs nothing when S3 refused no venue.
 
         Args:
             dataset: The dataset's name, such as `"futures.trades"`.
         """
         refused = self._refused()
+        if not refused:
+            return
         level = logging.WARNING if self.policy is OnError.LOG else logging.DEBUG
         logger.log(
             level,

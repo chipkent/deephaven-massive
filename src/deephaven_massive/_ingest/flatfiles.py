@@ -1023,9 +1023,9 @@ class FlatFileHistory:
                 it is set, the call raises `MassiveError` naming the cancellation after the
                 pool has drained. None for none.
             refusals: The call's record of refused futures venues, when a refused venue is
-                skipped (`refused_venues.RefusedVenues`): every file of a venue S3 refuses is
-                dropped, whatever its date, before the missing files are judged. None when a
-                refusal fails the call.
+                skipped (`refused_venues.RefusedVenues`): every file of a venue S3 refuses,
+                in the range or in a look past its end, is dropped, whatever its date, before
+                the missing files are judged. None when a refusal fails the call.
 
         Returns:
             The read: each kept file's tables with its day, the empty table in the schema, the
@@ -1056,13 +1056,13 @@ class FlatFileHistory:
             raise MassiveError(f"{spec.name} history: the read was cancelled")
         parts = [_outcome(future) for future in futures]
         if refusals is not None:
-            keys, parts = _without_refused(spec, keys, parts, refusals=refusals)
+            keys, parts = _without_refused(keys, parts, refusals=refusals)
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)
-        trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
         later: list[tuple[date, Table]] = []
         unread: tuple[date, ...]
         absent: tuple[date, ...] = ()
+        unpublished = None
         if infer_holidays:
             unpublished, absent, later = self._after_missing(
                 spec,
@@ -1072,7 +1072,15 @@ class FlatFileHistory:
                 prefix=prefix,
                 roll=roll,
                 stop=stop,
+                refusals=refusals,
             )
+        if refusals is not None:
+            # A look past the range's end may have met a refusal of a venue not refused before.
+            keys, parts = _without_refused(keys, parts, refusals=refusals)
+            missing = [key for key in missing if key.venue not in refusals]
+            refusals.report(spec.name)
+        trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
+        if infer_holidays:
             unread = () if unpublished is None else (unpublished,)
             holidays = [
                 day
@@ -1138,6 +1146,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool,
         stop: Cancel | None,
+        refusals: RefusedVenues | None = None,
     ) -> tuple[date | None, tuple[date, ...], list[tuple[date, Table]]]:
         """Tell the files missing at a range's end apart: no trading, not out yet, or none.
 
@@ -1174,6 +1183,9 @@ class FlatFileHistory:
             roll: True to read the later file found (futures named by instants).
             stop: A background read's stop token, or None when only the session's close
                 should stop the reads.
+            refusals: The call's record of refused futures venues, or None when a refusal
+                fails the call. With it, a look that S3 refuses records the venue, which then
+                contributes nothing here, for the read to drop.
 
         Returns:
             The first unpublished day over all venues, or None; the missing trading days that
@@ -1210,7 +1222,10 @@ class FlatFileHistory:
                 prefix=prefix,
                 roll=roll,
                 cancel=cancel,
+                refusals=refusals,
             )
+            if refusals is not None and venue in refusals:
+                continue
             if later is not None:
                 tables.extend(later)
                 continue
@@ -1232,6 +1247,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool,
         cancel: Cancel,
+        refusals: RefusedVenues | None = None,
     ) -> list[tuple[date, Table]] | None:
         """Look for the first file after a range's missing last files; see `_after_missing`.
 
@@ -1246,10 +1262,13 @@ class FlatFileHistory:
             roll: True to read the file found; False to only open and close it.
             cancel: The event that stops a look: the background read's stop token, or a
                 private one when only the session's close should stop it.
+            refusals: The call's record of refused futures venues, or None when a refusal
+                fails the call. With it, a refused look records the venue and ends the looks.
 
         Returns:
             The file's tables, each with the file's day, when it is read (none when it is only
-            opened), or None when no later file exists in the looked-for days.
+            opened), or None when no later file exists in the looked-for days or S3 refused
+            one that `refusals` recorded.
 
         Raises:
             MassiveError: `"<dataset> history: the read was cancelled"` once `cancel` is set;
@@ -1263,13 +1282,15 @@ class FlatFileHistory:
             key = _Key(object_key(prefix, day, name), day, first.venue)
             try:
                 found = (
-                    self._read_key(transform, key, cancel=cancel)
+                    self._read_key(transform, key, cancel=cancel, refusals=refusals)
                     if roll
-                    else self._opened(key, cancel=cancel)
+                    else self._opened(key, cancel=cancel, refusals=refusals)
                 )
             except _CancelledError:
                 logger.debug("%s history: stopped before reading %s", spec.name, key.key)
                 raise MassiveError(f"{spec.name} history: the read was cancelled") from None
+            if refusals is not None and first.venue in refusals:
+                return None
             if found is not None:
                 logger.info(
                     "%s: %s is missing and %s exists, so it was a day without trading%s",
@@ -1281,15 +1302,19 @@ class FlatFileHistory:
                 return [(day, table) for table in found]
         return None
 
-    def _opened(self, key: _Key, *, cancel: Cancel) -> list[Table] | None:
+    def _opened(
+        self, key: _Key, *, cancel: Cancel, refusals: RefusedVenues | None = None
+    ) -> list[Table] | None:
         """Tell whether a file exists by opening it and closing it unread.
 
         Args:
             key: The file.
             cancel: The call's cancel event, checked before the request.
+            refusals: The call's record of refused futures venues (`_read_key`), or None.
 
         Returns:
-            No tables when the file exists; None when it does not.
+            No tables when the file exists; None when it does not, or when S3 refused a
+            futures file and `refusals` recorded its venue.
 
         Raises:
             MassiveError: The public error of `_public` when the request fails, including
@@ -1300,6 +1325,8 @@ class FlatFileHistory:
         try:
             file = self._client.open(key.key, cancel=cancel)
         except WireError as error:
+            if _recorded(error, key, refusals):
+                return None
             public = _public(error, key)
             raise public from error
         if file is None:
@@ -1452,13 +1479,7 @@ class FlatFileHistory:
                 # the frames it passed through; clearing those frames frees them now rather
                 # than after the next read.
                 return _released(error)
-            venue = key.venue
-            if (
-                isinstance(error, WireEntitlementError)
-                and refusals is not None
-                and venue is not None
-            ):
-                refusals.add(venue, error)
+            if _recorded(error, key, refusals):
                 return None
             public = _public(error, key)
             raise public from error
@@ -1705,20 +1726,37 @@ def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     )
 
 
+def _recorded(error: WireError, key: _Key, refusals: RefusedVenues | None) -> bool:
+    """Record S3's refusal of a futures file when the call skips refused venues.
+
+    Args:
+        error: The request's error.
+        key: The file.
+        refusals: The call's record of refused venues, or None when a refusal fails the call.
+
+    Returns:
+        True when the error is a refusal (`WireEntitlementError`, never a rejected
+        credential) of a futures file and `refusals` recorded its venue; False to raise it.
+    """
+    venue = key.venue
+    if isinstance(error, WireEntitlementError) and refusals is not None and venue is not None:
+        refusals.add(venue, error)
+        return True
+    return False
+
+
 def _without_refused(
-    spec: DatasetSpec,
     keys: Sequence[_Key],
     parts: Sequence[list[Table] | None],
     *,
     refusals: RefusedVenues,
 ) -> tuple[list[_Key], list[list[Table] | None]]:
-    """Drop every file of the venues S3 refused in a call, and report them once.
+    """Drop every file of the venues S3 refused in a call.
 
     A venue refused on any date is dropped on every date, so the table never holds a venue for
     some days of the range and not others.
 
     Args:
-        spec: The dataset.
         keys: The call's files, in result order.
         parts: Each file's read, in the same order.
         refusals: The call's record of refused venues.
@@ -1731,10 +1769,8 @@ def _without_refused(
             (`RefusedVenues.every_venue_refused`).
     """
     refused = refusals.venues()
-    if refused:
-        if {key.venue for key in keys} <= set(refused):
-            raise refusals.every_venue_refused()
-        refusals.report(spec.name)
+    if refused and {key.venue for key in keys} <= set(refused):
+        raise refusals.every_venue_refused()
     kept = [(key, part) for key, part in zip(keys, parts, strict=True) if key.venue not in refused]
     return [key for key, _ in kept], [part for _, part in kept]
 

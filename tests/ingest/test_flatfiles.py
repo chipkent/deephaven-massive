@@ -2293,6 +2293,50 @@ def test_a_read_under_log_that_s3_refuses_nothing_keeps_every_venue_quietly(
     assert "refused" not in t.attributes().get("TableDescription", "")
 
 
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        pytest.param("2025-03-04", "2025-03-05", id="dates, which open the later file"),
+        pytest.param(
+            datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
+            datetime(2025, 3, 5, 12, tzinfo=CHICAGO),
+            id="instants, which read it",
+        ),
+    ],
+)
+def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
+    start: str | datetime,
+    end: str | datetime,
+    *,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # NYMEX's 03-05 file is missing, and the look for a later file meets a refusal: NYMEX is
+    # dropped on every day rather than its missing day taken for a holiday or failing the call.
+    m = dm.MassiveSession(config(max_concurrency=1))
+    try:
+        for day, stamp in ((4, 1741042800000000000), (5, 1741129200000000000)):
+            for index, venue in enumerate(VENUES):
+                if (venue, day) != ("nymex", 5):
+                    row = f",1.0,1,1,1,{10 * day + index},2025-03-0{day},ESH5,{stamp}\n"
+                    key = FUTURES_KEY.format(venue, date(2025, 3, day))
+                    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
+        later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
+        fake_s3.refuse(later, status=403, code="AccessDenied", message="Access Denied")
+        q = m.futures.trades(dm.ALL, refused_venues=OnError.LOG)
+        with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+            t = q.history(start, end, wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
+        assert t.attributes()["TableDescription"].endswith(
+            "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
+        )
+        assert [r.getMessage() for r in caplog.records if "holiday" in r.getMessage()] == []
+        assert f"S3 refused them: NYMEX: HTTP 403 for s3://flatfiles/{later}" in caplog.text
+    finally:
+        m.close()
+
+
 def test_a_refused_venue_is_not_requested_again_in_the_call(
     *, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
 ) -> None:
