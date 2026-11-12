@@ -204,10 +204,14 @@ def test_snapshot_rows_lead_with_their_symbol(spec: DatasetSpec) -> None:
 def test_conversion_keeps_the_vendor_symbol() -> None:
     columns = _schema(forex.CONVERSION)
     assert next(iter(columns)) == "Symbol"
-    assert {"Converted", "InitialAmount", "LastAskPrice", "LastBidPrice", "LastTimestamp"} <= set(
-        columns
-    )
-    assert columns["LastTimestamp"] is ColumnType.INSTANT
+    assert {
+        "Converted",
+        "InitialAmount",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
+    } <= set(columns)
+    assert columns["LastQuoteParticipantTimestamp"] is ColumnType.INSTANT
 
 
 # --- factories ------------------------------------------------------------------------------
@@ -294,12 +298,13 @@ def test_bars_default_to_one_minute_and_take_no_adjusted(
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.forex.bars
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars("C:EURUSD", dm.Timespan.SESSION)
+    # Massive judges these values itself, so the query is built and they are sent.
+    assert bars("C:EURUSD", dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
+    assert bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)._request.multiplier == 0
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars("C:EURUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
-    with pytest.raises(ValueError, match="multiplier"):
-        bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bars("C:EURUSD", dm.Timespan.HOUR, multiplier=True)
 
 
 def test_fmv(massive_session: dm.MassiveSession) -> None:
@@ -336,34 +341,24 @@ def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSes
     amount = 10**17 + 1
     query = massive_session.forex.conversion("EUR", "USD", amount=amount)
     assert dict(query._request.params)["amount"] == amount
+    # An int too large for a float is still a number a request can carry.
+    huge = massive_session.forex.conversion("EUR", "USD", amount=10**400)
+    assert dict(huge._request.params)["amount"] == 10**400
 
 
 @pytest.mark.parametrize(
     ("kwargs", "failure"),
     [
-        ({"from_currency": "EURO"}, (ValueError, "from_currency='EURO' is not a three-letter")),
-        ({"from_currency": "EU1"}, (ValueError, "from_currency='EU1' is not a three-letter")),
-        ({"to_currency": "U$D"}, (ValueError, r"to_currency='U\$D' is not a three-letter")),
-        # A code is taken exactly as written: the message names the code to write instead.
-        (
-            {"from_currency": " aud"},
-            (
-                ValueError,
-                "from_currency=' aud' is not a three-letter upper-case currency code; write 'AUD'",
-            ),
-        ),
-        ({"to_currency": "Usd"}, (ValueError, "to_currency='Usd' is not .*; write 'USD'")),
-        ({"to_currency": "USD "}, (ValueError, "to_currency='USD ' is not .*; write 'USD'")),
-        ({"from_currency": "EURO"}, (ValueError, "upper-case currency code, such as 'USD'")),
         ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
-        ({"amount": 0}, (ValueError, "amount must be positive and finite, got 0")),
-        ({"amount": -1.5}, (ValueError, "amount must be positive and finite, got -1.5")),
-        ({"amount": float("inf")}, (ValueError, "amount must be positive and finite, got inf")),
-        ({"amount": float("nan")}, (ValueError, "amount must be positive and finite, got nan")),
+        ({"to_currency": None}, (TypeError, "to_currency must be a str, not NoneType")),
+        # The code is a path segment, which can't be empty.
+        ({"from_currency": ""}, (ValueError, r"^from_currency is empty, and an empty code")),
+        ({"to_currency": ""}, (ValueError, r"^to_currency is empty")),
+        # A request cannot carry NaN or an infinity as a number.
+        ({"amount": float("inf")}, (ValueError, "amount must be finite, got inf")),
+        ({"amount": float("nan")}, (ValueError, "amount must be finite, got nan")),
         ({"amount": "1"}, (TypeError, "amount must be an int or float, not str")),
         ({"amount": True}, (TypeError, "amount must be an int or float, not bool")),
-        ({"precision": 5}, (ValueError, r"precision must be one of \[0, 1, 2, 3, 4\], got 5")),
-        ({"precision": -1}, (ValueError, "precision must be one of")),
         ({"precision": 2.0}, (TypeError, "precision must be an int, not float")),
         ({"precision": True}, (TypeError, "precision must be an int, not bool")),
     ],
@@ -786,14 +781,52 @@ def test_conversion_sends_the_pair_amount_and_precision(
         "Symbol",
         "Converted",
         "InitialAmount",
-        "LastAskPrice",
-        "LastBidPrice",
-        "LastTimestamp",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
     )
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
         ("C:AUDUSD", 73.14, 100.0, 1.3673344, 1.3672596, 1_605_555_313_000 * MS)
     ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "sent"),
+    [
+        # Massive honors a precision of 5, converts 0 and negative amounts, and answers HTTP 404
+        # to a code it does not know, such as `aud`: each is sent as given.
+        ({"precision": 5}, ("/v1/conversion/AUD/USD", {"amount": ["1"], "precision": ["5"]})),
+        ({"precision": -1}, ("/v1/conversion/AUD/USD", {"amount": ["1"], "precision": ["-1"]})),
+        ({"amount": 0}, ("/v1/conversion/AUD/USD", {"amount": ["0"], "precision": ["2"]})),
+        ({"amount": -100}, ("/v1/conversion/AUD/USD", {"amount": ["-100"], "precision": ["2"]})),
+        (
+            {"from_currency": "aud", "to_currency": "usd"},
+            ("/v1/conversion/aud/usd", {"amount": ["1"], "precision": ["2"]}),
+        ),
+    ],
+)
+def test_conversion_sends_the_values_massive_judges(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    kwargs: dict[str, object],
+    sent: tuple[str, dict[str, list[str]]],
+) -> None:
+    fake_rest.reply_default(Reply(fixture_body(load_fixture, "conversion.json")))
+    arguments: dict[str, object] = {"from_currency": "AUD", "to_currency": "USD", **kwargs}
+    rest_session.forex.conversion(**arguments).fetch(wait=True)  # type: ignore[arg-type]
+    assert fake_rest.get_queries() == [sent]
+
+
+def test_a_currency_massive_does_not_know_fails_with_its_answer(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "NOT_FOUND", "request_id": "r", "message": "Couldn't find requested pair"}
+    fake_rest.reply_default(Reply(refusal, status=404))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 404 .*Couldn't find requested pair"):
+        rest_session.forex.conversion("aud", "usd").fetch(wait=True)
 
 
 # --- WebSocket, end to end --------------------------------------------------------------------
@@ -1151,7 +1184,7 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     assert revised == {
         "forex.snapshots": ("Updated",),
         "forex.movers": ("Updated",),
-        "forex.conversion": ("LastTimestamp",),
+        "forex.conversion": ("LastQuoteParticipantTimestamp",),
         "forex.last_quote": ("Timestamp",),
         "forex.previous_day_bar": ("TimestampStart",),
     }

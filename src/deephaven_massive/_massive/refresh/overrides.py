@@ -1923,6 +1923,24 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
             )
             for key in ("bid", "ask")
         },
+        (_CONVERSION, "last"): Spelling(
+            long_name="last_quote",
+            source="/v2/snapshot/locale/global/markets/forex/tickers `lastQuote`",
+            reason="Live reads of 2026-11-12 found the conversion's `last` to be the pair's last "
+            "quote: in both directions of AUD/USD, 7 of 8 tries read one bid, ask, exchange, and "
+            "time in the conversion's `last`, `/v1/last_quote/currencies/{from}/{to}`, and the v2 "
+            'forex snapshot\'s `lastQuote` ("The most recent quote for this ticker."), so the '
+            "object takes the snapshot's name.",
+        ),
+        (_CONVERSION, "last.timestamp"): Spelling(
+            long_name="participant_timestamp",
+            source="/v2/snapshot/locale/global/markets/forex/tickers `lastQuote.t`",
+            reason='The conversion\'s `last.timestamp` ("The Unix millisecond timestamp.") is '
+            "the v2 forex snapshot's `lastQuote.t` (\"The millisecond accuracy timestamp of the "
+            'quote."), read as `participant_timestamp`: both are milliseconds, and the live reads '
+            "of 2026-11-12 found them equal whenever the two carried one quote (1794443156000 "
+            "for AUD/USD).",
+        ),
     }
 )
 """`(source, key)` to the long name of that object or field, taken from another endpoint."""
@@ -1942,6 +1960,14 @@ SHARED_DESCRIPTIONS: Mapping[str, SharedDescription] = MappingProxyType(
             "LULD band's time, an options trade's or quote's SIP time, a forex or crypto "
             "event's participant time, and an index value's time. Each takes the name its "
             "own REST or flat-file data gives it (the lexicons).",
+        ),
+        "The Unix millisecond timestamp.": SharedDescription(
+            long_names=frozenset({"participant_timestamp", "timestamp"}),
+            reason="Massive gives this text to the time of a forex or crypto last quote or last "
+            "trade. On `/v1/last_quote` and `/v1/last/crypto` it is the row's own time, the "
+            "library's `Timestamp` column. In the conversion it is the time of the quote the "
+            "conversion used, a field of that quote, which takes the forex snapshot's name for "
+            "its quote's time, as the quote's other fields take the snapshot's names.",
         ),
         (
             "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/"

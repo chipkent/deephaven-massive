@@ -134,74 +134,29 @@ settles it.
   sent, with Massive's description. Settled by `tests/namespaces/test_options_integration.py`
   (Options Starter), which records each contract's ratio to Black-Scholes gamma from its own
   inputs.
-- **87.** What Massive answers to a forex conversion `precision` outside 0 to 4, the values its
-  specification lists. Refused by `m.forex.conversion` until read. Settled by
-  `tests/namespaces/test_forex_integration.py` (Currencies Starter), which sends `precision=5`
-  and records Massive's status, message, and rows, with a verdict of ERROR, EMPTY, or DATA, as
-  every item to 106 does (`tests/_live/bad_values.py`).
-- **88.** What Massive answers to a forex conversion `amount` of 0 or below. Refused by
-  `m.forex.conversion` until read. Settled by `tests/namespaces/test_forex_integration.py`
-  (Currencies Starter), which sends 0 and -100.
-- **89.** What Massive answers to a forex conversion currency that is not three upper-case
-  letters. Refused by `m.forex.conversion` until read. Settled by
-  `tests/namespaces/test_forex_integration.py` (Currencies Starter), which sends `aud` to `usd`.
-- **90.** What Massive answers to an indicator `timespan` its path does not list (`second`).
-  Refused by the indicators until read. Settled by
-  `tests/namespaces/test_indicators_integration.py` (Stocks Basic).
-- **91.** What Massive answers to an indicator `window` below 1. Refused by the indicators until
-  read. Settled by `tests/namespaces/test_indicators_integration.py` (Stocks Basic), which
-  sends `window=0`.
-- **92.** What the reference endpoints answer to an `asset_class` their specification does not
-  list. Refused by `m.reference.conditions`, `exchanges`, and `ticker_types` until read. Settled
-  by `tests/namespaces/test_reference_integration.py` (Stocks Basic), which sends futures to the
-  conditions and the ticker types and indices to the exchanges.
-- **93.** What Massive answers to a `sort` value outside a path's listed sort fields. Refused by
-  `Catalog.check_sort` until read. Settled by
-  `tests/namespaces/test_query_building_integration.py` (Stocks Basic), which sends the
-  conditions `sort=exchange`.
-- **94.** What Massive answers to a text `sort` part that names no field of the rows. Refused by
-  `Catalog.check_sort` until read. Settled by
-  `tests/namespaces/test_query_building_integration.py` (Stocks Basic), which sends the
-  dividends `sort=no_such_field.asc`.
-- **95.** What Massive answers to a `sort` part with surrounding whitespace. Refused by
-  `Catalog.check_sort` until read. Settled by
-  `tests/namespaces/test_query_building_integration.py` (Stocks Basic), which sends the
-  dividends `sort=ticker, ex_dividend_date.desc`.
-- **96.** What Massive answers to a `limit` below 1. Refused by every dataset method until read.
-  Settled by `tests/namespaces/test_query_building_integration.py` (Stocks Basic), which sends
-  the dividends `limit=0`.
-- **97.** What Massive answers to a filter value outside an enum parameter's listed values.
-  Refused by `filters` through `spec.values.encode_value` until read. Settled by
-  `tests/datasets/test_filters_integration.py` (Stocks Basic), which sends the tickers list
-  `market=equities`.
-- **98.** What Massive answers to a filter list item with surrounding whitespace. Refused by
-  `filters` until read. Settled by `tests/datasets/test_filters_integration.py` (Stocks Basic),
-  which sends the dividends `ticker.any_of` of `AAPL` and ` MSFT`.
-- **99.** What Massive answers to balance sheets for `timeframe=trailing_twelve_months`, which
-  the other statements take. Refused by `m.stocks.financials.balance_sheets` until read.
-  Settled by `tests/namespaces/test_stock_financials_integration.py` (Stocks Advanced).
-- **100.** What the futures aggregates answer to a day `resolution` (`1day`). `Timespan.DAY` is
-  refused for futures bars until read. Settled by `tests/queries/test_choice_integration.py`
-  (Futures Basic), on the front E-mini contract.
-- **101.** What the aggregates range answers to `timespan=session` outside futures.
-  `Timespan.SESSION` is refused outside futures until read. Settled by
-  `tests/queries/test_choice_integration.py` (Stocks Basic), on AAPL.
-- **102.** What the aggregates range answers to a multiplier below 1. Refused by `bars()` until
-  read. Settled by `tests/queries/test_choice_integration.py` (Stocks Basic), which sends AAPL's
-  bars with multiplier 0.
-- **103.** What the option chain and the contracts list answer to a currency or crypto pair as
-  the underlying. An `underlying` that is no stock or index ticker is refused until read.
-  Settled by `tests/namespaces/test_options_integration.py` (Options Starter for the chain,
-  Options Basic for the contracts), which sends `C:EURUSD` and `X:BTCUSD`.
 - **104.** What the contract overview answers to a stock ticker (`AAPL`). `m.options.contracts`
   refuses an underlying passed as `symbols` until read. Settled by
   `tests/namespaces/test_options_integration.py` (Options Basic).
-- **105.** What Massive answers to a range whose start is after its end. Refused by
-  `dates.check_order` until read. Settled by `tests/datasets/test_dates_integration.py` (Stocks
-  Basic), on AAPL's day bars and on the dividends' `ex_dividend_date.gte` and `.lte`.
-- **106.** What Massive answers to a range that starts after now. Refused when `end` is left out
-  until read. Settled by `tests/datasets/test_dates_integration.py` (Stocks Basic), which sends
-  AAPL's day bars from 10 to 20 days ahead.
+- **107.** Whether Massive's futures `day` bars are its `session` bars at every multiplier.
+  `resolution=1day` answered with the same shape as `1session` (item 100), so `Timespan.DAY` is
+  sent as `day` and its bars are dated and kept as session bars. Settled by
+  `tests/namespaces/test_futures_integration.py` (Futures Basic), which compares `1day` with
+  `1session` and `5day` with `5session` on the front E-mini contract, and records the library's
+  `DAY` bars beside them. `tests/queries/test_choice_integration.py` records what the futures
+  aggregates answer to a multiplier below 1 (`0session`), which the library sends for Massive to
+  judge.
+- **108.** What the option chain answers to an option contract as its underlying. Sent to
+  Massive for it to judge; if it answers with no error, the chain should refuse a contract.
+  Settled by `tests/namespaces/test_options_integration.py` (Options Starter), which sends
+  `O:AAPL250117C00150000`.
+- **109.** What the options contracts list answers to an option contract as its
+  `underlying_ticker`. Sent to Massive for it to judge; if it answers with no error,
+  `m.options.contracts` should refuse a contract as `underlying`. Settled by
+  `tests/namespaces/test_options_integration.py` (Options Basic), which sends
+  `O:AAPL250117C00150000`.
+- **118.** What Massive answers to a filter list with an empty item (`ticker.any_of=AAPL,,MSFT`).
+  Sent as written; if Massive reads the empty item as no filter, the library should refuse it.
+  Settled by `tests/datasets/test_filters_integration.py` (Stocks Basic).
 
 ## Settled
 
@@ -293,5 +248,57 @@ settles it.
   `Updated` keeps its name.
 - **86.** The forex conversion's `last` is the last quote of its `from`/`to` pair. Settled
   2026-11-12: in both directions of AUD/USD, 7 of 8 tries read one quote on the conversion,
-  `/v1/last_quote`, and the snapshot's `lastQuote`. Whether the conversion's `Last*` columns
-  take the snapshot's `LastQuote*` names is the owner's call.
+  `/v1/last_quote`, and the snapshot's `lastQuote`; the conversion's columns now take the
+  snapshot's `LastQuote*` names.
+- **87.** A forex conversion `precision` outside 0 to 4. Settled 2026-11-12: `precision=5` was
+  honored (`converted` the amount times `last.bid`, rounded to 5 decimals); now sent; recorded by
+  `tests/namespaces/test_forex_integration.py`.
+- **88.** A forex conversion `amount` of 0 or below. Settled 2026-11-12: 0 converted to 0, and -100
+  to -68.43; now sent; recorded by `tests/namespaces/test_forex_integration.py`.
+- **89.** A forex conversion currency that is not three upper-case letters. Settled 2026-11-12:
+  `aud` to `usd` answered HTTP 404 "Couldn't find requested currency pair"; now sent; recorded by
+  `tests/namespaces/test_forex_integration.py`.
+- **90.** An indicator `timespan` its path does not list. Settled 2026-11-12: `second` answered
+  HTTP 200 with no values; still refused; recorded by
+  `tests/namespaces/test_indicators_integration.py`.
+- **91.** An indicator `window` below 1. Settled 2026-11-12: `window=0` answered HTTP 200 with an
+  empty body; still refused; recorded by `tests/namespaces/test_indicators_integration.py`.
+- **92.** An `asset_class` a reference endpoint does not list. Settled 2026-11-12: the conditions,
+  the exchanges, and the ticker types each answered HTTP 200 with no rows; still refused; recorded
+  by `tests/namespaces/test_reference_integration.py`.
+- **93.** A `sort` value outside a path's listed sort fields. Settled 2026-11-12: the conditions
+  answered `sort=exchange` with HTTP 400; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
+- **94.** A text `sort` part that names no field of the rows. Settled 2026-11-12: the dividends
+  answered `no_such_field.asc` with HTTP 400; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
+- **95.** A `sort` part with surrounding whitespace. Settled 2026-11-12: the dividends served
+  `ticker, ex_dividend_date.desc` as written; now sent; recorded by
+  `tests/namespaces/test_query_building_integration.py`.
+- **96.** A `limit` below 1. Settled 2026-11-12: the dividends answered `limit=0` with HTTP 200 and
+  no rows; still refused; recorded by `tests/namespaces/test_query_building_integration.py`.
+- **97.** A filter value outside an enum parameter's values. Settled 2026-11-12: the tickers list
+  answered `market=equities` with HTTP 200 and no rows; still refused; recorded by
+  `tests/datasets/test_filters_integration.py`.
+- **98.** A filter list item with surrounding whitespace. Settled 2026-11-12: ` MSFT` in
+  `ticker.any_of` returned MSFT's dividends; now sent; recorded by
+  `tests/datasets/test_filters_integration.py`.
+- **99.** Balance sheets for `trailing_twelve_months`. Settled 2026-11-12: HTTP 200 with no rows;
+  still refused; recorded by `tests/namespaces/test_stock_financials_integration.py`.
+- **100.** The futures aggregates' `resolution=1day`. Settled 2026-11-12: five bars, each starting
+  at 00:00 UTC and labelled with the next day's session; `Timespan.DAY` now sent (item 107);
+  recorded by `tests/queries/test_choice_integration.py`.
+- **101.** `timespan=session` on the aggregates range outside futures. Settled 2026-11-12: HTTP 400
+  "Invalid time span"; now sent; recorded by `tests/queries/test_choice_integration.py`.
+- **102.** A bar multiplier below 1. Settled 2026-11-12: HTTP 400 "The parameter 'multiplier' must
+  be a positive number"; now sent; recorded by `tests/queries/test_choice_integration.py`.
+- **103.** A currency or crypto pair as an options underlying. Settled 2026-11-12: the chain
+  answered HTTP 400 "Invalid ticker." and is now sent; the contracts list answered HTTP 200 with no
+  rows and is still refused; recorded by `tests/namespaces/test_options_integration.py`.
+- **105.** A range whose start is after its end. Settled 2026-11-12: the aggregates range answered
+  HTTP 400, the dividends' `ex_dividend_date` HTTP 200 with no rows; still refused, since
+  `history()` turns a range into the bars or days inside it and a reversed one has none to send;
+  recorded by `tests/datasets/test_dates_integration.py`.
+- **106.** A range that starts after now. Settled 2026-11-12: AAPL's day bars 10 to 20 days ahead
+  answered HTTP 200 with no rows; still refused; recorded by
+  `tests/datasets/test_dates_integration.py`.

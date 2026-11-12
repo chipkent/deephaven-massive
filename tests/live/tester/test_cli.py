@@ -17,7 +17,7 @@ import pytest
 
 from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import FAIL, OK, Item
-from tests._live.live_run.run_probe import ProbeResult
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.tester import cli
 
 if TYPE_CHECKING:

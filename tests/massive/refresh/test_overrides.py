@@ -349,7 +349,9 @@ def test_the_futures_snapshot_takes_the_quote_and_trade_names() -> None:
     assert futures.field("LastTradeTimestamp").wire_key == "last_trade.last_updated"
 
 
-def test_the_conversion_s_last_quote_prices_take_the_quote_names() -> None:
+def test_the_conversion_s_last_quote_takes_the_snapshot_s_quote_names() -> None:
     conversion = spec.source(Transport.REST, "/v1/conversion/{from}/{to}")
-    assert conversion.field("LastBidPrice").wire_key == "last.bid"
-    assert conversion.field("LastAskPrice").wire_key == "last.ask"
+    assert conversion.field("LastQuoteBidPrice").wire_key == "last.bid"
+    assert conversion.field("LastQuoteAskPrice").wire_key == "last.ask"
+    assert conversion.field("LastQuoteExchange").wire_key == "last.exchange"
+    assert conversion.field("LastQuoteParticipantTimestamp").wire_key == "last.timestamp"

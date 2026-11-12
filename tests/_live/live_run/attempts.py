@@ -36,7 +36,7 @@ from tests._live.live_run.outcomes import (
     check_outcome,
     read_outcomes,
 )
-from tests._live.live_run.run_probe import plans_variable
+from tests._live.live_run.probe_result import plans_variable
 from tests._live.live_run.schedule import PYTEST_GROUPS, PYTEST_PATHS, due_names, half_day_suffix
 from tests._live.live_run.state import Attempt, RunState, check_of, is_due, record
 
