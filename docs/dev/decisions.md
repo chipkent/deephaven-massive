@@ -572,4 +572,6 @@ A call on a closed session, and a live table whose session closes, raise or fail
 public `dm.SessionClosedError` (source `USER`). A wrong argument type stays a `TypeError`, and a
 wrong value a `ValueError`; any other exception escaping a query method is a bug, logged at
 ERROR with its traceback and raised as a `MassiveError` (`LIBRARY`) chained to it, so every
-failure inside a query method is a `MassiveError`.
+failure inside a query method is a `MassiveError`. Every `LIBRARY` error's message ends with
+how to report it, and every `USER` error's message names its fix: a closed session says to open
+a new `dm.MassiveSession()`, and a stopped read says why it stopped and to call the method again.

@@ -164,9 +164,7 @@ class ErrorSource(StrEnum):
 
     NETWORK = "network"
     """No answer came: a connection failed through every retry the library made, or a live
-    table got nothing for longer than `MassiveConfig.max_outage` (its stream's connection stayed
-    down, or its `poll()` cycle received no page). A `poll()` whose cycles kept failing keeps its
-    latest cycle's source instead."""
+    table got nothing for longer than `MassiveConfig.max_outage`."""
 
     USER = "user"
     """Your code or settings stopped the call, such as a missing API key, delayed data your
@@ -192,7 +190,7 @@ class MassiveError(Exception):
     A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True`, a
     failure after the call returns fails their table instead, as it fails a live table: the
     table shows the error, the log records it, and `m.streams()` lists it. A closed session or
-    a bug still raises at the call.
+    a wrong argument still raises at the call.
 
     Example:
         Catch any `MassiveError`, and branch on the HTTP status::
@@ -280,11 +278,11 @@ class MassiveError(Exception):
         """Whether the same call may succeed if you make it again later.
 
         True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
-        504), a `NETWORK` error, a flat file Massive hasn't published yet, and a few rarer
-        failures whose message says to retry. A `fetch()` or `history()` of a watchlist whose
-        every symbol failed is retryable only when every symbol's error is. False for any other
-        HTTP status, an `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or
-        a bug.
+        504), a `NETWORK` error, a flat file Massive hasn't published yet, and pages of one read
+        on which Massive answered with a different `adjusted` than was asked. A `fetch()` or
+        `history()` of a watchlist whose every symbol failed is retryable only when every
+        symbol's error is. False for any other HTTP status, an `AuthenticationError`, an
+        `EntitlementError`, a `SessionClosedError`, or a bug.
 
         Before it raises, the library has retried a server failure or a lost connection a few
         times. It raises a rate limit as soon as the read would spend more than 10 minutes in
@@ -299,7 +297,7 @@ class MassiveError(Exception):
 
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
-        or a parameter that the request for one of a watchlist's symbols doesn't take; its
+        or a parameter that one of the watchlist's symbols can't be read with; its
         message names the fix. The library logs a bug at ERROR, and any other error below
         ERROR.
         """

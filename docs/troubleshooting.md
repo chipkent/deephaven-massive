@@ -81,14 +81,15 @@ do:
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings, and the message names the fix), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
-Wait before you call again. The library has already retried a server failure or a lost
-connection a few times. It raises a rate limit as soon as the read would spend more than 10
-minutes in all waiting out rate limits, or 90 seconds for a console command with `wait=True`.
+Wait before you call again, since the library has already retried, as
+`help(dm.MassiveError.is_retryable)` explains. After `m.close()`, a query method such as
+`fetch()`, or `m.streams()`, raises `dm.SessionClosedError`. Create a new session to read
+again.
 
 A `fetch()` or `history()` of a watchlist can fail for some symbols and not others, such as
 when Massive refuses one symbol's request. Those symbols show their errors in
-`m.symbol_reads()`, the log reports them, and the read fails only when every symbol on the
-watchlist when you called failed.
+`m.symbol_reads()`, the log reports them, and the read fails only when every symbol that was
+on the watchlist at the call failed.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 
@@ -111,10 +112,6 @@ for attempt in range(3):
 ```
 
 Branch on `is_retryable` and `is_bug`, never on the message.
-
-A query method such as `fetch()`, or `m.streams()`, raises `dm.SessionClosedError` after
-`m.close()`. Create a new session to
-read again.
 
 <a id="diagnostics"></a>
 
