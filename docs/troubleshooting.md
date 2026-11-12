@@ -75,7 +75,7 @@ attributes of a `dm.MassiveError` tell your code what to do:
 
 | Attribute | What it says |
 |---|---|
-| `is_retryable` | `True` when the same call may succeed later: a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection to Massive that kept failing, or an answer whose message says to retry. `False` otherwise, such as for a plan that lacks the data. |
+| `is_retryable` | `True` when the same call may succeed later, such as after a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection to Massive that kept failing, or a flat file Massive has not published yet. `False` when it can't, such as for a plan that lacks the data, a refused key, a closed session, or a bug. |
 | `is_bug` | `True` when a bug caused the error: in the library, whose message says how to report it, or in your code, whose message names the fix. |
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
 | `status` | The HTTP status of Massive's answer, such as 404, or `None` when there was none. |

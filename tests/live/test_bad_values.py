@@ -18,6 +18,7 @@ from deephaven_massive._massive import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 
 # The governor's fake clock, so no pacing wait sleeps, and the reply and envelope builders are
@@ -325,7 +326,7 @@ def test_an_unreadable_200_is_recorded_and_raises(
     lines: list[str] = []
     with pytest.raises(WireError) as raised:
         bad_values.ask_all(client, bad_values.LIMIT, lines.append, today=_DAY)
-    assert raised.value.unreadable
+    assert raised.value.kind is WireFailure.UNREADABLE
     assert "no verdict on the value" in lines[-1]
 
 

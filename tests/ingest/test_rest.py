@@ -1130,7 +1130,9 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         claimed.set()
         assert refuse.wait(TIMEOUT)
         stop.set()  # the maker's table is released as the refusal arrives
-        raise _massive.WireError("HTTP 403 for GET /v3/reference/tickers", status=403)
+        raise _massive.WireError(
+            "HTTP 403 for GET /v3/reference/tickers", status=403, kind=_massive.WireFailure.REFUSED
+        )
 
     monkeypatch.setattr(client, "pages", refused)
     reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
@@ -2729,7 +2731,11 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     def pages(*_: object, **__: object) -> NoReturn:
         # The session closes while the symbol's request is on the wire, which then ends in 404.
         reader.state.close()
-        raise _massive.WireError("HTTP 404 from GET /v1/last/crypto/BTC/USD", status=404)
+        raise _massive.WireError(
+            "HTTP 404 from GET /v1/last/crypto/BTC/USD",
+            status=404,
+            kind=_massive.WireFailure.REFUSED,
+        )
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
     with (
@@ -3670,7 +3676,8 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
     )
     assert info.value.status == 404
-    assert info.value.is_retryable  # unlike any other 404: the page may be there again
+    # Not retryable by the rule for a 404, though a followed read reads the symbol again.
+    assert not info.value.is_retryable
 
 
 def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:
@@ -4621,13 +4628,17 @@ def _not_found(
 def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
     session: dm.MassiveSession,
 ) -> None:
-    error = _massive.WireError("not found", status=404, request_id="r1")
+    error = _massive.WireError(
+        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
     assert outcome == rest._Outcome((), 1, missing="ZZZZ")
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
-    error = _massive.WireError("not found", status=404, request_id="r1")
+    error = _massive.WireError(
+        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
     with pytest.raises(CutShortError, match="after 2 pages had arrived") as info:
         _not_found(session, error, symbol="AAPL", requests=2)
     assert info.value.request_id == "r1"
@@ -4639,7 +4650,7 @@ def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSe
 def test_only_a_per_symbol_404_is_about_the_symbol(
     *, session: dm.MassiveSession, status: int, symbol: str | None
 ) -> None:
-    error = _massive.WireError("failed", status=status)
+    error = _massive.WireError("failed", status=status, kind=_massive.WireFailure.REFUSED)
     with pytest.raises(dm.MassiveError) as info:
         _not_found(session, error, symbol=symbol, requests=0)
     assert not isinstance(info.value, CutShortError)

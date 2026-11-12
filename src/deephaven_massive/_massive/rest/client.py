@@ -58,6 +58,7 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
+    WireFailure,
     is_proxy_auth_failure,
     is_tls_failure,
     linked_errors,
@@ -498,7 +499,9 @@ class RestClient:
                 following = next_target(next_url, self._origin)
             except ValueError as error:
                 raise WireError(
-                    f"{job.rest_path.template}: refusing to follow {error}", host=self._host
+                    f"{job.rest_path.template}: refusing to follow {error}",
+                    host=self._host,
+                    kind=WireFailure.REFUSED,
                 ) from error
             if following in fetched:
                 raise WireError(
@@ -506,6 +509,7 @@ class RestClient:
                     "pagination already fetched; refusing to loop",
                     host=self._host,
                     path=following,
+                    kind=WireFailure.REFUSED,
                 )
             fetched.add(following)
             target = following
@@ -849,7 +853,7 @@ class RestClient:
             status=response.status,
             host=self._host,
             path=request.target,
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
@@ -878,7 +882,7 @@ class RestClient:
         try:
             return admission.acquire(stop)
         except WireError as error:
-            if error.status is None:  # the wait was cancelled
+            if error.kind is WireFailure.STOPPED:  # the wait was cancelled
                 raise self._stopped(request) from None
             raise WireError(
                 error.message,
@@ -886,6 +890,7 @@ class RestClient:
                 host=self._host,
                 path=request.target,
                 request_id=error.request_id,
+                kind=error.kind,
             ) from None
 
     def _stopped(self, request: RequestTarget) -> WireError:
@@ -895,10 +900,15 @@ class RestClient:
             request: The request.
 
         Returns:
-            A `WireError` without a status.
+            A `WireError` without a status, `WireFailure.STOPPED`.
         """
         reason = "the REST client is closed" if self._closed.is_set() else "cancelled"
-        return WireError(f"GET {request.target}: {reason}", host=self._host, path=request.target)
+        return WireError(
+            f"GET {request.target}: {reason}",
+            host=self._host,
+            path=request.target,
+            kind=WireFailure.STOPPED,
+        )
 
     def _unanswered(
         self, request: RequestTarget, error: urllib3.exceptions.HTTPError
@@ -924,7 +934,7 @@ class RestClient:
                 "SSL_CERT_FILE to a bundle that trusts it",
                 host=self._host,
                 path=request.target,
-                local=True,
+                kind=WireFailure.LOCAL,
             ) from error
         if is_proxy_auth_failure(error):
             raise WireError(
@@ -933,14 +943,14 @@ class RestClient:
                 status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                 host=self._host,
                 path=request.target,
-                local=True,
+                kind=WireFailure.LOCAL,
             ) from error
         return _Retryable(
             WireError(
                 f"GET {request.target} on {self._host} failed: {error}",
                 host=self._host,
                 path=request.target,
-                transient=True,
+                kind=WireFailure.NO_ANSWER,
             )
         )
 

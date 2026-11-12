@@ -18,6 +18,7 @@ import pyarrow.csv as pacsv
 import pytest
 from typing_extensions import override
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.flatfiles import reader
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
@@ -225,7 +226,7 @@ def test_a_file_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> Non
         "of the requested symbols was dropped, so the file's format may have changed; the "
         "first: timestamp unit mismatch for x: 5 ns"
     )
-    assert info.value.unreadable
+    assert info.value.kind is WireFailure.UNREADABLE
 
 
 def test_one_odd_row_alone_in_its_block_never_fails_the_file(
@@ -703,7 +704,7 @@ def test_every_missing_key_header_is_named(
 ) -> None:
     with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$") as info:
         table(opened(KEY, "price\n1.5\n"), plan())
-    assert info.value.unreadable
+    assert info.value.kind is WireFailure.UNREADABLE
 
 
 @pytest.mark.parametrize(
@@ -849,7 +850,7 @@ def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
         "lines is malformed, so the file's format may have changed; the first: row 1 after "
         "the header has 2 fields where the header has 13"
     )
-    assert info.value.unreadable
+    assert info.value.kind is WireFailure.UNREADABLE
 
 
 def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(

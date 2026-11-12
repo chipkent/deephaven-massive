@@ -54,7 +54,12 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.capture import capture_frame
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireAuthError, WireError
+from deephaven_massive._massive.net.errors import (
+    LIBRARY_BUG_REPORT,
+    WireAuthError,
+    WireError,
+    WireFailure,
+)
 from deephaven_massive._massive.net.http import ssl_context
 from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
@@ -484,7 +489,7 @@ class WsClient:
                 f"error: {error!r}",
                 host=self._host,
                 path=self._path,
-                client_defect=True,
+                kind=WireFailure.CLIENT_DEFECT,
             )
             failure.__cause__ = error
         else:

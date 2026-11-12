@@ -13,9 +13,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidMessage, InvalidStatus, InvalidURI
+from websockets.exceptions import (
+    InvalidMessage,
+    InvalidProxy,
+    InvalidProxyMessage,
+    InvalidProxyStatus,
+    InvalidStatus,
+    InvalidURI,
+)
 from websockets.http11 import Response
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import (
@@ -758,6 +766,34 @@ def test_other_http_statuses_are_fatal(status: int) -> None:
     assert isinstance(error, WireError)
     assert (error.status, error.host, error.path) == (status, HOST, PATH)
     assert error.message == f"WebSocket connection to {HOST}{PATH} failed: HTTP {status}"
+    assert error.kind is WireFailure.REFUSED  # the server answered the handshake
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidProxyStatus(Response(407, "x", Headers({}), b"")),
+        InvalidProxyMessage("the proxy's reply is not HTTP"),
+        InvalidProxy("http://proxy", "bad"),
+    ],
+    ids=["refused-credentials", "garbled-reply", "bad-setting"],
+)
+def test_a_proxy_failure_is_this_machines_to_fix(error: Exception) -> None:
+    classified = _classify(error)
+    assert isinstance(classified, WireError)
+    assert classified.kind is WireFailure.LOCAL
+
+
+def test_a_proxy_that_refuses_the_credentials_names_its_status() -> None:
+    error = _classify(InvalidProxyStatus(Response(407, "x", Headers({}), b"")))
+    assert isinstance(error, WireError)
+    assert error.status == 407
+
+
+def test_a_broken_handshake_is_the_servers_answer() -> None:
+    error = _classify(InvalidMessage("did not receive a valid HTTP response"))
+    assert isinstance(error, WireError)
+    assert (error.status, error.kind) == (None, WireFailure.REFUSED)
 
 
 def test_an_invalid_uri_is_fatal_without_a_status() -> None:
@@ -767,6 +803,7 @@ def test_an_invalid_uri_is_fatal_without_a_status() -> None:
     assert error.message == (
         f"WebSocket connection to {HOST}{PATH} failed: InvalidURI: x isn't a valid URI: bad"
     )
+    assert error.kind is WireFailure.CLIENT_DEFECT  # the client built the URI
 
 
 def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
@@ -776,7 +813,7 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert error.status is None
     assert (error.host, error.path) == (HOST, PATH)
     assert error.message.startswith(f"TLS certificate verification failed for {HOST}: ")
-    assert error.local  # SSL_CERT_FILE, on this machine, is the fix
+    assert error.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert error.message.endswith(
         "; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
     )

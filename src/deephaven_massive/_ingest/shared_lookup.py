@@ -33,7 +33,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from deephaven_massive._errors import ErrorSource, MassiveError, copy_error, library_bug
-from deephaven_massive._massive import WireError
+from deephaven_massive._massive import WireError, WireFailure
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -402,7 +402,9 @@ class SharedLookup(Generic[K, V]):
                         return False
                     return True
                 if cancel is not None and cancel.is_set():
-                    stopped = public(WireError(f"waiting for {what}: cancelled"))
+                    stopped = public(
+                        WireError(f"waiting for {what}: cancelled", kind=WireFailure.STOPPED)
+                    )
                     logger.debug(
                         "%s: stops waiting for %s, its read was stopped: %s",
                         self._label,

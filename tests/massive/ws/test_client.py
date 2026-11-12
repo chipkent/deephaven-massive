@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.errors import WireAuthError, WireError
 from deephaven_massive._massive.spec.types import (
@@ -944,8 +945,8 @@ def test_a_raising_callback_stops_the_client_and_is_logged(
     assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
     error = recorder.of("state")[-1][1]
     assert type(error) is WireError
-    assert error.client_defect  # a bug in the client, which the library reports as a defect
-    assert not error.unreadable
+    # A bug in the client, which the library reports as a defect.
+    assert error.kind is WireFailure.CLIENT_DEFECT
     assert isinstance(error.__cause__, ZeroDivisionError)
     assert error.message == (
         "the WebSocket client for 127.0.0.1/stocks stopped on an internal error: "

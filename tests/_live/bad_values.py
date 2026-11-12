@@ -34,6 +34,7 @@ from deephaven_massive._massive import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
     source,
 )
 from tests._live.contracts import front_contract
@@ -227,7 +228,9 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     except WireError as error:
         if error.status is None or error.status in _NO_JUDGMENT:
             raise
-        if error.unreadable or isinstance(error, WireAuthError | WireEntitlementError):
+        if error.kind is WireFailure.UNREADABLE or isinstance(
+            error, WireAuthError | WireEntitlementError
+        ):
             # A reply that judges the key or the plan, or cannot be read: recorded for the
             # owner, but no refusal of the value. The live fixtures turn a plan refusal into
             # a skip or a failure.

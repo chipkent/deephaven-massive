@@ -51,10 +51,21 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Literal, NamedTuple
 
 from websockets.client import process_exception
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import (
+    InvalidHandshake,
+    InvalidProxy,
+    InvalidProxyStatus,
+    InvalidStatus,
+    ProxyError,
+)
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, is_tls_failure
+from deephaven_massive._massive.net.errors import (
+    LIBRARY_BUG_REPORT,
+    WireError,
+    WireFailure,
+    is_tls_failure,
+)
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
@@ -285,7 +296,7 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
             "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
             host=host,
             path=path,
-            local=True,
+            kind=WireFailure.LOCAL,
         )
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -293,13 +304,35 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         return 0.0 if wait is None else wait
     if process_exception(error) is None:
         return 0.0
+    if isinstance(error, InvalidProxyStatus):
+        status = error.response.status_code
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
     return WireError(
         f"WebSocket connection to {host}{path} failed: {reason}",
         status=status,
         host=host,
         path=path,
+        kind=_fatal_kind(error),
     )
+
+
+def _fatal_kind(error: Exception) -> WireFailure:
+    """Return what kind of failure a connection attempt websockets does not retry is.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        `LOCAL` for a proxy that refused the connection, answered it wrongly, or is configured
+        wrong (the proxy settings are this machine's); `REFUSED` for a server that answered but
+        refused or broke the handshake (an HTTP status such as 401 or 404 included); and
+        `CLIENT_DEFECT` for anything else, such as a URI the client built wrong.
+    """
+    if isinstance(error, ProxyError | InvalidProxy):
+        return WireFailure.LOCAL
+    if isinstance(error, InvalidHandshake):
+        return WireFailure.REFUSED
+    return WireFailure.CLIENT_DEFECT
 
 
 def _quote(value: object) -> str:
@@ -714,7 +747,10 @@ class FrameDecoder:
             into: The channel's accumulator for this frame.
         """
         error = WireError(
-            f"dropped {self._about(channel, item, problem)}", host=self._host, path=self._path
+            f"dropped {self._about(channel, item, problem)}",
+            host=self._host,
+            path=self._path,
+            kind=WireFailure.UNREADABLE,
         )
         raw = row_excerpt(item)
         logger.debug("%s; the row: %s", error, raw)

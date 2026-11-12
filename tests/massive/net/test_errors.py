@@ -1,4 +1,7 @@
+import functools
+import inspect
 import ssl
+from collections.abc import Callable
 
 import pytest
 
@@ -9,14 +12,20 @@ from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 
-ALL_CLASSES = [WireError, WireAuthError, WireEntitlementError]
+ALL_ERRORS: list[Callable[..., WireError]] = [
+    functools.partial(WireError, kind=WireFailure.REFUSED),
+    WireAuthError,
+    WireEntitlementError,
+]
+"""What makes each wire error class, as a client answered with a refusal would."""
 
 
-@pytest.mark.parametrize("cls", ALL_CLASSES)
-def test_every_attribute_is_kept(cls: type[WireError]) -> None:
-    error = cls(
+@pytest.mark.parametrize("make", ALL_ERRORS)
+def test_every_attribute_is_kept(make: Callable[..., WireError]) -> None:
+    error = make(
         "HTTP 403 from GET /v3/quotes/AAPL (request_id r1): not entitled",
         status=403,
         host="api.massive.com",
@@ -31,27 +40,34 @@ def test_every_attribute_is_kept(cls: type[WireError]) -> None:
     assert error.request_id == "r1"
 
 
-@pytest.mark.parametrize("cls", ALL_CLASSES)
-def test_the_context_defaults_to_none(cls: type[WireError]) -> None:
-    error = cls("connection reset")
+@pytest.mark.parametrize("cls", [WireAuthError, WireEntitlementError])
+def test_the_context_defaults_to_none_and_a_credential_error_is_a_refusal(
+    cls: type[WireAuthError] | type[WireEntitlementError],
+) -> None:
+    error = cls("rejected")
     assert (error.status, error.host, error.path, error.request_id) == (None, None, None, None)
-    assert not error.transient  # a failure is not taken to pass unless the client says so
-    assert not error.local
-    assert cls("connection reset", transient=True).transient
-    assert cls("certificate failed", local=True).local
+    assert error.kind is WireFailure.REFUSED  # Massive's answer, by definition
 
 
-@pytest.mark.parametrize(
-    "attribute", ["message", "status", "host", "path", "request_id", "transient", "local"]
-)
+@pytest.mark.parametrize("kind", list(WireFailure))
+def test_a_wire_error_keeps_the_kind_its_client_chose(kind: WireFailure) -> None:
+    assert WireError("failed", kind=kind).kind is kind
+
+
+def test_a_wire_error_has_no_kind_by_default() -> None:
+    # A client must say what kind of failure it raises: none is taken for Massive's answer.
+    assert inspect.signature(WireError).parameters["kind"].default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("attribute", ["message", "status", "host", "path", "request_id", "kind"])
 def test_attributes_are_read_only(attribute: str) -> None:
-    error = WireError("x", status=500)
+    error = WireError("x", status=500, kind=WireFailure.REFUSED)
     with pytest.raises(AttributeError):
         setattr(error, attribute, "changed")
 
 
 def test_the_message_survives_a_change_to_args() -> None:
-    error = WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
+    error = WireError("HTTP 503 from GET /v3/trades/AAPL", status=503, kind=WireFailure.REFUSED)
     error.args = ("rewritten",)
     assert error.message == "HTTP 503 from GET /v3/trades/AAPL"
 

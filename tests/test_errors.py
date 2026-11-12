@@ -1,5 +1,6 @@
 import ast
 import builtins
+import functools
 import importlib
 import inspect
 import pkgutil
@@ -30,7 +31,7 @@ from deephaven_massive._errors import (
     source_of,
     user_defect,
 )
-from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError, WireFailure
 from deephaven_massive._session import MassiveSession
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import Query
@@ -68,12 +69,14 @@ def test_status_and_request_id_are_read_only(attribute: str) -> None:
 @pytest.mark.parametrize(
     ("wire", "public"),
     [
-        (WireError, MassiveError),
+        (functools.partial(WireError, kind=WireFailure.REFUSED), MassiveError),
         (WireAuthError, AuthenticationError),
         (WireEntitlementError, EntitlementError),
     ],
 )
-def test_from_wire_maps_each_wire_error(wire: type[WireError], public: type[MassiveError]) -> None:
+def test_from_wire_maps_each_wire_error(
+    wire: Callable[..., WireError], public: type[MassiveError]
+) -> None:
     converted = from_wire(
         wire(
             "HTTP 403 from GET /v3/quotes/AAPL (request_id r9): not entitled",
@@ -89,7 +92,7 @@ def test_from_wire_maps_each_wire_error(wire: type[WireError], public: type[Mass
 
 
 def test_from_wire_keeps_missing_context_as_none() -> None:
-    converted = from_wire(WireError("connection reset by peer"))
+    converted = from_wire(WireError("connection reset by peer", kind=WireFailure.NO_ANSWER))
     assert (converted.status, converted.request_id) == (None, None)
     assert converted.args == ("connection reset by peer",)
 
@@ -147,15 +150,18 @@ def test_every_source_has_a_lowercase_value() -> None:
 @pytest.mark.parametrize(
     ("wire", "source"),
     [
-        (WireError("HTTP 404", status=404), ErrorSource.MASSIVE),
+        (WireError("HTTP 404", status=404, kind=WireFailure.REFUSED), ErrorSource.MASSIVE),
         # A WebSocket status message refusing a subscription: Massive's answer, with no status.
-        (WireError("max connections"), ErrorSource.MASSIVE),
-        (WireError("connection reset", transient=True), ErrorSource.NETWORK),
-        (WireError("TLS certificate verification failed", local=True), ErrorSource.USER),
+        (WireError("max connections", kind=WireFailure.REFUSED), ErrorSource.MASSIVE),
+        (WireError("connection reset", kind=WireFailure.NO_ANSWER), ErrorSource.NETWORK),
+        (
+            WireError("TLS certificate verification failed", kind=WireFailure.LOCAL),
+            ErrorSource.USER,
+        ),
         # Data Massive delivered that the client could not read is the library's to fix, and
         # so is a failure of the client itself.
-        (WireError("bad file", unreadable=True), ErrorSource.LIBRARY),
-        (WireError("bug", client_defect=True), ErrorSource.LIBRARY),
+        (WireError("bad file", kind=WireFailure.UNREADABLE), ErrorSource.LIBRARY),
+        (WireError("bug", kind=WireFailure.CLIENT_DEFECT), ErrorSource.LIBRARY),
     ],
 )
 def test_from_wire_takes_the_source_the_wire_client_knows(
@@ -165,7 +171,7 @@ def test_from_wire_takes_the_source_the_wire_client_knows(
 
 
 def test_from_wire_takes_the_source_the_caller_knows() -> None:
-    rejected = from_wire(WireError("bad row"), source=ErrorSource.LIBRARY)
+    rejected = from_wire(WireError("bad row", kind=WireFailure.REFUSED), source=ErrorSource.LIBRARY)
     assert (rejected.source, rejected.is_bug) == (ErrorSource.LIBRARY, True)
 
 
@@ -220,15 +226,15 @@ def test_a_bug_is_never_retryable() -> None:
 @pytest.mark.parametrize(
     ("wire", "retryable"),
     [
-        (WireError("HTTP 503", status=503), True),
-        (WireError("rate limited", status=429), True),
-        (WireError("connection reset", transient=True), True),
-        (WireError("TLS certificate verification failed", local=True), False),
-        (WireError("HTTP 404", status=404), False),
+        (WireError("HTTP 503", status=503, kind=WireFailure.REFUSED), True),
+        (WireError("rate limited", status=429, kind=WireFailure.REFUSED), True),
+        (WireError("connection reset", kind=WireFailure.NO_ANSWER), True),
+        (WireError("TLS certificate verification failed", kind=WireFailure.LOCAL), False),
+        (WireError("HTTP 404", status=404, kind=WireFailure.REFUSED), False),
         (WireAuthError("HTTP 401", status=401), False),
         (WireEntitlementError("HTTP 403", status=403), False),
         # Data the client could not read is a bug, whatever its status.
-        (WireError("bad body", status=200, unreadable=True), False),
+        (WireError("bad body", status=200, kind=WireFailure.UNREADABLE), False),
     ],
 )
 def test_from_wire_says_whether_the_call_may_succeed_later(

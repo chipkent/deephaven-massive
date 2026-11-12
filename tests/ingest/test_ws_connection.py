@@ -1105,7 +1105,7 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    error = _massive.WireError("dropped")
+    error = _massive.WireError("dropped", kind=_massive.WireFailure.UNREADABLE)
     rejects = [
         _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
         for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")

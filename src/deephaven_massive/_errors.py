@@ -63,6 +63,7 @@ The public names are re-exported by `deephaven_massive/__init__.py`; this module
 from __future__ import annotations
 
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
 from deephaven_massive._massive import (
@@ -70,6 +71,7 @@ from deephaven_massive._massive import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 
 if TYPE_CHECKING:
@@ -167,7 +169,7 @@ class MassiveError(Exception):
 
     One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for
     other failures, such as a network error, an HTTP error other than 401 or 403, a rate limit
-    that outlasted how long the read waits out rate limits, or a bug in the library. The
+    that lasted longer than the read waits, or a bug in the library. The
     message names what failed, and quotes Massive's text when Massive answered. To branch on
     the failure, read `is_retryable`, `is_bug`, `source`, or `status` instead of the message.
 
@@ -176,7 +178,7 @@ class MassiveError(Exception):
     error, the log records it, and `m.streams()` lists it.
 
     Example:
-        Catch every failure of the library, and branch on the HTTP status::
+        Catch any `MassiveError`, and branch on the HTTP status::
 
             import deephaven_massive as dm
 
@@ -195,11 +197,6 @@ class MassiveError(Exception):
     default_is_bug: ClassVar[bool] = False
     """Whether an error of this class created without `is_bug` is a bug; a subclass whose every
     instance is a user's bug sets it. A `LIBRARY` error is a bug whatever this says."""
-
-    default_is_retryable: ClassVar[bool | None] = None
-    """Whether an error of this class created without `is_retryable` may succeed later, or
-    `None` to decide from `status` and `source`; a subclass whose every instance may succeed
-    later sets True."""
 
     def __init__(
         self,
@@ -220,10 +217,9 @@ class MassiveError(Exception):
                 response or it carried none.
             source: What stopped the call, or `None` (absent) for the class's
                 `default_source`, which is `ErrorSource.MASSIVE` unless a subclass sets another.
-            is_retryable: Whether the same call may succeed later, or `None` (absent) for the
-                class's `default_is_retryable`, and when that is `None` too, to decide from
-                `status` and `source`: true for a status in `RETRYABLE_STATUSES` or a `NETWORK`
-                source. A bug is never retryable, whatever this says.
+            is_retryable: Whether the same call may succeed later, or `None` (absent) to
+                decide from `status` and `source`: true for a status in `RETRYABLE_STATUSES` or
+                a `NETWORK` source. A bug is never retryable, whatever this says.
             is_bug: Whether a defect caused the error, or `None` (absent) for the class's
                 `default_is_bug`. A `LIBRARY` error is a bug whatever this says.
         """
@@ -234,8 +230,6 @@ class MassiveError(Exception):
         if is_bug is None:
             is_bug = self.default_is_bug
         self._is_bug = is_bug or self._source is ErrorSource.LIBRARY
-        if is_retryable is None:
-            is_retryable = self.default_is_retryable
         if is_retryable is None:
             is_retryable = status in RETRYABLE_STATUSES or self._source is ErrorSource.NETWORK
         self._is_retryable = is_retryable and not self._is_bug
@@ -259,12 +253,13 @@ class MassiveError(Exception):
     def is_retryable(self) -> bool:
         """Whether the same call may succeed if you make it again later.
 
-        True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
-        504), a `NETWORK` error, and an answer whose message says to retry, such as a flat file
-        Massive has not published yet. False for everything else, such as a refusal (HTTP 400,
-        403, or 404), an `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`,
-        or a bug. A watchlist read that failed because every symbol failed is retryable only
-        when every symbol's error is.
+        True for exactly these: a rate limit (HTTP 429); a failure on Massive's side (HTTP 500,
+        502, 503, or 504); a `NETWORK` error; a flat file Massive has not published yet; pages
+        of one read that disagreed on `adjusted`; a `poll()` stopped by cycles that kept
+        failing, when its latest cycle's error is retryable; and a watchlist read that failed
+        because every symbol failed, when every symbol's error is retryable. False for every
+        other error, such as any other HTTP status, an `AuthenticationError`, an
+        `EntitlementError`, a `SessionClosedError`, or a bug.
 
         The library has already retried a server failure or a lost connection, and waited out a
         rate limit's pause, so wait before you call again.
@@ -284,7 +279,7 @@ class MassiveError(Exception):
 
 
 class AuthenticationError(MassiveError):
-    """Massive refused your keys: the API key is missing or rejected, or the S3 keys are.
+    """Your keys are missing, or Massive refused them: the API key, or the S3 keys of flat files.
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
     live table fails with it when Massive's streaming server rejects the key. Every other stream on
@@ -309,12 +304,12 @@ class AuthenticationError(MassiveError):
 class EntitlementError(MassiveError):
     """Your key is valid, but your plan doesn't include what you asked for.
 
-    Massive refused the request: a REST request with HTTP 403, a stream subscription, or a flat
-    file. The library raises it too when Massive marks current data as delayed and its subscription
-    isn't in `MassiveConfig.delayed_subscriptions`. The message then names the setting to change.
-    Its `source` is `ErrorSource.MASSIVE` when Massive refused, and `ErrorSource.USER` when
-    `delayed_subscriptions` refused delayed data. Only the table that asked fails. Other
-    tables on the same connection keep running.
+    Massive refused the request: a REST request with HTTP 403, a flat file, or a stream
+    subscription, which fails only the table that asked while other tables on the same
+    connection keep running. The library raises it too when Massive marks current data as
+    delayed and its subscription isn't in `MassiveConfig.delayed_subscriptions`. The message
+    then names the setting to change. Its `source` is `ErrorSource.MASSIVE` when Massive
+    refused, and `ErrorSource.USER` when `delayed_subscriptions` refused delayed data.
 
     The message says what Massive refused, in Massive's own words. A refused flat-file `history()`
     also names `source=dm.HistorySource.REST` when REST can serve the read.
@@ -326,7 +321,7 @@ class EntitlementError(MassiveError):
 
             m = dm.MassiveSession()
             try:
-                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06")
+                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06", wait=True)
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """
@@ -396,26 +391,32 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
 
 
 def wire_source(error: WireError) -> ErrorSource:
-    """Return what stopped a call, from what the wire client knows of its error.
+    """Return what stopped a call, from the kind of failure its wire error is.
 
     Args:
         error: The wire error.
 
     Returns:
-        `ErrorSource.LIBRARY` for data Massive delivered that the client could not read
-        (`unreadable`) or a failure of the client itself (`client_defect`);
-        `ErrorSource.NETWORK` for a request that got no answer through every retry
-        (`transient`); `ErrorSource.USER` for a failure of this machine's network settings, a
-        certificate it doesn't trust or a proxy that refused its credentials (`local`); and
-        `ErrorSource.MASSIVE` for every answer from Massive.
+        `ErrorSource.MASSIVE` for a refusal or an error Massive answered with
+        (`WireFailure.REFUSED`); `ErrorSource.NETWORK` for a request that got no answer
+        (`NO_ANSWER`); `ErrorSource.USER` for this machine's settings (`LOCAL`) or a request
+        the caller stopped (`STOPPED`); and `ErrorSource.LIBRARY` for data the client could not
+        read (`UNREADABLE`) or a failure of the client itself (`CLIENT_DEFECT`).
     """
-    if error.unreadable or error.client_defect:
-        return ErrorSource.LIBRARY
-    if error.transient:
-        return ErrorSource.NETWORK
-    if error.local:
-        return ErrorSource.USER
-    return ErrorSource.MASSIVE
+    return _SOURCES[error.kind]
+
+
+_SOURCES: Final = MappingProxyType(
+    {
+        WireFailure.REFUSED: ErrorSource.MASSIVE,
+        WireFailure.NO_ANSWER: ErrorSource.NETWORK,
+        WireFailure.LOCAL: ErrorSource.USER,
+        WireFailure.STOPPED: ErrorSource.USER,
+        WireFailure.UNREADABLE: ErrorSource.LIBRARY,
+        WireFailure.CLIENT_DEFECT: ErrorSource.LIBRARY,
+    }
+)
+"""The source of the public error of each kind of wire failure (`wire_source`)."""
 
 
 def source_of(error: BaseException) -> ErrorSource:
@@ -595,10 +596,10 @@ class CutShortError(MassiveError):
     Internal: not exported from `dm`; `fetch()` and `history()` raise it as the `MassiveError`
     it is, with status 404. The REST transport raises it, and a read by symbol
     (`_ingest/symbol_reads.py`) names it: unlike any other 404, which the same request would
-    meet again, a page that vanished mid-read may be there when the symbol is read again.
+    meet again, a page that vanished mid-read may be there when the symbol is read again, so
+    a followed read reads the symbol again (`symbol_reads.failure_kind`). The error itself
+    follows the rule for a 404 and is not `is_retryable`.
     """
-
-    default_is_retryable = True
 
 
 class RowDataError(PermanentError):

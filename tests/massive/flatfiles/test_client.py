@@ -32,6 +32,7 @@ from botocore.exceptions import (
     ConnectTimeoutError,
     EndpointConnectionError,
     HTTPClientError,
+    InvalidProxiesConfigError,
     ParamValidationError,
     ProxyConnectionError,
     ReadTimeoutError,
@@ -42,6 +43,7 @@ from typing_extensions import override
 from urllib3.exceptions import ProtocolError
 from urllib3.exceptions import SSLError as Urllib3SSLError
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.flatfiles import client as client_module
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
@@ -523,7 +525,7 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     )
     assert (error.status, error.request_id) == (status, fake_s3.request_id)
     # S3 answers a timeout with HTTP 400, whose status alone does not say it may pass.
-    assert error.transient is (code == "RequestTimeout")
+    assert error.kind is WireFailure.REFUSED  # S3 answered, a RequestTimeout included
     assert isinstance(error.__cause__, ClientError)
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
@@ -631,7 +633,7 @@ def test_an_unreachable_endpoint_is_a_wire_error_after_the_retries(
     assert type(info.value) is WireError
     assert (info.value.status, info.value.request_id, info.value.path) == (None, None, KEY)
     assert isinstance(info.value.__cause__, EndpointConnectionError)
-    assert info.value.transient
+    assert info.value.kind is WireFailure.NO_ANSWER
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
 
@@ -656,8 +658,8 @@ def test_a_failure_no_retry_can_fix_is_not_retried(
         client.open(KEY)
     assert info.value.__cause__ is failure
     assert clock.waits == []
-    assert not info.value.transient
-    assert info.value.client_defect  # Massive never answered: the failure is the client's
+    # S3 never answered: the failure is the client's.
+    assert info.value.kind is WireFailure.CLIENT_DEFECT
 
 
 def _certificate_rejected(_key: str) -> None:
@@ -694,17 +696,10 @@ def _handshake_refused(_key: str) -> None:
             _certificate_rejected_by_way_of_the_proxy,
             r"TLS certificate verification failed for files\.massive\.com \(.*proxy\.corp.*\);",
         ),
-        (
-            _handshake_refused,
-            (
-                r"TLS failed for files\.massive\.com \(SSL validation failed for "
-                r"https://files\.massive\.com .*wrong version number.*\)$"
-            ),
-        ),
     ],
-    ids=["certificate", "certificate-at-the-proxy", "handshake"],
+    ids=["certificate", "certificate-at-the-proxy"],
 )
-def test_a_tls_failure_is_never_retried(
+def test_a_certificate_failure_is_never_retried(
     *,
     client: FlatFileClient,
     fake_s3: FakeS3,
@@ -725,8 +720,45 @@ def test_a_tls_failure_is_never_retried(
         client.open(KEY)
     assert (info.value.status, info.value.path) == (None, KEY)
     assert isinstance(info.value.__cause__, BotoCoreError)
-    assert info.value.local
+    assert info.value.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert (attempts, clock.waits) == ([KEY], [])
+
+
+def test_a_proxy_setting_botocore_cannot_use_is_this_machines_to_fix(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    def fail(_key: str) -> None:
+        raise InvalidProxiesConfigError(proxy_url="http://proxy.corp")
+
+    fake_s3.before_answer = fail
+    with pytest.raises(WireError) as info:
+        client.open(KEY)
+    assert info.value.kind is WireFailure.LOCAL
+    assert clock.waits == []
+
+
+def test_a_failed_tls_handshake_got_no_answer_and_is_retried(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    # As the REST client counts it: no answer came, so the request is sent again.
+    attempts: list[str] = []
+
+    def fail(key: str) -> None:
+        attempts.append(key)
+        _handshake_refused(key)
+
+    fake_s3.before_answer = fail
+    with pytest.raises(
+        WireError,
+        match=(
+            f"^cannot read s3://flatfiles/{KEY} at .*: TLS failed for files\\.massive\\.com "
+            r"\(SSL validation failed for https://files\.massive\.com .*wrong version number"
+        ),
+    ) as info:
+        client.open(KEY)
+    assert isinstance(info.value.__cause__, SSLError)
+    assert info.value.kind is WireFailure.NO_ANSWER
+    assert (attempts, clock.waits) == ([KEY] * 4, WAITS)
 
 
 def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
@@ -753,6 +785,7 @@ def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
     assert not reader.is_alive()
     (error,) = raised
     assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert error.kind is WireFailure.STOPPED
     assert fake_s3.keys() == [KEY]
     assert clock.monotonic() == 0.0  # the wait ended without time passing
 
@@ -775,8 +808,7 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
     assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
-    assert not info.value.unreadable  # a transport failure, not the file's content
-    assert info.value.transient
+    assert info.value.kind is WireFailure.NO_ANSWER  # a transport failure, not the file's content
     assert (fake_s3.keys(), clock.waits) == ([KEY], [])
     assert fake_s3.closed_bodies == [KEY]
 
@@ -790,15 +822,14 @@ def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3:
     with file, pytest.raises(WireError, match="Not a gzipped file") as info:
         list(file.batches(stocks_plan()))
     assert not file.dropped
-    assert info.value.unreadable  # the file's content: a gap in the library
-    assert not info.value.transient
+    assert info.value.kind is WireFailure.UNREADABLE  # the file's content: a gap in the library
 
 
 def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     *, client: FlatFileClient, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=client_module.__name__)
-    error = WireError("cannot read s3://flatfiles/k at here: dropped")
+    error = WireError("cannot read s3://flatfiles/k at here: dropped", kind=WireFailure.NO_ANSWER)
     cancel = threading.Event()
     assert [client.wait_to_reread(error, retry, cancel) for retry in range(4)] == [
         True,
@@ -827,7 +858,7 @@ def test_a_reread_is_not_waited_for_once_the_call_is_cancelled(
     cancel = threading.Event()
     cancel.set()
     # No reread will follow, so there is no wait and no line promising one.
-    assert client.wait_to_reread(WireError("dropped"), 0, cancel)
+    assert client.wait_to_reread(WireError("dropped", kind=WireFailure.NO_ANSWER), 0, cancel)
     assert clock.waits == []
     assert [r for r in caplog.records if r.name == client_module.__name__] == []
 
@@ -852,7 +883,8 @@ def waiting() -> Iterator[tuple[FakeClock, FlatFileClient, Start]]:
 
     def start(cancel: threading.Event, retry: int = 0) -> threading.Thread:
         thread = threading.Thread(
-            target=client.wait_to_reread, args=(WireError("dropped"), retry, cancel)
+            target=client.wait_to_reread,
+            args=(WireError("dropped", kind=WireFailure.NO_ANSWER), retry, cancel),
         )
         thread.start()
         threads.append(thread)
@@ -1036,6 +1068,7 @@ def test_a_client_that_cannot_be_created_is_a_wire_error(
     ) as info:
         client.open(KEY)
     assert info.value.host == "files.massive.com"
+    assert info.value.kind is WireFailure.LOCAL  # AWS_PROFILE, on this machine, is the fix
     assert fake_s3.clients == []
 
 
@@ -1393,7 +1426,7 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
         "refused its credentials (HTTP 407); check the user and password in HTTPS_PROXY"
     )
     assert (info.value.status, info.value.path) == (407, KEY)
-    assert info.value.local
+    assert info.value.kind is WireFailure.LOCAL
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tls_server.requests, clock.waits) == ([], [])
     assert not any("wr0ng" in r.getMessage() for r in caplog.records)
@@ -1515,7 +1548,7 @@ def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retrie
     )
     assert isinstance(info.value.__cause__, ProtocolError)
     assert (info.value.status, info.value.path) == (None, KEY)
-    assert info.value.transient  # no answer, so a later request may get one
+    assert info.value.kind is WireFailure.NO_ANSWER  # no answer, so a later request may get one
     assert server.connections == 4
     assert clock.waits == WAITS
 

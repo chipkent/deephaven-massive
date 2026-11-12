@@ -533,28 +533,32 @@ owe no compatibility; in `0.x` a break raises the minor and anything else the pa
 `1.0.0`, standard Semantic Versioning.
 
 **105. An error says what stopped the call, whether to retry it, and whether a bug caused it**
-(2026-11-11). Owner, approving the design: "I approve the rest of that design", and for the
+(2026-11-12). Owner, approving the design: "I approve the rest of that design", and for the
 names, "Q1: errors design is approved." `MassiveError.cause` and `dm.ErrorCause` are replaced by
 three attributes, because the old `cause` collided with Python's `__cause__` and one value mixed
 two questions: whose move it is, and whether to log at ERROR.
 
-- `source`, a `dm.ErrorSource`: `MASSIVE` when Massive answered with a refusal or an error (an
-  HTTP error status from Massive, a rejected key, a plan without the data, a WebSocket status
-  message, another connection taking the WebSocket connection, a list of Massive's that lacks a
-  pair); `NETWORK` when no answer came through the library's retries (S3's `RequestTimeout`
-  included), or a live table got no data for `max_outage`; `USER` when the user's code or
-  settings stopped it (a missing API key, delayed data `delayed_subscriptions` refuses, a
-  closed session, a failing symbol table, a certificate or proxy setting that fails, a read the
-  user stopped); `LIBRARY` for a bug, Massive data the library cannot read and a failure inside
-  a wire client included. More members may come, so handlers keep a default case.
+- `source`, a `dm.ErrorSource`: `MASSIVE` only where Massive answered with a refusal or an
+  error (an HTTP error status from Massive or S3, a rejected key, a plan without the data, a
+  WebSocket status message, another connection taking the WebSocket connection, a list of
+  Massive's that lacks a pair); `NETWORK` when no answer came through the library's retries
+  (a TLS handshake that failed for another reason than the certificate included), or a live
+  table got no data for `max_outage`; `USER` when the user's code or settings stopped it (a
+  missing API key, delayed data `delayed_subscriptions` refuses, a closed session, a failing
+  symbol table, a certificate, proxy, or AWS profile setting, a read the user stopped);
+  `LIBRARY` for a bug, Massive data the library cannot read and a failure inside a wire client
+  included. One failure has one source on every transport. More members may come, so handlers
+  keep a default case.
+- Every wire error carries exactly one `WireFailure`, which its client must choose (refused,
+  no answer, local settings, stopped, unreadable, client defect), so no failure becomes
+  Massive's answer by default.
 - `is_retryable`: true for HTTP 429, 500, 502, 503, and 504 and for `NETWORK`; false for every
   other status, authentication, entitlement, a closed session, and a taken connection, and
-  always for a bug. Three answers whose messages already said to retry are retryable too: a flat
-  file not yet published, a symbol's pages cut short by HTTP 404, and pages that disagree on
-  `adjusted`. A read that fails because every symbol failed is retryable only when every
-  symbol's error is. The library has already retried a server failure or a lost connection, and
-  waited out a rate limit's pause, before it raises. A followed read retries a symbol's read
-  exactly when its error is retryable.
+  always for a bug. A flat file not yet published and pages that disagree on `adjusted` are
+  retryable too: neither is an HTTP status, and both messages say to retry. A read that fails
+  because every symbol failed is retryable only when every symbol's error is. The library has
+  already retried a server failure or a lost connection, and waited out a rate limit's pause,
+  before it raises.
 - `is_bug`: true for every `LIBRARY` error and for a user's bug the library caught (a failing
   symbol table, a parameter a path does not take, a symbol table row that is not Massive's
   ticker, a session made outside a server). The library logs a failure at ERROR exactly when

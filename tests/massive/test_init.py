@@ -41,6 +41,7 @@ EXPECTED_INTERFACE = [
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireFailure",
     "WireType",
     "WireUnit",
     "WsClient",

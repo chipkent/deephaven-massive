@@ -16,6 +16,8 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `WireFailure`: what kind of failure a wire error is, whether Massive answered and, if
+      not, why not; every wire error has exactly one.
     - `source`, `sources`: the generated description of each REST path, WebSocket channel,
       and flat-file prefix, loaded once from the committed `spec/*.json`, each field carrying
       its description (the vendor's, or the refresh's correction where the vendor's is clearly
@@ -72,13 +74,15 @@ Importing the package imports every client and its dependencies, and never Deeph
 Example:
     ::
 
-        from deephaven_massive._massive import Transport, WireError, source
+        from deephaven_massive._massive import Transport, WireError, WireFailure, source
 
         trades = source(Transport.REST, "/v3/trades/{stockTicker}")
         assert trades.field("Price").wire_key == "price"
 
         try:
-            raise WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
+            raise WireError(
+                "HTTP 503 from GET /v3/trades/AAPL", status=503, kind=WireFailure.REFUSED
+            )
         except WireError as error:
             assert error.status == 503
 """
@@ -94,6 +98,7 @@ from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
@@ -153,6 +158,7 @@ __all__ = [
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireFailure",
     "WireType",
     "WireUnit",
     "WsClient",
