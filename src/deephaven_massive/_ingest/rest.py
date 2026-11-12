@@ -1846,7 +1846,7 @@ class RestReader:
         one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
         A crypto pair that Massive's crypto ticker list does not hold follows
         `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE` it is left out of the cycle
-        (`_skip_unlisted`); under `RAISE` its `UnlistedPairError` fails the table.
+        (`skip_unlisted`); under `RAISE` its `UnlistedPairError` fails the table.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1886,7 +1886,7 @@ class RestReader:
             self._unavailable(spec, template, names, reason=reason, missing=False)
             left_out.extend(f"{name} ({reason})" for name in names)
         if unlisted:
-            self._skip_unlisted(spec, unlisted, verb="poll()", setting=self.unlisted_symbols)
+            self.skip_unlisted(spec, unlisted, verb="poll()", setting=self.unlisted_symbols)
             left_out.extend(
                 f"{name} (not in Massive's crypto ticker list)" for name in sorted(unlisted)
             )
@@ -1910,7 +1910,7 @@ class RestReader:
         pair = functools.partial(self.crypto_pair, cancel=cancel)
         return recording_split(pair, unlisted, catching=UnlistedPairError)
 
-    def _skip_unlisted(
+    def skip_unlisted(
         self,
         spec: DatasetSpec,
         unlisted: Mapping[str, UnlistedPairError],
@@ -2084,7 +2084,7 @@ class RestReader:
                 runs.
             unlisted: What a crypto pair Massive's crypto ticker list does not hold does:
                 `RAISE` raises its `UnlistedPairError`; `LOG` and `IGNORE` leave it out
-                (`_skip_unlisted`), so a read whose every pair is left out reads nothing.
+                (`skip_unlisted`), so a read whose every pair is left out reads nothing.
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit` (each symbol's
@@ -2099,7 +2099,7 @@ class RestReader:
         split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
-            self._skip_unlisted(spec, found, verb="fetch()", setting=unlisted)
+            self.skip_unlisted(spec, found, verb="fetch()", setting=unlisted)
             planned = [_without(path, found) for path in planned]
         patience = self.patience()  # once for every path, on this thread, before any fan-out
         logger.debug(

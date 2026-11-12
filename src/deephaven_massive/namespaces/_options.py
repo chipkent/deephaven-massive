@@ -335,7 +335,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 
 def _underlying(value: object) -> str:
-    """Check an `underlying` argument: Massive's exact ticker of a stock or an index.
+    """Check an `underlying` argument: the ticker of a stock or an index, sent as written.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
@@ -346,8 +346,8 @@ def _underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is the ticker of an option, a currency pair, or a crypto pair,
-            or is not canonical; `check_symbol` names the canonical form when it can.
+        ValueError: If `value` has the prefix of an option, a currency pair, or a crypto pair,
+            or no request can carry it (`check_symbol`).
     """
     if not isinstance(value, str):
         kind = "dm.ALL" if value is ALL else type(value).__name__
@@ -708,7 +708,8 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL`, or isn't Massive's exact ticker of a stock or an index;
+                - `underlying` is `dm.ALL`, has another class's prefix, is empty, or holds `,`,
+                  `/`, or `*`;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

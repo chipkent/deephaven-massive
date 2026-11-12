@@ -24,7 +24,6 @@ from deephaven_massive._datasets.symbols import (
     check_symbols,
     forex_codes,
     is_forex_currency,
-    is_futures_contract,
     is_sendable,
     option_roots,
     symbol_class,
@@ -123,14 +122,6 @@ def test_every_futures_ticker_massive_writes_round_trips(
     for text in every:
         assert canonical_from_wire(FUT, text) == text
         assert dm.canonical_symbol(text, FUT) == text
-
-
-def test_a_futures_contract_is_a_root_a_month_and_a_year() -> None:
-    # The schedule calendar looks up only such tickers in Massive's contracts list.
-    for text in ("ESZ5", "6CH5", "0NGH39"):
-        assert is_futures_contract(text)
-    for text in ("ESZ", "esz5", "GCQ6-GCZ6", "BOB 02-01 U6"):
-        assert not is_futures_contract(text)
 
 
 @pytest.mark.parametrize(
@@ -339,8 +330,10 @@ def test_forex_currencies_are_three_letters() -> None:
 def test_forex_codes_split_a_forex_ticker_by_position() -> None:
     assert forex_codes("C:EURUSD") == ("EUR", "USD")
     assert forex_codes("C:USDJPY") == ("USD", "JPY")
-    # Other text splits the same way, with no check: Massive answers what is sent.
+    # Text with the prefix splits the same way, with no check: Massive answers what is sent.
     assert forex_codes("C:EURO") == ("EUR", "O")
+    # Text without it has no codes the library can derive: it goes on the wire as written.
+    assert forex_codes("EURUSD") is None
 
 
 def test_option_roots() -> None:

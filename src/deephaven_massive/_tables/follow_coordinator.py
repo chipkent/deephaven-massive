@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias, cast
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError, Reread
+from deephaven_massive._enums import Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorCause,
@@ -1045,9 +1045,9 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
-        A crypto pair Massive's crypto ticker list does not hold (`UnlistedPairError`) follows
-        `MassiveConfig.unlisted_symbols`: `FAILED` with a WARNING under `LOG`, with only a
-        DEBUG line under `IGNORE`, and under `RAISE` it fails the whole result.
+        A crypto pair Massive's crypto ticker list does not hold (`UnlistedPairError`) fails
+        the whole result under `MassiveConfig.unlisted_symbols=RAISE`; under `LOG` and `IGNORE`
+        the read gives it no rows instead (`read_rest_by_symbol`), so it never fails here.
 
         Args:
             result: The result's state.
@@ -1056,12 +1056,7 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
-        unlisted = (
-            result.read.core.config.unlisted_symbols
-            if isinstance(error, UnlistedPairError)
-            else None
-        )
-        if unlisted is OnError.RAISE:
+        if isinstance(error, UnlistedPairError):
             logger.debug(
                 "call %d follow %s: fails the result, under unlisted_symbols=RAISE: %s",
                 result.read.call,
@@ -1097,9 +1092,7 @@ class FollowCoordinator:
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
         level = logging.WARNING if first else logging.DEBUG
-        if unlisted is not None:
-            level = logging.WARNING if first and unlisted is OnError.LOG else logging.DEBUG
-        elif error.cause is not ErrorCause.EXPECTED and first:
+        if error.cause is not ErrorCause.EXPECTED and first:
             level = logging.ERROR
         logger.log(
             level,

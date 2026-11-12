@@ -262,3 +262,17 @@ def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
         None,
         "SPX",  # a futures code, not an option's
     ]
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "symbol"),
+    [(CRY, "BTCUSD"), (FX, "EURUSD"), (IDX, "SPX")],
+)
+def test_a_symbol_without_its_class_prefix_goes_on_the_wire_as_written(
+    asset_class: AssetClass, symbol: str
+) -> None:
+    # No spelling is derived from text that lacks Massive's prefix: `BTCUSD` is never cut into
+    # `X:CUSD`, nor `EURUSD` read as `C:EURUSD`. Massive answers the text as written.
+    assert wire_spellings(asset_class, symbol) == (symbol,)
+    if asset_class is not CRY:  # a crypto topic takes its split from Massive's list alone
+        assert ws_symbol(asset_class, symbol, {}) == symbol

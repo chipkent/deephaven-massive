@@ -24,7 +24,7 @@ __all__ = ["ARGUMENT_RULES"]
 ARGUMENT_RULES: Final = MappingProxyType(
     {
         "symbols": (
-            "Each symbol is Massive's ticker, spelled as Massive does:\n"
+            "Write each symbol as Massive's ticker:\n"
             "\n"
             "| Asset class | Ticker |\n"
             "| --- | --- |\n"
@@ -42,7 +42,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- Each symbol is sent as you write it, and Massive decides whether it names an "
             "instrument. A symbol Massive has no data for gives no rows.\n"
             "- A symbol that is empty or holds `,`, `/`, or `*` can't be sent: in text or a list "
-            "it raises `ValueError`, and in a table its row is skipped and logged.\n"
+            "it raises `ValueError`. In a table its row is skipped and logged by default, and "
+            "[`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.\n"
             "- To convert another source's tickers, such as Yahoo's `BRK-B`, use "
             "`dm.canonical_symbol`."
         ),

@@ -16,10 +16,9 @@ already trades for the next session.
   session per `session_end_date`, open from its first event (a pre-open or the open) to its
   last (the close).
 
-Only a single contract ticker is looked up (`symbols.is_futures_contract`). Every other futures
-ticker is a spread or combination (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`,
-`6A:XF:AUDUSD:Q6`): `/futures/v1/contracts` lists none of them, and Massive documents no grammar
-that names their legs. The schedules cannot place their rows, so they are misses (below).
+Every ticker is looked up as written, a combo (`GCQ6-GCJ7`, `BOB 02-01 U6`) included: Massive's
+contracts list says which product it belongs to, if any, and that product's schedule places its
+rows. A ticker the list does not hold, or whose product has no schedule, is a miss (below).
 
 A futures stream's verb asks for its contracts (`watch`) and waits, bounded, until their
 products and schedules are loaded (`wait_loaded`), before the stream subscribes, so its first
@@ -28,8 +27,8 @@ on the session's `symbol changes` worker (`_ingest/ws.py`).
 
 `correct` runs on the connection's flush thread and never waits: a row inside a loaded session
 gets that session's date, and a row in the gap between a close and the next loaded session's
-first event gets the next session's date. A row the calendar cannot place is a miss: a spread,
-a contract or product still loading (a contract a `dm.ALL` stream adds, or one whose wait
+first event gets the next session's date. A row the calendar cannot place is a miss: a contract
+or product still loading (a contract a `dm.ALL` stream adds, or one whose wait
 ran out), a row before the first or past the last loaded session, a
 contract Massive's contracts do not list, or a lookup that failed. A miss gets a null `Date`,
 never the 17:00 rule's: without the schedule the rule can be wrong on any weekday (a holiday
@@ -72,7 +71,6 @@ import pyarrow as pa
 
 from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
-from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, failure_text
 from deephaven_massive._ingest.rate_limits import bucket_of
@@ -268,10 +266,9 @@ class FuturesCalendar:
         table adds some, so their rows are usually placed from the first one.
 
         Args:
-            symbols: Canonical futures symbols, contracts or spreads; spreads are not looked
-                up.
+            symbols: Futures tickers, contracts or combos, each looked up as written.
         """
-        self._ask_contracts({symbol for symbol in symbols if is_futures_contract(symbol)})
+        self._ask_contracts(set(symbols))
 
     def wait_loaded(self, symbols: Iterable[str], timeout: float, *, stop: threading.Event) -> bool:
         """Wait until the products and schedules of some contracts are loaded, or failed.
@@ -283,8 +280,7 @@ class FuturesCalendar:
         the timeout. Never call it on a flush or update-graph thread, which must not wait.
 
         Args:
-            symbols: Canonical futures symbols; spreads are skipped, as they are never looked
-                up.
+            symbols: Futures tickers.
             timeout: The most seconds to wait.
             stop: Ends the wait early: set it, then call `wake()`. The waiting session's close
                 does so, while the calendar, which other sessions share, stays open.
@@ -294,7 +290,7 @@ class FuturesCalendar:
             and every product's schedule is loaded (or failed), or the calendar has closed;
             False when `timeout` passed first or `stop` ended the wait.
         """
-        contracts = {symbol for symbol in symbols if is_futures_contract(symbol)}
+        contracts = set(symbols)
 
         def settled() -> bool:
             if self._closed:
@@ -362,10 +358,6 @@ class FuturesCalendar:
                 fixed[row] = None
                 continue
             if day is None:
-                continue
-            if not is_futures_contract(symbol):
-                batch.misses[symbol, symbol, day, _SPREAD] = None
-                fixed[row] = None
                 continue
             fixed[row] = self._place(symbol, known, moment=moment, day=day, batch=batch)
         if batch.contracts:
@@ -710,9 +702,6 @@ _LOADING: Final = frozenset({_LOOKING_UP, _SCHEDULE_LOADING})
 waits for its contracts' schedules (`wait_loaded`), so these are the rows of contracts a
 reactive table or a `dm.ALL` stream adds, until their lookup ends; a lookup that fails logs a
 WARNING of its own (`_failure`)."""
-
-_SPREAD: Final = "a spread or combination is never looked up in Massive's schedules"
-"""The reason of a miss whose symbol is not a single contract (`symbols.is_futures_contract`)."""
 
 
 def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bool) -> str:

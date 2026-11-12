@@ -325,9 +325,17 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     assert "returned from /v2/reference/news for no symbol name none" in caplog.text
 
 
-def test_a_crypto_pair_massive_does_not_list_fails_alone(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_raise(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
 ) -> None:
+    # A pair Massive has no data for: no rows under LOG, its own failure under RAISE.
+    core = session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
     listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
     fake_rest.reply(TICKERS_PATH, Reply(envelope([listed])), Reply(envelope([])))
     last = {
@@ -338,9 +346,12 @@ def test_a_crypto_pair_massive_does_not_list_fails_alone(
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
     out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
-    nope = _failure(out["X:NOPEUSD"])
-    assert isinstance(nope.error, UnlistedPairError)
-    assert nope.kind is FailureKind.PERMANENT
+    if setting is dm.OnError.LOG:
+        assert _rows(out["X:NOPEUSD"]) == []
+    else:
+        nope = _failure(out["X:NOPEUSD"])
+        assert isinstance(nope.error, UnlistedPairError)
+        assert nope.kind is FailureKind.PERMANENT
     # No request was made for the pair the list does not hold.
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
         "/v1/last/crypto/BTC/USD"

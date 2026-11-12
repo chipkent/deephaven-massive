@@ -330,32 +330,24 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     follows(massive_session)
 
 
-@pytest.mark.parametrize("setting", [OnError.LOG, OnError.IGNORE, OnError.RAISE])
-def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
+def test_a_followed_fetch_s_unlisted_pair_raises_under_raise(
     *,
     live: Callable[..., Table],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    setting: OnError,
 ) -> None:
+    # Under LOG and IGNORE the read gives such a pair no rows instead, so it fails nothing.
     core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
+    strict = dataclasses.replace(core.config, unlisted_symbols=OnError.RAISE)
+    monkeypatch.setattr(core, "config", strict)
     error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
     rest.outcomes = {"DOT": SymbolFailure(error, FailureKind.PERMANENT)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
     assert isinstance(q, FetchQuery)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
-        if setting is OnError.RAISE:
-            with pytest.raises(UnlistedPairError, match="does not list it"):
-                q.fetch(wait=True)
-            rest.outcomes = {}  # the raised error's traceback holds the session
-            return
-        result = q.fetch(wait=True)
-    assert len(caplog.messages) == (1 if setting is OnError.LOG else 0)
-    massive_session.release(result)
-    follows(massive_session)
+    with pytest.raises(UnlistedPairError, match="does not list it"):
+        q.fetch(wait=True)
+    rest.outcomes = {}  # the raised error's traceback holds the session
 
 
 def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> None:

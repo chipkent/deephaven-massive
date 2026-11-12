@@ -552,5 +552,10 @@ still refuses a spelling Massive reads as another instrument (Yahoo's `VOD.L`, N
 only checked text, are removed, and so is `DatasetSpec.symbols_as_written`, since every dataset
 now keeps its symbols as written. A crypto pair that Massive's crypto ticker list does not
 hold is a pair Massive has no data for: it follows `unlisted_symbols` whether passed in code or
-in a table, so under `LOG`, the default, a stream or read skips it and gives no rows, where a pair
-passed in code used to raise. Supersedes 58's refusal and 66's `noncanonical_symbols`.
+in a table, so under `LOG`, the default, a stream or read skips it and gives no rows (a
+followed read shows it `DONE` with 0 rows), where a pair passed in code used to raise. A list
+the library cannot read at all affects every pair, so it fails the call or stream under any
+setting. A wire spelling is derived only from a symbol with Massive's prefix (`C:`, `X:`,
+`I:`); other text goes on the wire as written. The futures schedule calendar looks every ticker
+up in Massive's contracts list, combos included, instead of telling a contract by its shape.
+Supersedes 58's refusal and 66's `noncanonical_symbols`.

@@ -68,6 +68,7 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
+    UnlistedPairError,
     library_bug,
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
@@ -360,7 +361,9 @@ def read_rest_by_symbol(
         request: The normalized arguments.
         symbols: The canonical symbols, in the order the outcomes follow.
         units: The planned requests (`fetch_units`, `history_units`).
-        failed: The symbols that failed before any request, with their errors.
+        failed: The symbols that failed before any request, with their errors. A crypto pair
+            Massive's list does not hold is no failure under `unlisted_symbols` `LOG` and
+            `IGNORE`: it has no rows, as a ticker Massive answers with no data has.
         limit: The cap on each request's rows (`RestReader.read_each`).
         window: The `history()` window whose rows to keep, or None for `fetch()`.
         current: True when the pages are checked for a `DELAYED` label
@@ -396,7 +399,13 @@ def read_rest_by_symbol(
         patience.seconds,
     )
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
-    failures = dict(failed)
+    # A crypto pair Massive's list does not hold has no data: under LOG and IGNORE it is no
+    # failure, but a symbol with no rows, as a ticker Massive answers with no data is.
+    skips = reader.unlisted_symbols is not OnError.RAISE
+    unlisted = {s: e for s, e in failed.items() if skips and isinstance(e, UnlistedPairError)}
+    if unlisted:
+        reader.skip_unlisted(spec, unlisted, verb="read", setting=reader.unlisted_symbols)
+    failures = {s: e for s, e in failed.items() if s not in unlisted}
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = own_symbols(spec, planned.symbol, planned.query)
         if isinstance(result, MassiveError):

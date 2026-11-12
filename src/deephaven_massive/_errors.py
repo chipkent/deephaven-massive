@@ -477,6 +477,6 @@ class UnlistedPairError(PermanentError):
     (`RestReader.crypto_pair` in `_ingest/rest.py`). Such a pair is one Massive has
     no data for, and follows `MassiveConfig.unlisted_symbols`, whether passed in code or in a
     table: under `LOG` and `IGNORE`, `fetch()` and each `poll()` cycle leave it out, and a
-    followed read marks it `FAILED`; under `RAISE`, a `fetch()`, `poll()`, or followed table
-    fails with it, and `fetch(wait=True)` raises it.
+    followed read gives it no rows, `DONE`; under `RAISE`, a `fetch()`, `poll()`, or followed
+    table fails with it, and `fetch(wait=True)` raises it.
     """

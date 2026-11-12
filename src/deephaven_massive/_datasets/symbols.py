@@ -21,9 +21,7 @@ shows it. The library judges no ticker's shape; this module owns three things ar
   instrument's data with no error.
 - **The wire helpers**: `symbol_class` routes a symbol of a dataset that spans classes by its
   prefix, `forex_codes`, `read_forex_pair`, and `read_crypto_pair` split and join currency pairs
-  for the transports (`wire_symbols.py`), `is_futures_contract` tells the futures schedule
-  calendar which tickers its contracts list holds, and `option_roots` computes the `OptionRoot`
-  column.
+  for the transports (`wire_symbols.py`), and `option_roots` computes the `OptionRoot` column.
 
 | Class   | Massive's spelling                     | Converters also accept         |
 |---------|----------------------------------------|--------------------------------|
@@ -85,7 +83,6 @@ __all__ = [
     "check_symbols",
     "forex_codes",
     "is_forex_currency",
-    "is_futures_contract",
     "is_sendable",
     "option_roots",
     "read_crypto_pair",
@@ -167,9 +164,6 @@ _OCC: Final = re.compile(r"^O:[A-Z0-9]{1,6}\d{6}[CP]\d{8}$")
 """An OCC option symbol after `O:`: the root, `YYMMDD`, `C` or `P`, and the strike in
 thousandths of a dollar, eight digits. Only the converter reads it, to recognize the spelling
 it converts."""
-_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$")
-"""A single futures contract: a root of upper-case letters and digits, a month code, and a one-
-or two-digit year (`ESZ5`, `6CH5`, `0NGH39`)."""
 _INDEX_ROOT: Final = re.compile(r"^[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
 """An index root the converter prefixes with `I:`: letters and digits, with dotted parts."""
 _CRYPTO: Final = re.compile(r"^X:[A-Z0-9]{4,}$")
@@ -187,6 +181,9 @@ _OCC_TAIL: Final = 15
 
 UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
 """The classes whose tickers an option can be linked to: the ones an `underlying` takes."""
+
+_FOREX_PREFIX: Final = "C:"
+"""The prefix of Massive's forex tickers."""
 
 _CLASS_BY_PREFIX: Final[dict[str, AssetClass]] = {
     "O:": AssetClass.OPTIONS,
@@ -269,23 +266,6 @@ def is_sendable(text: str) -> bool:
         True for any non-empty text without `,`, `/`, or `*`.
     """
     return unsendable_reason(text) is None
-
-
-def is_futures_contract(text: str) -> bool:
-    """Tell whether text is a single futures contract ticker (`ESZ5`), not a combo.
-
-    The futures schedule calendar looks up only such tickers, by their product: a combo
-    (`type: 'combo'` in Massive's contracts list) names several legs, and the contracts list
-    holds none of them.
-
-    Args:
-        text: The text.
-
-    Returns:
-        True for a root of upper-case letters and digits, a month code, and a one- or two-digit
-        year.
-    """
-    return _FUTURE.fullmatch(text) is not None
 
 
 def symbol_class(symbol: str) -> AssetClass:
@@ -889,20 +869,23 @@ def check_symbols(symbols: str | Iterable[str] | AllSymbols) -> tuple[str, ...] 
 # --- the wire ------------------------------------------------------------------------------------
 
 
-def forex_codes(symbol: str) -> tuple[str, str]:
+def forex_codes(symbol: str) -> tuple[str, str] | None:
     """Split a forex ticker into its two ISO 4217 codes, by position.
 
     A forex ticker is `C:` and two three-letter codes joined, so, unlike a crypto pair, it
-    splits by position, with no lookup and no guess: `C:EURUSD` is `("EUR", "USD")`. Other text
-    splits the same way, with no check, and Massive answers what is sent.
+    splits by position, with no lookup and no guess: `C:EURUSD` is `("EUR", "USD")`. Only text
+    with Massive's `C:` prefix is split; any other text has no codes the library can derive,
+    and goes on the wire as written.
 
     Args:
         symbol: A forex ticker, such as `C:EURUSD`.
 
     Returns:
-        `(base, quote)`, such as `("EUR", "USD")`.
+        `(base, quote)`, such as `("EUR", "USD")`; None for text without the `C:` prefix.
     """
-    body = symbol.removeprefix("C:")
+    if not symbol.startswith(_FOREX_PREFIX):
+        return None
+    body = symbol.removeprefix(_FOREX_PREFIX)
     return body[:_CURRENCY_CODE_LENGTH], body[_CURRENCY_CODE_LENGTH:]
 
 

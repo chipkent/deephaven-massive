@@ -1740,9 +1740,9 @@ def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSessi
     calendar = ws_session.connections.futures_calendar()
     assert calendar is ws_session.connections.futures_calendar()
     assert calendar.wait_loaded(["ESZ5", "GCQ6-GCJ7"], 15.0, stop=threading.Event())
-    # A spread is not a contract: it is never looked up.
+    # A combo is looked up as written, as a contract is: Massive's list says what it is.
     sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
-    assert sent == [("ESZ5",)]
+    assert sent == [("ESZ5", "GCQ6-GCJ7")]
     ws_session.session.release(result)
 
 
@@ -1918,7 +1918,7 @@ def test_a_futures_watchlist_starts_each_lookup_while_an_earlier_change_waits(
     # The worker waits for one change's schedules at a time, but every added contract's
     # lookup starts as the change is reported, so lookups never queue behind a wait.
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
+    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))
     result = ws_session.query(FUTURES, watchlist).blink()
     ws_session.subscribed("T.GCQ6-GCJ7")
     schedules = GatedSchedules(monkeypatch)
@@ -1940,9 +1940,10 @@ def test_a_futures_removal_goes_through_the_worker_without_a_lookup(
     # Reported on this thread, so its path is measured on every Python: a removal starts no
     # lookup, and reaches the connection through the worker, in order with the additions.
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
+    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))
     result = ws_session.query(FUTURES, watchlist).blink()
     ws_session.subscribed("T.GCQ6-GCJ7")
+    lookups_before = len(ws_session.fetched)
     (stream_id,) = ws_session.connections.group.streams
     posted = threading.Event()
     changes: list[tuple[frozenset[str], frozenset[str]]] = []
@@ -1955,7 +1956,7 @@ def test_a_futures_removal_goes_through_the_worker_without_a_lookup(
     ws_session.connections._symbols_changed(stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}))
     assert posted.wait(TIMEOUT)
     assert changes == [(frozenset(), frozenset({"GCQ6-GCJ7"}))]
-    assert not any(path == "/futures/v1/contracts" for path, _ in ws_session.fetched)
+    assert len(ws_session.fetched) == lookups_before  # the removal looked nothing up
     ws_session.session.release(result)
 
 
@@ -2160,7 +2161,7 @@ def test_a_watchlist_pair_massive_does_not_list_is_skipped_and_shown(
     ws_session.session.release(result)
 
 
-def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_are_skipped(
+def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_fails_the_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
@@ -2169,7 +2170,8 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_a
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # Three pairs added during an outage: each try reads the list once for all of them, not
-    # once per pair, and after the last try every pair still unsplit is skipped.
+    # once per pair, and a list still unread after the last try fails the stream, since it
+    # affects every pair.
     monkeypatch.setattr(ws, "PAIR_RETRY_DELAYS", (0.0, 0.0))
     outage = dm.MassiveError("the list read timed out")
     added = ["X:ADAUSD", "X:DOTUSD", "X:SOLUSD"]
@@ -2181,11 +2183,13 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_a
     ws_session.subscribed("XT.BTC-USD")
     with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.ws"):
         watchlist.add(new_table([string_col("Symbol", added)]))
-        wait_for(lambda: stream_error(ws_session, dh_to_pylist) is not None)
-    assert stream_error(ws_session, dh_to_pylist) == (
-        "skipped crypto pairs 3 [X:ADAUSD, X:DOTUSD, X:SOLUSD], since Massive's crypto ticker "
-        "list could not be read (cannot stream 'X:ADAUSD': the list read timed out); a watchlist's "
-        "skipped pair is looked up again when its row is added again"
+        wait_for(lambda: failed_after_flush(ws_session, result))
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].endswith(
+        "cannot stream the symbol table's crypto pairs 3 [X:ADAUSD, X:DOTUSD, X:SOLUSD], since "
+        "Massive's crypto ticker list could not be read (cannot stream 'X:ADAUSD': the list "
+        "read timed out)"
     )
     # The first try and one retry after each delay, each stopped by its first failed read.
     tried = [symbol for symbol, _ in lookups(ws_session) if symbol != "X:BTCUSD"]
@@ -2196,14 +2200,14 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_the_pairs_a
         "[X:ADAUSD, X:DOTUSD, X:SOLUSD] again in 0 s"
     )
     assert retries == [retry, retry]
-    # Deleting a row and adding it again looks it up again, and it now splits.
-    watchlist.delete(new_table([string_col("Symbol", added)]))
-    wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
-    with ws_session.cond:
-        ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
-    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
-    ws_session.subscribed("XT.DOT-USD")
-    ws_session.session.release(result)
+
+
+def test_an_unreadable_pair_list_at_the_call_raises_under_log(ws_session: WsSession) -> None:
+    # A list that cannot be read affects every pair, so it is no pair Massive has no data for.
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
+    with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:DOTUSD': the list read timed"):
+        ws_session.query(CRYPTO, ["X:DOTUSD"]).blink()
+    assert ws_session.urls == []  # no connection opened
 
 
 def test_a_retry_tries_only_the_pairs_not_yet_split(ws_session: WsSession) -> None:

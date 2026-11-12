@@ -420,8 +420,9 @@ class Query:
         """Read the call-time symbols of a followed `history()` or `fetch()` now, as one read.
 
         The read of `wait=True`, on the caller thread. A crypto pair Massive's crypto ticker
-        list does not hold follows `MassiveConfig.unlisted_symbols`: under `RAISE` the call
-        raises its error, and under `IGNORE` the WARNING leaves it out.
+        list does not hold raises its error under `MassiveConfig.unlisted_symbols=RAISE`;
+        under `LOG` and `IGNORE` the read gives it no rows, as a ticker with no data, so it is
+        no failure here.
 
         Args:
             plan: How the symbols are read.
@@ -432,8 +433,7 @@ class Query:
             Each symbol's outcome, with when the read began and how long it took.
 
         Raises:
-            MassiveError: The first symbol's error, when every symbol failed and some failed
-                for another reason than a pair Massive's list does not hold; or, under
+            MassiveError: The first symbol's error, when every symbol failed; under
                 `unlisted_symbols=RAISE`, the first unlisted pair's. A failure of every symbol
                 alike (a rejected key, a closed session) propagates from the read.
         """
@@ -445,32 +445,24 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        unlisted = self._core.config.unlisted_symbols
         pairs = [
             name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
         ]
-        if pairs and unlisted is OnError.RAISE:
+        if pairs:  # only under RAISE: otherwise such a pair has no rows, and no failure
             raise failed[pairs[0]].error
-        # A pair Massive does not list has no data, so it fails no call: only other failures do.
-        others = [name for name in call_time if name in failed and name not in pairs]
-        if len(failed) == len(call_time) and others:
-            raise failed[others[0]].error
-        warned = {
-            name: outcome
-            for name, outcome in failed.items()
-            if not (unlisted is OnError.IGNORE and name in pairs)
-        }
-        if warned:
+        if len(failed) == len(call_time):
+            raise failed[call_time[0]].error
+        if failed:
             logger.warning(
                 "%s %s: %d of the %d symbols of the call failed and are left out of the "
                 "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
                 self._spec.name,
                 verb,
-                len(warned),
+                len(failed),
                 len(call_time),
                 "; ".join(
                     f"{name}: {failure_text(outcome.error)}"
-                    for name, outcome in list(warned.items())[:_FAILED_SHOWN]
+                    for name, outcome in list(failed.items())[:_FAILED_SHOWN]
                 ),
             )
         return FirstRead(outcomes, began_at, time.monotonic() - started)

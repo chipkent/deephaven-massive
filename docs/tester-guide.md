@@ -613,7 +613,8 @@ converted = dm.canonicalize_symbols(
 
 You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, and `BRK-B`, each on its own line: with
 no convention named, a stock ticker comes back as written. `converted` holds `BRK.B`, `AAPL`, and
-a null `Symbol` for `VOD.L`, Yahoo's London listing, which Massive would read as a share class.
+a null `Symbol` for `VOD.L`: Yahoo's dot marks a listing outside the US, and Massive's marks a
+share class.
 The debug log records a `WARNING` for it.
 
 #### 12. Check the debug log for your key
@@ -893,7 +894,7 @@ of `streams`:
    stream's `Symbols` lists it.
 2. Delete `X:SOLUSD`. Its row leaves `latest_trades` at once, and `Symbols` drops it.
 3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` among the
-   values it skips. The other pairs keep streaming.
+   pairs Massive's crypto ticker list doesn't hold. The other pairs keep streaming.
 4. Delete `btcusd` and add `X:BTCUSD`. The `Error` clears, and an `X:BTCUSD` row arrives with
    its first trade.
 5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and the `Error` names it. Delete

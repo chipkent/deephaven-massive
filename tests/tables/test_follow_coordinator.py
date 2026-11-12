@@ -1695,32 +1695,6 @@ def unlisted() -> SymbolFailure:
     return SymbolFailure(error, FailureKind.PERMANENT)
 
 
-@pytest.mark.parametrize(("setting", "warns"), [(dm.OnError.LOG, True), (dm.OnError.IGNORE, False)])
-def test_an_unlisted_pair_fails_alone_and_warns_only_under_log(
-    *,
-    watchlist: Callable[..., Table],
-    massive_session: dm.MassiveSession,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    setting: dm.OnError,
-    warns: bool,
-) -> None:
-    core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
-    script = Script(massive_session)
-    script.answers["DOT"] = [unlisted()]
-    with caplog.at_level(logging.DEBUG, logger=LOGGER):
-        result = follow(massive_session, watchlist("AAPL", "DOT"), script)
-        failed = wait_state(massive_session, "DOT", SymbolReadState.FAILED)
-        wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    assert "does not list it" in (failed.error or "")
-    assert not result.j_table.isFailed()
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert [("DOT failed" in m) for m in warnings] == ([True] if warns else [])
-    assert any("DOT failed" in r.getMessage() for r in caplog.records)  # DEBUG at least
-    massive_session.release(result)
-
-
 def test_an_unlisted_pair_fails_the_result_under_raise(
     *,
     watchlist: Callable[..., Table],

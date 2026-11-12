@@ -107,17 +107,19 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
     Args:
         asset_class: The dataset's class; every flat-file dataset has one (`DatasetSpec`
             refuses `ClassFromPrefix.ANY` with flat files).
-        symbol: A canonical symbol of the class.
+        symbol: A symbol of the class.
 
     Returns:
         The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
-        `symbol`.
+        `symbol`; only the symbol itself for one without its class's prefix (`BTCUSD` on the
+        crypto class), which goes on the wire as written.
     """
-    prefixes: tuple[str, ...]
-    if asset_class is AssetClass.FOREX:
-        base, quote = forex_codes(symbol)
-        prefixes = ("C:", "X:", "")
-    elif asset_class is AssetClass.CRYPTO:
+    codes = forex_codes(symbol) if asset_class is AssetClass.FOREX else None
+    if codes is not None:
+        base, quote = codes
+        prefixes: tuple[str, ...] = ("C:", "X:", "")
+        return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
+    if asset_class is AssetClass.CRYPTO and symbol.startswith("X:"):
         prefixes = ("X:", "")
         # The joined ticker does not say where the pair splits, so the file may separate it at
         # any point: every cut is looked for, and each reads back as this one symbol.
@@ -126,11 +128,9 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
         joined = tuple(f"{p}{body}" for p in prefixes)
         dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
         return (*joined, *dashed)
-    elif asset_class is AssetClass.INDICES:
-        return symbol, symbol[2:]
-    else:
-        return (symbol,)
-    return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
+    if asset_class is AssetClass.INDICES and symbol.startswith(_INDEX_PREFIX):
+        return symbol, symbol.removeprefix(_INDEX_PREFIX)
+    return (symbol,)
 
 
 def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[str, str]]) -> str:
@@ -163,8 +163,8 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
         # The `ticker` parameter of every forex channel is "{from}-{to}": see
         # vendor/massive/websocket/forex/quotes.md, aggregates-per-minute.md,
         # aggregates-per-second.md, and fair-market-value.md.
-        base, quote = forex_codes(symbol)
-        return f"{base}-{quote}"
+        codes = forex_codes(symbol)
+        return symbol if codes is None else f"{codes[0]}-{codes[1]}"
     if asset_class is AssetClass.CRYPTO:
         base, quote = pairs[symbol]
         return f"{base}-{quote}"
