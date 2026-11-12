@@ -122,12 +122,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, TypeVar, cast
-from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches_now
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
@@ -2804,7 +2802,7 @@ class RestEndpoints:
             used = [path for path in candidates if path is not None]
         else:
             used = [path.template for path, _ in reader.plan_fetch(spec, request, request.symbols)]
-        host = urlsplit(_massive.REST_BASE_URL).hostname
+        host = self._state.client.host
         paths = ", ".join(dict.fromkeys(used))
         return poll.open_poll(
             self._core,

@@ -2431,12 +2431,12 @@ def test_a_reread_is_not_made_for_a_broken_file(
     ("code", "message"),
     [
         # How botocore reads the HTML "Massive 404 Not Found" page of Massive's front end,
-        # which a wrong bucket meets.
+        # which a path it does not route meets.
         ("404", "Not Found"),
         ("NotFound", "Not Found"),
     ],
 )
-def test_a_404_that_is_not_a_missing_file_names_the_settings(
+def test_a_404_that_is_not_a_missing_file_fails_with_massive_s_answer(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -2444,7 +2444,7 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     code: str,
     message: str,
 ) -> None:
-    # A wrong bucket answers 404 for every key; it must not read as a run of holidays.
+    # A 404 for every key that is not S3's missing file must not read as a run of holidays.
     fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (

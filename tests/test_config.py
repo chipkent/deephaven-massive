@@ -816,6 +816,14 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url", "s3_bucket"])
+def test_the_removed_endpoint_settings_are_unknown(tmp_path: Path, name: str) -> None:
+    # Massive's endpoints are not settings, so a settings file that names one is refused.
+    message = _refused(tmp_path, f"{name}: https://example.com\n")
+    assert message.startswith(f", line 1, column 1: unknown setting '{name}'")
+    assert name not in {f.name for f in dataclasses.fields(MassiveConfig)}
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

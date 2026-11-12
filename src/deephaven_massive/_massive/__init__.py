@@ -32,14 +32,13 @@ Interface:
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
       dataset's file for a day lives.
-    - `S3_ENDPOINT_URL`, `S3_BUCKET`: Massive's flat-file endpoint and bucket, which the
-      library reads. They are not settings; a test points the library at a fake server by
-      replacing them here, before the session's first flat-file read.
+    - `S3_ENDPOINT_URL`, `S3_BUCKET`: Massive's flat-file endpoint and bucket, which every
+      session's flat-file client reads. They are not settings.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
-    - `REST_BASE_URL`: Massive's REST API, which the library calls. It is not a setting; a
-      test points the library at a fake server by replacing it here, before the session is
-      created.
+    - `REST_BASE_URL`: Massive's REST API, which the library calls. It is not a setting.
+      Each session reads it once, when it is created, for its REST client and its rate-limit
+      lease.
     - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
       start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
       API key, and a snapshot of one subscription's state for diagnostics.
