@@ -611,11 +611,10 @@ converted = dm.canonicalize_symbols(
 )
 ```
 
-You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, and `BRK-B`, each on its own line: with
+You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, and `BRK-B`, each on its own line. With
 no convention named, a stock ticker comes back as written. `converted` holds `BRK.B`, `AAPL`, and
-a null `Symbol` for `VOD.L`: Yahoo's dot marks a listing outside the US, and Massive's marks a
-share class.
-The debug log records a `WARNING` for `VOD.L`.
+a null `Symbol` for `VOD.L`, since Yahoo's dot marks a listing outside the US and Massive's marks
+a share class. The debug log records a `WARNING` for `VOD.L`.
 
 #### 12. Check the debug log for your key
 

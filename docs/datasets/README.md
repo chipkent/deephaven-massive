@@ -229,9 +229,9 @@ Write each symbol as Massive's ticker:
 - A live table works as a watchlist. Symbols you add are read, and symbols you delete stop being read.
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
 - Each symbol is sent as you write it, and Massive decides whether it names an instrument. A symbol Massive has no data for gives no rows.
-- A crypto stream, and a pair's last trade or daily open and close, take the pair's two currencies from Massive's crypto ticker list. A pair the list doesn't hold gives no rows there, as [`unlisted_symbols`](../configuration.md#unlisted_symbols) says.
+- A crypto stream, last trade, or daily open and close reads only pairs on Massive's crypto ticker list. By default, any other pair gives no rows; [`unlisted_symbols`](../configuration.md#unlisted_symbols) changes that.
 - A symbol that is empty or holds `,` or `*` can't be sent: in text or a list it raises `ValueError`. In a table its row is skipped and logged by default, and [`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.
-- To convert another source's tickers, such as Yahoo's `BRK-B`, use `dm.canonical_symbol`, naming the source's `convention` for a stock.
+- To convert another source's tickers, use `dm.canonical_symbol`. For a stock, also pass the source's convention: `convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`.
 
 <a id="start"></a>
 

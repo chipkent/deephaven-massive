@@ -282,8 +282,8 @@ Set `raise` when a stream must not run without every pair you asked for.
   for a pair in a table. A live table fails when such a pair is added later.
 
 It applies to streams and to calls for a pair's last trade or daily open and close.
-A pair in another spelling, such as `BTC-USD` for `X:BTCUSD`, isn't on the list
-either; `dm.canonical_symbol_crypto` converts it.
+To convert another spelling, such as `BTC-USD`, to Massive's `X:BTCUSD`, use
+`dm.canonical_symbol_crypto`.
 
 Under `log` or `ignore`, a skipped pair gives no rows, and the
 other pairs are read as usual. A stream lists the skipped pairs in its `m.streams()`
@@ -291,7 +291,7 @@ row's `Error`, and so does a `poll()`. A `fetch()` of a live table shows the pai
 `DONE` with 0 rows in `m.symbol_reads()`.
 
 If the library can't read Massive's crypto ticker list, the stream or read fails
-under any setting, as it does when any request fails.
+under any setting.
 
 #### unreadable_symbols
 
