@@ -244,13 +244,14 @@ class FetchQuery(Query):
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
                 - no row of a table of symbols can be sent.
             AuthenticationError: With `wait=True`, if Massive rejects your API key. For
-                `m.crypto.last_trade` and `m.crypto.daily_open_close`, also at the call, if Massive
-                rejects it while the call reads Massive's list of crypto tickers.
+                `m.crypto.last_trade` and `m.crypto.daily_open_close` of pairs passed in code under
+                `unlisted_symbols=dm.OnError.RAISE`, also at the call, if Massive rejects it while
+                the call reads Massive's list of crypto tickers.
             EntitlementError: With `wait=True`, if your plan doesn't include the data, or Massive
                 delays current data whose subscription isn't in
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
-                For those two crypto datasets, also at the call, if your plan doesn't include
-                Massive's list of crypto tickers.
+                For those two crypto datasets, under the same condition, also at the call, if your
+                plan doesn't include Massive's list of crypto tickers.
             MassiveError: At the call, if:
                 - the session is closed;
                 - for those two crypto datasets, under `unlisted_symbols=dm.OnError.RAISE`,

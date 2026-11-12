@@ -251,8 +251,9 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
-                  can't be read, or lacks a crypto pair.
+                - Massive's list of crypto tickers can't be read, for crypto pairs passed as a
+                  `str`, a list, or a static table;
+                - under `unlisted_symbols=dm.OnError.RAISE`, that list lacks a crypto pair.
         """
         return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
 
@@ -293,8 +294,9 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
-                  can't be read, or lacks a crypto pair.
+                - Massive's list of crypto tickers can't be read, for crypto pairs passed as a
+                  `str`, a list, or a static table;
+                - under `unlisted_symbols=dm.OnError.RAISE`, that list lacks a crypto pair.
         """
         return self._stream(
             blink_to_append_only, self._stream_request("append_only"), verb="append_only"
@@ -341,8 +343,9 @@ class StreamQuery(Query):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
-                  can't be read, or lacks a crypto pair.
+                - Massive's list of crypto tickers can't be read, for crypto pairs passed as a
+                  `str`, a list, or a static table;
+                - under `unlisted_symbols=dm.OnError.RAISE`, that list lacks a crypto pair.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -460,8 +463,9 @@ class SymbolStreamQuery(StreamQuery):
             MassiveError: If:
                 - the session is closed;
                 - the stream fails while it opens;
-                - under `unlisted_symbols=dm.OnError.RAISE`, Massive's list of crypto tickers
-                  can't be read, or lacks a crypto pair.
+                - Massive's list of crypto tickers can't be read, for crypto pairs passed as a
+                  `str`, a list, or a static table;
+                - under `unlisted_symbols=dm.OnError.RAISE`, that list lacks a crypto pair.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request("last_by")
