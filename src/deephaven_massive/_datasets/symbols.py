@@ -7,7 +7,7 @@ shows it. The library judges no ticker's shape; this module owns three things ar
 - **The argument.** `check_symbols` reads a `symbols` argument other than a table (`dm.ALL`, one
   `str`, or a sequence of them) and `check_symbol` one value of it. A value of the wrong Python
   type raises `TypeError`, and a value the library cannot put in a request raises `ValueError`
-  (`is_sendable`): empty text, or text holding `,`, `/`, or `*`, each of which Massive's
+  (`is_sendable`): empty text, or text holding `,` or `*`, each of which Massive's
   requests read as a separator or a wildcard instead of a ticker.
 - **The converters**, the public way to turn another spelling into Massive's:
   `canonical_symbol(text, asset_class, convention=)` for Python code, and one function per class
@@ -195,8 +195,6 @@ _CLASS_BY_PREFIX: Final[dict[str, AssetClass]] = {
 _UNSENDABLE: Final[dict[str, str]] = {
     ",": "Massive's list parameters and WebSocket subscriptions split on commas, so it would "
     "be sent as several tickers",
-    "/": "Massive answers HTTP 404 for a '/' inside a path segment, so it cannot be sent "
-    "in a URL path",
     "*": "Massive's WebSocket reads '*' as every ticker, so it would subscribe the whole market",
 }
 """The characters no symbol can be sent with, each with the reason a message gives."""
@@ -263,7 +261,7 @@ def is_sendable(text: str) -> bool:
         text: The symbol.
 
     Returns:
-        True for any non-empty text without `,`, `/`, or `*`.
+        True for any non-empty text without `,` or `*`.
     """
     return unsendable_reason(text) is None
 

@@ -440,7 +440,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -471,7 +471,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -506,7 +506,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -536,7 +536,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -588,7 +588,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `timespan` is `SESSION`, or `multiplier` is below 1;
-                - `symbols` is None or empty, or holds an empty ticker or one with `,`, `/`, or `*`.
+                - `symbols` is None or empty, or holds an empty ticker or one with `,` or `*`.
 
         Example:
             ::
@@ -626,7 +626,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `adjusted` isn't a `bool`, or `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -665,7 +665,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -693,7 +693,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -721,7 +721,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` isn't one of the accepted forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -751,7 +751,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 forms.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -824,7 +824,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column;
                 - `date` is a `datetime`, another time, or text that isn't a date.
 
@@ -880,7 +880,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `symbols` is `dm.ALL` or empty, or holds an empty ticker or one with `,`, `/`, or
+                - `symbols` is `dm.ALL` or empty, or holds an empty ticker or one with `,` or
                   `*`;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
@@ -941,7 +941,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -999,7 +999,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date, or `end` is before `start`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1056,7 +1056,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -1114,7 +1114,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -1169,7 +1169,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 

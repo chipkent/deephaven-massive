@@ -4707,3 +4707,14 @@ def test_page_recency_passes_a_listed_subscription_and_collects_unknown_labels()
 def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
     found = _recency([{"timeframe": "DELAYED"}, {"ticker": "AAPL"}])
     assert found == rest._PageRecency(delayed=False, real_time=False, refused={}, unknown=())
+
+
+def test_a_path_ticker_holding_a_slash_is_sent_encoded_and_massive_answers_it(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The `/` stays inside the ticker's segment, so no other endpoint is reached, and
+    # Massive's 404 on the symbol's first request gives no rows.
+    fake_rest.reply("/v3/trades/BRK%2FB", Reply(envelope(status="NOT_FOUND"), status=404))
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["BRK/B"])
+    assert out == []
+    assert [r.target.partition("?")[0] for r in fake_rest.requests] == ["/v3/trades/BRK%2FB"]

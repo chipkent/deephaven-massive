@@ -196,8 +196,8 @@ def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
         channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
-    with pytest.raises(ValueError, match=r"^cannot send the symbol 'EUR/USD' to Massive"):
-        build(massive_session, fx, symbols="EUR/USD")
+    with pytest.raises(ValueError, match=r"^cannot send the symbol 'EUR,USD' to Massive"):
+        build(massive_session, fx, symbols="EUR,USD")
     # Every ticker is sent as written, whatever its shape: Massive answers it.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
     assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("aapl",)

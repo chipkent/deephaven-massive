@@ -379,7 +379,6 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        ("EUR/USD", "cannot send the symbol 'EUR/USD'"),
         (["C:EURUSD", "C:GBPUSD,C:USDJPY"], "cannot send the symbol 'C:GBPUSD,C:USDJPY'"),
         ("", "cannot send the symbol ''"),
         ([], "no symbols"),

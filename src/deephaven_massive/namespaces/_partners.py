@@ -470,7 +470,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -523,7 +523,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -567,7 +567,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, `dm.ALL`, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
@@ -616,7 +616,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -669,7 +669,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -723,7 +723,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -827,7 +827,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date or a time with a time zone;
                 - the range ends before it starts;
                 - `limit` isn't positive;
@@ -910,7 +910,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -962,7 +962,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1015,7 +1015,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1067,7 +1067,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1118,7 +1118,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 

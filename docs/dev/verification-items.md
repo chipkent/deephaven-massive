@@ -213,6 +213,10 @@ settles it.
 - **106.** What Massive answers to a range that starts after now. Refused when `end` is left out
   until read. Settled by `tests/datasets/test_dates_integration.py` (Stocks Basic), which sends
   AAPL's day bars from 10 to 20 days ahead.
+- **115.** What a path that takes the ticker answers for one holding `/`, sent as `%2F`
+  (`BRK%2FB`). Sent as written, and read as no rows on an empty 200 or a 404, until read. Verified
+  by `tests/namespaces/test_stocks_integration.py` (Stocks Basic); rows there would be silent
+  wrong data, and a refusal would return with that evidence.
 
 ## Settled
 

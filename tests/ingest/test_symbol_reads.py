@@ -358,6 +358,17 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     ]
 
 
+def test_a_crypto_ticker_list_that_cannot_be_read_fails_the_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The list affects every pair, so it fails the read rather than one pair after another.
+    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply(TICKERS_PATH, refusal)
+    with pytest.raises(EntitlementError):
+        _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
+    assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == []
+
+
 def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

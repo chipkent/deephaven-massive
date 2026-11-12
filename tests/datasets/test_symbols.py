@@ -65,6 +65,7 @@ SENT_AS_WRITTEN = [
     "EURUSD=X",
     "X:BTCUSD",
     "BTC-USD",
+    "EUR/USD",
     "X:BTC",
     "ERIC B",
     "7203",
@@ -87,7 +88,6 @@ def test_a_symbol_is_sent_as_written_whatever_its_shape(text: str) -> None:
     [
         ("", "an empty symbol names no ticker"),
         ("AAPL,MSFT", "split on commas, so it would be sent as several tickers"),
-        ("EUR/USD", "HTTP 404 for a '/' inside a path segment"),
         ("*", "reads '\\*' as every ticker"),
     ],
 )

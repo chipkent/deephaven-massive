@@ -20,10 +20,10 @@ from the symbol (`SPXW`, `AAPL1`). The admin messages name none: Massive sends t
 so the stream subscribes every exchange (`AD.*`), its rows have no `Symbol`, and their text is
 kept as OPRA sends it. The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
-contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
+contract to as `Underlying`, Massive's ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
-of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
-too, or a table of them in a `Symbol` column (`value_table`), each read as if passed alone.
+of it. Neither column is ever mapped to the other. `underlying=` takes a ticker, sent
+as written, or a table of them in a `Symbol` column (`value_table`), each read as if passed alone.
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
@@ -439,7 +439,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -473,7 +473,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -509,7 +509,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -555,7 +555,7 @@ class OptionsNamespace(Namespace):
             ValueError: If:
                 - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -595,7 +595,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -635,7 +635,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -708,8 +708,8 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL`, has another class's prefix, is empty, or holds `,`,
-                  `/`, or `*`;
+                - `underlying` is `dm.ALL`, has another class's prefix, is empty, or holds `,`
+                  or `*`;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -780,7 +780,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit;
@@ -862,9 +862,9 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker in `symbols` is empty or holds `,`, `/`, or `*`;
+                - a ticker in `symbols` is empty or holds `,` or `*`;
                 - a table has no `Symbol` column;
-                - `underlying` is empty or holds `,`, `/`, or `*`;
+                - `underlying` is empty or holds `,` or `*`;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -927,7 +927,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column;
                 - `date` is a `datetime` or isn't a date.
 

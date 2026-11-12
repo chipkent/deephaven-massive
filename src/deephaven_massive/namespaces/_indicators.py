@@ -319,7 +319,7 @@ class IndicatorsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - the timespan is `SECOND` or `SESSION`;
                 - a window isn't positive;
                 - a bound is a time without a time zone, or the range ends before it starts;
@@ -393,7 +393,7 @@ class IndicatorsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - the timespan is `SECOND` or `SESSION`;
                 - a window isn't positive;
                 - a bound is a time without a time zone, or the range ends before it starts;
@@ -466,7 +466,7 @@ class IndicatorsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - the timespan is `SECOND` or `SESSION`;
                 - a window isn't positive;
                 - a bound is a time without a time zone, or the range ends before it starts;
@@ -544,7 +544,7 @@ class IndicatorsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - the timespan is `SECOND` or `SESSION`;
                 - a window isn't positive;
                 - a bound is a time without a time zone, or the range ends before it starts;

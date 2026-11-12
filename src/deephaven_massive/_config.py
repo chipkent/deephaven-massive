@@ -346,10 +346,10 @@ class MassiveConfig:
 
             Change it only with `s3_endpoint_url`.
         unsendable_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value that can't be sent: an empty value, or one with `,`, `/`, or `*`. Defaults
+            a value that can't be sent: an empty value, or one with `,` or `*`. Defaults
             to `LOG`.
 
-            Set `dm.OnError.RAISE` to stop at the first empty value or one with `,`, `/`, or
+            Set `dm.OnError.RAISE` to stop at the first empty value or one with `,` or
             `*`. Every other value is sent as written.
 
             - `dm.OnError.LOG` skips the row and logs a warning naming the value.

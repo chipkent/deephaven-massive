@@ -540,9 +540,10 @@ symbol pattern refuses or rewrites a value Massive could answer. A ticker Massiv
 for is no error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it
 in `m.symbol_reads()`. The library refuses only a value of the wrong Python type, and one no
 request can carry: an empty symbol, or one holding `,` (Massive's list parameters and WebSocket
-subscriptions split on it), `/` (Massive answers HTTP 404 for it inside a path segment), or `*`
-(the WebSocket's every-ticker wildcard). Such a value raises `ValueError` in code, and a table's
-row follows `MassiveConfig.unsendable_symbols`, which replaces `noncanonical_symbols`. A row's
+subscriptions split on it) or `*` (the WebSocket's every-ticker wildcard). Such a value raises
+`ValueError` in code, and a table's row follows `MassiveConfig.unsendable_symbols`, which replaces
+`noncanonical_symbols`. A `/` is sent, percent-encoded so it stays in its path segment, and
+Massive answers it (verification item 115). A row's
 ticker is kept as Massive writes it, except the spellings a transport writes differently from
 the REST ticker (`EUR/USD` in WebSocket forex frames), which are read back into it. The
 converters convert the spellings they know and return other text unchanged; a stock convention

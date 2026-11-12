@@ -341,7 +341,7 @@ class FuturesNamespace(Namespace):
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -379,7 +379,7 @@ class FuturesNamespace(Namespace):
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -429,7 +429,7 @@ class FuturesNamespace(Namespace):
                 - `timespan` is `DAY`; the message names `SESSION`;
                 - `venues` is empty, or `multiplier` is below 1;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -488,7 +488,7 @@ class FuturesNamespace(Namespace):
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
                 a `str`, a sequence of `str`, or a table.
             ValueError: If:
-                - `symbols` holds None, or a ticker that is empty or holds `,`, `/`, or `*`;
+                - `symbols` holds None, or a ticker that is empty or holds `,` or `*`;
                 - `order` is given without `sort`;
                 - `product_code` is empty, or a table without a `ProductCode` column;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -555,7 +555,7 @@ class FuturesNamespace(Namespace):
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, `product_code` isn't a
                 `str`, a sequence of `str`, or a table, or `symbols` or `as_of` is of another type.
             ValueError: If:
-                - `symbols` is `dm.ALL`, or holds an empty ticker or one with `,`, `/`, or `*`;
+                - `symbols` is `dm.ALL`, or holds an empty ticker or one with `,` or `*`;
                 - `as_of` is a `datetime` or isn't a date;
                 - `order` is given without `sort`;
                 - `product_code` is empty, or a table without a `ProductCode` column;

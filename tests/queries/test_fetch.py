@@ -633,3 +633,28 @@ def test_poll_reads_a_table_of_values_at_its_call(
     assert verb == "poll"
     assert request.value_table is not None
     assert request.value_table.table is codes
+
+
+def test_a_followed_fetch_of_a_pair_massive_does_not_list_ends_done_with_no_rows(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Through the real REST transport: Massive's crypto ticker list holds only BTC-USD, so
+    # DOT-USD has no data, as a ticker Massive answers with nothing has: DONE, with no rows.
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([listed])), Reply(envelope([])))
+    last = {"status": "OK", "symbol": "BTC-USD", "last": {"price": 1.0, "timestamp": 1741000000000}}
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    result = rest_session.crypto.last_trade(live("X:BTCUSD", "X:DOTUSD")).fetch(wait=True)
+    assert [r["Symbol"] for r in dh_to_pylist(result)] == ["X:BTCUSD"]
+
+    def states() -> dict[str, tuple[str, int]]:
+        rows = dh_to_pylist(rest_session.symbol_reads())
+        return {r["Symbol"]: (r["State"], r["Rows"]) for r in rows}
+
+    until(lambda: states().get("X:DOTUSD") == ("DONE", 0))
+    rest_session.release(result)
+    follows(rest_session)

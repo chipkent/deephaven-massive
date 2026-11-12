@@ -416,6 +416,13 @@ class FuturesCalendar:
             key, why = self._unloaded(symbol, product, known=known, batch=batch)
             batch.misses[symbol, key, day, why] = None
             return None
+        if not sessions:
+            # Massive's schedules list no session for the product (a combo's, say): the daily
+            # reload of every loaded schedule picks up any it adds, so a miss asks for none.
+            batch.misses[
+                symbol, product, day, f"its loaded schedule ({product}) holds no session"
+            ] = None
+            return None
         opens = batch.opens.get(product)
         if opens is None:
             opens = batch.opens[product] = [s.opens for s in sessions]
@@ -712,14 +719,12 @@ def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bo
 
     Args:
         product: The product.
-        sessions: Its loaded sessions, oldest first; possibly none.
+        sessions: Its loaded sessions, oldest first; at least one.
         before: True for a row before the first session, False for one after the last.
 
     Returns:
         The reason, such as `its loaded schedule (ES) ends with the session of 2024-04-01`.
     """
-    if not sessions:
-        return f"its loaded schedule ({product}) holds no session"
     if before:
         return f"its loaded schedule ({product}) begins with the session of {sessions[0].day}"
     return f"its loaded schedule ({product}) ends with the session of {sessions[-1].day}"

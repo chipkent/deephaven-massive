@@ -329,7 +329,7 @@ class ReferenceNamespace(Namespace):
             TypeError: If `active` isn't a `bool`, or another argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `as_of` is a time instead of a date;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -386,7 +386,7 @@ class ReferenceNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `as_of` is a time instead of a date.
 
         Example:
@@ -462,7 +462,7 @@ class ReferenceNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - `types` is empty.
 
         Example:
@@ -496,7 +496,7 @@ class ReferenceNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or `dm.ALL`;
-                - a ticker is empty or holds `,`, `/`, or `*`.
+                - a ticker is empty or holds `,` or `*`.
 
         Example:
             ::
@@ -548,7 +548,7 @@ class ReferenceNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,`, `/`, or `*`;
+                - a ticker is empty or holds `,` or `*`;
                 - a bound isn't a date or a time with a time zone;
                 - the range ends before it starts;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

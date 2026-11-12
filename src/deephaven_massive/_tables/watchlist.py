@@ -6,8 +6,8 @@ chain's underlyings in `Symbol`, futures product codes in `ProductCode`) is read
 same way, through a rule made by `SymbolRowRule.for_values`. Each row is sent as written, as
 `symbols=` is (`check_symbol` in `_datasets/symbols.py`), and Massive answers it: the library never
 rewrites a watchlist, so what the table says is what the stream subscribes and what `last_by()`
-matches. A null row is ignored. A row no request can carry (`is_sendable`: empty, or holding `,`,
-`/`, or `*`) is never subscribed or requested; what else it does follows the session's
+matches. A null row is ignored. A row no request can carry (`is_sendable`: empty, or holding `,`
+or `*`) is never subscribed or requested; what else it does follows the session's
 `MassiveConfig.unsendable_symbols`, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
@@ -213,7 +213,7 @@ class SymbolRowRule:
             symbol: The row's value, never null.
 
         Returns:
-            True for any non-empty value without `,`, `/`, or `*`.
+            True for any non-empty value without `,` or `*`.
         """
         return is_sendable(symbol)
 

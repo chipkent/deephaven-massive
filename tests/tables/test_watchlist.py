@@ -124,11 +124,11 @@ def test_read_symbols_refuses_a_failed_table(
 
 
 def test_read_symbols_refuses_a_row_no_request_can_carry(dh_exec_ctx: object) -> None:
-    table = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
+    table = new_table([string_col("Symbol", ["C:EURUSD", "EUR,USD"])])
     with pytest.raises(
         ValueError,
-        match=r"^forex\.quotes: a symbol table holds 'EUR/USD', which no request to Massive can "
-        r"carry \('EUR/USD' holds '/': .*\)\. Fix or delete the row$",
+        match=r"^forex\.quotes: a symbol table holds 'EUR,USD', which no request to Massive can "
+        r"carry \('EUR,USD' holds ',': .*\)\. Fix or delete the row$",
     ):
         read_symbols(rule(), table, stream_id=7)
 
@@ -136,7 +136,7 @@ def test_read_symbols_refuses_a_row_no_request_can_carry(dh_exec_ctx: object) ->
 def test_a_skipped_row_read_before_any_stream_names_the_call(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bad = "EUR/USD call"  # a value of its own: each value is logged once per dataset and process
+    bad = "EUR,USD call"  # a value of its own: each value is logged once per dataset and process
     table = new_table([string_col("Symbol", [bad])])
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         read_symbols(rule(mode=OnError.LOG), table, stream_id=None)
@@ -149,7 +149,7 @@ def test_read_symbols_skips_a_row_no_request_can_carry(
     dh_exec_ctx: object, *, caplog: pytest.LogCaptureFixture, mode: OnError, level: str
 ) -> None:
     # A value of its own per mode: each value is logged once per dataset and process.
-    bad = f"EUR/USD {mode.value}"
+    bad = f"EUR,USD {mode.value}"
     table = new_table([string_col("Symbol", ["C:EURUSD", bad, bad, None])])
     with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
         assert read_symbols(rule(mode=mode), table, stream_id=7) == CurrentSymbols(
@@ -246,11 +246,11 @@ def test_a_watch_refuses_a_late_row_no_request_can_carry(
     watch, seen, refused, skipped = watching(watchlist)
     watch.start()
     watchlist.add(
-        new_table([int_col("Key", [1, 2]), string_col("Symbol", ["EUR/USD", "C:GBPUSD"])])
+        new_table([int_col("Key", [1, 2]), string_col("Symbol", ["EUR,USD", "C:GBPUSD"])])
     )
     wait_for(lambda: len(seen) == 1 and len(refused) == 1)
     assert seen == [(frozenset({"C:GBPUSD"}), frozenset())]  # the bad row is never subscribed
-    assert refused == [f"forex.quotes: {invalid_row_message('EUR/USD')}"]
+    assert refused == [f"forex.quotes: {invalid_row_message('EUR,USD')}"]
     watchlist.delete(new_table([int_col("Key", [1])]))  # removing it changes nothing
     watchlist.add(new_table([int_col("Key", [3]), string_col("Symbol", ["C:USDJPY"])]))
     wait_for(lambda: len(seen) == 2)
@@ -263,21 +263,21 @@ def test_a_watch_skips_a_late_row_no_request_can_carry(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
     watchlist = dh_input_table({"Key": dtypes.int32, "Symbol": dtypes.string}, key_cols=["Key"])
-    watchlist.add(new_table([int_col("Key", [1]), string_col("Symbol", ["eur/usd"])]))
+    watchlist.add(new_table([int_col("Key", [1]), string_col("Symbol", ["eur,usd"])]))
     watch, seen, refused, skipped = watching(watchlist, OnError.LOG)
     watch.start()  # the replay reports the skipped row
     assert seen == []
-    assert skipped == [("eur/usd",)]
+    assert skipped == [("eur,usd",)]
     watchlist.add(
-        new_table([int_col("Key", [2, 3]), string_col("Symbol", ["EUR/USD", "C:GBPUSD"])])
+        new_table([int_col("Key", [2, 3]), string_col("Symbol", ["EUR,USD", "C:GBPUSD"])])
     )
     wait_for(lambda: len(seen) == 1 and len(skipped) == 2)
     assert seen == [(frozenset({"C:GBPUSD"}), frozenset())]  # bad rows are never subscribed
-    assert skipped[1] == ("EUR/USD", "eur/usd")
+    assert skipped[1] == ("EUR,USD", "eur,usd")
     watchlist.add(new_table([int_col("Key", [2]), string_col("Symbol", ["C:EURUSD"])]))  # fixed
     wait_for(lambda: len(seen) == 2 and len(skipped) == 3)
     assert seen[1] == (frozenset({"C:EURUSD"}), frozenset())
-    assert skipped[2] == ("eur/usd",)
+    assert skipped[2] == ("eur,usd",)
     watchlist.delete(new_table([int_col("Key", [1])]))  # the last bad row goes
     wait_for(lambda: len(skipped) == 4)
     assert skipped[3] == ()
@@ -438,7 +438,7 @@ _UPDATES = [
     _Update(added=["A", "A", "B", "b,c"]),
     _Update(removed=["A", "b,c"]),  # one of A's two rows remains; the bad row leaves
     _Update(modified=["C"], modified_prev=["A"]),  # A's last row now holds C
-    _Update(modified=["x/btc"], modified_prev=["C"]),  # C's row now holds a bad symbol
+    _Update(modified=["x,btc"], modified_prev=["C"]),  # C's row now holds a bad symbol
 ]
 
 
@@ -462,7 +462,7 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
     ]
     assert refused == [
         f"snapshots: {invalid_row_message('b,c')}",
-        f"snapshots: {invalid_row_message('x/btc')}",
+        f"snapshots: {invalid_row_message('x,btc')}",
     ]
     assert skipped == []
 
@@ -485,7 +485,7 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
         (frozenset({"C"}), frozenset({"A"})),
         (frozenset(), frozenset({"C"})),
     ]
-    assert skipped == [("b,c",), (), ("x/btc",)]  # only when the set of skipped values changes
+    assert skipped == [("b,c",), (), ("x,btc",)]  # only when the set of skipped values changes
     assert refused == []
 
 

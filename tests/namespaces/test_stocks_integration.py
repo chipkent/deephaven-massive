@@ -1050,3 +1050,41 @@ def test_past_stock_data_is_served_with_the_default_config(
         session.close()
     assert previous.size == 1, "previous_day_bar returned no row"
     assert day.size == 1, f"daily_open_close returned no row for {previous_trading_day}"
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.verifies("115")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_a_path_ticker_holding_a_slash_gets_no_data(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What a path that takes the ticker answers for one holding `/`, sent as `%2F`.
+
+    Requests `BRK/B`, a Yahoo-style spelling, from `/prev`, `/v3/trades`, and the ticker
+    details, sent as `BRK%2FB` so the `/` stays in its segment, and records each answer's
+    status and row count. Passes when each answer is an empty 200 or a 404, which the library
+    reads as no rows. Rows would mean the `/` reached another endpoint or ticker: silent wrong
+    data, which a refusal would then have to prevent.
+    """
+    ticker = "BRK/B"
+    requests = (
+        ("/v2/aggs/ticker/{stocksTicker}/prev", {"stocksTicker": ticker}),
+        ("/v3/trades/{stockTicker}", {"stockTicker": ticker}),
+        ("/v3/reference/tickers/{ticker}", {"ticker": ticker}),
+    )
+    unexpected = []
+    for template, params in requests:
+        # Ticker details are reference data of no subscription; the rest are stocks data.
+        bucket = "other" if template.startswith("/v3/reference/") else "stocks"
+        try:
+            page = live_rest.get(source(Transport.REST, template), params, {}, bucket=bucket)
+        except WireError as error:
+            evidence(f"{template}: HTTP {error.status} {error.message[:120]}")
+            if error.status != 404:
+                unexpected.append(f"{template}: HTTP {error.status}")
+        else:
+            evidence(f"{template}: HTTP 200, status {page.status}, {len(page.rows)} rows")
+            if page.rows:
+                unexpected.append(f"{template}: {len(page.rows)} rows")
+    assert not unexpected, f"answers other than an empty 200 or a 404: {unexpected}"

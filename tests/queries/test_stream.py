@@ -249,12 +249,12 @@ def test_a_live_verb_refuses_a_symbol_table_row_no_request_can_carry_under_raise
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     strict(massive_session, monkeypatch)
-    watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
+    watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR,USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, SymbolStreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
         with pytest.raises(
-            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD', which no request"
+            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR,USD', which no request"
         ):
             verb()
     assert fake_streams.publishers == {}
