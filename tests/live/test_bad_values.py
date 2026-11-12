@@ -66,6 +66,12 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
             {"ticker.any_of": "AAPL, MSFT", "ex_dividend_date.gte": "2025-11-11", "limit": "50"},
         )
     ],
+    bad_values.FILTER_EMPTY_ITEM: [
+        (
+            _DIVIDENDS,
+            {"ticker.any_of": "AAPL,,MSFT", "ex_dividend_date.gte": "2025-11-11", "limit": "50"},
+        )
+    ],
     bad_values.TRAILING_BALANCE_SHEET: [
         (
             "/stocks/financials/v1/balance-sheets",
@@ -78,6 +84,12 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
             {"resolution": "1day", "window_start.gte": "2026-10-28", "limit": "5"},
         )
     ],
+    bad_values.FUTURES_MULTIPLIER: [
+        (
+            "/futures/v1/aggs/ESZ6",
+            {"resolution": "0session", "window_start.gte": "2026-10-28", "limit": "5"},
+        )
+    ],
     bad_values.SESSION_OUTSIDE_FUTURES: [
         (f"{_AGGS}/1/session/2026-10-28/2026-11-04", {"limit": "5"})
     ],
@@ -86,9 +98,18 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
         ("/v3/snapshot/options/C:EURUSD", {"limit": "5"}),
         ("/v3/snapshot/options/X:BTCUSD", {"limit": "5"}),
     ],
+    bad_values.UNDERLYING_CHAIN_CONTRACT: [
+        ("/v3/snapshot/options/O:AAPL250117C00150000", {"limit": "5"})
+    ],
     bad_values.UNDERLYING_CONTRACTS: [
         ("/v3/reference/options/contracts", {"underlying_ticker": "C:EURUSD", "limit": "5"}),
         ("/v3/reference/options/contracts", {"underlying_ticker": "X:BTCUSD", "limit": "5"}),
+    ],
+    bad_values.UNDERLYING_CONTRACTS_CONTRACT: [
+        (
+            "/v3/reference/options/contracts",
+            {"underlying_ticker": "O:AAPL250117C00150000", "limit": "5"},
+        )
     ],
     bad_values.CONTRACT_SYMBOL: [("/v3/reference/options/contracts/AAPL", {})],
     bad_values.START_AFTER_END: [
@@ -185,6 +206,18 @@ def test_data_counts_the_rows_that_answer_the_request(
     # Each endpoint gets the same two rows; the exchanges asked for indices, which neither is.
     assert [a.matched for a in answers] == [1, 0, 1]
     assert lines[-1].endswith("2 rows, 1 of them of asset_class futures)")
+
+
+def test_an_empty_list_item_counts_the_rows_of_the_tickers_sent(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    rows = [{"ticker": "AAPL"}, {"ticker": "MSFT"}, {"ticker": "TSLA"}]
+    fake_rest.reply_default(Reply(envelope(rows)))
+    lines: list[str] = []
+    answers = bad_values.ask_all(client, bad_values.FILTER_EMPTY_ITEM, lines.append, today=_DAY)
+    # TSLA was not sent: a row of it means the empty item read as no filter.
+    assert [a.matched for a in answers] == [2]
+    assert lines[-1].endswith("3 rows, 2 of them of AAPL or MSFT, the tickers sent)")
 
 
 @pytest.mark.parametrize(
@@ -327,6 +360,15 @@ def test_an_unreadable_200_is_recorded_and_raises(
         bad_values.ask_all(client, bad_values.LIMIT, lines.append, today=_DAY)
     assert raised.value.unreadable
     assert "no verdict on the value" in lines[-1]
+
+
+def test_an_empty_200_is_empty(fake_rest: FakeRestServer, client: RestClient) -> None:
+    # The indicators answered `window=0` this way: Massive's answer, though no page.
+    fake_rest.reply(_SMA, Reply(b""))
+    lines: list[str] = []
+    answers = bad_values.ask_all(client, bad_values.WINDOW, lines.append, today=_DAY)
+    assert answers == (bad_values.Answer("EMPTY", 200, 0, None),)
+    assert lines[-1] == "window=0: verdict EMPTY (HTTP 200, empty body)"
 
 
 @pytest.mark.parametrize(

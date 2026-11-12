@@ -1,7 +1,7 @@
 """Live checks of the list endpoints' `sort` and `limit` values against Massive.
 
-Each test sends a value the library refuses before any request straight to Massive's REST
-endpoint through the wire client, and records Massive's status, message, and row count
+Each test sends a value the library could refuse before any request straight to Massive's
+REST endpoint through the wire client, and records Massive's status, message, and row count
 (`evidence`), ending with a verdict line: ERROR, EMPTY, or DATA (`tests/_live/bad_values.py`).
 The tests are marked `settles`: they assert only that Massive answered, and the owner reads
 the verdict. ERROR means Massive judges the value itself; EMPTY, or DATA that does not answer
@@ -37,8 +37,8 @@ def test_massive_answers_a_sort_value_its_path_does_not_list(
 ) -> None:
     """What the conditions answer to `sort=exchange`, a field their `sort` does not list.
 
-    The library refuses a value outside a listed `sort` (`Catalog.check_sort`). DATA
-    cannot be compared with the request: read the rows' order.
+    The library sends a value outside a listed `sort` for Massive to judge. DATA cannot be
+    compared with the request: read the rows' order.
     """
     assert bad_values.ask_all(live_rest, bad_values.ENUM_SORT, evidence)
 
@@ -51,8 +51,8 @@ def test_massive_answers_a_sort_field_its_rows_do_not_have(
 ) -> None:
     """What the dividends answer to `sort=no_such_field.asc`.
 
-    On a path whose `sort` takes comma-separated fields, the library refuses a part that
-    names no field of the rows. DATA cannot be compared with the request.
+    On a path whose `sort` takes comma-separated fields, the library sends a part that names
+    no field of the rows for Massive to judge. DATA cannot be compared with the request.
     """
     assert bad_values.ask_all(live_rest, bad_values.SORT_FIELD, evidence)
 
@@ -65,8 +65,8 @@ def test_massive_answers_a_sort_part_with_a_space(
 ) -> None:
     """What the dividends answer to `sort=ticker, ex_dividend_date.desc`, a part with a space.
 
-    The library refuses a part with surrounding whitespace. DATA cannot be compared with
-    the request: read whether the rows come newest first.
+    The library sends a part with surrounding whitespace as written. DATA cannot be compared
+    with the request: read whether the rows come newest first.
     """
     assert bad_values.ask_all(live_rest, bad_values.SORT_WHITESPACE, evidence)
 
