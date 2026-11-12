@@ -3,9 +3,10 @@
 `scripts/live_run.py` runs one of these in the embedded Deephaven server it started, sized by
 `server.jvm_args`, and then leaves through `os._exit`. They import the library, and so
 Deephaven, so only a child that started a server imports this module; the parent never does.
+Every child first watches its parent (`start_parent_watch`), so it ends when the parent does.
 
 - `_group --out OUT --attempt FOLDER --token T`: a built-in group's child (`attempts`). It
-  watches its parent, opens sessions on the key (declaring its Basic subscriptions, except for
+  opens sessions on the key (declaring its Basic subscriptions, except for
   the upgrade check, whose sessions declare nothing), and runs the group (`group_child`).
 - `_probe --result FILE`: one probe of the key (`run_probe.probe_key`), its result written to
   `FILE` for the parent to read (`probe_result.probe_in_child`).
@@ -58,17 +59,14 @@ def run_group_child(
     attempt: str,
     *,
     environ: Mapping[str, str],
-    watch: Callable[[], None],
 ) -> None:
-    """Be a built-in group's child: watch the parent, then run the group.
+    """Be a built-in group's child: run the group.
 
     Args:
         out: The results folder.
         attempt: The attempt's folder, relative to `out`.
         environ: The environment, for the probe of the upgrade check.
-        watch: Starts watching the parent (`start_parent_watch`).
     """
-    watch()
     request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
     tiers = request["tiers"].items()
     basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
@@ -100,8 +98,8 @@ def start_parent_watch() -> None:
     """Start a thread that ends this child at once if its parent goes away.
 
     The child runs in a session of its own, so a closed terminal never reaches it; without
-    the watch it would outlive the program that would stop it, holding the key's connection
-    and writing into a folder a resumed run uses again.
+    the watch it would outlive the program that would stop it, holding its server, the key's
+    connection, and a folder a resumed run uses again.
     """
     threading.Thread(
         target=watch_parent,
@@ -138,7 +136,7 @@ def main(
     Args:
         argv: The arguments, without the program's name.
         environ: The environment, secrets included.
-        watch: Starts a `_group` child's watch of its parent (`start_parent_watch`).
+        watch: Starts the child's watch of its parent (`start_parent_watch`).
 
     Returns:
         0 once the command finished; 2 when the parser refused the command line, after the
@@ -148,9 +146,10 @@ def main(
         arguments = parser().parse_args(argv)
     except SystemExit as stop:
         return int(stop.code or 0)
+    watch()
     if arguments.command == "_group":
         out = arguments.out.expanduser().resolve()
-        run_group_child(out, arguments.attempt, environ=environ, watch=watch)
+        run_group_child(out, arguments.attempt, environ=environ)
     else:
         run_probe_child(arguments.result, environ=environ)
     return 0

@@ -76,7 +76,6 @@ def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
         tmp_path,
         "a",
         environ={"MASSIVE_API_KEY": KEY},
-        watch=lambda: None,
     )
     open_session = seen["open_session"]
     with open_session() as session:
@@ -125,10 +124,14 @@ def test_the_probe_child_writes_its_probe_for_the_parent(
 
     monkeypatch.setattr(child_commands, "probe_key", probe_key)
     result = tmp_path / "probe.json"
+    watched: list[str] = []
     code = child_commands.main(
-        ["_probe", "--result", str(result)], environ={"MASSIVE_API_KEY": KEY}
+        ["_probe", "--result", str(result)],
+        environ={"MASSIVE_API_KEY": KEY},
+        watch=lambda: watched.append("watching"),
     )
     assert code == 0
+    assert watched == ["watching"]  # a probe child ends with its parent too
     assert seen == [Credentials(api_key=KEY, s3_pair=None)]
     assert read_result(result).tiers == {"stocks": "starter"}
 
