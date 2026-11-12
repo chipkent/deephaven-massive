@@ -311,10 +311,10 @@ The futures exchanges whose flat files `history()` reads, as a set of `dm.Future
 
 ### refused_venues
 
-What `history()` does when Massive refuses the flat files of some exchanges in `venues`, as it does for one your plan doesn't include. It takes a `dm.OnError`. The default, None, uses `MassiveConfig.refused_venues`, which is `RAISE` unless you set it.
+What `history()` does when Massive refuses the flat files of some exchanges in `venues`, as it does for one your plan doesn't include. It takes a `dm.OnError`. Left out, it follows `MassiveConfig.refused_venues`, which is `RAISE` unless you set it.
 
 - `RAISE` fails the call with `EntitlementError`, naming the exchange.
-- `LOG` skips each refused exchange's files for the whole range, logs one warning with Massive's answer, and names the exchanges in the table's description.
+- `LOG` skips each refused exchange's files for the whole range, logs one warning with Massive's answer, and names the exchanges in the table's description. A table that follows a live symbol table names them in each symbol's `Transport` in `m.symbol_reads()` instead.
 - `IGNORE` skips them too, logging only at DEBUG.
 
 It applies only when REST can't serve the call: `dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive refuses the flat files. A call whose every exchange is refused fails whatever the setting.

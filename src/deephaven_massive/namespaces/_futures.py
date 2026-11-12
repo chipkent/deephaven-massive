@@ -337,7 +337,7 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads.
             refused_venues: What `history()` does when Massive refuses some exchanges' flat
-                files, or None to use `MassiveConfig.refused_venues`.
+                files. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -386,7 +386,7 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads.
             refused_venues: What `history()` does when Massive refuses some exchanges' flat
-                files, or None to use `MassiveConfig.refused_venues`.
+                files. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -442,7 +442,7 @@ class FuturesNamespace(Namespace):
             multiplier: Units per bar.
             venues: The exchanges whose flat files `history()` reads.
             refused_venues: What `history()` does when Massive refuses some exchanges' flat
-                files, or None to use `MassiveConfig.refused_venues`.
+                files. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query that reads history, and streams 1-second and 1-minute bars at

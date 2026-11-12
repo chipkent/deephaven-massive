@@ -6,11 +6,14 @@ When REST cannot serve the call and its `Request.refused_venues` is `dm.OnError.
 `IGNORE`, the flat-file read skips such a venue instead of failing: `RefusedVenues` records each
 venue's first refusal as the reader threads meet them, so the venue's other files are never
 requested, and the read then drops every file of a refused venue, whatever its date, so the
-table never holds a venue for some days of the range and not others. `report` logs the refused
-venues once per call (a WARNING under `LOG`, DEBUG under `IGNORE`), with Massive's status and
-text, and `every_venue_refused` is the `EntitlementError` raised when no requested venue is
-left, whatever the setting. A rejected credential (`WireAuthError`) is no refusal of a venue:
-it fails the call under any setting.
+table never holds a venue for some days of the range and not others. `report` logs each refused
+venue once per `history()` call (a WARNING under `LOG`, DEBUG under `IGNORE`), with Massive's
+status and text, even when a table that follows a live symbol table reads the files again;
+`every_venue_refused` is the `EntitlementError` raised when no requested venue is left, whatever
+the setting. A static table's description names the skipped venues (`refused_note`); a
+followed table's description is fixed before its reads, so each symbol's transport in
+`m.symbol_reads()` names them instead (`refused_source`). A rejected credential
+(`WireAuthError`) is no refusal of a venue: it fails the call under any setting.
 """
 
 from __future__ import annotations
@@ -21,32 +24,37 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._errors import EntitlementError
+from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
     from deephaven_massive._massive import WireEntitlementError
 
-__all__ = ["RefusedVenues", "refused_note"]
+__all__ = ["RefusedVenues", "refused_note", "refused_source"]
 
 logger = logging.getLogger(__name__)
 
 
 class RefusedVenues:
-    """The venues S3 refused in one `history()` call, each with its first refusal.
+    """The venues S3 refused in one flat-file read, each with its first refusal.
 
-    Shared by the call's reader threads, so every access holds the instance's lock, which is a
+    Shared by the read's reader threads, so every access holds the instance's lock, which is a
     leaf: nothing else is called under it.
     """
 
-    __slots__ = ("_lock", "_refusals", "policy")
+    __slots__ = ("_lock", "_refusals", "call", "policy")
 
-    def __init__(self, policy: OnError) -> None:
-        """Start a call's record with no venue refused.
+    def __init__(self, policy: OnError, *, call: str) -> None:
+        """Start a read's record with no venue refused.
 
         Args:
             policy: The call's `Request.refused_venues`, `LOG` or `IGNORE`, which `report`
                 follows; the read never makes a record under `RAISE`.
+            call: The `history()` call the read serves, such as `"MassiveSession #1 call-9"`.
+                A table that follows a live symbol table reads its files again as symbols
+                join, and `report` logs each refused venue once per call, not per read.
         """
         self.policy = policy
+        self.call = call
         self._lock = threading.Lock()
         self._refusals: dict[FuturesVenue, WireEntitlementError] = {}
 
@@ -97,27 +105,29 @@ class RefusedVenues:
         return tuple((venue, refusals[venue]) for venue in FuturesVenue if venue in refusals)
 
     def report(self, dataset: str) -> None:
-        """Log the venues the call skips: one WARNING under `LOG`, one DEBUG line under `IGNORE`.
+        """Log each venue the read skips, once per call.
 
-        Called once per call, after the read; logs nothing when S3 refused no venue.
+        A WARNING under `LOG`, a DEBUG line under `IGNORE`. Called after the read; logs nothing
+        when S3 refused no venue.
 
         Args:
             dataset: The dataset's name, such as `"futures.trades"`.
         """
-        refused = self._refused()
-        if not refused:
-            return
         level = logging.WARNING if self.policy is OnError.LOG else logging.DEBUG
-        logger.log(
-            level,
-            "%s history: skipping the flat files of %s for the whole range, as "
-            "refused_venues=%s says; pass venues= with only the venues the plan includes to "
-            "request none of them. S3 refused them: %s",
-            dataset,
-            _names(refused),
-            self.policy.name,
-            "; ".join(f"{venue.name}: {error.message}" for venue, error in refused),
-        )
+        for venue, error in self._refused():
+            log_once(
+                logger,
+                f"{self.call}\0{dataset}\0refused venue {venue.name}",
+                "%s history (%s): skipping %s's flat files for the whole range, as "
+                "refused_venues=%s says; pass venues= with only the venues the plan includes "
+                "to request none of them. S3 refused: %s",
+                dataset,
+                self.call,
+                venue.name,
+                self.policy.name,
+                error.message,
+                level=level,
+            )
 
     def every_venue_refused(self) -> EntitlementError:
         """Return the error of a call whose every requested venue S3 refused.
@@ -154,6 +164,26 @@ def refused_note(venues: tuple[FuturesVenue, ...]) -> str | None:
         f"Massive refused the flat files of {named}, so this table holds no rows of "
         f"{'that exchange' if len(venues) == 1 else 'those exchanges'}."
     )
+
+
+def refused_source(source: str, venues: tuple[FuturesVenue, ...]) -> str:
+    """Return a read by symbol's source, naming the venues it skipped.
+
+    A table that follows a live symbol table fixes its description before any read, so
+    `m.symbol_reads()` shows the skip in each symbol's `Transport`.
+
+    Args:
+        source: The source as users read it, such as `"flat files"`.
+        venues: The venues S3 refused and the read skipped (`FlatFileRead.refused`); empty for
+            none.
+
+    Returns:
+        `source` itself when no venue was skipped; otherwise, for example,
+        `"flat files without NYMEX, COMEX (refused)"`.
+    """
+    if not venues:
+        return source
+    return f"{source} without {', '.join(venue.name for venue in venues)} (refused)"
 
 
 def _names(refused: tuple[tuple[FuturesVenue, WireEntitlementError], ...]) -> str:

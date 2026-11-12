@@ -50,7 +50,7 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
-from deephaven_massive._ingest.refused_venues import refused_note
+from deephaven_massive._ingest.refused_venues import refused_note, refused_source
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
@@ -438,7 +438,9 @@ def read_history_by_symbol(
     history_by_symbol`, over day windows built for the call's instant), so a symbol fails
     alone when its own REST read fails, and a symbol that failed is not read for later days.
     When S3 refuses the files and REST may serve the call, the whole call is read from REST by
-    symbol. An empty window reads nothing.
+    symbol. When the request's `refused_venues` skips a refused futures venue instead, each
+    symbol's source names it (`refused_venues.refused_source`), since the followed table's
+    description was fixed before the read. An empty window reads nothing.
 
     Args:
         spec: The dataset.
@@ -500,6 +502,9 @@ def read_history_by_symbol(
         logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
     with entered(core.exec_ctx):
         files_rows = merge([read.empty, *(part for _, part in read.parts)])
+    # A followed table's description is fixed before its reads, so each symbol's transport in
+    # `m.symbol_reads()` names the venues the read skipped.
+    flat = refused_source(flat, read.refused)
     tables = split_by_symbol(core, spec, files_rows, symbols=ordered, source=flat)
     if not read.unread:
         return symbol_outcomes(

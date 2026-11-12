@@ -444,10 +444,11 @@ class MassiveConfig:
             - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
               exchange and `venues=`.
             - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
-              logs one warning with Massive's status and text, and names the exchanges in the
-              table's description.
+              logs one warning per exchange with Massive's status and text, and names the
+              exchanges in the table's description. A table that follows a live symbol table
+              names them in each symbol's `Transport` in `m.symbol_reads()` instead.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
-              description name them.
+              description or `m.symbol_reads()` name them.
 
             It applies only when REST can't serve the call: `dm.ALL`, or
             `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive

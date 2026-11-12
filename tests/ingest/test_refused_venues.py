@@ -4,7 +4,7 @@ import pytest
 
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._ingest import refused_venues
-from deephaven_massive._ingest.refused_venues import RefusedVenues, refused_note
+from deephaven_massive._ingest.refused_venues import RefusedVenues, refused_note, refused_source
 from deephaven_massive._massive import WireEntitlementError
 
 
@@ -15,7 +15,7 @@ def _refusal(venue: str, request_id: str) -> WireEntitlementError:
 def test_a_venue_keeps_its_first_refusal_and_venues_come_in_enum_order(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    refused = RefusedVenues(OnError.LOG)
+    refused = RefusedVenues(OnError.LOG, call="MassiveSession #1 call-1")
     assert refused.venues() == ()
     assert None not in refused
     with caplog.at_level(logging.DEBUG, logger=refused_venues.__name__):
@@ -47,4 +47,11 @@ def test_the_note_names_one_venue_or_several() -> None:
     assert refused_note((FuturesVenue.CBOT, FuturesVenue.NYMEX)) == (
         "Massive refused the flat files of CBOT, NYMEX, so this table holds no rows of those "
         "exchanges."
+    )
+
+
+def test_a_source_names_the_skipped_venues() -> None:
+    assert refused_source("flat files", ()) == "flat files"
+    assert refused_source("flat files", (FuturesVenue.CME, FuturesVenue.COMEX)) == (
+        "flat files without CME, COMEX (refused)"
     )

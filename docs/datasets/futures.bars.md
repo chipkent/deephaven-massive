@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.DAY`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
-| [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses some exchanges' flat files, or None to use `MassiveConfig.refused_venues`. |
+| [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses some exchanges' flat files. Left out, `MassiveConfig.refused_venues` applies. |
 
 ## Plans
 

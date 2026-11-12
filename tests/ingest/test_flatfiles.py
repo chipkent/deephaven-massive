@@ -53,7 +53,12 @@ from deephaven_massive._massive import DriftReport, Field, Source, Transport, Wi
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure
+from deephaven_massive._tables.transports import (
+    FailureKind,
+    SymbolFailure,
+    SymbolOutcome,
+    SymbolRows,
+)
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
@@ -2155,9 +2160,14 @@ def test_a_read_whose_files_hold_only_their_own_sessions_names_no_doubt() -> Non
     seen = flatfiles._OtherSessions()
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
     assert seen.uncertain(span) == ()
-    seen.saw(pa.array([date(2025, 3, 2)], pa.date32()), date(2025, 3, 3))
+    key = flatfiles._Key(
+        FUTURES_KEY.format("cme", date(2025, 3, 3)), date(2025, 3, 3), FuturesVenue.CME
+    )
+    seen.saw(pa.array([date(2025, 3, 2)], pa.date32()), key)
     assert seen.uncertain(span) == (date(2025, 3, 5),)
     assert seen.uncertain(None) == ()  # a read by instants covers its whole range
+    # The files of a venue the read dropped count for nothing.
+    assert seen.uncertain(span, dropped=(FuturesVenue.CME,)) == ()
 
 
 def test_a_futures_row_of_another_requested_session_is_kept_with_its_own_date(
@@ -2265,15 +2275,16 @@ def test_a_venue_refused_on_one_day_is_skipped_for_the_whole_range(
         assert t.attributes()["TableDescription"].endswith(
             "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
         )
-        reports = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
-        expected = (
-            "futures.trades history: skipping the flat files of NYMEX for the whole range, "
-            f"as refused_venues={policy.name} says; pass venues= with only the venues the "
-            "plan includes to request none of them. S3 refused them: NYMEX: HTTP 403 for "
-            f"s3://flatfiles/{REFUSED_0305} at https://files.massive.com (AccessDenied: "
-            "Access Denied)"
+        (report,) = [r for r in caplog.records if "flat files for the whole" in r.getMessage()]
+        assert report.levelno == level
+        assert re.fullmatch(
+            r"futures\.trades history \(MassiveSession #\d+ call-\d+\): skipping NYMEX's flat "
+            rf"files for the whole range, as refused_venues={policy.name} says; pass venues= "
+            "with only the venues the plan includes to request none of them. S3 refused: HTTP "
+            rf"403 for s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
+            r"\(AccessDenied: Access Denied\)",
+            report.getMessage(),
         )
-        assert [(r.levelno, r.getMessage()) for r in reports] == [(level, expected)]
     finally:
         m.close()
 
@@ -2332,9 +2343,106 @@ def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
             "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
         )
         assert [r.getMessage() for r in caplog.records if "holiday" in r.getMessage()] == []
-        assert f"S3 refused them: NYMEX: HTTP 403 for s3://flatfiles/{later}" in caplog.text
+        assert f"S3 refused: HTTP 403 for s3://flatfiles/{later}" in caplog.text
     finally:
         m.close()
+
+
+def test_a_call_whose_only_venue_is_refused_past_the_range_end_raises(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # NYMEX's 03-04 file reads, its 03-05 file is missing, and the look for a later file is
+    # refused: the call's only venue is refused, so it raises whatever the setting.
+    row = ",1.0,1,1,1,42,2025-03-04,ESH5,1741042800000000000\n"
+    fake_s3.put(FUTURES_KEY.format("nymex", date(2025, 3, 4)), make_csv_gz(FUTURES_HEADER + row))
+    later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
+    fake_s3.refuse(later, status=403, code="AccessDenied", message="No")
+    q = session.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX}, refused_venues=OnError.IGNORE)
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^the plan does not include the flat files of any venue requested \(NYMEX\): ",
+    ):
+        q.history("2025-03-04", "2025-03-05", wait=True)
+
+
+def test_a_list_of_contracts_read_with_flat_files_forced_skips_a_refused_venue(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
+) -> None:
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
+    q = session.futures.trades(["ESH5"], refused_venues=OnError.LOG)
+    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "ReportSequence") == [(40,), (41,), (43,)]
+    assert "Massive refused the flat files of NYMEX" in t.attributes()["TableDescription"]
+
+
+def test_a_refused_venues_rows_of_other_sessions_leave_no_session_uncertain(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # NYMEX's 03-04 file, read before its 03-05 file is refused, holds a row of session 03-03.
+    # NYMEX is dropped, so no kept file held another session's rows, and no requested session
+    # is called incomplete.
+    m = dm.MassiveSession(config(max_concurrency=1))
+    try:
+        for day, stamp in ((4, 1741042800000000000), (5, 1741129200000000000)):
+            for index, venue in enumerate(("cme", "nymex")):
+                row = f",1.0,1,1,1,{10 * day + index},2025-03-0{day},ESH5,{stamp}\n"
+                if (venue, day) == ("nymex", 4):
+                    row += ",1.0,1,1,1,99,2025-03-03,ESH5,1740956400000000000\n"
+                key = FUTURES_KEY.format(venue, date(2025, 3, day))
+                fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
+        refused = FUTURES_KEY.format("nymex", date(2025, 3, 5))
+        fake_s3.refuse(refused, status=403, code="AccessDenied", message="No")
+        q = m.futures.trades(
+            dm.ALL, venues={FuturesVenue.CME, FuturesVenue.NYMEX}, refused_venues=OnError.LOG
+        )
+        t = q.history("2025-03-04", "2025-03-05", wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (50,)]
+        assert "may be incomplete" not in t.attributes()["TableDescription"]
+    finally:
+        m.close()
+
+
+def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A table that follows a live symbol table has its description before any read, so each
+    # symbol's source names the skipped venue; reading again in the same call logs nothing new.
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
+    asked = Request(
+        venues=tuple(FuturesVenue),
+        refused_venues=OnError.LOG,
+        start=date(2025, 3, 4),
+        end=date(2025, 3, 4),
+    )
+    window = whole_days(FUTURES_TRADES, "2025-03-04")
+    with dm.MassiveSession(config()) as m:
+        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+
+        def read(call: int) -> dict[str, SymbolOutcome]:
+            return transport.history_by_symbol(
+                FUTURES_TRADES,
+                asked,
+                window,
+                symbols=["ESH5"],
+                dates=(date(2025, 3, 4),),
+                call=call,
+                forced=True,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.refused_venues"):
+            first, again, other = read(7), read(7), read(8)
+    for outcome in (first, again, other):
+        rows = outcome["ESH5"]
+        assert isinstance(rows, SymbolRows)
+        assert rows.source == "flat files without NYMEX (refused)"
+        assert pick(rows.table, "ReportSequence") == [(40,), (41,), (43,)]
+    calls = [re.search(r"call-\d+", r.getMessage()) for r in caplog.records]
+    assert [match.group() for match in calls if match] == ["call-7", "call-8"]
 
 
 def test_a_refused_venue_is_not_requested_again_in_the_call(

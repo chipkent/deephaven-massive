@@ -398,7 +398,9 @@ class _OtherSessions:
     session's rows may also sit in the file after it, which a call by dates reads only up to
     its last session; when a file holds a row of a later session, they may sit in the file
     before it. The read cannot see those files, so it says which requested sessions may be
-    incomplete (`uncertain`). Shared by the read's reader threads; one leaf lock guards it.
+    incomplete (`uncertain`). Each venue's files are tracked apart, so the files of a venue
+    the read drops (one S3 refused) count for nothing. Shared by the read's reader threads; one
+    leaf lock guards it.
     """
 
     __slots__ = ("_earlier", "_later", "_lock")
@@ -406,40 +408,46 @@ class _OtherSessions:
     def __init__(self) -> None:
         """Start having seen no other session."""
         self._lock = threading.Lock()
-        self._earlier = False
-        self._later = False
+        self._earlier: set[FuturesVenue | None] = set()
+        self._later: set[FuturesVenue | None] = set()
 
-    def saw(self, others: pa.Array, day: date) -> None:
+    def saw(self, others: pa.Array, key: _Key) -> None:
         """Record a file's rows of other sessions.
 
         Args:
             others: The sessions, `date32`, of the file's rows whose session is not its day.
-            day: The file's day.
+            key: The file, for its day and venue.
         """
-        own = pa.scalar(day, pa.date32())
+        own = pa.scalar(key.day, pa.date32())
         earlier = bool(pc.any(pc.less(others, own)).as_py())
         later = bool(pc.any(pc.greater(others, own)).as_py())
         with self._lock:
-            self._earlier |= earlier
-            self._later |= later
+            if earlier:
+                self._earlier.add(key.venue)
+            if later:
+                self._later.add(key.venue)
 
-    def uncertain(self, sessions: DaySpan | None) -> tuple[date, ...]:
+    def uncertain(
+        self, sessions: DaySpan | None, *, dropped: tuple[FuturesVenue, ...] = ()
+    ) -> tuple[date, ...]:
         """Return the requested sessions whose rows may sit in a file the read did not read.
 
         Args:
             sessions: The sessions a call by dates requested, or None for a call by instants,
                 whose files cover its whole time range.
+            dropped: The venues whose files the read dropped (`FlatFileRead.refused`), whose
+                rows the table does not hold.
 
         Returns:
-            The first session when some file held a later session's rows, and the last when
-            some file held an earlier session's rows, oldest first, without repeats; empty
-            when no file held another session's rows.
+            The first session when some kept file held a later session's rows, and the last
+            when some kept file held an earlier session's rows, oldest first, without
+            repeats; empty when no kept file held another session's rows.
         """
         if sessions is None:
             return ()
         with self._lock:
-            found = {sessions.first} if self._later else set()
-            if self._earlier:
+            found = {sessions.first} if self._later.difference(dropped) else set()
+            if self._earlier.difference(dropped):
                 found.add(sessions.last)
         return tuple(sorted(found))
 
@@ -680,7 +688,7 @@ class _Transform:
         own = pa.scalar(key.day, pa.date32())
         others = pc.filter(sessions, pc.not_equal(sessions, own))
         if len(others):
-            self.seen.saw(others, key.day)
+            self.seen.saw(others, key)
             self.warnings.log(
                 f"{self.dataset}\0other sessions",
                 "%s: the flat file %s holds rows of session %s, not only of its own %s; each "
@@ -867,7 +875,7 @@ class FlatFileHistory:
         refusals = None
         policy = request.refused_venues
         if infer_holidays and policy is not None and policy is not OnError.RAISE:
-            refusals = RefusedVenues(policy)
+            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}")
         return self._read(
             spec,
             transform,
@@ -1123,18 +1131,30 @@ class FlatFileHistory:
                 days=unread,
                 exec_ctx=self._core.exec_ctx,
             )
-        with entered(self._core.exec_ctx):
-            # Merging onto an empty table in the schema keeps every column when no row matched.
-            empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
+        refused = () if refusals is None else refusals.venues()
         return FlatFileRead(
             tuple(kept),
-            empty,
+            self._empty(transform),
             unread,
-            transform.seen.uncertain(transform.sessions),
+            transform.seen.uncertain(transform.sessions, dropped=refused),
             absent,
             tuple(holidays),
-            () if refusals is None else refusals.venues(),
+            refused,
         )
+
+    def _empty(self, transform: _Transform) -> Table:
+        """Return a static table in the read's schema with no row.
+
+        The read merges its files onto it, so a read without rows keeps every column.
+
+        Args:
+            transform: The request's block transform, for its schema.
+
+        Returns:
+            The empty table.
+        """
+        with entered(self._core.exec_ctx):
+            return dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
 
     def _after_missing(
         self,
