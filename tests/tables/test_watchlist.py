@@ -307,7 +307,7 @@ def test_a_table_of_underlyings_sends_every_value_as_written(dh_exec_ctx: object
 def test_a_skipped_underlying_is_logged_with_its_reason(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bad = "AAPL,MSFT"  # a value of its own: each value is logged once per dataset and process
+    bad = "AAPL,LOGGED"  # a value of its own: each value is logged once per dataset and process
     table = new_table([string_col("Symbol", [bad, "AAPL"])])
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)

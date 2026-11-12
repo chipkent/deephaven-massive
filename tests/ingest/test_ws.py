@@ -2525,6 +2525,9 @@ def test_an_unlisted_pair_in_a_list_raises_under_raise(
     make_ws_session: Callable[..., WsSession],
 ) -> None:
     ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
+    listed = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()  # every pair splits: it opens
+    ws_session.subscribed("XT.BTC-USD")
+    ws_session.session.release(listed)
     with pytest.raises(dm.MassiveError, match=r"^cannot stream 'X:ETHTUSD': 'X:ETHTUSD' cannot"):
         ws_session.query(CRYPTO, ["X:BTCUSD", "X:ETHTUSD"]).append_only()
 
