@@ -579,7 +579,7 @@ class RestReader:
             Massive (`MassiveConfig.unavailable_symbols`), which every read follows.
         unlisted_symbols: The session's setting for a crypto pair that Massive's crypto ticker
             list does not hold (`MassiveConfig.unlisted_symbols`), which a `poll()` cycle
-            (`_plan_cycle`) and a `history()` read (`listed_split`) follow.
+            (`_plan_cycle`) follows.
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -1892,38 +1892,6 @@ class RestReader:
             )
         return planned, left_out
 
-    def listed_split(
-        self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
-    ) -> CryptoSplit:
-        """Return the crypto split a read uses under the session's `unlisted_symbols`.
-
-        Under `RAISE` a pair Massive's crypto ticker list does not hold raises its
-        `UnlistedPairError`; under `LOG` and `IGNORE` it is recorded, so the read leaves its
-        requests out (`_without`) and logs it (`skip_unlisted`).
-
-        Args:
-            unlisted: Receives each pair recorded, with its error.
-            cancel: The read's stop token, which the list's read listens to.
-
-        Returns:
-            The split.
-        """
-        if self.unlisted_symbols is OnError.RAISE:
-            return functools.partial(self.crypto_pair, cancel=cancel)
-        return self._unlisted_recorder(unlisted, cancel)
-
-    def skip_unlisted(
-        self, spec: DatasetSpec, unlisted: Mapping[str, UnlistedPairError], *, verb: str
-    ) -> None:
-        """Log the crypto pairs a read leaves out under the session's `unlisted_symbols`.
-
-        Args:
-            spec: The dataset.
-            unlisted: The pairs, with their errors.
-            verb: The verb that leaves them out, such as `"history()"`.
-        """
-        self._skip_unlisted(spec, unlisted, verb=verb, setting=self.unlisted_symbols)
-
     def _unlisted_recorder(
         self, unlisted: dict[str, UnlistedPairError], cancel: Cancel | None
     ) -> CryptoSplit:
@@ -2671,18 +2639,14 @@ class RestEndpoints:
         cut short.
         """
         reader = self._reader(f"call-{call}")
-        unlisted: dict[str, UnlistedPairError] = {}
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
             request,
             window=window,
-            split=reader.listed_split(unlisted, _token(stop)),
+            split=functools.partial(reader.crypto_pair, cancel=_token(stop)),
             days=days,
         )
-        if unlisted:
-            reader.skip_unlisted(spec, unlisted, verb="history()")
-            rest_path, calls = _without((rest_path, calls), unlisted)
         announce(
             self._state.client.governor,
             f"{spec.name} history",

@@ -62,11 +62,12 @@ Settings:
     `help(dm.MassiveConfig)` lists every setting.
 
 Symbols:
-    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
-    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. `dm.ALL` means every symbol, in the datasets
-    that take it. A table with a `Symbol` column works too. A live one is a watchlist, which
-    the library follows as you add and delete rows. `dm.canonical_symbol` and
-    `dm.canonicalize_symbols` convert other spellings, such as Yahoo's `BRK-B`.
+    Datasets send each symbol as written, so spell Massive's tickers: `AAPL`, `BRK.B`,
+    `O:SPY271217C00700000`, `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. A ticker Massive has
+    no data for gives no rows. `dm.ALL` means every symbol, in the datasets that take it. A
+    table with a `Symbol` column works too. A live one is a watchlist, which the library
+    follows as you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols`
+    convert other spellings, such as Yahoo's `BRK-B`.
 
 Enums:
     An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.

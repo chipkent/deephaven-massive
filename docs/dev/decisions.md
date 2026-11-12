@@ -550,4 +550,7 @@ still refuses a spelling Massive reads as another instrument (Yahoo's `VOD.L`, N
 `ABC.U`), since that would read the other instrument's data with no error.
 `canonical_symbol_stock`, `canonical_symbol_future`, and `canonical_symbol_future_spread`, which
 only checked text, are removed, and so is `DatasetSpec.symbols_as_written`, since every dataset
-now keeps its symbols as written. Supersedes 58's refusal and 66's `noncanonical_symbols`.
+now keeps its symbols as written. A crypto pair that Massive's crypto ticker list does not
+hold is a pair Massive has no data for: it follows `unlisted_symbols` whether passed in code or
+in a table, so under `LOG`, the default, a stream or read skips it and gives no rows, where a pair
+passed in code used to raise. Supersedes 58's refusal and 66's `noncanonical_symbols`.

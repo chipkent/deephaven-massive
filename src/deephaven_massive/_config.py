@@ -346,11 +346,13 @@ class MassiveConfig:
 
             Change it only with `s3_endpoint_url`.
         unsendable_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value no request can carry: an empty value, or one with `,`, `/`, or `*`, which
-            Massive would read as a separator or as every ticker. Defaults to `LOG`.
+            a value no request can carry: an empty value, or one with `,`, `/`, or `*`. Defaults
+            to `LOG`.
 
-            Every other value is sent as written, and a ticker Massive has no data for gives no
-            rows. Set `dm.OnError.RAISE` to stop at a row no request can carry.
+            The library sends each value as written, and a ticker Massive has no data for gives
+            no rows. It can't send these: Massive reads `,` as a separator and `*` as every
+            ticker, and refuses a `/` in a URL path. Set `dm.OnError.RAISE` to stop at such a
+            row.
 
             - `dm.OnError.LOG` skips the row and logs a warning naming the value.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
@@ -376,15 +378,16 @@ class MassiveConfig:
               `fetch(wait=True)` raises it at the call.
 
             It applies to streams and to calls for a pair's last trade or daily open and close,
-            which need the pair split as that list splits it. A pair in another spelling, such as
+            which need the pair's two currencies, and take them only from that list. A pair in
+            another spelling, such as
             `BTC-USD` for `X:BTCUSD`, isn't on the list either; `dm.canonical_symbol_crypto`
             converts it.
 
-            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, such a pair is one Massive has no data
-            for: it gives no rows, and the stream or read keeps its other pairs, even when none
-            is left. A stream lists the skipped ones in its `m.streams()` row's `Error`, a
-            `poll()` lists the pair in `Error`, and a `fetch()` of a live table marks it `FAILED`
-            in `m.symbol_reads()`.
+            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, such a pair gives no rows, as a pair
+            Massive has no data for does, and the stream or read goes on with its other pairs; a
+            stream or read of only such pairs opens and gives no rows. A stream lists the skipped
+            ones in its `m.streams()` row's `Error`, a `poll()` lists the pair in `Error`, and a
+            `fetch()` of a live table marks it `FAILED` in `m.symbol_reads()`.
         unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
             can't read. Defaults to `LOG`.
 
@@ -1604,7 +1607,8 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         OnError.RAISE, "A watchlist value no request can carry: log, ignore, or raise."
     ),
     "unlisted_symbols": _Example(
-        OnError.LOG, "A watchlist crypto pair that Massive doesn't list: log, ignore, or raise."
+        OnError.LOG,
+        "A crypto pair that Massive's crypto ticker list doesn't hold: log, ignore, or raise.",
     ),
     "unreadable_symbols": _Example(
         OnError.LOG,

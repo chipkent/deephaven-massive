@@ -482,7 +482,7 @@ class OnError(StrEnum):
       value you pass always raises, whatever the setting.
       The default is `LOG`.
     - `MassiveConfig.unlisted_symbols`, for a crypto pair that Massive's crypto ticker list does
-      not hold, in a stream, `fetch()`, `history()`, or `poll()`. The default is
+      not hold, in a stream, `fetch()`, or `poll()`. The default is
       `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
