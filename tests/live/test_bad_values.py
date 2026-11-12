@@ -329,6 +329,15 @@ def test_an_unreadable_200_is_recorded_and_raises(
     assert "no verdict on the value" in lines[-1]
 
 
+def test_an_empty_200_is_empty(fake_rest: FakeRestServer, client: RestClient) -> None:
+    # The indicators answered `window=0` this way: Massive's answer, though no page.
+    fake_rest.reply(_SMA, Reply(b""))
+    lines: list[str] = []
+    answers = bad_values.ask_all(client, bad_values.WINDOW, lines.append, today=_DAY)
+    assert answers == (bad_values.Answer("EMPTY", 200, 0, None),)
+    assert lines[-1] == "window=0: verdict EMPTY (HTTP 200, empty body)"
+
+
 @pytest.mark.parametrize(
     "reply",
     [

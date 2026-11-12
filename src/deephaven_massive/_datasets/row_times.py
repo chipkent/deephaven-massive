@@ -114,6 +114,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.bar_periods import (
     bar_days,
     futures_bar_ended,
+    futures_session_unit,
     intraday,
     unit_ns,
 )
@@ -421,7 +422,7 @@ class FuturesBarCompletion:
     reader threads may share it.
 
     Attributes:
-        timespan: The bar unit: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+        timespan: The bar unit: `SESSION`, `DAY`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
         multiplier: How many units one bar spans, at least 1.
         now: The current instant of the `history()` call: a bar is kept only when it has
             certainly ended by then.
@@ -945,12 +946,12 @@ class TimeRule:
 
         Args:
             rows: The batch, whose `Date` holds the bars' `session_end_date`.
-            timespan: `SESSION`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
+            timespan: `SESSION`, `DAY`, `WEEK`, `MONTH`, `QUARTER`, or `YEAR`.
 
         Returns:
             The batch with `Date` and `TimestampEnd`; a row without a label has no end.
         """
-        single = timespan is Timespan.SESSION and self.multiplier == 1
+        single = futures_session_unit(timespan) and self.multiplier == 1
         labels = _column(rows, DATE)
         distinct = pc.unique(labels)
         ends = [

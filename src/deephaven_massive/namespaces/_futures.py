@@ -21,8 +21,9 @@ Futures differ from the other asset classes in three ways that show here:
 - **Venues.** Flat files are published per exchange (`us_futures_cme/...`), so `trades`,
   `quotes`, and `bars` take `venues`, a set that picks the flat-file prefixes (all four by
   default). Streams always use the `/futures` cluster path, whatever the venues.
-- **Bars.** The aggregates endpoint has a `session` unit and no `day` unit, so `bars` accepts
-  `Timespan.SESSION` and rejects `Timespan.DAY`.
+- **Bars.** The aggregates endpoint documents a `session` unit and no `day` unit, but Massive
+  serves `1day` bars in the shape of one-session buckets, so `bars` sends `Timespan.DAY` as `day`
+  and dates and keeps its bars as it does `Timespan.SESSION` bars.
 
 Every `product_code=` takes one code, a list of codes (sent as `product_code.any_of`), or a table
 of codes in a `ProductCode` column (`value_table`), each code read as if passed alone; a
@@ -403,17 +404,18 @@ class FuturesNamespace(Namespace):
     ) -> StreamHistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
-        Each row is one bar of `multiplier` times `timespan`. A futures day is a session, so daily
-        bars are `dm.Timespan.SESSION`; there is no `DAY` and no `previous_day_bar()`. With dates,
-        `history()` keeps a bar of a session or longer only when all its sessions are in the range.
-        The dataset's page, linked below, says how each bar's window and `Date` are set.
+        Each row is one bar of `multiplier` times `timespan`. Daily bars are
+        `dm.Timespan.SESSION` or `dm.Timespan.DAY`; both give one bar per trading session. There
+        is no `previous_day_bar()`. With dates, `history()` keeps a bar of a session or longer
+        only when all its sessions are in the range. The dataset's page, linked below, says how
+        each bar's window and `Date` are set.
 
         Massive refuses a multiplier above its unit's maximum, such as 60 minutes, and the call
         raises `MassiveError`. Use the next unit instead.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL` for every contract.
-            timespan: The bar's unit, any but `dm.Timespan.DAY`.
+            timespan: The bar's unit.
             multiplier: Units per bar.
             venues: The exchanges whose flat files `history()` reads.
 
@@ -426,8 +428,7 @@ class FuturesNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `timespan` is `DAY`; the message names `SESSION`;
-                - `venues` is empty, or `multiplier` is below 1;
+                - `venues` is empty;
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
                 - a table has no `Symbol` column.

@@ -24,10 +24,12 @@ and years are calendar periods (`futures_bucket_end`). A bar has certainly ended
 label's session has closed and, when the label may not yet be the bucket's last session, one
 weekday after the latest session the bucket can hold (`futures_bar_ended`). Named by session
 dates, such bars are requested from the first bucket that can start inside the range
-(`futures_bar_request`, `futures_first_bucket_day`). Intraday futures bars sit on whole units of
-UTC time like every other class's; named by date, their request starts
-`FUTURES_HOLIDAY_MARGIN` before the first session's regular open, and their rows are kept by
-their session, `Date`.
+(`futures_bar_request`, `futures_first_bucket_day`). Massive serves `day` bars of futures as it
+serves `session` bars, buckets of whole UTC days labelled by their last session, so a futures
+bar of `Timespan.DAY` follows every rule of `Timespan.SESSION` here (`futures_session_unit`).
+Intraday futures bars sit on whole units of UTC time like every other class's; named by date,
+their request starts `FUTURES_HOLIDAY_MARGIN` before the first session's regular open, and
+their rows are kept by their session, `Date`.
 
 `history_source` keeps the bars `bar_starts` admits, and `row_times` fills a bar's window from
 `bar_days` and judges whether a futures bar has ended with `futures_bar_ended`. Every function
@@ -72,6 +74,7 @@ __all__ = [
     "futures_bar_request",
     "futures_bucket_end",
     "futures_first_bucket_day",
+    "futures_session_unit",
     "intraday",
     "unit_ns",
 ]
@@ -89,6 +92,9 @@ _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 _DAYS_A_WEEK: Final = 7
+
+_FUTURES_SESSION_UNITS: Final = frozenset({Timespan.SESSION, Timespan.DAY})
+"""The futures bar units of one session each (`futures_session_unit`)."""
 
 _INTRADAY_SECONDS: Final[Mapping[Timespan, int]] = {
     Timespan.SECOND: 1,
@@ -128,10 +134,11 @@ def futures_bar_request(span: DaySpan, *, timespan: Timespan, multiplier: int) -
         The instants to request, in UTC.
     """
     upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO).astimezone(UTC)
-    if intraday(timespan) or (timespan is Timespan.SESSION and multiplier == 1):
+    sessions = futures_session_unit(timespan)
+    if intraday(timespan) or (sessions and multiplier == 1):
         lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
         return TimeRange(lower.astimezone(UTC), upper)
-    if timespan is Timespan.SESSION:
+    if sessions:
         # A futures bucket starts at 00:00 UTC of its first day.
         return TimeRange(midnight(futures_first_bucket_day(span.first), UTC), upper)
     period = _Periods(AssetClass.FUTURES, timespan).anchor(span.first)
@@ -216,13 +223,29 @@ def futures_bar_ended(
         The aware instant, in Chicago time.
     """
     closes = futures_session_end(label)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         return closes
     after = futures_bucket_end(first_day, timespan=timespan, multiplier=multiplier)
     latest = _latest_possible_session(after)
     if label >= latest:
         return closes
     return futures_session_end(add_weekdays(latest, 1))
+
+
+def futures_session_unit(timespan: Timespan) -> bool:
+    """Tell whether a futures bar unit is one session, as `SESSION` and `DAY` both are.
+
+    Massive answers `resolution=1day` with bars in the shape of its `1session` bars: each
+    starts at 00:00 UTC on its bucket's first day and is labelled with the session it holds,
+    so the library dates and keeps both alike, and sends each as its own unit.
+
+    Args:
+        timespan: The bar unit.
+
+    Returns:
+        True for `SESSION` and `DAY`.
+    """
+    return timespan in _FUTURES_SESSION_UNITS
 
 
 def intraday(timespan: Timespan) -> bool:

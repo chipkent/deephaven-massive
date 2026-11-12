@@ -5,8 +5,8 @@ requests worked, and its evidence, not a pass, answers the question; a test mark
 asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
 from the wire REST client, because "a key is missing" and "a key holds an empty list" look the same
 once the library has read them; the library's own answer is recorded beside them. The underlying
-and contract-symbol tests send values the library refuses (`tests/_live/bad_values.py`) and
-record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
+and contract-symbol tests send values the library refuses or used to (`tests/_live/bad_values.py`)
+and record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -1052,7 +1052,7 @@ def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
 ) -> None:
     """What the option chain answers for `C:EURUSD` and `X:BTCUSD` as the underlying.
 
-    The library takes only a stock or index ticker as `underlying`. DATA counts the
+    The library sends any canonical ticker as the chain's `underlying`. DATA counts the
     contracts on the pair sent.
     """
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)

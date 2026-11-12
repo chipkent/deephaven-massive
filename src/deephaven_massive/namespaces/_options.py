@@ -334,8 +334,40 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 """Every dataset of `m.options`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
 
+@raises_through(check_symbol)
+def _chain_underlying(value: object) -> str:
+    """Check the chain's `underlying` argument: Massive's exact ticker of an instrument.
+
+    Massive judges the instrument: it answers HTTP 400 ("Invalid ticker.") to the chain of a
+    currency or crypto pair, so such a pair is sent. An option contract is refused: what
+    Massive answers to one as an underlying has not been read.
+
+    Args:
+        value: The `underlying` argument as passed, such as `"AAPL"` or `"I:SPX"`.
+
+    Returns:
+        The ticker, unchanged.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` is not canonical (`check_symbol`), or is an option contract.
+    """
+    if not isinstance(value, str):
+        kind = "dm.ALL" if value is ALL else type(value).__name__
+        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
+    ticker = check_symbol(ClassFromPrefix.ANY, value)
+    if symbol_class(ticker) is AssetClass.OPTIONS:
+        raise ValueError(f"underlying must be the ticker of an underlying, not {value!r}")
+    return ticker
+
+
+@raises_through(_chain_underlying)
 def _underlying(value: object) -> str:
-    """Check an `underlying` argument: Massive's exact ticker of a stock or an index.
+    """Check the contracts list's `underlying` argument: a stock or index ticker.
+
+    A currency or crypto pair is refused, because Massive answers it with no error: sent
+    `underlying_ticker=C:EURUSD` or `X:BTCUSD`, the contracts list answered HTTP 200 with no
+    rows, which would read as a pair with no options listed.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"`, `"BRK.B"`, or `"I:SPX"`.
@@ -346,17 +378,15 @@ def _underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is the ticker of an option, a currency pair, or a crypto pair,
-            or is not canonical; `check_symbol` names the canonical form when it can.
+        ValueError: If `value` is not canonical, or is the ticker of an option, a currency
+            pair, or a crypto pair.
     """
-    if not isinstance(value, str):
-        kind = "dm.ALL" if value is ALL else type(value).__name__
-        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
-    if symbol_class(value) not in UNDERLYING_CLASSES:
+    ticker = _chain_underlying(value)
+    if symbol_class(ticker) not in UNDERLYING_CLASSES:
         raise ValueError(
             f"underlying must be a stock or index ticker such as 'AAPL' or 'I:SPX', not {value!r}"
         )
-    return check_symbol(ClassFromPrefix.ANY, value)
+    return ticker
 
 
 @raises_through(_require_enum)
@@ -540,7 +570,7 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
-            timespan: The bar's unit, any but `dm.Timespan.SESSION`.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts for splits of the underlying.
 
@@ -553,7 +583,6 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `timespan` is `SESSION`, or `multiplier` is below 1;
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
@@ -668,7 +697,7 @@ class OptionsNamespace(Namespace):
         """
         return build_query(self._core, ADMIN_MESSAGES, query_type=StreamQuery)
 
-    @raises_through(build_query, list_params, _contract_type, _underlying, value_table)
+    @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)
     def chain(
         self,
         underlying: str | Table,
@@ -687,13 +716,14 @@ class OptionsNamespace(Namespace):
         the standard ones. `contracts()` tells them apart: a standard contract has
         `SharesPerContract` of 100.
 
-        A table of underlyings is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed underlying fails the call.
+        A table of underlyings is read value by value. A row that isn't a stock or index ticker
+        follows `MassiveConfig.noncanonical_symbols`, which skips and logs it by default. A live
+        table is followed. In a static table, one failed underlying fails the call.
 
         Args:
-            underlying: The underlying's exact Massive ticker, a stock or an index, such as `"AAPL"`
-                or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused;
-                use `snapshots(dm.ALL)` for every contract.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
+                table of stock or index tickers in a `Symbol` column works too. `dm.ALL` is
+                refused; use `snapshots(dm.ALL)` for every contract.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
@@ -708,7 +738,7 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL`, or isn't Massive's exact ticker of a stock or an index;
+                - `underlying` is `dm.ALL` or an option contract, or isn't Massive's exact ticker;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -733,7 +763,7 @@ class OptionsNamespace(Namespace):
             else None
         )
         params: dict[str, object] = {
-            "underlyingAsset": None if values is not None else _underlying(underlying),
+            "underlyingAsset": None if values is not None else _chain_underlying(underlying),
             "contract_type": _contract_type(contract_type),
         }
         params.update(list_params(sort=sort, order=order))

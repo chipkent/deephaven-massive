@@ -1468,32 +1468,26 @@ def test_every_sort_default_massive_documents_passes_the_sort_check() -> None:
 @pytest.mark.parametrize(
     ("spec", "sort", "ordered", "message"),
     [
-        # An enum sort takes one of its listed fields.
+        # Massive judges the fields: it answers HTTP 400 to a value an enum sort does not list
+        # and to a field its rows lack, and reads a part with a space as the field it names.
         (OPTION_CONTRACTS, "strike_price", True, None),
-        (
-            OPTION_CONTRACTS,
-            "strike",
-            False,
-            r"sort 'strike' is not a sort field of /v3/reference/options/contracts; it takes \[",
-        ),
-        # A text sort takes fields of the rows, each with an optional direction.
+        (OPTION_CONTRACTS, "strike", False, None),
+        (OPTION_CONTRACTS, "strike_price.desc", True, None),
         (RATINGS, "date.desc,ticker", False, None),
-        # A part is taken exactly as written: a space after a comma is refused, not trimmed.
-        (
-            RATINGS,
-            "date.desc, ticker",
-            False,
-            r"sort part ' ticker' has surrounding whitespace; write 'ticker'",
-        ),
+        (RATINGS, "date.desc, ticker", False, None),
+        (RATINGS, "dat.desc", False, None),
+        (RATINGS, "date,,ticker", False, None),
         (RATINGS, "date", True, None),
-        (RATINGS, "dat.desc", False, r"sort part 'dat\.desc' names no field of"),
-        (RATINGS, "date,,ticker", False, r"sort part '' names no field of"),
+        (RATINGS, "desc", True, None),
+        # A text sort carries its direction as its last part's suffix, so a part's own
+        # direction beside `order` cannot be sent.
         (RATINGS, "date.desc", True, r"sort part 'date\.desc' has its own direction"),
+        (RATINGS, "ticker,date.asc", True, r"sort part 'date\.asc' has its own direction"),
         # A dataset whose paths take no sort is left to build_query.
-        (INDICATOR, "anything", False, None),
+        (INDICATOR, "anything", True, None),
     ],
 )
-def test_sort_is_checked_against_the_sort_fields_of_each_path(
+def test_only_a_sort_direction_beside_order_is_refused(
     *, spec: DatasetSpec, sort: str, ordered: bool, message: str | None
 ) -> None:
     catalog = Catalog((spec,))
@@ -1502,20 +1496,6 @@ def test_sort_is_checked_against_the_sort_fields_of_each_path(
     else:
         with pytest.raises(ValueError, match=rf"^{spec.name}: {message}"):
             catalog.check_sort(spec, sort, ordered=ordered)
-
-
-def test_a_sort_part_may_name_a_field_the_path_filters_on() -> None:
-    # The futures snapshot sorts by `ticker`, its filter, while its rows nest the ticker as
-    # `details.ticker`; a page-shaping parameter is no sort field.
-    snapshots = CATALOG.by_name["futures.snapshots"]
-    CATALOG.check_sort(snapshots, "ticker.desc,product_code", ordered=False)
-    with pytest.raises(ValueError, match=r"sort part 'limit' names no field of"):
-        CATALOG.check_sort(snapshots, "limit", ordered=False)
-    # A filter that names no field of the rows is refused at the call, not by Massive.
-    news = next(s for s in CATALOG.by_name.values() if "/benzinga/v2/news" in s.rest_paths)
-    CATALOG.check_sort(news, "tickers", ordered=False)
-    with pytest.raises(ValueError, match=r"sort part 'stocks' names no field of"):
-        CATALOG.check_sort(news, "stocks", ordered=False)
 
 
 def test_no_vendor_field_keeps_a_library_time_column_s_name() -> None:

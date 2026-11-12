@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Option contracts, or `dm.ALL` for every contract. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.SESSION`. |
+| [`timespan`](README.md#timespan) | The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`adjusted`](README.md#adjusted) | Adjusts for splits of the underlying. |
 

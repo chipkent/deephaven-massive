@@ -1,7 +1,7 @@
 """Live checks of the bars' timespan and multiplier values against Massive.
 
-Each test sends a value the library refuses before any request straight to Massive's REST
-endpoint through the wire client, and records Massive's status, message, and row count
+Each test sends a value the library could refuse before any request straight to Massive's
+REST endpoint through the wire client, and records Massive's status, message, and row count
 (`evidence`), ending with a verdict line: ERROR, EMPTY, or DATA (`tests/_live/bad_values.py`).
 The tests are marked `settles`: they assert only that Massive answered, and the owner reads
 the verdict. ERROR means Massive judges the value itself; EMPTY, or DATA that does not answer
@@ -37,8 +37,9 @@ def test_massive_answers_futures_bars_of_a_day(
 ) -> None:
     """What the futures aggregates answer to `resolution=1day` for the front E-mini contract.
 
-    The library refuses `Timespan.DAY` for futures bars and takes `SESSION`. DATA cannot be
-    compared with the request: read whether the bars span a day or a session.
+    The library sends `Timespan.DAY` for futures bars as `1day`, and dates and keeps them as
+    one-session bars. DATA cannot be compared with the request: read whether the bars span a
+    day or a session.
     """
     assert bad_values.ask_all(live_rest, bad_values.FUTURES_DAY, evidence)
 
@@ -51,8 +52,8 @@ def test_massive_answers_stock_bars_of_a_session(
 ) -> None:
     """What the aggregates range answers to AAPL's bars of `timespan=session`.
 
-    The library refuses `Timespan.SESSION` outside futures. DATA cannot be compared with the
-    request: read the bars' spacing.
+    The library sends `Timespan.SESSION` outside futures for Massive to judge. DATA cannot be
+    compared with the request: read the bars' spacing.
     """
     assert bad_values.ask_all(live_rest, bad_values.SESSION_OUTSIDE_FUTURES, evidence)
 
@@ -65,7 +66,7 @@ def test_massive_answers_a_bar_multiplier_of_0(
 ) -> None:
     """What the aggregates range answers to AAPL's bars with multiplier 0.
 
-    The library refuses a multiplier below 1. DATA cannot be compared with the request:
-    read the bars' spacing.
+    The library sends a multiplier below 1 for Massive to judge. DATA cannot be compared with
+    the request: read the bars' spacing.
     """
     assert bad_values.ask_all(live_rest, bad_values.MULTIPLIER, evidence)

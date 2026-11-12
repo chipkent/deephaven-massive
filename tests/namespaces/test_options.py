@@ -436,8 +436,8 @@ def test_every_bars_call_is_one_class_and_only_some_stream(
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
     assert bars(CONTRACT, dm.Timespan.MINUTE)._request.adjusted is True
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars(CONTRACT, dm.Timespan.SESSION)
+    # Massive answers HTTP 400 to session bars outside futures, so they are sent.
+    assert bars(CONTRACT, dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars(CONTRACT, cast("dm.Timespan", "minute"))
     with pytest.raises(TypeError, match="adjusted must be a bool"):
@@ -498,6 +498,16 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
         massive_session.options.contracts(underlying=tickers)
 
 
+def test_a_chain_of_a_pair_fails_with_massive_s_answer(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "ERROR", "request_id": "r", "error": "Invalid ticker."}
+    fake_rest.reply_default(Reply(refusal, status=400))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid ticker\."):
+        rest_session.options.chain("C:EURUSD").fetch(wait=True)
+    assert [path for path, _ in fake_rest.get_queries()] == ["/v3/snapshot/options/C:EURUSD"]
+
+
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
     with pytest.raises(
@@ -516,9 +526,10 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain("aapl")
     with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
         chain("i:SPX")
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
-        chain("C:EURUSD")
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
+    # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
+    assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
+    assert request_of(chain("X:BTCUSD"))["params"]["underlyingAsset"] == "X:BTCUSD"
+    with pytest.raises(ValueError, match=r"^underlying must be the ticker of an underlying, not"):
         chain("O:AAPL250117C00150000")
     assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"

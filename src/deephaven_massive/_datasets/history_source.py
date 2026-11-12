@@ -54,6 +54,7 @@ from deephaven_massive._datasets.bar_periods import (
     bar_starts,
     futures_bar_request,
     futures_first_bucket_day,
+    futures_session_unit,
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
@@ -325,7 +326,7 @@ def _futures_sessions(
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(AssetClass.FUTURES, ended, timespan=timespan, multiplier=multiplier)
         return HistoryWindow(span, keep, span, requested, whole, now=now)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         # Only finished sessions, and no session ends on a Saturday or Sunday.
         last = min(span.last, futures_session(now) - _ONE_DAY)

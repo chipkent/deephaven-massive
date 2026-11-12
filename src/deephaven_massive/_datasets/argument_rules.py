@@ -91,7 +91,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "timespan": (
             "The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or "
-            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, "
+            "`dm.Timespan.DAY`. `SESSION`, a trading session, is for futures only; a futures "
+            "`DAY` bar is one session. On a bars dataset, "
             "one-second and one-minute bars with `multiplier=1` also stream. Bars of other "
             "lengths are history only."
         ),

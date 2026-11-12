@@ -1,7 +1,7 @@
 """Live checks of filter values against Massive.
 
-Each test sends a value the library refuses before any request straight to Massive's REST
-endpoint through the wire client, and records Massive's status, message, and row count
+Each test sends a value the library could refuse before any request straight to Massive's
+REST endpoint through the wire client, and records Massive's status, message, and row count
 (`evidence`), ending with a verdict line: ERROR, EMPTY, or DATA (`tests/_live/bad_values.py`).
 The tests are marked `settles`: they assert only that Massive answered, and the owner reads
 the verdict. ERROR means Massive judges the value itself; EMPTY, or DATA that does not answer
@@ -51,7 +51,8 @@ def test_massive_answers_a_filter_list_item_with_a_space(
 ) -> None:
     """What the dividends answer to `ticker.any_of=AAPL, MSFT`, whose second item has a space.
 
-    The library refuses an item with surrounding whitespace. DATA counts the MSFT rows: none
-    means Massive matched ` MSFT` as written, and so dropped that ticker with no error.
+    The library sends an item with surrounding whitespace as written. DATA counts the MSFT
+    rows: none means Massive matched ` MSFT` as written, and so dropped that ticker with no
+    error.
     """
     assert bad_values.ask_all(live_rest, bad_values.FILTER_WHITESPACE, evidence)
