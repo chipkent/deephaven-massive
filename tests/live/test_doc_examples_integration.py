@@ -457,7 +457,7 @@ def _check_snapshot(
     snapshot: Table, delay: timedelta, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
     """Check Example 8: a snapshot of three stocks, with the columns its text names."""
-    assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
+    assert {"DayClose", "PrevDayClose", "DayChangePercent"} <= set(snapshot.column_names)
     _wait(lambda: bool(table_rows(snapshot)), _FILL_WAIT)  # it reads in the background
     rows = table_rows(snapshot)
     evidence(f"example 8: {[(r['Symbol'], r['DayClose']) for r in rows]}")

@@ -767,7 +767,7 @@ def test_movers_put_the_direction_in_the_path(
     fake_rest.reply(path, Reply(fixture_body(load_fixture, "movers.json")))
     table = rest_session.forex.movers(dm.Direction.LOSERS).fetch(wait=True)
     assert fake_rest.get_queries() == [(path, {})]
-    assert pick(table, "Symbol", "TodaysChangePerc") == [("C:PLNILS", 5.13770674)]
+    assert pick(table, "Symbol", "DayChangePercent") == [("C:PLNILS", 5.13770674)]
 
 
 def test_conversion_sends_the_pair_amount_and_precision(
@@ -1104,10 +1104,10 @@ def test_snapshot_polls_keep_one_row_per_symbol(
     second = {"status": "OK", "tickers": [snapshot_row("C:EURUSD", 3.0)]}
     fake_rest.reply(path, Reply(first), Reply(second))
     table = make(rest_session).poll(60)
-    rows_when(table, changes({("C:EURUSD", 1.0), ("C:GBPUSD", 2.0)}, "TodaysChangePerc"))
+    rows_when(table, changes({("C:EURUSD", 1.0), ("C:GBPUSD", 2.0)}, "DayChangePercent"))
     # The next cycle replaces the rows by Symbol: EUR/USD is updated, GBP/USD leaves.
     next_cycle(poll_clock)
-    rows_when(table, changes({("C:EURUSD", 3.0)}, "TodaysChangePerc"))
+    rows_when(table, changes({("C:EURUSD", 3.0)}, "DayChangePercent"))
     assert [p for p, _ in fake_rest.get_queries()] == [path, path]
 
 

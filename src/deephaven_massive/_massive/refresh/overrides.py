@@ -1835,8 +1835,47 @@ _CONVERSION_QUOTE = (
     "`{key}_price`, the spelling of `/v3/quotes/{{fxTicker}}`."
 )
 
+_V2_SNAPSHOTS = tuple(
+    f"/v2/snapshot/locale/{market}/{path}"
+    for market in ("us/markets/stocks", "global/markets/forex", "global/markets/crypto")
+    for path in ("tickers", "{direction}")
+)
+_DAY_CHANGE = (
+    'The v2 snapshots and movers document `{key}` as "{text}", a number, as the option chain '
+    'documents `day.{chain_key}` ("The {measure} of the price change for the contract from the '
+    'previous trading day."), read as `day_{chain_key}`. Live reads of '
+    "2026-11-11 and 2026-11-12 (UTC) found both to be one quantity: for AAPL, MSFT, SPY, IWM, "
+    "and XLU, `todaysChange` was the latest price (the last trade or minute close) minus "
+    "`prevDay.c`, and `todaysChangePerc` 100 times that over `prevDay.c`; for SPY's option "
+    "chain, `day.change` was `day.close` minus `day.previous_close`, and `day.change_percent` "
+    "100 times that over `day.previous_close`. The forex and crypto snapshots and movers give "
+    "the field the same key and text as the stocks ones."
+)
+
 SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
     {
+        **{
+            (source, key): Spelling(
+                long_name=f"day_{chain_key}",
+                source=f"{_CHAIN} `day.{chain_key}`",
+                reason=_DAY_CHANGE.format(key=key, text=text, chain_key=chain_key, measure=measure),
+            )
+            for source in _V2_SNAPSHOTS
+            for key, text, chain_key, measure in (
+                (
+                    "todaysChange",
+                    "The value of the change from the previous day.",
+                    "change",
+                    "value",
+                ),
+                (
+                    "todaysChangePerc",
+                    "The percentage change since the previous day.",
+                    "change_percent",
+                    "percent",
+                ),
+            )
+        },
         (_CHAIN, "details"): _OPTION_DETAILS,
         (_UNIFIED, "details"): _OPTION_DETAILS,
         (_FUTURES, "details"): Spelling(

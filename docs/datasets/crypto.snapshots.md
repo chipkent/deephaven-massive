@@ -68,8 +68,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `PrevDayClose` | double | The close price for the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
 | `PrevDayVolume` | double | The trading volume of the symbol in the given time period. From the `prevDay` object: The previous day's bar for this ticker. |
 | `PrevDayVwap` | double | The volume weighted average price. From the `prevDay` object: The previous day's bar for this ticker. |
-| `TodaysChange` | double | The value of the change from the previous day. |
-| `TodaysChangePerc` | double | The percentage change since the previous day. |
+| `DayChange` | double | The value of the change from the previous day. |
+| `DayChangePercent` | double | The percentage change since the previous day. |
 | `Updated` | Instant | The last updated timestamp. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
@@ -110,8 +110,8 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `PrevDayClose` | `prevDay.c` |
 | `PrevDayVolume` | `prevDay.v` |
 | `PrevDayVwap` | `prevDay.vw` |
-| `TodaysChange` | `todaysChange` |
-| `TodaysChangePerc` | `todaysChangePerc` |
+| `DayChange` | `todaysChange` |
+| `DayChangePercent` | `todaysChangePerc` |
 | `Updated` | `updated` |
 | `TimestampInsert` |  |
 
