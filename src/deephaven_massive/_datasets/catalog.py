@@ -261,8 +261,8 @@ class DatasetSpec:
     A fetch path is never combined with channels or a history source, so `fetch()` always
     returns every row its endpoint returns: a REST endpoint that answers one row per symbol
     (the last trade, the previous day's bar) is a one-row dataset of its own, in the same kind
-    as the stream and history dataset of its class. A `bars` dataset needs H and no F; its
-    class is picked per call from the timespan and multiplier (`bar_query_class`). Every other
+    as the stream and history dataset of its class. A `bars` dataset needs H and no F; with
+    S its query streams only the bars that have a channel. Every other
     combination is rejected when the spec is created.
 
     Example:

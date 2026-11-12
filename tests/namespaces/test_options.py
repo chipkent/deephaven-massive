@@ -40,7 +40,6 @@ from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -192,7 +191,7 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.TRADES, StreamHistoryQuery),
         (options.LAST_TRADE, FetchQuery),
         (options.QUOTES, StreamHistoryQuery),
-        (options.BARS, HistoryQuery),
+        (options.BARS, StreamHistoryQuery),
         (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, SymbolStreamQuery),
         (options.ADMIN_MESSAGES, StreamQuery),
@@ -418,13 +417,21 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
 
 
-def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSession) -> None:
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession,
+) -> None:
     bars = massive_session.options.bars
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.SECOND)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE, multiplier=5)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.HOUR)) is HistoryQuery
+    for timespan, multiplier in [
+        (dm.Timespan.MINUTE, 1),
+        (dm.Timespan.SECOND, 1),
+        (dm.Timespan.DAY, 1),
+        (dm.Timespan.MINUTE, 5),
+        (dm.Timespan.HOUR, 1),
+    ]:
+        assert type(bars(CONTRACT, timespan, multiplier=multiplier)) is StreamHistoryQuery
+    for timespan, multiplier in [(dm.Timespan.DAY, 1), (dm.Timespan.MINUTE, 5)]:
+        with pytest.raises(ValueError, match=r"\.ring\(\): only 1-second and 1-minute bars"):
+            bars(CONTRACT, timespan, multiplier=multiplier).ring(10)
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False

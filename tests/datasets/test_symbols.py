@@ -729,10 +729,10 @@ def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
 
 def test_all_is_the_exported_singleton() -> None:
     assert dm.ALL is ALL
-    assert AllSymbols("ALL") is ALL
+    assert dm.AllSymbols is AllSymbols
+    assert AllSymbols("ALL") is AllSymbols.ALL is ALL
     assert copy.copy(ALL) is ALL
     assert copy.deepcopy(ALL) is ALL
-    assert hash(ALL) == hash(AllSymbols.ALL)
     assert not isinstance(ALL, str)
 
 

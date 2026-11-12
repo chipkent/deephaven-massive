@@ -75,12 +75,12 @@ from deephaven_massive.namespaces import (
     ReferenceNamespace,
     StocksNamespace,
 )
-from deephaven_massive.namespaces._namespace import shows_call
 from deephaven_massive.namespaces._query_building import (
     build_query,
     list_params,
 )
 from deephaven_massive.queries import FetchQuery
+from deephaven_massive.queries._call import shows_call
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -110,7 +110,7 @@ NAMESPACE_MODULES: Final = (
 )
 """Every namespace module, each exporting `DATASETS`, imported statically, and `snapshots`, the
 module of the dataset the session serves itself. A test asserts that this tuple names every
-private module of `namespaces/` except `_query_building`, and `_snapshots`."""
+private module of `namespaces/` except `_query_building` and `_namespace`, and `_snapshots`."""
 
 CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session
@@ -315,16 +315,16 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         core.attach(SessionClients(core))
         _register(core)
         self._core = core
-        self._stocks = StocksNamespace(core)
-        self._options = OptionsNamespace(core)
-        self._futures = FuturesNamespace(core)
-        self._indices = IndicesNamespace(core)
-        self._forex = ForexNamespace(core)
-        self._crypto = CryptoNamespace(core)
-        self._reference = ReferenceNamespace(core)
-        self._indicators = IndicatorsNamespace(core)
-        self._economy = EconomyNamespace(core)
-        self._partners = PartnersNamespace(core)
+        self._stocks = StocksNamespace(self)
+        self._options = OptionsNamespace(self)
+        self._futures = FuturesNamespace(self)
+        self._indices = IndicesNamespace(self)
+        self._forex = ForexNamespace(self)
+        self._crypto = CryptoNamespace(self)
+        self._reference = ReferenceNamespace(self)
+        self._indicators = IndicatorsNamespace(self)
+        self._economy = EconomyNamespace(self)
+        self._partners = PartnersNamespace(self)
 
     @override
     def __repr__(self) -> str:

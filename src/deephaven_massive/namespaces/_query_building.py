@@ -11,11 +11,10 @@ method of the query runs.
   have a `Symbol` column and is boxed in a `SymbolTable`), refuses `dm.ALL` where the dataset
   can't serve it and names the alternative, parses the time bounds, and normalizes the typed
   parameters and the `filters` mapping into a hashable `Request`. It builds the class
-  `queries/_choice.py` derives from the dataset (`query_class`, or `bar_query_class` for a
-  `bars()` call) and fails, as a library defect, when that class isn't the one the method
-  declares. Filter keys and values are checked against the dataset's generated REST
-  parameters (`check_filters` in `_datasets/filters.py`), and the `Request` stores each value
-  as the check parsed it, never the caller's text.
+  `queries/_choice.py` derives from the dataset (`query_class`) and fails, as a library defect,
+  when that class isn't the one the method declares. Filter keys and values are checked
+  against the dataset's generated REST parameters (`check_filters` in `_datasets/filters.py`),
+  and the `Request` stores each value as the check parsed it, never the caller's text.
 - `list_query` builds the query of a REST list dataset, whose `sort` and `order` arguments
   `list_params` checks; its `limit` is a cap on the total rows (`Request.limit`), not the
   endpoint's page size.
@@ -54,13 +53,13 @@ from deephaven_massive._datasets.filters import (
 )
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
-from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
 from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive.queries import FetchQuery, Query
 from deephaven_massive.queries._call import QueryCall
-from deephaven_massive.queries._choice import bar_query_class, query_class
+from deephaven_massive.queries._choice import query_class
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
@@ -688,39 +687,50 @@ def _typed_params(
     return {**params, **library}
 
 
-def _query_class(
-    spec: DatasetSpec, query_type: type[_Q], *, timespan: Timespan | None, multiplier: int
-) -> type[_Q]:
-    """Derive the class of a dataset call's query, and check it against the declared class.
+def _check_bar_period(spec: DatasetSpec, timespan: object, multiplier: object) -> None:
+    """Check a `bars()` call's timespan and multiplier, before any request.
 
-    The class follows from the dataset's spec (`query_class`), and for a `bars()` call from its
-    timespan and multiplier (`bar_query_class`), so no dataset method names it by hand. The
-    method declares the class it returns; a derived class that is neither that class nor a
-    subclass of it means the method's signature and its dataset disagree, a defect of the
+    Args:
+        spec: The bars dataset.
+        timespan: The `timespan` argument as passed.
+        multiplier: The `multiplier` argument as passed.
+
+    Raises:
+        ValueError: If `Timespan.DAY` is used for futures (the futures endpoint has no day
+            unit; use `Timespan.SESSION`), or `Timespan.SESSION` is used outside futures.
+
+    A `timespan` that is not a `dm.Timespan` raises the `TypeError` of `_require_enum`, and a
+    `multiplier` that is not a positive `int` the error of `require_positive_int`.
+    """
+    span = _require_enum(timespan, Timespan, "timespan")
+    require_positive_int("multiplier", multiplier)
+    futures = spec.asset_class is AssetClass.FUTURES
+    if futures and span is Timespan.DAY:
+        raise ValueError("futures bars have no DAY timespan; use dm.Timespan.SESSION")
+    if not futures and span is Timespan.SESSION:
+        raise ValueError("Timespan.SESSION exists only for futures bars")
+
+
+def _query_class(spec: DatasetSpec, query_type: type[_Q]) -> type[_Q]:
+    """Derive the class of a dataset's query, and check it against the declared class.
+
+    The class follows from the dataset's spec (`query_class`), so no dataset method names it by
+    hand. The method declares the class it returns; a derived class that is neither that class
+    nor a subclass of it means the method's signature and its dataset disagree, a defect of the
     library that no caller can cause.
 
     Args:
         spec: The dataset.
         query_type: The class the dataset method declares it returns.
-        timespan: The bar timespan, or None for a call without one.
-        multiplier: The bar multiplier.
 
     Returns:
         The class to build.
 
     Raises:
-        TypeError: If `timespan` is neither None nor a `dm.Timespan`.
         MassiveError: A library defect, if the derived class is not `query_type` or a
             subclass of it.
-
-    A bars call's timespan or multiplier that the dataset refuses raises the error of
-    `bar_query_class`.
     """
     cls = query_class(spec)
-    if timespan is not None:
-        _require_enum(timespan, Timespan, "timespan")
-    if timespan is not None and spec.is_bars:
-        cls = bar_query_class(spec, timespan, multiplier)
     if not issubclass(cls, query_type):
         message = f"m.{spec.name} gives a {cls.__name__}, not the {query_type.__name__} it declares"
         raise MassiveError(library_bug(message), cause=ErrorCause.LIBRARY_DEFECT)
@@ -761,8 +771,8 @@ def build_query(
         core: The session core the query will run on.
         spec: The dataset.
         query_type: The query class the dataset method declares it returns. The class of the
-            query is derived from the spec (`query_class`, or `bar_query_class` for a bars
-            dataset), and must be this class or a subclass of it.
+            query is derived from the spec (`query_class`), and must be this class or a
+            subclass of it.
         symbols: The instruments, or None for datasets without them. A Deephaven `Table`
             must have a `Symbol` column; it is boxed by identity in a `SymbolTable` and read
             when a verb runs. None is refused for an instrument dataset
@@ -774,8 +784,8 @@ def build_query(
             `ValueError` tells the caller to do instead, an instruction such as
             `"use m.stocks.snapshots(dm.ALL)"` or `"leave symbols out, which returns every
             ticker"`.
-        timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it also selects
-            the query class through `bar_query_class`.
+        timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it is checked
+            with the multiplier (`_check_bar_period`).
         multiplier: The bar multiplier.
         venues: The futures venues whose flat files `history()` reads (`futures_venues`), or
             None for a dataset without venues.
@@ -806,8 +816,8 @@ def build_query(
             the verbs send each of the table's values as that parameter.
 
     Returns:
-        An instance of the spec's query class (`query_class`, or the class `bar_query_class`
-        picks for a bars dataset), whose call names only the dataset; the dataset method's
+        An instance of the spec's query class (`query_class`), whose call names only the
+        dataset; the dataset method's
         `shows_call` wrapper replaces it with the call as made.
 
     Raises:
@@ -827,7 +837,7 @@ def build_query(
     raise the `TypeError` or `ValueError` of the helper that checks them (`check_symbols` in
     `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
     `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
-    calendar-date bounds, `bar_query_class`, `require_positive_int` for `limit`). A `query_type`
+    calendar-date bounds, `_check_bar_period`, `require_positive_int` for `limit`). A `query_type`
     the dataset can't give is a library defect, the `MassiveError` of `_query_class`.
     """
     normalized = _normalized_symbols(
@@ -840,7 +850,11 @@ def build_query(
     if adjusted is not None and not isinstance(adjusted, bool):
         raise TypeError(f"adjusted must be a bool, not {type(adjusted).__name__}")
     sent = _typed_params(core, spec, params or {})
-    cls = _query_class(spec, query_type, timespan=timespan, multiplier=multiplier)
+    cls = _query_class(spec, query_type)
+    if timespan is not None:
+        _require_enum(timespan, Timespan, "timespan")
+    if timespan is not None and spec.is_bars:
+        _check_bar_period(spec, timespan, multiplier)
     first = None if start is None else parse_date_like(deephaven_time_text(start, "start"), "start")
     last = (
         None if end is None else parse_date_like(deephaven_time_text(end, "end"), "end", upper=True)

@@ -42,7 +42,6 @@ from deephaven_massive.namespaces import _forex as forex
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     Query,
     StreamHistoryQuery,
     SymbolStreamQuery,
@@ -54,6 +53,9 @@ from tests._fakes.rest import FakeRestServer, Reply
 if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
+
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
@@ -118,7 +120,7 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
     [
         (forex.QUOTES, StreamHistoryQuery),
         (forex.LAST_QUOTE, FetchQuery),
-        (forex.BARS, HistoryQuery),
+        (forex.BARS, StreamHistoryQuery),
         (forex.PREVIOUS_DAY_BAR, FetchQuery),
         (forex.FMV, SymbolStreamQuery),
         (forex.SNAPSHOTS, FetchQuery),
@@ -255,22 +257,25 @@ def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> No
 
 
 @pytest.mark.parametrize(
-    ("case", "expected"),
+    ("case", "streams"),
     [
-        ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.DAY, 1), HistoryQuery),
-        ((dm.Timespan.MINUTE, 5), HistoryQuery),
-        ((dm.Timespan.HOUR, 1), HistoryQuery),
-        ((dm.Timespan.DAY, 2), HistoryQuery),
+        ((dm.Timespan.SECOND, 1), True),
+        ((dm.Timespan.MINUTE, 1), True),
+        ((dm.Timespan.DAY, 1), False),
+        ((dm.Timespan.MINUTE, 5), False),
+        ((dm.Timespan.HOUR, 1), False),
+        ((dm.Timespan.DAY, 2), False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], expected: type
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], streams: bool
 ) -> None:
     timespan, multiplier = case
     query = massive_session.forex.bars("C:EURUSD", timespan, multiplier=multiplier)
-    assert type(query) is expected
+    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            query.blink()
     assert query._request == Request(
         symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )
@@ -284,7 +289,7 @@ def test_bars_default_to_one_minute_and_take_no_adjusted(
     # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
     assert query._request == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
     with pytest.raises(TypeError, match="adjusted"):
-        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-overload]  # no such argument
+        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-arg]  # no such argument
 
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -292,7 +297,7 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="SESSION exists only for futures"):
         bars("C:EURUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("C:EURUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("C:EURUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)
 

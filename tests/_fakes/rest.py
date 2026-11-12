@@ -23,7 +23,7 @@ that fails. `LoopbackHTTPServer`, the server class underneath `FakeRestServer`, 
 tests that need a plain HTTP server on 127.0.0.1.
 
 Every method is safe to call from any thread: the script and the record sit behind one lock.
-Imported lazily by the `fake_rest` fixture in `tests/conftest.py`.
+The `fake_rest` fixture in `tests/conftest.py` serves one per test.
 """
 
 from __future__ import annotations

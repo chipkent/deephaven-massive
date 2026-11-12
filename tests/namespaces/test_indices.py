@@ -46,6 +46,9 @@ if TYPE_CHECKING:
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
 PREVIOUS = "/v2/aggs/ticker/{indicesTicker}/prev"
@@ -324,19 +327,24 @@ def test_values_history_from_flat_files_needs_credentials(
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.DAY, 2, HistoryQuery),
-        (dm.Timespan.WEEK, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.DAY, 2, False),
+        (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, int, type]) -> None:
-    timespan, multiplier, expected = case
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    m: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
+) -> None:
+    timespan, multiplier, streams = case
     q = m.indices.bars("I:SPX", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     assert q._request.symbols == ("I:SPX",)
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
@@ -489,7 +497,7 @@ def test_factories_return_the_class_of_their_dataset() -> None:
     assert query_class(indices.PREVIOUS_DAY_BAR) is FetchQuery
     assert query_class(indices.SNAPSHOTS) is FetchQuery
     assert query_class(indices.DAILY_OPEN_CLOSE) is FetchQuery
-    assert query_class(indices.BARS) is HistoryQuery
+    assert query_class(indices.BARS) is StreamHistoryQuery
 
 
 @pytest.mark.parametrize("spec", indices.DATASETS, ids=lambda spec: spec.name)

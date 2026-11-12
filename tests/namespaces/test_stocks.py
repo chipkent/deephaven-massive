@@ -66,6 +66,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
 DOCS = "docs/datasets/stocks."
@@ -456,20 +459,23 @@ def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.Massiv
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.WEEK, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
-    timespan, multiplier, cls = case
+    timespan, multiplier, streams = case
     query = massive_session.stocks.bars("AAPL", timespan, multiplier=multiplier)
-    assert type(query) is cls
+    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            query.blink()
     assert query._request.timespan is timespan
     assert query._request.multiplier == multiplier
     assert query._request.adjusted is True

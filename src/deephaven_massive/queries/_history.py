@@ -88,16 +88,16 @@ def _window_text(first: date | datetime, last: date | datetime | None, now: date
 
 
 class HistoryQuery(Query):
-    """A query of a past range: `history(start, end)` reads the rows between two dates or times.
+    """Any query that reads a past range: `history(start, end)` reads the rows between two times.
 
-    A `bars()` call whose bars don't stream, such as hourly or daily bars, returns a
-    `HistoryQuery`. Call `history(start, end)` for a table of the rows in that range. The
-    library reads them from Massive's REST API or its S3 flat files, whichever serves the range,
-    unless you choose with `source`. Each call reads its range again.
+    Annotate with `HistoryQuery` when your code only reads history, such as a helper that
+    loads a week of any dataset's rows. Call `history(start, end)` for a table of the rows in
+    that range. The library reads them from Massive's REST API or its S3 flat files, whichever
+    serves the range, unless you choose with `source`. Each call reads its range again.
 
-    Datasets that also stream, such as trades or one-minute bars, return a
-    `StreamHistoryQuery` instead. It is a subclass of this class, so code annotated with
-    `HistoryQuery` takes it too.
+    Every dataset with history also streams today, so its method returns a
+    `StreamHistoryQuery`, a subclass of this class that adds the stream methods; code annotated
+    with `HistoryQuery` takes it.
 
     Import it as `from deephaven_massive.queries import HistoryQuery` to annotate your own code.
     You get one from a dataset method and never construct one.
@@ -105,8 +105,16 @@ class HistoryQuery(Query):
     Example:
         ::
 
-            q = m.options.bars("O:AAPL250117C00150000", dm.Timespan.HOUR)
-            week = q.history("2025-01-06", "2025-01-10")  # whole days, both included
+            from deephaven.table import Table
+
+            from deephaven_massive.queries import HistoryQuery
+
+
+            def week(query: HistoryQuery) -> Table:
+                return query.history("2025-01-06", "2025-01-10")  # whole days, both included
+
+
+            hourly = week(m.options.bars("O:AAPL250117C00150000", dm.Timespan.HOUR))
     """
 
     __slots__ = ()
@@ -535,12 +543,16 @@ class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     """A query of a stream that also has history: the live feed and the past, with one schema.
 
     Massive both streams some datasets live and keeps them for the past, such as stock trades
-    and quotes, index values, and one-second and one-minute bars. Their dataset methods return a
-    `StreamHistoryQuery`, which has
-    every method of `SymbolStreamQuery` and of `HistoryQuery`: `history(start, end)` reads a
-    past range, and the stream methods follow the live feed, with the same columns, so code
-    written against one works on the other. `help(StreamQuery)` covers what the stream methods
-    share, and `help(SymbolStreamQuery)` the symbols and watchlists they take.
+    and quotes, index values, and aggregate bars. Their dataset methods return a
+    `StreamHistoryQuery`, which has every method of `SymbolStreamQuery` and of `HistoryQuery`:
+    `history(start, end)` reads a past range, and the stream methods follow the live feed, with
+    the same columns, so code written against one works on the other. `help(StreamQuery)`
+    covers what the stream methods share, and `help(SymbolStreamQuery)` the symbols and
+    watchlists they take.
+
+    A `bars()` query streams only 1-second and 1-minute bars at `multiplier=1`, which Massive
+    sends over its WebSocket; its stream methods refuse any other bars with `ValueError`, which
+    names the bars that stream. `history()` reads every bar.
 
     Import it as `from deephaven_massive.queries import StreamHistoryQuery` to annotate your own
     code. You get one from a dataset method and never construct one.

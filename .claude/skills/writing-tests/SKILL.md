@@ -10,11 +10,13 @@ holds the harness details that keep a test deterministic and the JVM alive.
 
 ## The embedded JVM
 
-- `tests/conftest.py` starts one embedded Deephaven server per pytest process before
-  collection, so test modules may import `deephaven` at module level. Under `-n`, each xdist
-  worker starts one and the controller starts none; `-n` with the live tests is refused.
-- Never start or stop another `Server` in that process (a subprocess may). Read the comments on
-  the `trylast` hook and the JVM shutdown block in `tests/conftest.py` before touching either.
+- The pytest plugin `tests/embedded_server.py`, loaded with `-p` from `pyproject.toml`, starts
+  one embedded Deephaven server per pytest process before any conftest imports the library, so
+  test modules may import `deephaven` and the library at module level. Under `-n`, the xdist
+  controller and each worker start one; `-n` with the live tests is refused.
+- Never start or stop another `Server` in that process (a subprocess may). Read the comments in
+  `tests/embedded_server.py` and on the JVM shutdown block in `tests/conftest.py` before
+  touching either.
 - The JVM raises SIGSEGV on purpose, so never call `faulthandler.enable()` once it runs. Any
   process that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py`
   does.

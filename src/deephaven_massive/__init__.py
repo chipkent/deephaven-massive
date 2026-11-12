@@ -29,7 +29,8 @@ Datasets:
     To annotate your own code, import the class of a namespace, such as `StocksNamespace` for
     `m.stocks`, from `deephaven_massive.namespaces`, and the class of a query, such as
     `StreamHistoryQuery`, from `deephaven_massive.queries`. The types of the arguments,
-    `dm.SymbolsLike`, `dm.DateLike`, and `dm.FilterValue`, are here.
+    `dm.SymbolsLike`, `dm.DateLike`, and `dm.FilterValue`, are here, and so is
+    `dm.AllSymbols`, the type of `dm.ALL`.
 
 Query methods:
     A query reads nothing until you call one of its methods. It has only the methods its
@@ -111,6 +112,7 @@ from deephaven_massive._datasets.dates import DateLike
 from deephaven_massive._datasets.filters import FilterValue
 from deephaven_massive._datasets.symbols import (
     ALL,
+    AllSymbols,
     SymbolsLike,
     canonical_symbol,
     canonical_symbol_crypto,
@@ -158,6 +160,7 @@ from deephaven_massive._tables.symbols import canonicalize_symbols
 
 __all__ = [
     "ALL",
+    "AllSymbols",
     "AssetClass",
     "AuthenticationError",
     "ConditionDataType",

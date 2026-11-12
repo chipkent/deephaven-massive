@@ -51,7 +51,7 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
     assert rows["stocks.last_trade"]["Methods"] == ["fetch", "poll"]
     assert rows["stocks.last_trade"]["Transports"] == ["REST"]
     # Bars stream at some timespans only: each stream method names the bars that have it.
-    bars = "(1-second and 1-minute bars)"
+    bars = "(1-second and 1-minute bars at multiplier=1)"
     assert rows["stocks.bars"]["Methods"] == [
         "history",
         f"blink {bars}",
@@ -106,7 +106,7 @@ def test_every_dataset_has_its_call() -> None:
         methods=calls["stocks.bars"].methods,
         # The stream methods that only 1-second and 1-minute bars have.
         stream_verbs=("blink", "append_only", "ring", "last_by"),
-        stream_condition="1-second and 1-minute bars",
+        stream_condition="1-second and 1-minute bars at multiplier=1",
     )
     methods = {m.name: m for m in calls["stocks.bars"].methods}
     assert list(methods) == ["history", "blink", "append_only", "ring", "last_by"]

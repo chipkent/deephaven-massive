@@ -8,6 +8,7 @@ import importlib.metadata
 import inspect
 import re
 import sys
+import types
 import typing
 from collections.abc import Callable
 from enum import Enum, StrEnum
@@ -27,6 +28,7 @@ EXPECTED_EXPORTS = [
     "EntitlementError",
     "ErrorCause",
     "ALL",
+    "AllSymbols",
     "AssetClass",
     "Timespan",
     "PollMode",
@@ -75,7 +77,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 47
+    assert len(EXPECTED_EXPORTS) == 48
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 
@@ -159,11 +161,8 @@ class _PublicApiWalk:
     a sub-namespace returned by a property is checked like a top-level one.
 
     An implementation detail may stay private: a private base class (its members are walked as
-    the public class's own), the runtime class of a value declared as a public type, and the
-    enum of a value the package exports whole, such as the type of `dm.ALL`: users name the
-    value and never its type, so an exported enum member stands for its enum. A
-    constructor parameter whose name starts with an underscore is internal (a namespace's
-    session core), so its type is not checked; on any other method, such a parameter is.
+    the public class's own), and the runtime class of a value declared as a public type.
+    Nothing else is exempt: a constructor's parameters are checked like any method's.
     """
 
     def __init__(self, modules: tuple[ModuleType, ...]) -> None:
@@ -174,8 +173,6 @@ class _PublicApiWalk:
             for name in module.__all__:
                 value = getattr(module, name)
                 self.public.setdefault(id(value), f"{module.__name__}.{name}")
-                if isinstance(value, Enum):
-                    self.public.setdefault(id(type(value)), f"{module.__name__}.{name}")
                 self.exports[f"{module.__name__}.{name}"] = value
                 self.exports_by_name[name] = value
         self.findings: set[str] = set()
@@ -282,13 +279,10 @@ class _PublicApiWalk:
         function = inspect.unwrap(function)
         variants = [function, *typing.get_overloads(function)]
         self.methods[where] = len(variants) - 1
-        constructor = where.endswith(".__init__")
         for variant in variants:
             signature = inspect.signature(variant)
             for parameter in signature.parameters.values():
                 if parameter.name in {"self", "cls"}:
-                    continue
-                if constructor and parameter.name.startswith("_"):
                     continue
                 self.check_annotation(parameter.annotation, module, f"{where}({parameter.name})")
                 if parameter.default is not inspect.Parameter.empty:
@@ -437,9 +431,8 @@ def test_the_walk_reaches_every_namespace_and_its_dataset_methods() -> None:
     assert "deephaven_massive.MassiveSession.partners" in walk.methods
     assert "deephaven_massive.namespaces.PartnersBenzingaNamespace.ratings" in walk.methods
     assert "deephaven_massive.queries.Query.columns" in walk.methods
-    # Overloads are filed under each method's renamed path; the walk still finds them.
-    assert walk.methods["deephaven_massive.namespaces.StocksNamespace.bars"] == 2
-    assert walk.methods["deephaven_massive.namespaces.FuturesNamespace.bars"] == 2
+    assert "deephaven_massive.namespaces.StocksNamespace.bars" in walk.methods
+    assert "deephaven_massive.namespaces.FuturesNamespace.bars" in walk.methods
 
 
 class _Hidden:
@@ -449,27 +442,31 @@ class _Hidden:
 _Hidden.__module__ = "deephaven_massive._session"
 
 
-def _planted(annotations: dict[str, str], *parameters: str) -> Callable[..., object]:
-    """Return a method whose annotations are text resolved in `_session`, as the library's are.
+def _takes_nothing(self: object) -> object:
+    raise NotImplementedError
+
+
+def _takes_span(self: object, span: object) -> object:
+    raise NotImplementedError
+
+
+def _takes_core(self: object, _core: object) -> object:
+    raise NotImplementedError
+
+
+def _planted(shape: Callable[..., object], annotations: dict[str, str]) -> Callable[..., object]:
+    """Return a copy of `shape` annotated with text resolved in `_session`, as the library's are.
+
+    Args:
+        shape: A function with the parameters the planted method takes.
+        annotations: The annotation text of each parameter and of `"return"`.
 
     Returns:
-        A method taking `self` and `parameters`, annotated with `annotations`.
+        A new function with `shape`'s code and the given annotations.
     """
-
-    def method(self: object, *args: object) -> object:
-        raise NotImplementedError
-
-    method.__signature__ = inspect.Signature(  # type: ignore[attr-defined]  # read by inspect
-        [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-        + [
-            inspect.Parameter(
-                name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=annotations[name]
-            )
-            for name in parameters
-        ],
-        return_annotation=annotations.get("return", inspect.Signature.empty),
-    )
-    return method
+    planted = types.FunctionType(shape.__code__, shape.__globals__, "planted")
+    planted.__annotations__ = annotations
+    return planted
 
 
 def _private_default(self: object, value: object = _Hidden()) -> None:
@@ -515,19 +512,19 @@ _Stocks.__module__ = "deephaven_massive._session"
 @pytest.mark.parametrize(
     ("member", "finding"),
     [
-        (property(_planted({"return": "SessionCore"})), "planted ->: SessionCore"),
+        (property(_planted(_takes_nothing, {"return": "SessionCore"})), "planted ->: SessionCore"),
         (
-            functools.cached_property(_planted({"return": "SessionCore"})),
+            functools.cached_property(_planted(_takes_nothing, {"return": "SessionCore"})),
             "planted ->: SessionCore",
         ),
-        (_planted({"span": "NormalizedSymbols"}, "span"), "planted(span): NormalizedSymbols"),
-        (_planted({"_core": "SessionCore"}, "_core"), "planted(_core): SessionCore"),
+        (_planted(_takes_span, {"span": "NormalizedSymbols"}), "planted(span): NormalizedSymbols"),
+        (_planted(_takes_core, {"_core": "SessionCore"}), "planted(_core): SessionCore"),
         (
-            _planted({"return": "planted_tables.session_core.SessionCore"}),
+            _planted(_takes_nothing, {"return": "planted_tables.session_core.SessionCore"}),
             "planted ->: planted_tables.session_core.SessionCore",
         ),
         (_private_default, "planted(value=): _Hidden"),
-        (property(_planted({"return": "_Stocks"})), "planted ->: _Stocks"),
+        (property(_planted(_takes_nothing, {"return": "_Stocks"})), "planted ->: _Stocks"),
         (_documents_a_private_error, "planted raises: RowDataError"),
         (_documents_a_value, "planted raises: dm.ALL"),
         (
@@ -554,8 +551,8 @@ def test_the_walk_finds_a_private_type_planted_in_a_public_class(
     assert {found for found in walk.findings if ".planted" not in found} == set()
 
 
-def test_a_constructor_skips_its_underscore_parameters() -> None:
-    # `_core` of a namespace's constructor is a private `SessionCore`, and nothing is reported.
+def test_a_namespace_constructor_declares_only_public_types() -> None:
+    # A namespace takes the public `MassiveSession` it belongs to.
     walk = _walk_public_api()
     assert "deephaven_massive.namespaces.StocksNamespace.__init__" in walk.methods
     assert walk.findings == set()
@@ -572,7 +569,7 @@ def test_the_walk_finds_a_private_type_inside_a_public_alias(
 
 def test_the_walk_fails_on_a_name_nothing_defines(monkeypatch: pytest.MonkeyPatch) -> None:
     session_module = importlib.import_module("deephaven_massive._session")
-    planted = _planted({"return": "NoSuchName"})
+    planted = _planted(_takes_nothing, {"return": "NoSuchName"})
     monkeypatch.setattr(session_module.MassiveSession, "planted", planted, raising=False)
     with pytest.raises(AssertionError, match="names 'NoSuchName', which nothing defines"):
         _walk_public_api()

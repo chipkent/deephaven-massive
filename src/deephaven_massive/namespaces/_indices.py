@@ -28,7 +28,7 @@ it gets the prefix from the endpoint's class, never from the name.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
@@ -44,7 +44,6 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     StreamHistoryQuery,
 )
 
@@ -221,22 +220,10 @@ class IndicesNamespace(Namespace):
         """
         return build_query(self._core, VALUES, query_type=StreamHistoryQuery, symbols=symbols)
 
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
-        *,
-        multiplier: Literal[1] = 1,
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self, symbols: SymbolsLike, timespan: Timespan, *, multiplier: int = 1
-    ) -> HistoryQuery: ...
     @raises_through(build_query)
     def bars(
         self, symbols: SymbolsLike, timespan: Timespan, *, multiplier: int = 1
-    ) -> HistoryQuery:
+    ) -> StreamHistoryQuery:
         """Open, high, low, and close index levels over fixed windows of time.
 
         Each row is one bar of one index. Index bars come from index levels, so they have no volume
@@ -250,9 +237,9 @@ class IndicesNamespace(Namespace):
             multiplier: Units per bar.
 
         Returns:
-            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
-            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
-            history only. Its columns, plans, and methods:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.bars.md.
 
         Raises:
@@ -271,7 +258,7 @@ class IndicesNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=HistoryQuery,
+            query_type=StreamHistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

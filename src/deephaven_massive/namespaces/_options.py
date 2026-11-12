@@ -36,7 +36,7 @@ against that cap and raise `ValueError` before subscribing a static list that wo
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 from deephaven.table import Table
 
@@ -73,7 +73,6 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     StreamHistoryQuery,
     StreamQuery,
     SymbolStreamQuery,
@@ -521,24 +520,6 @@ class OptionsNamespace(Namespace):
         """
         return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
 
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
-        *,
-        multiplier: Literal[1] = 1,
-        adjusted: bool = True,
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Timespan,
-        *,
-        multiplier: int = 1,
-        adjusted: bool = True,
-    ) -> HistoryQuery: ...
     @raises_through(build_query)
     def bars(
         self,
@@ -547,7 +528,7 @@ class OptionsNamespace(Namespace):
         *,
         multiplier: int = 1,
         adjusted: bool = True,
-    ) -> HistoryQuery:
+    ) -> StreamHistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
         Each row is one contract's bar of `multiplier` times `timespan`. The dataset's page, linked
@@ -564,9 +545,9 @@ class OptionsNamespace(Namespace):
             adjusted: Adjusts for splits of the underlying.
 
         Returns:
-            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
-            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
-            history only. Its columns, plans, and methods:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.bars.md.
 
         Raises:
@@ -586,7 +567,7 @@ class OptionsNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=HistoryQuery,
+            query_type=StreamHistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

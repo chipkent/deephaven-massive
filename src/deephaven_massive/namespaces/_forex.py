@@ -20,7 +20,7 @@ declares the symbol as filled from the request, so the row's `Symbol` is the who
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.symbols import is_forex_currency
@@ -42,7 +42,6 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     StreamHistoryQuery,
     SymbolStreamQuery,
 )
@@ -336,22 +335,6 @@ class ForexNamespace(Namespace):
             all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
         )
 
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
-        *,
-        multiplier: Literal[1] = 1,
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Timespan,
-        *,
-        multiplier: int = 1,
-    ) -> HistoryQuery: ...
     @raises_through(build_query)
     def bars(
         self,
@@ -359,7 +342,7 @@ class ForexNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
-    ) -> HistoryQuery:
+    ) -> StreamHistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, though the
@@ -374,9 +357,9 @@ class ForexNamespace(Namespace):
             multiplier: Units per bar.
 
         Returns:
-            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
-            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
-            history only. Its columns, plans, and methods:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.bars.md.
 
         Raises:
@@ -396,7 +379,7 @@ class ForexNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=HistoryQuery,
+            query_type=StreamHistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

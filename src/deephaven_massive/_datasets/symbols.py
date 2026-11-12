@@ -114,10 +114,10 @@ __all__ = [
 class AllSymbols(Enum):
     """The type of `dm.ALL`, the value that asks a dataset for every symbol.
 
-    A one-member enum gives `dm.ALL` a type of its own, so the symbol checks tell it from a
-    ticker (it is not a `str`) and `dm.SymbolsLike` can name it. Users pass `dm.ALL` and never
-    name this class. `dm.ALL` is its only instance, even after copying or unpickling, so code
-    tests for it with `symbols is dm.ALL`.
+    Pass `dm.ALL` itself, as in `m.stocks.trades(dm.ALL)`; name `dm.AllSymbols` only in a type
+    hint, as `dm.SymbolsLike` does. `dm.ALL` is its one member, and an enum member stays itself
+    through a copy or an unpickle, so code tests for it with `symbols is dm.ALL`. It is not a
+    `str`, so it is never mistaken for a ticker.
     """
 
     ALL = "ALL"

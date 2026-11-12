@@ -114,7 +114,6 @@ _DATA = _TESTS / "data"
 # Test files that mirror no source module. A new entry needs owner approval.
 APPROVED_EXCEPTIONS = frozenset(
     {
-        PurePosixPath("conftest.py"),  # embedded JVM checks and fixtures
         PurePosixPath("embedded_server.py"),  # the -p plugin that starts the embedded JVM
         PurePosixPath("test_layout.py"),  # this file
         PurePosixPath("test_docs.py"),  # the user docs: README.md and the docstrings' links

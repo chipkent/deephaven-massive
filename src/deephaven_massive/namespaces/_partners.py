@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
-    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._session import MassiveSession
     from deephaven_massive.queries import FetchQuery
 
 __all__ = [
@@ -1395,17 +1395,19 @@ class PartnersNamespace(Namespace):
     __slots__ = ("_benzinga", "_etf_global", "_fable", "_tmx")
     _path: ClassVar[str] = "partners"
 
-    def __init__(self, _core: SessionCore) -> None:
-        """Create the four vendor namespaces.
+    def __init__(self, session: MassiveSession) -> None:
+        """Create the namespace and its four vendor namespaces, for the session it is on.
+
+        Users reach it as `m.partners` and never construct it.
 
         Args:
-            _core: The session's internal core.
+            session: The session the namespace belongs to.
         """
-        super().__init__(_core)
-        self._benzinga = PartnersBenzingaNamespace(_core)
-        self._etf_global = PartnersEtfGlobalNamespace(_core)
-        self._tmx = PartnersTmxNamespace(_core)
-        self._fable = PartnersFableNamespace(_core)
+        super().__init__(session)
+        self._benzinga = PartnersBenzingaNamespace(session)
+        self._etf_global = PartnersEtfGlobalNamespace(session)
+        self._tmx = PartnersTmxNamespace(session)
+        self._fable = PartnersFableNamespace(session)
 
     @property
     def benzinga(self) -> PartnersBenzingaNamespace:

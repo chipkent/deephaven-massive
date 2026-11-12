@@ -26,7 +26,7 @@ together.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
@@ -57,7 +57,6 @@ from deephaven_massive.namespaces._stock_filings import StocksFilingsNamespace
 from deephaven_massive.namespaces._stock_financials import StocksFinancialsNamespace
 from deephaven_massive.queries import (
     FetchQuery,
-    HistoryQuery,
     StreamHistoryQuery,
     SymbolStreamQuery,
 )
@@ -68,7 +67,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
-    from deephaven_massive._tables.session_core import SessionCore
+    from deephaven_massive._session import MassiveSession
 
 __all__ = [
     "DATASETS",
@@ -400,15 +399,17 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     __slots__ = ("_filings", "_financials")
     _path: ClassVar[str] = "stocks"
 
-    def __init__(self, _core: SessionCore) -> None:
-        """Create the namespace and its two nested namespaces.
+    def __init__(self, session: MassiveSession) -> None:
+        """Create the namespace and its two nested namespaces, for the session `m.stocks` is on.
+
+        Users reach it as `m.stocks` and never construct it.
 
         Args:
-            _core: The session's internal core.
+            session: The session the namespace belongs to.
         """
-        super().__init__(_core)
-        self._financials = StocksFinancialsNamespace(_core)
-        self._filings = StocksFilingsNamespace(_core)
+        super().__init__(session)
+        self._financials = StocksFinancialsNamespace(session)
+        self._filings = StocksFilingsNamespace(session)
 
     @property
     def financials(self) -> StocksFinancialsNamespace:
@@ -551,24 +552,6 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
         )
 
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
-        *,
-        multiplier: Literal[1] = 1,
-        adjusted: bool = True,
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Timespan,
-        *,
-        multiplier: int = 1,
-        adjusted: bool = True,
-    ) -> HistoryQuery: ...
     @raises_through(build_query, require_bool)
     def bars(
         self,
@@ -577,7 +560,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         *,
         multiplier: int = 1,
         adjusted: bool = True,
-    ) -> HistoryQuery:
+    ) -> StreamHistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
         Each row is one bar of `multiplier` times `timespan`. The dataset's page, linked below, says
@@ -596,9 +579,9 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             adjusted: Adjusts volume as well as prices.
 
         Returns:
-            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
-            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
-            history only. Its columns, plans, and methods:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md.
 
         Raises:
@@ -616,7 +599,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         return build_query(
             self._core,
             BARS,
-            query_type=HistoryQuery,
+            query_type=StreamHistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

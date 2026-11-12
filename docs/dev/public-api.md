@@ -29,14 +29,22 @@ classes are grouped by what they are, out of the root's way:
   named for its path on the session (`StocksNamespace`, `PartnersBenzingaNamespace`), and the
   dataset factory they share.
 
-A package's name says what is in it, in the words a user already has: a dataset method returns
-a *query*, and `m.stocks` is a *namespace*. A name that describes how a user uses the contents
-instead, such as `types`, `typing`, or `typehints`, tells a user nothing about what they will
-find, and the first two shadow the standard library in an import line or an IDE's suggestions.
+A public package is named for what the user does with it, checked against what numpy,
+pandas, and Deephaven call the same thing. A user imports from these packages to name, in a
+type hint, the object a call handed them: the query a dataset method returned, or the
+namespace `m.stocks` is. Deephaven names such a module for the object it holds: `Table` comes
+from `deephaven.table`, `PartitionedTable` from it too, and `InputTable` from
+`deephaven.table_factory`. pandas names the classes it hands back by what they are, such as
+`DataFrameGroupBy` and `Resampler`, and gathers them for annotation in `pandas.api.typing`;
+numpy gathers its annotation types in `numpy.typing`. A user of this library already calls the
+two objects a *query* and a *namespace*, so `deephaven_massive.queries` and
+`deephaven_massive.namespaces` follow Deephaven's convention, which the user's own tables
+follow, rather than numpy's and pandas' `typing`: that name describes a use, holds two unrelated
+kinds of class here, and reads like the standard library's `typing` in an import line.
 
-A name with no user outside the library is private, whatever it is. The type of `dm.ALL` is an
-example: a user passes `dm.ALL` and never names its type, so the type stays private, even
-inside the public alias `dm.SymbolsLike`.
+A type a public signature declares is public, even one a user rarely names. The type of
+`dm.ALL` is an example: a user passes `dm.ALL`, and names `dm.AllSymbols` only in a type hint,
+as `dm.SymbolsLike` does.
 
 ## Code lives in the package that exposes it
 
@@ -49,8 +57,8 @@ place to read, and its documentation, its code, and its tests sit together.
   package.
 - No package holds both `x` and `_x`. A public module that only re-exports a private twin
   makes a reader look in two places for one thing, and the two drift apart.
-- No `__module__` is rewritten to make a private module look public. The class's real home is
-  where a reader and a debugger find it.
+- No `__module__` or `__qualname__` is rewritten to make a name look like another. A class's
+  real home is where a reader and a debugger find it.
 - Every import is eager. `import deephaven_massive` imports the whole library, and with it
   Deephaven, so the library runs only inside a Deephaven server: in its console, in an
   application script, or in a program that starts `deephaven_server.Server` before the import.

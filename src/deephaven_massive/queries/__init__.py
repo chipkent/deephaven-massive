@@ -10,7 +10,7 @@ what Massive serves for its dataset, and the query's class says so:
 - `FetchQuery`: a REST dataset, with `fetch()` and `poll()`.
 - `StreamQuery`: a live stream, with `blink()`, `append_only()`, and `ring()`.
 - `SymbolStreamQuery`: a live stream whose rows name their symbol, which adds `last_by()`.
-- `HistoryQuery`: bars that don't stream, with `history()` only.
+- `HistoryQuery`: any query with `history()`, for code that only reads history.
 - `StreamHistoryQuery`: a stream that also has history, with all five of those methods.
 - `Query`: the base class of all five, with `columns()`, for code that takes any query.
 

@@ -283,10 +283,10 @@ class DatasetCall:
             without one is shown by its name alone, such as `blink()`. The index's table of
             query methods lists every method of every dataset once, in the order they first
             appear.
-        stream_verbs: The stream verbs only some of its queries have, for a `bars` dataset
-            whose 1-second and 1-minute bars stream; empty for every other dataset.
-        stream_condition: Which calls have `stream_verbs`, such as `"1-second and 1-minute
-            bars"`; empty when `stream_verbs` is.
+        stream_verbs: The stream verbs that work only for some of its queries, for a `bars`
+            dataset whose 1-second and 1-minute bars stream; empty for every other dataset.
+        stream_condition: Which calls `stream_verbs` work for, such as `"1-second and
+            1-minute bars at multiplier=1"`; empty when `stream_verbs` is.
     """
 
     signature: str

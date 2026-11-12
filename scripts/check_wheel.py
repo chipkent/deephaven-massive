@@ -56,6 +56,27 @@ from deephaven_server import Server
 if TYPE_CHECKING:
     from types import TracebackType
 
+
+def _exit(status: int) -> None:
+    """Flush the output and leave with `status`, skipping the JVM's and jpy's finalizers."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
+
+
+def _fail(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
+    """Print an exception that escaped `main` and leave with status 1.
+
+    Installed as `sys.excepthook`, and called for a `SystemExit`, which skips the hook, so every
+    failure, an interrupt or an exit included, fails the check.
+    """
+    traceback.print_exception(kind, value, tb)
+    _exit(1)
+
+
+# Installed first, so a server start or a library import that fails still exits through
+# `_exit`, skipping the finalizers of a JVM that has loaded.
+sys.excepthook = _fail
 # Port 0 asks the OS for an ephemeral port, so the check never clashes with a server.
 Server(port=0, jvm_args=["-Xmx1g"]).start()
 
@@ -200,25 +221,7 @@ def _report(line: str) -> None:
     sys.stdout.write(f"ok: {line}\n")
 
 
-def _exit(status: int) -> None:
-    """Flush the output and leave with `status`, skipping the JVM's and jpy's finalizers."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(status)
-
-
-def _fail(kind: type[BaseException], value: BaseException, tb: TracebackType | None) -> None:
-    """Print an exception that escaped `main` and leave with status 1.
-
-    Installed as `sys.excepthook`, and called for a `SystemExit`, which skips the hook, so every
-    failure, an interrupt or an exit included, fails the check.
-    """
-    traceback.print_exception(kind, value, tb)
-    _exit(1)
-
-
 if __name__ == "__main__":
-    sys.excepthook = _fail
     try:
         main()
     except SystemExit as stop:

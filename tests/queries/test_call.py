@@ -1,18 +1,19 @@
 """Tests for `queries/_call.py`: a query's repr, the call that built it."""
 
+import inspect
+import logging
 from datetime import UTC, date, datetime
 
 import numpy as np
+import pytest
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.time import to_j_instant, to_j_local_date, to_j_time_zone
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._enums import (
-    Timespan,
-)
-from deephaven_massive.queries._call import QueryCall, _shown
+from deephaven_massive._enums import FuturesVenue, Timespan
+from deephaven_massive.queries._call import QueryCall, _is_default, _shown
 from tests._fakes.queries import (
     NEWS_SPEC,
     make,
@@ -82,3 +83,25 @@ def test_query_repr_falls_back_to_the_symbols_passed() -> None:
     # A request that does not store its symbols shows them as the caller passed them.
     assert QueryCall("m.x.y", (("symbols", "AAPL"),)).text(Request()) == "m.x.y('AAPL')"
     assert QueryCall("m.x.y", (("symbols", ("B", "A")),)).text(Request()) == "m.x.y(['B', 'A'])"
+
+
+def test_an_array_argument_is_never_its_default() -> None:
+    # A numpy array's `==` answers element by element; the repr must not ask its truth.
+    assert not _is_default(np.array([1, 1]), 1)
+    assert _is_default(1, 1)
+    assert _is_default({FuturesVenue.CME}, frozenset({FuturesVenue.CME}))
+    assert not _is_default(None, inspect.Parameter.empty)
+    assert not _is_default(2, None)
+
+
+def test_a_namespace_method_logs_the_input_it_refuses(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.queries"),
+        pytest.raises(TypeError),
+    ):
+        massive_session.stocks.trades(42)  # type: ignore[arg-type]  # a refused symbol type
+    refusals = [r for r in caplog.records if "m.stocks.trades refused" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [logging.DEBUG]
+    assert refusals[0].getMessage().startswith("m.stocks.trades refused: TypeError: ")

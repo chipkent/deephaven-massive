@@ -50,6 +50,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 OWNER = "namespaces/futures"
 
 Loader = Callable[[str, str], bytes]
@@ -153,22 +156,25 @@ def test_an_exhausted_generator_is_no_symbols(massive_session: dm.MassiveSession
 
 
 @pytest.mark.parametrize(
-    ("bar", "expected"),
+    ("bar", "streams"),
     [
-        ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 5), HistoryQuery),
-        ((dm.Timespan.HOUR, 1), HistoryQuery),
-        ((dm.Timespan.SESSION, 1), HistoryQuery),
-        ((dm.Timespan.WEEK, 2), HistoryQuery),
+        ((dm.Timespan.SECOND, 1), True),
+        ((dm.Timespan.MINUTE, 1), True),
+        ((dm.Timespan.MINUTE, 5), False),
+        ((dm.Timespan.HOUR, 1), False),
+        ((dm.Timespan.SESSION, 1), False),
+        ((dm.Timespan.WEEK, 2), False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, bar: tuple[Any, int], expected: type
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, bar: tuple[Any, int], streams: bool
 ) -> None:
     timespan, multiplier = bar
     q = massive_session.futures.bars("ESZ5", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
 
@@ -398,7 +404,7 @@ def _spec(name: str) -> DatasetSpec:
     [
         ("trades", StreamHistoryQuery),
         ("quotes", StreamHistoryQuery),
-        ("bars", HistoryQuery),
+        ("bars", StreamHistoryQuery),
         ("snapshots", FetchQuery),
         ("contracts", FetchQuery),
         ("products", FetchQuery),

@@ -1,6 +1,5 @@
 """Tests for `queries/_choice.py`: the query class each dataset and `bars()` call gets."""
 
-import dataclasses
 from typing import Any
 
 import pytest
@@ -20,8 +19,6 @@ from deephaven_massive.queries import (
     SymbolStreamQuery,
 )
 from deephaven_massive.queries._choice import (
-    bar_query_class,
-    bar_stream_condition,
     bar_stream_verbs,
     query_class,
     verbs,
@@ -72,39 +69,10 @@ INDEX_BARS = DatasetSpec(
 )
 
 
-@pytest.mark.parametrize(
-    ("case", "expected"),
-    [
-        ((STOCK_BARS, Timespan.SECOND, 1), StreamHistoryQuery),
-        ((STOCK_BARS, Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((STOCK_BARS, Timespan.DAY, 1), HistoryQuery),
-        ((STOCK_BARS, Timespan.MINUTE, 5), HistoryQuery),
-        ((STOCK_BARS, Timespan.DAY, 2), HistoryQuery),
-        ((STOCK_BARS, Timespan.HOUR, 1), HistoryQuery),
-        ((FUTURES_BARS, Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((FUTURES_BARS, Timespan.SESSION, 1), HistoryQuery),
-        ((INDEX_BARS, Timespan.DAY, 1), HistoryQuery),
-    ],
-)
-def test_bar_query_class_selection(case: tuple[DatasetSpec, Timespan, int], expected: type) -> None:
-    assert bar_query_class(*case) is expected
-
-
-def test_bar_timespan_rules() -> None:
-    with pytest.raises(ValueError, match="futures bars have no DAY timespan"):
-        bar_query_class(FUTURES_BARS, Timespan.DAY, 1)
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bar_query_class(STOCK_BARS, Timespan.SESSION, 1)
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
-        bar_query_class(STOCK_BARS, "day", 1)
-    with pytest.raises(ValueError, match="multiplier must be positive"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, 0)
-
-
-@pytest.mark.parametrize("multiplier", [True, 1.0])
-def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
-    with pytest.raises(TypeError, match="multiplier must be an int"):
-        bar_query_class(STOCK_BARS, Timespan.DAY, multiplier)
+def test_every_bars_dataset_gives_one_streaming_class() -> None:
+    # Every call of `bars()` returns this class; its stream methods refuse bars that don't stream.
+    assert query_class(STOCK_BARS) is StreamHistoryQuery
+    assert query_class(FUTURES_BARS) is StreamHistoryQuery
 
 
 _FETCH = {"fetch_path": "/v2/last/trade/{stocksTicker}"}
@@ -151,11 +119,6 @@ def test_flat_files_are_a_history_source() -> None:
     assert query_class(values) is StreamHistoryQuery
 
 
-def test_a_bars_dataset_has_the_class_of_its_general_overload() -> None:
-    # Every bars spec, whatever its transports; each call picks its own class.
-    assert {query_class(STOCK_BARS), query_class(FUTURES_BARS)} == {HistoryQuery}
-
-
 def test_verbs_are_the_methods_every_query_of_a_dataset_has() -> None:
     by_name = CATALOG.by_name
     assert verbs(by_name["stocks.trades"]) == ("blink", "append_only", "ring", "last_by", "history")
@@ -168,9 +131,6 @@ def test_verbs_are_the_methods_every_query_of_a_dataset_has() -> None:
 
 def test_the_stream_methods_of_bars_name_the_bars_that_stream() -> None:
     assert bar_stream_verbs(STOCK_BARS) == ("blink", "append_only", "ring", "last_by")
-    assert bar_stream_condition(STOCK_BARS) == "1-second and 1-minute bars"
-    minute_only = dataclasses.replace(STOCK_BARS, channels={Timespan.MINUTE: "AM"})
-    assert bar_stream_condition(minute_only) == "1-minute bars"
     # Any other dataset has no stream method that only some of its queries have.
     assert bar_stream_verbs(CATALOG.by_name["stocks.trades"]) == ()
     assert bar_stream_verbs(CATALOG.by_name["stocks.last_trade"]) == ()

@@ -36,7 +36,7 @@ instrument: they take no symbols and have no `Symbol` column.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, Literal, overload
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from deephaven.table import Table
 
@@ -53,7 +53,7 @@ from deephaven_massive.namespaces._query_building import (
     one_or_any_of,
     value_table,
 )
-from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries import FetchQuery, StreamHistoryQuery
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -392,24 +392,6 @@ class FuturesNamespace(Namespace):
             self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, venues=venues
         )
 
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Literal[Timespan.SECOND, Timespan.MINUTE],
-        *,
-        multiplier: Literal[1] = 1,
-        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self,
-        symbols: SymbolsLike,
-        timespan: Timespan,
-        *,
-        multiplier: int = 1,
-        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
-    ) -> HistoryQuery: ...
     @raises_through(build_query)
     def bars(
         self,
@@ -418,7 +400,7 @@ class FuturesNamespace(Namespace):
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
-    ) -> HistoryQuery:
+    ) -> StreamHistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
         Each row is one bar of `multiplier` times `timespan`. A futures day is a session, so daily
@@ -436,9 +418,9 @@ class FuturesNamespace(Namespace):
             venues: The exchanges whose flat files `history()` reads.
 
         Returns:
-            A query. One-second and one-minute bars with `multiplier=1` give a `StreamHistoryQuery`,
-            which streams and reads history. Every other bar gives a `HistoryQuery`, which reads
-            history only. Its columns, plans, and methods:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.bars.md.
 
         Raises:
@@ -460,7 +442,7 @@ class FuturesNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=HistoryQuery,
+            query_type=StreamHistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

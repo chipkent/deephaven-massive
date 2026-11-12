@@ -1,5 +1,6 @@
 """Tests for `queries/_stream.py`: the stream verbs and `last_by()`."""
 
+import dataclasses
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import (
     AssetClass,
     NotBars,
@@ -23,6 +25,7 @@ from deephaven_massive.queries import (
     StreamHistoryQuery,
     SymbolStreamQuery,
 )
+from deephaven_massive.queries._stream import _check_streams, streaming_bars
 from tests._fakes.queries import (
     BARS_SPEC,
     TRADES_SPEC,
@@ -288,3 +291,52 @@ def test_ring_accepts_its_lower_bound(
     result = trades(massive_session).ring(1)
     assert result.is_refreshing
     massive_session.release(result)
+
+
+def test_streaming_bars_name_the_timespans_with_a_channel() -> None:
+    assert streaming_bars(BARS_SPEC) == "1-second and 1-minute bars at multiplier=1"
+    minute_only = dataclasses.replace(BARS_SPEC, channels={Timespan.MINUTE: "CA"})
+    assert streaming_bars(minute_only) == "1-minute bars at multiplier=1"
+
+
+@pytest.mark.parametrize(
+    ("timespan", "multiplier"),
+    [(Timespan.HOUR, 1), (Timespan.DAY, 1), (Timespan.MINUTE, 5), (Timespan.SECOND, 2)],
+)
+def test_bars_without_a_channel_refuse_to_stream(timespan: Timespan, multiplier: int) -> None:
+    request = Request(symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier)
+    call = "m.forex.bars('C:EURUSD', ...).blink()"
+    expected = (
+        f"{call}: only 1-second and 1-minute bars at multiplier=1 stream; read these bars with "
+        "history(start, end)"
+    )
+    with pytest.raises(ValueError, match="only") as caught:
+        _check_streams(BARS_SPEC, request, call=call)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("timespan", [Timespan.SECOND, Timespan.MINUTE])
+def test_streaming_bars_and_other_streams_pass_the_check(timespan: Timespan) -> None:
+    bars = Request(symbols=("C:EURUSD",), timespan=timespan, multiplier=1)
+    _check_streams(BARS_SPEC, bars, call="m.forex.bars(...).blink()")
+    # A stream that isn't bars has no timespan, and streams as asked.
+    _check_streams(TRADES_SPEC, Request(symbols=("AAPL",)), call="m.stocks.trades(...).blink()")
+
+
+def test_a_stream_method_of_bars_that_do_not_stream_names_the_call(
+    massive_session: dm.MassiveSession,
+) -> None:
+    hourly = massive_session.forex.bars("C:EURUSD", dm.Timespan.HOUR)
+    assert type(hourly) is StreamHistoryQuery
+    for verb, call in [
+        ("blink", hourly.blink),
+        ("append_only", hourly.append_only),
+        ("last_by", hourly.last_by),
+    ]:
+        with pytest.raises(
+            ValueError,
+            match=rf"^m\.forex\.bars\('C:EURUSD', dm\.Timespan\.HOUR\)\.{verb}\(\): only",
+        ):
+            call()
+    with pytest.raises(ValueError, match=r"\.ring\(\): only 1-second and 1-minute bars"):
+        hourly.ring(10)

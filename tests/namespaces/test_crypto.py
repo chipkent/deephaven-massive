@@ -65,6 +65,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 Fixture = Callable[[str, str], bytes]
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -106,7 +109,7 @@ def test_the_namespace_declares_every_crypto_dataset() -> None:
         (crypto.TRADES, StreamHistoryQuery),
         (crypto.LAST_TRADE, FetchQuery),
         (crypto.QUOTES, SymbolStreamQuery),
-        (crypto.BARS, HistoryQuery),
+        (crypto.BARS, StreamHistoryQuery),
         (crypto.PREVIOUS_DAY_BAR, FetchQuery),
         (crypto.FMV, SymbolStreamQuery),
         (crypto.SNAPSHOTS, FetchQuery),
@@ -336,21 +339,24 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.DAY, 2, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.YEAR, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.DAY, 2, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.YEAR, 1, False),
     ],
 )
-def test_bars_pick_their_class(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
-    timespan, multiplier, expected = case
+    timespan, multiplier, streams = case
     q = massive_session.crypto.bars("X:BTCUSD", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     request = request_of(q)
     assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, None)
 
@@ -372,11 +378,11 @@ def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
         bars("X:BTCUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("X:BTCUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("X:BTCUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
     with pytest.raises(TypeError, match="adjusted"):
-        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
+        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-arg]  # crypto bars have none
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
