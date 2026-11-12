@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._enums import FuturesVenue, Timespan
+    from deephaven_massive._enums import FuturesVenue, OnError, Timespan
 
 __all__ = ["ParamValue", "Request", "StreamKey", "ValueTable"]
 
@@ -93,6 +93,10 @@ class Request:
         venues: The futures venues whose flat-file prefixes `history()` reads, in
             `FuturesVenue` order; None for a dataset without venues. They select flat-file
             prefixes only, never a stream.
+        refused_venues: What `history()` does with a venue whose flat files S3 refuses when REST
+            cannot serve the call (`FlatFileHistory.history`): the call's `refused_venues`
+            argument, or `MassiveConfig.refused_venues` when it was left out. None for a
+            dataset without venues.
         adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
             parameter; None for datasets without one. Flat files hold only unadjusted bars.
             The REST transport sends it, when not None, as the `adjusted` query parameter;
@@ -116,6 +120,7 @@ class Request:
     timespan: Timespan | None = None
     multiplier: int = 1
     venues: tuple[FuturesVenue, ...] | None = None
+    refused_venues: OnError | None = None
     adjusted: bool | None = None
     start: date | datetime | None = None
     end: date | datetime | None = None

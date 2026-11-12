@@ -7,7 +7,7 @@ Open, high, low, close, and volume bars of futures contracts.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVenue))
+m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVenue), refused_venues=None)
 ```
 
 - [Methods](README.md#query-methods): `history(start, end=None)`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
@@ -25,6 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.DAY`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
+| [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses some exchanges' flat files, or None to use `MassiveConfig.refused_venues`. |
 
 ## Plans
 

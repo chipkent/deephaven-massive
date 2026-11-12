@@ -53,7 +53,14 @@ from deephaven_massive._datasets.filters import (
 )
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
-from deephaven_massive._enums import AssetClass, FuturesVenue, Order, Timespan, _require_enum
+from deephaven_massive._enums import (
+    AssetClass,
+    FuturesVenue,
+    OnError,
+    Order,
+    Timespan,
+    _require_enum,
+)
 from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._tables.time_text import deephaven_time_text
@@ -560,6 +567,26 @@ def _check_axis(
         check_order(start, end)
 
 
+def _refused_venues(core: SessionCore, refused_venues: object) -> OnError:
+    """Return what a futures `history()` does with a refused venue: the call's, or the session's.
+
+    Args:
+        core: The session core, whose `MassiveConfig.refused_venues` applies when the call left
+            the argument out.
+        refused_venues: The argument as passed; None when it was left out.
+
+    Returns:
+        The `dm.OnError` member.
+
+    Raises:
+        TypeError: If `refused_venues` is neither None nor a `dm.OnError` member (the error of
+            `_require_enum`).
+    """
+    if refused_venues is None:
+        return core.config.refused_venues
+    return _require_enum(refused_venues, OnError, "refused_venues")
+
+
 def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
     """Check the `venues` argument of a futures dataset and order it for the request.
 
@@ -749,6 +776,7 @@ def build_query(
     timespan: Timespan | None = None,
     multiplier: int = 1,
     venues: AbstractSet[FuturesVenue] | None = None,
+    refused_venues: OnError | None = None,
     adjusted: bool | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
@@ -790,6 +818,9 @@ def build_query(
         multiplier: The bar multiplier.
         venues: The futures venues whose flat files `history()` reads (`futures_venues`), or
             None for a dataset without venues.
+        refused_venues: For a dataset with venues, what `history()` does with a venue whose
+            flat files S3 refuses (`Request.refused_venues`), or None when the call left it out,
+            for `MassiveConfig.refused_venues`; ignored for a dataset without venues.
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None for an open start: a date
@@ -871,6 +902,7 @@ def build_query(
         timespan=timespan,
         multiplier=multiplier,
         venues=None if venues is None else futures_venues(venues),
+        refused_venues=None if venues is None else _refused_venues(core, refused_venues),
         adjusted=adjusted,
         start=first,
         end=last,

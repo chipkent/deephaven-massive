@@ -16,7 +16,8 @@ and decides what the call returns when they cannot serve all of it:
   and so do the days at the range's end that have no file a week or more later. The table's
   description names each day taken for a holiday, since Massive's file for a trading day may
   simply be missing, and the library never fills or hides a gap in Massive's data. A refusal
-  names REST when REST could serve the read.
+  names REST when REST could serve the read. A futures venue the request's `refused_venues`
+  skips instead is named in the table's description.
 - A futures read by dates whose files held rows of other sessions warns that the range's
   first or last session may be incomplete, and says so on the table.
 - A read by symbol (`read_history_by_symbol`, for a table that follows a live symbol table)
@@ -49,6 +50,7 @@ from deephaven_massive._datasets.history_source import (
 )
 from deephaven_massive._datasets.row_times import time_column
 from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._ingest.refused_venues import refused_note
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
@@ -107,7 +109,8 @@ def read_history(
         The static table; the description's source sentence when REST served any of it,
         which replaces the sentence of the source choice (None when only the flat files did);
         and the sentences the description adds on what the files may lack (`_files_lack_note`:
-        the days taken for holidays, the sessions that may be incomplete), or None.
+        the days taken for holidays, the sessions that may be incomplete, the futures venues
+        skipped because S3 refused them), or None.
 
     Raises:
         AuthenticationError: When S3 rejects the S3 credentials under `FLAT_FILES` or when
@@ -171,7 +174,8 @@ def _scan(
     """Read the flat files of a call, or learn that REST must serve all of it instead.
 
     Under `FLAT_FILES`, or when REST cannot serve the request (`problem`), holidays are
-    inferred and a refusal raises; otherwise a refusal of the files logs the WARNING of
+    inferred and a refusal raises, unless the request's `refused_venues` skips a refused
+    futures venue (`FlatFileHistory.history`); otherwise a refusal of the files logs the WARNING of
     `_warn_rest_served` and the whole call is read from REST.
 
     Args:
@@ -259,11 +263,16 @@ def _files_lack_note(spec: DatasetSpec, read: FlatFileRead) -> str | None:
         read: The flat-file read.
 
     Returns:
-        The sentence on the days taken for holidays (`_skipped_days`), then the one on the
-        sessions that may be incomplete (`_uncertain_sessions`), joined by a space; None when
-        neither applies.
+        The sentence on the days taken for holidays (`_skipped_days`), the one on the sessions
+        that may be incomplete (`_uncertain_sessions`), then the one on the futures venues
+        skipped because S3 refused them (`refused_venues.refused_note`), joined by spaces;
+        None when none applies.
     """
-    notes = [_skipped_days(read.skipped), _uncertain_sessions(spec, read.uncertain)]
+    notes = [
+        _skipped_days(read.skipped),
+        _uncertain_sessions(spec, read.uncertain),
+        refused_note(read.refused),
+    ]
     return " ".join(note for note in notes if note is not None) or None
 
 

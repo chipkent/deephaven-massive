@@ -101,8 +101,25 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "venues": (
             "The futures exchanges whose flat files `history()` reads, as a set of "
-            "`dm.FuturesVenue` members. The default is all four. Pass the ones your plan "
-            "includes."
+            "`dm.FuturesVenue` members. The default is all four. Each exchange's file of a "
+            "day holds every contract it trades, so naming fewer exchanges downloads less. "
+            "Name only the ones your plan includes, or set `refused_venues`."
+        ),
+        "refused_venues": (
+            "What `history()` does when Massive refuses the flat files of some exchanges in "
+            "`venues`, as it does for one your plan doesn't include. It takes a `dm.OnError`. "
+            "The default, None, uses `MassiveConfig.refused_venues`, which is `RAISE` unless "
+            "you set it.\n"
+            "\n"
+            "- `RAISE` fails the call with `EntitlementError`, naming the exchange.\n"
+            "- `LOG` skips each refused exchange's files for the whole range, logs one warning "
+            "with Massive's answer, and names the exchanges in the table's description.\n"
+            "- `IGNORE` skips them too, logging only at DEBUG.\n"
+            "\n"
+            "It applies only when REST can't serve the call: `dm.ALL`, or "
+            "`source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive "
+            "refuses the flat files. A call whose every exchange is refused fails whatever the "
+            "setting."
         ),
     }
 )

@@ -531,3 +531,21 @@ the agent says whether it breaks code and, if so, which version comes next, befo
 Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
+
+**107. A refused futures exchange follows `refused_venues`, `RAISE` by default** (2026-11-12).
+Massive publishes futures flat files per exchange, and a plan may include only some. The futures
+`trades`, `quotes`, and `bars` keep `venues`, so a read of `dm.ALL` or a long range can download
+less, and add `refused_venues: dm.OnError | None = None`, whose `None` means the argument was
+left out and `MassiveConfig.refused_venues` (`RAISE` by default) applies. Under `LOG` or `IGNORE`,
+a `history()` that REST cannot serve (`dm.ALL`, or `source=FLAT_FILES`) skips every file of an
+exchange S3 refuses, over the whole range, so the table has no holes, logs it (WARNING or DEBUG)
+with Massive's answer, and names it in the table's description; a call whose every exchange is
+refused raises. A list of tickers REST can serve still reads REST when S3 refuses its files.
+The library learns which exchanges a plan includes only from Massive's refusals: it encodes no
+plan tier and never guesses a ticker's exchange, since Massive can change its plans. A refusal
+of part of what a call asked for is the caller's to decide on the call, `RAISE` unless chosen,
+because asking for data the plan lacks is a bug in the caller; a problem with one value in the
+data stays a `MassiveConfig` setting, `LOG` by default. This supersedes decision 93's
+wording that one bad row never fails a table: `RAISE` fails it when a user chooses it.
+`canonicalize_symbols` keeps its `LOG` default (decision 93); the `OnError` docstring that said
+`RAISE` was wrong.

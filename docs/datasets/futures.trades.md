@@ -7,7 +7,7 @@ Trades of futures contracts, tick by tick.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.trades(symbols, *, venues=frozenset(dm.FuturesVenue))
+m.futures.trades(symbols, *, venues=frozenset(dm.FuturesVenue), refused_venues=None)
 ```
 
 - [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
@@ -23,6 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL` for every contract. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
+| [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses some exchanges' flat files, or None to use `MassiveConfig.refused_venues`. |
 
 ## Plans
 

@@ -136,6 +136,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
     assert base.malformed_rows is dm.OnError.LOG
+    assert base.refused_venues is dm.OnError.RAISE
     assert base.connection_taken is dm.ConnectionTaken.FAIL
 
 
@@ -432,7 +433,7 @@ def test_on_error_settings_default_to_log_and_read_no_environment(
     assert getattr(MassiveConfig(api_key="k"), setting) is dm.OnError.LOG
 
 
-@pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
+@pytest.mark.parametrize("setting", [*_ON_ERROR_SETTINGS, "refused_venues"])
 def test_on_error_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
     assert getattr(_replace(base, **{setting: dm.OnError.IGNORE}), setting) is dm.OnError.IGNORE
     with pytest.raises(
@@ -648,6 +649,7 @@ unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
 malformed_rows: ignore
+refused_venues: log
 connection_taken: reconnect
 """,
     )
@@ -674,6 +676,7 @@ connection_taken: reconnect
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
         malformed_rows=OnError.IGNORE,
+        refused_venues=OnError.LOG,
         connection_taken=dm.ConnectionTaken.RECONNECT,
     )
     config = MassiveConfig.from_file(file)
