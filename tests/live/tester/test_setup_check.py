@@ -13,7 +13,7 @@ from pathlib import Path
 
 from tests._live.live_run.children import run_command
 from tests._live.live_run.machine_checks import FAIL, OK, WARN, Item
-from tests._live.live_run.run_probe import ProbeResult
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.tester import setup_check
 
 ROOT = Path(__file__).resolve().parents[3]

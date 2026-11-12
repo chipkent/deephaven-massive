@@ -41,7 +41,7 @@ from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunMemory, RunRefusedError
 from tests._live.live_run.machine_checks import ready
 from tests._live.live_run.outcomes import read_outcomes
-from tests._live.live_run.run_probe import ProbeResult
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.live_run.schedule import (
     PYTEST_GROUPS,
     next_start_text,
@@ -51,7 +51,7 @@ from tests._live.live_run.schedule import (
 from tests._live.live_run.secret_scrub import fingerprints
 from tests._live.live_run.state import RunState, check_of, is_due, record
 from tests._live.live_run.stream_units import night_units, stream_units
-from tests._live.live_run.upgrade_check import PROMPT, SUBSCRIPTIONS
+from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -153,7 +153,7 @@ def apply_probe(
         memory.retries += 1
         ctx.say(f"the probe could not tell the subscriptions ({result.error}); keeping the last")
         if not state.current:
-            basic = dict.fromkeys(SUBSCRIPTIONS, "basic")
+            basic = dict.fromkeys(TIERS, "basic")
             state.current = run_state.entitlement_id(state, basic, [])
     else:
         memory.retries = 0
@@ -661,7 +661,7 @@ def command_upgrade_check(ctx: RunContext, subscription: str) -> int:
 
     Args:
         ctx: The command's context.
-        subscription: One of `upgrade_check.SUBSCRIPTIONS`.
+        subscription: One of the subscriptions (`plans.TIERS`).
 
     Returns:
         0 when it passed or was a rehearsal, 1 when it failed, `INTERRUPTED` after Control-C
@@ -734,7 +734,7 @@ def _attended_child(
 
     def echo(line: str) -> None:
         ctx.echo(f"  | {line}")
-        if line.startswith(PROMPT.split("{", maxsplit=1)[0]):
+        if line.endswith(children.ENTER_PROMPT):
             prompted.set()
 
     env = attempts.environment(ctx, state, folder=folder, extra={})

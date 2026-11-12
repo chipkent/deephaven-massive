@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Final
 
 from tests._live.calendar import NEW_YORK
 from tests._live.live_run import timetable
-from tests._live.live_run.replies import EXAMPLES
+from tests._live.live_run.reply_examples import EXAMPLES
 from tests._live.live_run.state import check_of, is_due
 from tests._live.live_run.stream_units import night_units, stream_units, throughput_units
 

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
+from tests._live.live_run.children import ENTER_PROMPT
 from tests._live.live_run.stream_capture import diagnostics_rows, wait_for_diagnostics
 
 if TYPE_CHECKING:
@@ -69,7 +70,8 @@ FRESH_MINUTE: Final = 65.0
 TOO_MANY_REQUESTS: Final = 429
 """The HTTP status of Massive's refusal for the per-minute limit."""
 
-PROMPT: Final = "Now upgrade {subscription} on the dashboard, then press Enter"
+PROMPT: Final = "Now upgrade {subscription} on the dashboard, then " + ENTER_PROMPT
+"""What the child prints before it reads Enter; its end tells the parent to wait for Enter."""
 
 
 @dataclass
