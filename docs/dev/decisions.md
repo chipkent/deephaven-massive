@@ -531,3 +531,22 @@ the agent says whether it breaks code and, if so, which version comes next, befo
 Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
+
+**109. A value the type checker cannot prove is checked at run time, or marked where a test breaks it**
+
+A `cast` tells mypy a value has a type without checking it, so a wrong assumption fails later and
+elsewhere, with an `AttributeError` far from its cause. The library checks the fact instead:
+`required(value, what)` returns a value its design guarantees is present (a path a dataset's spec
+declares for the read the caller makes, the session behind a weak reference the caller holds)
+and `required_instance(value, kind, what)` one it guarantees is of a type (a state's detail, a
+stop token the ingest layer made); each raises a `MassiveError` with
+`ErrorCause.LIBRARY_DEFECT` naming `what` when the guarantee breaks. A fact the code has just
+established is an `assert`; a union a function really returns is in its signature
+(`Permit | WireError`, `_Refused`); a type deephaven-core or jpy cannot state is checked once
+(`_checked_dtype`) or loaded by name with a mypy override (`import jpy`). Tests narrow with
+`assert isinstance`, and mark what they break on purpose with a `# type: ignore[code]` and its
+reason on the line: a wrong-type argument (`the point: refused at run time`), a write to a
+read-only mapping (`the point: read-only`), a fake bound once where a real class is declared, and
+an attribute botocore's stubs leave out. Untyped `**kwargs` give way to typed keywords and
+`dataclasses.replace`. A cast stays only where no check can state the type, with its reason on
+its line: the Java object `parse_date_like` reads through jpy, which has no type information.
