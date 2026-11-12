@@ -26,24 +26,13 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin
 
-_F = TypeVar("_F")
+from typing_extensions import override
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from typing_extensions import override
-else:
-
-    def override(method: _F) -> _F:
-        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
-
-        Type checkers read `typing_extensions.override` instead, from its bundled stub, so
-        overrides stay checked without a run-time dependency.
-        """
-        return method
 
 
 __all__ = [

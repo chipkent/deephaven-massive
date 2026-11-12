@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import gc
 import itertools
-import json
 import logging
 import pkgutil
-import subprocess
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,29 +22,35 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import exclusive_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _debug_log, _namespaces, _session
+from deephaven_massive import _debug_log, _session, _snapshots, namespaces
+from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import snapshots
-from deephaven_massive._namespaces.crypto import _Crypto
-from deephaven_massive._namespaces.economy import _Economy
-from deephaven_massive._namespaces.forex import _Forex
-from deephaven_massive._namespaces.futures import _Futures
-from deephaven_massive._namespaces.indicators import _Indicators
-from deephaven_massive._namespaces.indices import _Indices
-from deephaven_massive._namespaces.options import _Options
-from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._namespaces.reference import _Reference
-from deephaven_massive._namespaces.stocks import _Stocks
-from deephaven_massive._query import Query, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.session_core import CLOSE_SHOWN_TIMEOUT
+from deephaven_massive.namespaces._crypto import CryptoNamespace
+from deephaven_massive.namespaces._economy import EconomyNamespace
+from deephaven_massive.namespaces._forex import ForexNamespace
+from deephaven_massive.namespaces._futures import FuturesNamespace
+from deephaven_massive.namespaces._indicators import IndicatorsNamespace
+from deephaven_massive.namespaces._indices import IndicesNamespace
+from deephaven_massive.namespaces._options import OptionsNamespace
+from deephaven_massive.namespaces._partners import (
+    PartnersBenzingaNamespace,
+    PartnersEtfGlobalNamespace,
+    PartnersFableNamespace,
+    PartnersNamespace,
+    PartnersTmxNamespace,
+)
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.namespaces._reference import ReferenceNamespace
+from deephaven_massive.namespaces._stocks import StocksNamespace
+from deephaven_massive.queries import FetchQuery, SymbolStreamQuery
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
@@ -79,9 +82,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def one_row(session: dm.MassiveSession) -> Table:
@@ -344,24 +347,24 @@ def test_collected_sessions_leave_the_registry() -> None:
 def test_namespaces(massive_session: dm.MassiveSession) -> None:
     m = massive_session
     expected = {
-        "stocks": _Stocks,
-        "options": _Options,
-        "futures": _Futures,
-        "indices": _Indices,
-        "forex": _Forex,
-        "crypto": _Crypto,
-        "reference": _Reference,
-        "indicators": _Indicators,
-        "economy": _Economy,
-        "partners": _Partners,
+        "stocks": StocksNamespace,
+        "options": OptionsNamespace,
+        "futures": FuturesNamespace,
+        "indices": IndicesNamespace,
+        "forex": ForexNamespace,
+        "crypto": CryptoNamespace,
+        "reference": ReferenceNamespace,
+        "indicators": IndicatorsNamespace,
+        "economy": EconomyNamespace,
+        "partners": PartnersNamespace,
     }
     for name, cls in expected.items():
         assert type(getattr(m, name)) is cls
     assert m.stocks is m.stocks
-    assert type(m.partners.benzinga) is _Benzinga
-    assert type(m.partners.etf_global) is _EtfGlobal
-    assert type(m.partners.tmx) is _Tmx
-    assert type(m.partners.fable) is _Fable
+    assert type(m.partners.benzinga) is PartnersBenzingaNamespace
+    assert type(m.partners.etf_global) is PartnersEtfGlobalNamespace
+    assert type(m.partners.tmx) is PartnersTmxNamespace
+    assert type(m.partners.fable) is PartnersFableNamespace
 
 
 def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
@@ -372,7 +375,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         limit=3,
         filters={"ticker_gte": "A"},
     )
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is snapshots.SNAPSHOTS
     assert query._spec is _session.CATALOG.by_name["snapshots"]
     assert query._request == Request(
@@ -644,7 +647,7 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
         q.append_only()
     # Building queries and reaching namespaces never fail.
     assert isinstance(stream_query(massive_session), SymbolStreamQuery)
-    assert isinstance(massive_session.stocks, _Stocks)
+    assert isinstance(massive_session.stocks, StocksNamespace)
 
 
 def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSession) -> None:
@@ -891,51 +894,19 @@ def test_verbs_work_from_a_thread_without_an_execution_context(
         massive_session.release(result)
 
 
-def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
-    # A fresh interpreter starts its own JVM (this process's cannot be shared), opens a session
-    # with S3 credentials configured, reads its diagnostics, closes it, and reports which of
-    # boto3 and botocore it loaded. `os._exit` skips the interpreter shutdown that can crash
-    # after an embedded JVM. The script is a literal; `-P` keeps the working directory off
-    # `sys.path`.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import json, os, sys\n"
-                "from deephaven_server import Server\n"
-                "Server(port=0, jvm_args=['-Xmx512m']).start()\n"
-                "import deephaven_massive as dm\n"
-                "config = dm.MassiveConfig(\n"
-                "    api_key='k', s3_access_key_id='AKID', s3_secret_access_key='not-used'\n"
-                ")\n"
-                "m = dm.MassiveSession(config)\n"
-                "m.streams()\n"
-                "m.close()\n"
-                "loaded = sorted({'boto3', 'botocore'} & set(sys.modules))\n"
-                "print('LOADED ' + json.dumps(loaded), flush=True)\n"
-                "os._exit(0)\n"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=300,
-    )
-    [line] = [line for line in result.stdout.splitlines() if line.startswith("LOADED ")]
-    assert json.loads(line.removeprefix("LOADED ")) == []
-
-
 # --- The composition of a session ------------------------------------------------------------
 
 
 def test_every_namespace_module_feeds_the_catalog() -> None:
-    package = Path(_namespaces.__file__).parent
-    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"query_building"}
+    package = Path(namespaces.__file__).parent
+    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {
+        "_namespace",
+        "_query_building",
+    }
     named = [module.__name__ for module in _session.NAMESPACE_MODULES]
     assert len(named) == len(set(named))
-    assert set(named) == {f"deephaven_massive._namespaces.{name}" for name in found}
+    expected = {f"deephaven_massive.namespaces.{name}" for name in found}
+    assert set(named) == expected | {_snapshots.__name__}
     declared = [spec for module in _session.NAMESPACE_MODULES for spec in module.DATASETS]
     assert all(isinstance(spec, DatasetSpec) for spec in declared)
     assert list(_session.CATALOG.by_name.values()) == declared

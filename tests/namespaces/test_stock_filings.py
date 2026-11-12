@@ -20,9 +20,9 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._massive import RestPath, Transport, WireType, source
-from deephaven_massive._namespaces import stock_filings
-from deephaven_massive._query import Query, QueryBase
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _stock_filings as stock_filings
+from deephaven_massive.queries import FetchQuery, Query
 from tests._fakes.rest import FakeRestServer, Reply
 
 R = Transport.REST
@@ -51,11 +51,11 @@ def spec_of(name: str) -> DatasetSpec:
     return CATALOG.by_name[f"stocks.{name}"]
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., QueryBase]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., QueryBase]", target)
+    return cast("Callable[..., Query]", target)
 
 
 def columns(name: str) -> dict[str, ColumnType]:
@@ -213,7 +213,7 @@ def test_insider_datasets_normalize_every_documented_field(
 ) -> None:
     path = cast("str", spec_of(name).fetch_path)
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
-    table = cast("Query", factory(rest_session, name)()).fetch(wait=True)
+    table = cast("FetchQuery", factory(rest_session, name)()).fetch(wait=True)
     assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "10000"})]
     (row,) = table_rows(table)
     # Every row carries the instant its page arrived, last.
@@ -306,7 +306,7 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
     template = cast("str", spec_of(name).fetch_path)
     body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
     fake_rest.reply(template, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
+    table = cast("FetchQuery", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
     rows = _rows_when(table, len(body["results"]))
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
@@ -330,7 +330,7 @@ def test_a_filing_under_two_filers_polls_as_two_rows(
     owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
     body["results"] = [first, owner]
     fake_rest.reply(path, Reply(body=body))
-    table = cast("Query", factory(rest_session, name)(start="2025-01-02")).poll(60)
+    table = cast("FetchQuery", factory(rest_session, name)(start="2025-01-02")).poll(60)
     rows = _rows_when(table, 2)
     assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
         [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
@@ -361,7 +361,7 @@ def _poll_lines(
     # line is published.
     path = cast("str", spec_of(name).fetch_path)
     server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
-    table = cast("Query", factory(session, name)(start="2025-01-02")).poll(60)
+    table = cast("FetchQuery", factory(session, name)(start="2025-01-02")).poll(60)
     return table, _rows_when(table, len(lines))
 
 
@@ -432,7 +432,7 @@ def test_a_filing_without_a_ticker_keeps_a_null_symbol(
     first = body["results"][0]
     body["results"] = [first, {k: v for k, v in first.items() if k != "ticker"}]
     fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("Query", factory(rest_session, name)()).fetch(wait=True))
+    out = table_rows(cast("FetchQuery", factory(rest_session, name)()).fetch(wait=True))
     assert [row["Symbol"] for row in out] == [first["ticker"], None]
     key = spec_of(name).keys_for(R, path).symbol
     assert key is not None

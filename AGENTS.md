@@ -78,8 +78,8 @@ These protect the owner's repository, money, and secrets.
   secret, and sessions and queries expose no introspection attributes (`name`, `config`,
   `dataset`; decision 21), so the key stays out of objects users leave in console globals.
 - **Regenerate generated and vendored files; never edit them by hand**, since the next run
-  erases the edit: `_massive/spec/*.json` and `vendor/massive/` (`uv run python -m
-  deephaven_massive._massive.refresh`, `--fetch` for the vendor snapshot), and `docs/datasets/`
+  erases the edit: `_massive/spec/*.json` and `vendor/massive/` (`uv run python
+  scripts/refresh.py`, `--fetch` for the vendor snapshot), and `docs/datasets/`
   and the settings of `docs/configuration.md` (`scripts/render_reference.py`). Hand input goes
   only where `docs/dev/spec-refresh.md` says, each with its reason; commit output with its cause.
 

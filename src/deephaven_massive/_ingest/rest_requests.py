@@ -32,11 +32,10 @@ from typing import TYPE_CHECKING, Final, TypeAlias, cast
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
 from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
 from deephaven_massive._datasets.history_source import session_date_param
-from deephaven_massive._datasets.symbols import forex_codes, symbol_class
+from deephaven_massive._datasets.symbols import AllSymbols, forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -360,7 +359,7 @@ def _symbol_parts(
         spread = _Spread.LIST
     else:
         spread = _Spread.ONE
-    if symbols is None or isinstance(symbols, _All):
+    if symbols is None or isinstance(symbols, AllSymbols):
         if spread is _Spread.PATH:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]

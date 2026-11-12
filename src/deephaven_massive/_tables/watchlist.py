@@ -53,6 +53,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from deephaven.table_listener import TableListener, TableListenerHandle
+from typing_extensions import override
 
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
@@ -64,7 +65,6 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence

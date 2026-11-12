@@ -32,6 +32,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Set up JDK 17 (required by the embedded Deephaven server)
+        # The refresh lives in the library, whose import starts from Deephaven, which needs a
+        # running JVM: scripts/refresh.py starts an embedded server before running it.
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -41,15 +48,20 @@ jobs:
       - name: Set up Python
         run: uv python install 3.13
       - name: Sync dependencies
-        run: uv sync --python 3.13 --no-dev
+        # The dev group holds deephaven-server, the embedded server the refresh runs in.
+        run: uv sync --python 3.13
       - name: Compare the live Massive API with the vendored snapshot
         id: check
         # Status 0 is no drift and 1 is drift; anything else means the check could not be
         # made, which fails the job instead of touching the issue. An uncaught error also
-        # exits 1, so drift additionally needs the report's own title as its first line.
+        # exits 1, so drift additionally needs the report's own title as its first line. The
+        # report goes to its own file: the embedded server writes its startup lines to
+        # standard output.
         run: |
           status=0
-          uv run --no-sync python -m deephaven_massive._massive.refresh --check > drift.md || status=$?
+          rm -f drift.md
+          uv run --no-sync python scripts/refresh.py --check --report drift.md || status=$?
+          touch drift.md
           cat drift.md
           if [ "$status" -eq 0 ]; then
             echo "drift=false" >> "$GITHUB_OUTPUT"

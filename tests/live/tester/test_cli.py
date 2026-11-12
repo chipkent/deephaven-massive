@@ -1,8 +1,8 @@
 """Tests of the command line of `scripts/tester.py` (`tests/_live/tester/cli.py`).
 
-The commands run with their machine-facing parts replaced (the check, the machine's
-description, the server start), or, for `examples`, on a small folder of examples in a
-temporary copy of the repository's layout, so nothing reaches Massive.
+The commands run with their machine-facing parts replaced (the check and the machine's
+description), or, for `examples`, on a small folder of examples in a temporary copy of the
+repository's layout, so nothing reaches Massive.
 """
 
 from __future__ import annotations
@@ -28,10 +28,6 @@ KEY = "PLANTED-cli-key-5d21"
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _no_server() -> None:
-    pytest.fail("only examples starts a server")
-
-
 def _describe(_root: Path, _folder: Path, _environ: MutableMapping[str, str]) -> dict[str, object]:
     return {"os": "test"}
 
@@ -47,7 +43,6 @@ def _run(
     environ: dict[str, str],
     *,
     root: Path = ROOT,
-    start_server: Callable[[], None] = _no_server,
     check: Callable[[Path, argparse.Namespace, MutableMapping[str, str]], list[Item]] = _check,
     plans: Callable[[MutableMapping[str, str]], dict[str, str] | None] = lambda _e: None,
 ) -> tuple[int, list[str]]:
@@ -55,7 +50,6 @@ def _run(
     status = cli.main(
         argv,
         root=root,
-        start_server=start_server,
         environ=environ,
         stdout=out,
         check=check,
@@ -144,17 +138,14 @@ def test_examples_runs_the_folder_and_reports_the_failures(tmp_path: Path) -> No
     examples.mkdir(parents=True)
     (examples / "01_a.py").write_text("print('ok')\n", encoding="utf-8")
     (examples / "02_b.py").write_text("raise RuntimeError('broke')\n", encoding="utf-8")
-    started: list[bool] = []
     environ = {"MASSIVE_API_KEY": KEY}
     folder = tmp_path / "massive-test"
     status, lines = _run(
         ["examples", "--folder", str(folder)],
         environ,
         root=root,
-        start_server=lambda: started.append(True),
     )
     assert status == 1
-    assert started == [True]
     assert lines[-2:] == [f"saved to {folder.resolve() / 'examples-output'}", "failed: 02_b.py"]
     assert (folder / "examples-output" / "01_a.txt").read_text() == "ok\n"
 
@@ -167,7 +158,6 @@ def test_examples_says_when_nothing_failed(tmp_path: Path) -> None:
         ["examples", "--folder", str(tmp_path / "t")],
         {"MASSIVE_API_KEY": KEY},
         root=root,
-        start_server=lambda: None,
     )
     assert (status, lines[-1]) == (0, "no example failed")
 
@@ -218,7 +208,6 @@ def test_examples_writes_the_settings_the_keys_plans_need(tmp_path: Path) -> Non
         ["examples", "--folder", str(tmp_path / "t")],
         {"MASSIVE_API_KEY": KEY},
         root=root,
-        start_server=lambda: None,
         plans=lambda _environ: tiers,
     )
     assert status == 0
@@ -235,7 +224,6 @@ def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: 
         ["examples", "--folder", str(tmp_path / "t")],
         {"MASSIVE_API_KEY": KEY},
         root=root,
-        start_server=lambda: None,
     )
     assert lines[:2] == [
         "could not tell the key's plans; the examples run as on the free plan",

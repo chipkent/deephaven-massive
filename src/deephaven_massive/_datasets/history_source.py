@@ -76,18 +76,18 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_on_or_before,
 )
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
+from deephaven_massive._datasets.symbols import AllSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._massive import ParamKind, Transport, source
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._types import DateLike
 
 __all__ = [
     "HISTORY_TRANSPORTS",
@@ -441,7 +441,7 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     grouped = (
         spec.has_grouped_daily and request.timespan is Timespan.DAY and request.multiplier == 1
     )
-    if isinstance(request.symbols, _All) and not grouped:
+    if isinstance(request.symbols, AllSymbols) and not grouped:
         return f"{spec.name} history over REST needs explicit symbols"
     return None
 
@@ -558,7 +558,7 @@ def choose_source(
         rest is not None
         and request.adjusted is True
         and len(flat) == 1
-        and isinstance(request.symbols, _All)
+        and isinstance(request.symbols, AllSymbols)
     ):
         # Only adjustment holds flat files back, and only dm.ALL holds REST back: say so.
         raise ValueError(

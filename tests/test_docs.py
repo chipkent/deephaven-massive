@@ -203,10 +203,7 @@ def readme_server(
     yield fake_rest
     for made in opened:
         made.close()
-    # The package resolves `MassiveSession` lazily, so the name is not bound in the module;
-    # undoing the patch would bind it, so the binding is removed after the undo.
     monkeypatch.undo()
-    vars(dm).pop("MassiveSession", None)
 
 
 # --- Every example runs ------------------------------------------------------------------------

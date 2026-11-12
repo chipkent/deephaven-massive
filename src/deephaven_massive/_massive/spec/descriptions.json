@@ -1,5 +1,5 @@
 {
- "generated_by": "python -m deephaven_massive._massive.refresh",
+ "generated_by": "python scripts/refresh.py",
  "fetched": "2026-11-09",
  "urls": {
   "REST": {

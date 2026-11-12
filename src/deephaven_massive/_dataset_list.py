@@ -19,6 +19,7 @@ from __future__ import annotations
 import enum
 import inspect
 import re
+import typing
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -34,13 +35,17 @@ from deephaven_massive._datasets.column_reference import (
     call_path,
     page_url,
 )
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query, StreamHistoryQuery, verbs
-from deephaven_massive._session import CATALOG, NAMESPACE_MODULES, MassiveSession
+from deephaven_massive._session import CATALOG, MassiveSession
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery, StreamHistoryQuery
+from deephaven_massive.queries._choice import bar_stream_verbs, verbs
+from deephaven_massive.queries._stream import streaming_bars
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from collections.abc import Set as AbstractSet
+
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = ["DATASET_LIST_DESCRIPTIONS", "dataset_calls", "datasets"]
 
@@ -51,8 +56,9 @@ DATASET_LIST_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Call": "How a session m reaches the dataset, such as m.stocks.trades.",
         "Summary": "What the dataset holds, in one sentence.",
         "Methods": (
-            "The methods its queries have, such as fetch and poll. Bars stream only at some "
-            "timespans, as their docstring says."
+            "The methods its queries have, such as fetch and poll. A bars dataset's stream "
+            "methods name the bars they work for, such as blink (1-second and 1-minute bars at "
+            "multiplier=1)."
         ),
         "Transports": "Where its rows come from: REST, flat files, WebSocket.",
         "Documentation": "The web address of its page in the dataset reference.",
@@ -74,8 +80,11 @@ def datasets() -> Table:
         `Dataset` (String, such as `stocks.trades`), `Call` (String, how a session `m` reaches
         it, such as `m.stocks.trades`), `Summary` (String, one sentence), `Methods` (String[],
         the methods its queries have, in the order `fetch`, `poll`, `blink`, `append_only`,
-        `ring`, `last_by`, `history`), `Transports` (String[], where the library reads it from,
-        spelled `REST`, `flat files`, and `WebSocket`, as `columns()` spells them), and
+        `ring`, `last_by`, `history`; a bars dataset lists `history`, then each stream method
+        with the bars it works for, such as
+        `blink (1-second and 1-minute bars at multiplier=1)`), `Transports` (String[], where
+        the library reads it from, spelled `REST`, `flat files`, and `WebSocket`, as `columns()`
+        spells them), and
         `Documentation` (String, the web address of its page of the dataset reference).
         Each column carries a description, shown as its tooltip in the Deephaven IDE.
 
@@ -94,7 +103,7 @@ def datasets() -> Table:
             string_col("Dataset", [spec.name for spec in specs]),
             string_col("Call", [call_path(spec) for spec in specs]),
             string_col("Summary", [spec.summary for spec in specs]),
-            _string_arrays("Methods", [verbs(spec) for spec in specs]),
+            _string_arrays("Methods", [_listed_methods(spec) for spec in specs]),
             _string_arrays(
                 "Transports",
                 [
@@ -111,6 +120,21 @@ def datasets() -> Table:
     )
     described = table.j_table.withColumnDescriptions(j_hashmap(dict(DATASET_LIST_DESCRIPTIONS)))
     return Table(j_table=described)
+
+
+def _listed_methods(spec: DatasetSpec) -> tuple[str, ...]:
+    """Return a dataset's entries of the `Methods` column of `datasets()`.
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The methods every query of the dataset has (`verbs`), then, for bars that stream at
+        some timespans, each stream method with those bars, such as
+        `"blink (1-second and 1-minute bars at multiplier=1)"`.
+    """
+    condition = streaming_bars(spec) if bar_stream_verbs(spec) else ""
+    return verbs(spec) + tuple(f"{verb} ({condition})" for verb in bar_stream_verbs(spec))
 
 
 def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
@@ -130,7 +154,7 @@ def _string_arrays(name: str, rows: Sequence[Sequence[str]]) -> InputColumn:
     )
 
 
-_QUERY_CLASSES: Final = (Query, StreamHistoryQuery)
+_QUERY_CLASSES: Final = (FetchQuery, StreamHistoryQuery)
 """The query classes that between them define every verb, read for each verb's call and summary."""
 
 _RETURN: Final = "Return "
@@ -174,26 +198,41 @@ def dataset_calls() -> Mapping[str, DatasetCall]:
 
 
 def _dataset_methods() -> Iterator[tuple[str, Callable[..., object]]]:
-    """Yield every dataset method with its dataset's name.
+    """Yield every dataset method with its dataset's name, its path from a session.
+
+    The walk follows the session's namespace properties, as a user does: `m.stocks` is the
+    property `stocks`, whose return annotation is the namespace's class, and
+    `m.stocks.financials` a property of that class in turn.
 
     Yields:
-        `(dataset name, method)` pairs: each public function of each namespace class of the
-        namespace modules, named by its qualified name (its path, such as `stocks.bars`),
-        then the session's public methods that name a dataset of the catalog.
+        `(dataset name, method)` pairs, such as `("stocks.bars", StocksNamespace.bars)`: every
+        public function of every namespace class, and each of the session's own public
+        methods that names a dataset of the catalog, such as `snapshots`.
     """
-    for module in NAMESPACE_MODULES:
-        for owner in vars(module).values():
-            if (
-                isinstance(owner, type)
-                and issubclass(owner, Namespace)
-                and owner.__module__ == module.__name__
-            ):
-                for name, member in vars(owner).items():
-                    if not name.startswith("_") and inspect.isfunction(member):
-                        yield member.__qualname__, member
-    for name, member in vars(MassiveSession).items():
-        if name in CATALOG.by_name and inspect.isfunction(member):
-            yield name, member
+    yield from _methods_under(MassiveSession, "")
+
+
+def _methods_under(owner: type, path: str) -> Iterator[tuple[str, Callable[..., object]]]:
+    """Yield the dataset methods reached from one class: its own, then its namespaces'.
+
+    Args:
+        owner: `MassiveSession` or a namespace class.
+        path: The class's path from a session with a trailing dot, such as `"stocks."`, or
+            `""` for the session.
+
+    Yields:
+        `(dataset name, method)` pairs.
+    """
+    for name, member in vars(owner).items():
+        if name.startswith("_"):
+            continue
+        if isinstance(member, property):  # every public property is a namespace
+            namespace = typing.get_type_hints(member.fget)["return"]
+            yield from _methods_under(namespace, f"{path}{name}.")
+        elif inspect.isfunction(member) and (
+            issubclass(owner, Namespace) or name in CATALOG.by_name
+        ):
+            yield f"{path}{name}", member
 
 
 def _call(name: str, method: Callable[..., object]) -> DatasetCall:
@@ -231,7 +270,9 @@ def _call(name: str, method: Callable[..., object]) -> DatasetCall:
         arguments=tuple(param.name for param in parameters),
         typed=tuple(typed),
         descriptions=tuple(_argument_lines(method).get(param.name, "") for param in parameters),
-        methods=tuple(_query_method(verb) for verb in verbs(spec)),
+        methods=tuple(_query_method(verb) for verb in verbs(spec) + bar_stream_verbs(spec)),
+        stream_verbs=bar_stream_verbs(spec),
+        stream_condition=streaming_bars(spec) if bar_stream_verbs(spec) else "",
     )
 
 

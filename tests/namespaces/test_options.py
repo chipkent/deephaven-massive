@@ -34,19 +34,18 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import options
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
-    HistoryQuery,
+from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.namespaces import _options as options
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
     Query,
-    QueryBase,
     StreamHistoryQuery,
     StreamQuery,
     SymbolStreamQuery,
-    query_class,
 )
-from deephaven_massive._session import CATALOG
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -84,7 +83,7 @@ def ny_midnight_ns(day: date) -> int:
     return int(datetime.combine(day, time(), ZoneInfo("America/New_York")).timestamp()) * 10**9
 
 
-def request_of(query: QueryBase) -> dict[str, Any]:
+def request_of(query: Query) -> dict[str, Any]:
     r = query._request
     return {"symbols": r.symbols, "params": dict(r.params), "filters": dict(r.filters)}
 
@@ -94,7 +93,7 @@ def request_of(query: QueryBase) -> dict[str, Any]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.options
-    assert type(namespace) is options._Options
+    assert type(namespace) is options.OptionsNamespace
     assert isinstance(namespace, Namespace)
     assert repr(namespace).endswith(" options>")
 
@@ -190,16 +189,16 @@ def test_each_dataset_reads_its_sources() -> None:
     ("spec", "expected"),
     [
         (options.TRADES, StreamHistoryQuery),
-        (options.LAST_TRADE, Query),
+        (options.LAST_TRADE, FetchQuery),
         (options.QUOTES, StreamHistoryQuery),
-        (options.BARS, HistoryQuery),
-        (options.PREVIOUS_DAY_BAR, Query),
+        (options.BARS, StreamHistoryQuery),
+        (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, SymbolStreamQuery),
         (options.ADMIN_MESSAGES, StreamQuery),
-        (options.CHAIN, Query),
-        (options.SNAPSHOTS, Query),
-        (options.CONTRACTS, Query),
-        (options.DAILY_OPEN_CLOSE, Query),
+        (options.CHAIN, FetchQuery),
+        (options.SNAPSHOTS, FetchQuery),
+        (options.CONTRACTS, FetchQuery),
+        (options.DAILY_OPEN_CLOSE, FetchQuery),
     ],
 )
 def test_query_class_of_each_dataset(spec: DatasetSpec, expected: type) -> None:
@@ -418,13 +417,21 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
 
 
-def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSession) -> None:
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession,
+) -> None:
     bars = massive_session.options.bars
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.SECOND)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE, multiplier=5)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.HOUR)) is HistoryQuery
+    for timespan, multiplier in [
+        (dm.Timespan.MINUTE, 1),
+        (dm.Timespan.SECOND, 1),
+        (dm.Timespan.DAY, 1),
+        (dm.Timespan.MINUTE, 5),
+        (dm.Timespan.HOUR, 1),
+    ]:
+        assert type(bars(CONTRACT, timespan, multiplier=multiplier)) is StreamHistoryQuery
+    for timespan, multiplier in [(dm.Timespan.DAY, 1), (dm.Timespan.MINUTE, 5)]:
+        with pytest.raises(ValueError, match=r"\.ring\(\): only 1-second and 1-minute bars"):
+            bars(CONTRACT, timespan, multiplier=multiplier).ring(10)
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
@@ -450,7 +457,7 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
         limit=10,
         filters={"strike_price_gte": 150, "expiration_date_lte": "2025-01-17"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": None,
         "params": {
@@ -528,7 +535,7 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
 ) -> None:
     snapshots = massive_session.options.snapshots
     q = snapshots([CONTRACT], filters={"ticker_gte": "O:A"}, limit=500)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": (CONTRACT,),
         "params": {},
@@ -553,7 +560,7 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         expired=True,
         filters={"strike_price_gte": 100, "expiration_date_lte": date(2026, 1, 16)},
     )
-    assert type(listed) is Query
+    assert type(listed) is FetchQuery
     assert request_of(listed) == {
         "symbols": None,
         "params": {
@@ -623,7 +630,7 @@ def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> Non
 def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSession) -> None:
     daily = massive_session.options.daily_open_close
     q = daily("O:AAPL250117C00150000", date(2025, 1, 2))
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": (CONTRACT,),
         "params": {"date": date(2025, 1, 2)},
@@ -667,7 +674,7 @@ def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession)
 
 
 def _factory(name: str) -> Callable[..., object]:
-    return cast("Callable[..., object]", getattr(options._Options, name))
+    return cast("Callable[..., object]", getattr(options.OptionsNamespace, name))
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -679,7 +686,7 @@ def test_docstrings_name_their_dataset_page(name: str) -> None:
 def test_every_factory_has_a_dataset() -> None:
     public = {
         name
-        for name, member in vars(options._Options).items()
+        for name, member in vars(options.OptionsNamespace).items()
         if callable(member) and not name.startswith("_")
     }
     assert public == set(NAMES)
@@ -735,7 +742,7 @@ def test_the_one_row_datasets_share_the_columns_of_their_kind(
         assert len(shared) > 5
     assert not hasattr(massive_session.options.trades(CONTRACT), "fetch")
     assert not hasattr(massive_session.options.bars(CONTRACT, dm.Timespan.DAY), "fetch")
-    assert type(massive_session.options.last_trade(CONTRACT)) is Query
+    assert type(massive_session.options.last_trade(CONTRACT)) is FetchQuery
 
 
 def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
@@ -743,7 +750,7 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
 ) -> None:
     prev = massive_session.options.previous_day_bar
     q = prev(CONTRACT)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert (q._request.timespan, q._request.multiplier, q._request.adjusted) == (
         dm.Timespan.DAY,
         1,
@@ -1383,14 +1390,8 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
         massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
-    methods = "its methods are blink(), append_only(), ring()"
-    with pytest.raises(AttributeError) as last_by:
-        query.last_by  # noqa: B018  # the attribute lookup is the test
-    assert str(last_by.value) == f"options.admin_messages has no last_by(); {methods}"
-    with pytest.raises(AttributeError) as fetch:
-        query.fetch  # noqa: B018  # the attribute lookup is the test
-    # No snapshot serves the messages, so none is offered.
-    assert str(fetch.value) == f"options.admin_messages has no fetch(); {methods}"
+    assert not hasattr(query, "last_by")
+    assert not hasattr(query, "fetch")
 
 
 def test_admin_messages_of_every_exchange_arrive_in_each_shape(

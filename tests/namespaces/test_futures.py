@@ -30,10 +30,14 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import KeySpec
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._massive import Transport, object_key, source
-from deephaven_massive._namespaces import futures
-from deephaven_massive._namespaces.query_building import Namespace, build_query
-from deephaven_massive._query import HistoryQuery, Query, QueryBase, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _futures as futures
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
+    build_query,
+)
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
+from deephaven_massive.queries._choice import query_class
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
@@ -46,6 +50,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 OWNER = "namespaces/futures"
 
 Loader = Callable[[str, str], bytes]
@@ -53,7 +60,7 @@ Loader = Callable[[str, str], bytes]
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.futures
-    assert type(namespace) is futures._Futures
+    assert type(namespace) is futures.FuturesNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -149,22 +156,25 @@ def test_an_exhausted_generator_is_no_symbols(massive_session: dm.MassiveSession
 
 
 @pytest.mark.parametrize(
-    ("bar", "expected"),
+    ("bar", "streams"),
     [
-        ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 5), HistoryQuery),
-        ((dm.Timespan.HOUR, 1), HistoryQuery),
-        ((dm.Timespan.SESSION, 1), HistoryQuery),
-        ((dm.Timespan.WEEK, 2), HistoryQuery),
+        ((dm.Timespan.SECOND, 1), True),
+        ((dm.Timespan.MINUTE, 1), True),
+        ((dm.Timespan.MINUTE, 5), False),
+        ((dm.Timespan.HOUR, 1), False),
+        ((dm.Timespan.SESSION, 1), False),
+        ((dm.Timespan.WEEK, 2), False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, bar: tuple[Any, int], expected: type
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, bar: tuple[Any, int], streams: bool
 ) -> None:
     timespan, multiplier = bar
     q = massive_session.futures.bars("ESZ5", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
 
@@ -180,7 +190,7 @@ def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSes
 
 def test_bars_reject_the_day_timespan(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"no DAY timespan; use dm\.Timespan\.SESSION"):
-        massive_session.futures.bars("ESZ5", cast("Any", dm.Timespan.DAY))
+        massive_session.futures.bars("ESZ5", dm.Timespan.DAY)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         massive_session.futures.bars("ESZ5", cast("Any", "minute"))
     with pytest.raises(ValueError, match="multiplier must be positive"):
@@ -191,7 +201,7 @@ def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> No
     q = massive_session.futures.snapshots(
         ["ESZ5"], sort="ticker", order=dm.Order.DESC, limit=10, filters={"ticker_gte": "E"}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("ESZ5",)
     assert q._request.params == (("order", dm.Order.DESC), ("sort", "ticker"))
     assert q._request.filters == (("ticker_gte", "E"),)
@@ -210,7 +220,7 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.contracts(
         product_code="ES", filters={"active": True, "last_trade_date_gte": date(2026, 1, 1)}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols is None
     assert q._request.params == (("product_code", "ES"),)
     assert dict(q._request.filters) == {"active": True, "last_trade_date_gte": date(2026, 1, 1)}
@@ -246,7 +256,7 @@ def test_products(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(
         product_code="GC", sort="name", limit=5, filters={"sector": "precious"}
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "GC"), ("sort", "name"))
     assert q._request.limit == 5
     with pytest.raises(ValueError, match="filter 'sector' takes"):
@@ -257,7 +267,7 @@ def test_products(massive_session: dm.MassiveSession) -> None:
 
 def test_exchanges(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.exchanges()
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request == type(q._request)()
     assert repr(q) == "m.futures.exchanges()"
     assert massive_session.futures.exchanges(limit=2)._request.limit == 2
@@ -272,14 +282,14 @@ def rest_params(name: str) -> set[str]:
 @pytest.mark.parametrize("name", ["exchanges", "market_status"])
 def test_a_path_without_filters_or_sort_offers_none(name: str) -> None:
     # Every parameter of either path is `limit` or a form of the typed `product_code`.
-    parameters = inspect.signature(getattr(futures._Futures, name)).parameters
+    parameters = inspect.signature(getattr(futures.FuturesNamespace, name)).parameters
     assert not {"filters", "sort", "order"} & set(parameters)
     assert {p.split(".")[0] for p in rest_params(name)} <= {"limit", "product_code"}
 
 
 def test_market_status(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.market_status(product_code="ES", limit=3)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "ES"),)
     assert q._request.limit == 3
 
@@ -306,11 +316,11 @@ def test_product_code_forms_are_set_only_through_product_code(
 _PRODUCT_DATASETS = ["snapshots", "contracts", "products", "market_status", "schedules"]
 
 
-def _with_product_code(namespace: object, name: str, product_code: object) -> QueryBase:
+def _with_product_code(namespace: object, name: str, product_code: object) -> Query:
     factory = getattr(namespace, name)
     if name == "snapshots":
-        return cast("QueryBase", factory(dm.ALL, product_code=product_code))
-    return cast("QueryBase", factory(product_code=product_code))
+        return cast("Query", factory(dm.ALL, product_code=product_code))
+    return cast("Query", factory(product_code=product_code))
 
 
 @pytest.mark.parametrize("name", _PRODUCT_DATASETS)
@@ -362,7 +372,7 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
         end=date(2025, 12, 26),
         filters={"trading_venue": "XCME"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.params == (("product_code", "ES"),)
     assert q._request.start == date(2025, 12, 22)
     assert q._request.end == date(2025, 12, 26)
@@ -394,13 +404,13 @@ def _spec(name: str) -> DatasetSpec:
     [
         ("trades", StreamHistoryQuery),
         ("quotes", StreamHistoryQuery),
-        ("bars", HistoryQuery),
-        ("snapshots", Query),
-        ("contracts", Query),
-        ("products", Query),
-        ("exchanges", Query),
-        ("market_status", Query),
-        ("schedules", Query),
+        ("bars", StreamHistoryQuery),
+        ("snapshots", FetchQuery),
+        ("contracts", FetchQuery),
+        ("products", FetchQuery),
+        ("exchanges", FetchQuery),
+        ("market_status", FetchQuery),
+        ("schedules", FetchQuery),
     ],
 )
 def test_query_classes(name: str, expected: type) -> None:
@@ -483,7 +493,7 @@ def test_schedule_and_status_times_are_instants_and_sessions_dates() -> None:
 @pytest.mark.parametrize("spec", futures.DATASETS, ids=lambda spec: spec.name)
 def test_docstrings_name_their_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.removeprefix("futures.")
-    doc = getattr(futures._Futures, dataset).__doc__
+    doc = getattr(futures.FuturesNamespace, dataset).__doc__
     assert doc is not None
     assert f"docs/datasets/{spec.name}.md" in doc
     assert doc.splitlines()[0] == spec.summary
@@ -1355,10 +1365,10 @@ def test_history_with_dates_refuses_a_session_end_date_filter(
     q = build_query(
         rest_session._core,
         futures.TRADES,
+        query_type=HistoryQuery,
         symbols=["ESZ4"],
         filters={"session_end_date": "2024-12-17"},
     )
-    assert isinstance(q, HistoryQuery)
     with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
         q.history("2024-12-17", "2024-12-17", source=dm.HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []

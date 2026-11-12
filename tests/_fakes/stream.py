@@ -5,9 +5,8 @@ real transport creates one, without any network. The fake records every stream i
 every `on_shutdown_callback` Deephaven runs, so tests can observe exactly when a stream is torn
 down. Like the real transport, the callback first tells the session
 (`SharedStreams.shut_down`), which drops the stream's registry record, and the handle's
-`fail` records the failure and then fails the table, once, as `StreamSink.fail` does. Imported
-lazily by
-the `fake_streams` fixture in `tests/conftest.py`, after the embedded JVM has started.
+`fail` records the failure and then fails the table, once, as `StreamSink.fail` does. The
+`fake_streams` fixture in `tests/conftest.py` gives one to each test that asks for it.
 """
 
 from __future__ import annotations

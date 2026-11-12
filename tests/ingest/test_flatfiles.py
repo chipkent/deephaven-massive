@@ -27,6 +27,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -42,13 +43,12 @@ from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, No
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import HistoryQuery
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.transports import FailureKind, SymbolFailure
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
@@ -352,9 +352,7 @@ def flat_file_client(m: dm.MassiveSession) -> _massive.FlatFileClient:
 
 
 def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> HistoryQuery:
-    q = build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
-    assert isinstance(q, HistoryQuery)
-    return q
+    return build_query(m._core, spec, query_type=HistoryQuery, **cast("dict[str, Any]", kwargs))
 
 
 class ShutdownSignal(ThreadPoolExecutor):
@@ -2450,7 +2448,7 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.queries"),
         pytest.raises(dm.MassiveError) as info,
     ):
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)

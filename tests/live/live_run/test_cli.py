@@ -42,10 +42,6 @@ def _machine(_folder: Path, _offset: float | None) -> tuple[list[Item], dict[str
     return [], {}
 
 
-def _no_server(_heap: int, _folder: Path) -> None:
-    pytest.fail("only _group starts a server")
-
-
 class Recorder:
     """Builds a fake context per command, and remembers what it was asked for."""
 
@@ -73,7 +69,6 @@ def _main(argv: list[str], recorder: Recorder) -> int:
         argv,
         root=ROOT,
         script=ROOT / "scripts" / "live_run.py",
-        start_server=_no_server,
         make_context=recorder,
     )
 
@@ -217,38 +212,25 @@ def test_the_real_keep_awake_starts_and_stops_its_tool(
     assert stdout.getvalue() == "warning: nothing keeps the machine awake; keep it awake yourself\n"
 
 
-@pytest.mark.parametrize(
-    ("group", "memory", "heap"),
-    [
-        ("responses", 64 << 30, cli.SMALL_HEAP),
-        ("stream-day", 64 << 30, cli.STREAM_HEAP_LIMIT),
-        ("throughput", 12 << 30, 6 << 30),
-        ("stream-day", None, cli.SMALL_HEAP),
-    ],
-)
-def test_the_group_child_starts_a_server_sized_to_its_group(
-    *, group: str, memory: int | None, heap: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_group_child_watches_its_parent_then_runs_its_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "request.json").write_text(
-        json.dumps({"group": group, "tiers": {"stocks": "basic"}})
+        json.dumps({"group": "responses", "tiers": {"stocks": "basic"}})
     )
-    monkeypatch.setattr(machine_checks, "memory_total", lambda: memory)
-    ran: list[str] = []
+    events: list[str] = []
     monkeypatch.setattr(
-        group_child, "run_group", lambda _out, attempt, **_options: ran.append(attempt)
+        group_child, "run_group", lambda _out, attempt, **_options: events.append(attempt)
     )
-    servers: list[tuple[int, Path]] = []
-    watched: list[str] = []
     code = cli.main(
         ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"],
         root=ROOT,
         script=Path("s.py"),
-        start_server=lambda heap, folder: servers.append((heap, folder)),
-        watch=lambda: watched.append("watching"),
+        watch=lambda: events.append("watching"),
     )
     assert code == 0
-    assert (servers, ran, watched) == ([(heap, tmp_path / "a")], ["a"], ["watching"])
+    assert events == ["watching", "a"]
 
 
 def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
@@ -280,7 +262,6 @@ def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
         tmp_path,
         "a",
         environ={"MASSIVE_API_KEY": KEY},
-        start_server=lambda _heap, _folder: None,
         watch=lambda: None,
     )
     open_session = seen["open_session"]

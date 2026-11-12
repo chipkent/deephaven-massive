@@ -22,13 +22,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from deephaven import empty_table
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
-from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter

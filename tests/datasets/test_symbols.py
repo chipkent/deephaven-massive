@@ -1,8 +1,10 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
+import copy
 import json
 import re
-from collections.abc import Callable
+import typing
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
@@ -14,6 +16,9 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.symbols import (
+    ALL,
+    AllSymbols,
+    SymbolsLike,
     SymbolTable,
     check_symbol,
     check_symbols,
@@ -720,3 +725,26 @@ def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
         dm.canonical_symbol_forex("EURUSD=X")
     with pytest.raises(ValueError, match="Yahoo Finance"):
         dm.canonical_symbol_forex("eurusd=x")
+
+
+def test_all_is_the_exported_singleton() -> None:
+    assert dm.ALL is ALL
+    assert dm.AllSymbols is AllSymbols
+    assert AllSymbols("ALL") is AllSymbols.ALL is ALL
+    assert copy.copy(ALL) is ALL
+    assert copy.deepcopy(ALL) is ALL
+    assert not isinstance(ALL, str)
+
+
+def test_all_shows_its_public_name() -> None:
+    assert repr(ALL) == "dm.ALL"
+    assert str(ALL) == "ALL"
+    assert f"{ALL}" == "ALL"
+
+
+def test_symbols_like_names_every_form_symbols_takes() -> None:
+    assert set(typing.get_args(SymbolsLike)) == {str, Sequence[str], Table, AllSymbols}
+
+
+def test_all_is_an_instance_of_the_symbols_like_member() -> None:
+    assert isinstance(ALL, AllSymbols)

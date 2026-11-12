@@ -41,18 +41,18 @@ from deephaven_massive._massive import (
     source,
     to_batch,
 )
-from deephaven_massive._namespaces import crypto
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    SymbolStreamQuery,
-    query_class,
-)
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive.namespaces import _crypto as crypto
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
+    HistoryQuery,
+    Query,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
+from deephaven_massive.queries._choice import query_class
 
 # The reply builder is a plain class of the fake, which no fixture can hand over; the servers
 # and the streaming session come from the `fake_rest`, `fake_s3`, and `ws_session` fixtures.
@@ -65,6 +65,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 Fixture = Callable[[str, str], bytes]
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -72,7 +75,7 @@ OWNER = "namespaces/crypto"
 CRYPTO = Catalog(crypto.DATASETS)
 
 
-def request_of(query: QueryBase) -> Request:
+def request_of(query: Query) -> Request:
     return query._request
 
 
@@ -81,7 +84,7 @@ def request_of(query: QueryBase) -> Request:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.crypto
-    assert type(namespace) is crypto._Crypto
+    assert type(namespace) is crypto.CryptoNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -104,14 +107,14 @@ def test_the_namespace_declares_every_crypto_dataset() -> None:
     ("spec", "expected"),
     [
         (crypto.TRADES, StreamHistoryQuery),
-        (crypto.LAST_TRADE, Query),
+        (crypto.LAST_TRADE, FetchQuery),
         (crypto.QUOTES, SymbolStreamQuery),
-        (crypto.BARS, HistoryQuery),
-        (crypto.PREVIOUS_DAY_BAR, Query),
+        (crypto.BARS, StreamHistoryQuery),
+        (crypto.PREVIOUS_DAY_BAR, FetchQuery),
         (crypto.FMV, SymbolStreamQuery),
-        (crypto.SNAPSHOTS, Query),
-        (crypto.MOVERS, Query),
-        (crypto.DAILY_OPEN_CLOSE, Query),
+        (crypto.SNAPSHOTS, FetchQuery),
+        (crypto.MOVERS, FetchQuery),
+        (crypto.DAILY_OPEN_CLOSE, FetchQuery),
     ],
 )
 def test_each_dataset_has_the_query_class_of_its_transports(
@@ -122,7 +125,7 @@ def test_each_dataset_has_the_query_class_of_its_transports(
 
 def test_each_factory_docstring_starts_with_its_summary() -> None:
     for spec in crypto.DATASETS:
-        factory = getattr(crypto._Crypto, spec.name.partition(".")[2])
+        factory = getattr(crypto.CryptoNamespace, spec.name.partition(".")[2])
         assert (factory.__doc__ or "").startswith(spec.summary + "\n"), spec.name
 
 
@@ -317,12 +320,12 @@ def test_the_streams_and_snapshots_accept_all(
 
 @pytest.mark.parametrize(
     ("method", "expected"),
-    [("quotes", SymbolStreamQuery), ("fmv", SymbolStreamQuery), ("snapshots", Query)],
+    [("quotes", SymbolStreamQuery), ("fmv", SymbolStreamQuery), ("snapshots", FetchQuery)],
 )
 def test_the_single_class_factories(
     massive_session: dm.MassiveSession, method: str, expected: type
 ) -> None:
-    q: QueryBase = getattr(massive_session.crypto, method)("X:SOLUSD")
+    q: Query = getattr(massive_session.crypto, method)("X:SOLUSD")
     assert type(q) is expected
     assert request_of(q).symbols == ("X:SOLUSD",)
 
@@ -336,21 +339,24 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.DAY, 2, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.YEAR, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.DAY, 2, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.YEAR, 1, False),
     ],
 )
-def test_bars_pick_their_class(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
-    timespan, multiplier, expected = case
+    timespan, multiplier, streams = case
     q = massive_session.crypto.bars("X:BTCUSD", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     request = request_of(q)
     assert (request.timespan, request.multiplier, request.adjusted) == (timespan, multiplier, None)
 
@@ -372,16 +378,16 @@ def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
         bars("X:BTCUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("X:BTCUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("X:BTCUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
     with pytest.raises(TypeError, match="adjusted"):
-        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-overload]  # crypto bars have none
+        bars("X:BTCUSD", adjusted=True)  # type: ignore[call-arg]  # crypto bars have none
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
     q = massive_session.crypto.movers(dm.Direction.LOSERS)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     request = request_of(q)
     assert request.symbols is None
     assert request.params == (("direction", dm.Direction.LOSERS),)
@@ -391,7 +397,7 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 
 def test_daily_open_close(massive_session: dm.MassiveSession) -> None:
     q = massive_session.crypto.daily_open_close(["X:BTCUSD", "X:ETHUSD"], "2026-01-02")
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     request = request_of(q)
     assert request.symbols == ("X:BTCUSD", "X:ETHUSD")
     assert request.params == (("date", date(2026, 1, 2)),)
@@ -483,10 +489,10 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
 
 def test_the_one_row_datasets_need_explicit_symbols(massive_session: dm.MassiveSession) -> None:
     q = massive_session.crypto.last_trade(["X:ETHUSD", "X:BTCUSD"])
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
     prev = massive_session.crypto.previous_day_bar("X:BTCUSD")
-    assert type(prev) is Query
+    assert type(prev) is FetchQuery
     assert request_of(prev).timespan is dm.Timespan.DAY
     with pytest.raises(ValueError, match=r"use m\.crypto\.snapshots\(dm\.ALL\)\.fetch\(\)"):
         massive_session.crypto.last_trade(dm.ALL)
@@ -495,11 +501,8 @@ def test_the_one_row_datasets_need_explicit_symbols(massive_session: dm.MassiveS
         massive_session.crypto.previous_day_bar(dm.ALL)
 
 
-def test_a_stream_without_fetch_names_its_last_trade(massive_session: dm.MassiveSession) -> None:
-    q = massive_session.crypto.trades("X:BTCUSD")
-    assert not hasattr(q, "fetch")
-    with pytest.raises(AttributeError, match=r"m\.crypto\.last_trade\(\.\.\.\)\.fetch\(\)"):
-        _ = q.fetch
+def test_a_stream_has_no_fetch(massive_session: dm.MassiveSession) -> None:
+    assert not hasattr(massive_session.crypto.trades("X:BTCUSD"), "fetch")
 
 
 def test_rest_history_needs_explicit_symbols(massive_session: dm.MassiveSession) -> None:

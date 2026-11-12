@@ -3,7 +3,7 @@
 The flat-file read and the REST transport are fakes here: the files answer a scripted
 `FlatFileRead` (or refusal), and REST records each call and returns no rows. The reads through
 the real transports are tested in `tests/ingest/test_flatfiles.py`, and through `history()` in
-`tests/test_query.py`.
+`tests/queries/test_history.py`.
 """
 
 from __future__ import annotations

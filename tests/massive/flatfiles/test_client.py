@@ -38,6 +38,7 @@ from botocore.exceptions import (
     SSLError,
 )
 from botocore.response import StreamingBody
+from typing_extensions import override
 from urllib3.exceptions import ProtocolError
 from urllib3.exceptions import SSLError as Urllib3SSLError
 
@@ -47,7 +48,6 @@ from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, Re
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.slots import ConnectionSlots
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
 

@@ -28,7 +28,7 @@ from deephaven_massive._massive import (
     WireUnit,
     source,
 )
-from deephaven_massive._namespaces import stocks
+from deephaven_massive.namespaces import _stocks as stocks
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 

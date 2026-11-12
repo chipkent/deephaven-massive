@@ -166,15 +166,20 @@ _FIELD = {
 
 
 def test_the_schemas_load_without_the_refresh_package() -> None:
-    # An installed wheel has no `refresh/`: block it and load the schemas in a fresh process.
-    # The script is a literal; `-P` keeps the working directory off `sys.path`.
+    # An installed wheel has no `refresh/`: block it and load the schemas in a fresh process,
+    # which starts its own Deephaven server first, since importing the library needs one, and
+    # leaves through `os._exit`, as every process that starts a server does. The server prints
+    # to stdout, so each count line is marked. The script is a literal; `-P` keeps the working
+    # directory off `sys.path`.
     result = subprocess.run(
         [
             sys.executable,
             "-P",
             "-c",
             (
-                "import sys\n"
+                "import os, sys\n"
+                "from deephaven_server import Server\n"
+                "Server(port=0, jvm_args=['-Xmx512m']).start()\n"
                 "class Block:\n"
                 "    def find_spec(self, name, path=None, target=None):\n"
                 "        if name.startswith('deephaven_massive._massive.refresh'):\n"
@@ -184,7 +189,9 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
                 "from deephaven_massive._massive.spec.types import Transport\n"
                 "for transport in Transport:\n"
                 "    found = spec.sources(transport).values()\n"
-                "    print(len(found), sum(len(s.memberships) for s in found))\n"
+                "    print('counts', len(found), sum(len(s.memberships) for s in found))\n"
+                "sys.stdout.flush()\n"
+                "os._exit(0)\n"
             ),
         ],
         capture_output=True,
@@ -192,12 +199,13 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
         check=True,
     )
     expected = [
-        f"{len(found)} {sum(len(s.memberships) for s in found)}"
+        f"counts {len(found)} {sum(len(s.memberships) for s in found)}"
         for found in (spec.sources(transport).values() for transport in Transport)
     ]
-    assert result.stdout.splitlines() == expected
+    shown = [line for line in result.stdout.splitlines() if line.startswith("counts ")]
+    assert shown == expected
     # Every channel and prefix belongs to a kind, so memberships are read where they matter.
-    assert all(count.split()[1] != "0" for count in expected)
+    assert all(count.split()[2] != "0" for count in expected)
 
 
 # --- Descriptions and provenance -----------------------------------------------------------
@@ -258,7 +266,7 @@ _URL = "https://massive.com/docs/rest/x.md"
 
 def _descriptions(**change: object) -> str:
     document = {
-        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "generated_by": "python scripts/refresh.py",
         "fetched": "2026-10-27",
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},

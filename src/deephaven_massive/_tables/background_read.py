@@ -82,6 +82,7 @@ from deephaven.column import InputColumn
 from deephaven.stream import blink_to_append_only
 from deephaven.table import TableDefinition
 from deephaven.table_listener import TableListener, TableListenerHandle
+from typing_extensions import override
 
 from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
@@ -96,7 +97,6 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
-from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable

@@ -51,7 +51,7 @@ _PATH = RestPath(
 def test_render_writes_one_line_per_field_and_parameter() -> None:
     text = render.render_rest([_PATH, _PATH])
     document = json.loads(text)
-    assert document["generated_by"] == "python -m deephaven_massive._massive.refresh"
+    assert document["generated_by"] == "python scripts/refresh.py"
     assert document["sources"][1]["fields"][0] == {
         "column": "Price",
         "conversion": None,
@@ -214,7 +214,7 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         titles={_URL: "Things", _OTHER: "Crypto things"},
     )
     assert json.loads(text) == {
-        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "generated_by": "python scripts/refresh.py",
         "fetched": "2026-10-27",
         # A source's URLs are sorted.
         "urls": {"REST": {_PATH.key: [_OTHER, _URL]}},

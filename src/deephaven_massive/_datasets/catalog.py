@@ -1,11 +1,11 @@
 """The dataset catalog: one frozen `DatasetSpec` per dataset, and the `Catalog` that holds them.
 
-Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, declaratively, by
-a `DatasetSpec` in its namespace module under `_namespaces/`. Each of those modules exports
-`DATASETS: tuple[DatasetSpec, ...]`, and `_session.py` composes them, once, at import, into the
-process's `Catalog` (`CATALOG`), which every session core holds. This module names no namespace
-module and imports nothing above the dataset layer, so the catalog is built by the code that
-owns the namespaces and handed down.
+Every dataset (`m.stocks.trades`, `m.reference.news`, ...) is described once, declaratively, by a
+`DatasetSpec` in its namespace module under `namespaces/`, or in `_snapshots.py`. Each of those
+modules exports `DATASETS: tuple[DatasetSpec, ...]`, and `_session.py` composes them, once, at
+import, into the process's `Catalog` (`CATALOG`), which every session core holds. This module names
+no namespace module and imports nothing above the dataset layer, so the catalog is built by the code
+that owns the namespaces and handed down.
 
 A spec names its sources, never its columns. Each source is a generated `Source` of the wire
 package: a REST path by role (`fetch_path`, `detail_path`, `history_path`,
@@ -16,7 +16,7 @@ holds each key (`KeySpec`, grouped per source in a `SourceKeys`). The catalog me
 (`Catalog.dataset_schema`).
 
 A spec also says which transports serve the dataset, and its query class follows from them:
-`query_class` in `_query.py` maps the channels, the history sources, and the fetch
+`query_class` in `queries/_choice.py` maps the channels, the history sources, and the fetch
 path to one of the query classes, and `DatasetSpec` rejects, when it is created, the
 combinations no query class serves.
 
@@ -253,16 +253,16 @@ class DatasetSpec:
     `Catalog.dataset_schema` merges them from the sources. Specs are immutable singletons
     compared by identity, and safe to share across threads.
 
-    The transports decide the dataset's query class (`query_class` in `_query.py`).
+    The transports decide the dataset's query class (`query_class` in `queries/_choice.py`).
     With S meaning the spec has channels, H that it has a history source (a history path, a
     grouped-daily path, or flat-file prefixes), and F that it has a fetch path: F alone gives
-    `Query`, S alone `SymbolStreamQuery` (`StreamQuery`, without `last_by()`, for a stream
+    `FetchQuery`, S alone `SymbolStreamQuery` (`StreamQuery`, without `last_by()`, for a stream
     whose rows name no symbol), H alone `HistoryQuery`, and S and H `StreamHistoryQuery`.
     A fetch path is never combined with channels or a history source, so `fetch()` always
     returns every row its endpoint returns: a REST endpoint that answers one row per symbol
     (the last trade, the previous day's bar) is a one-row dataset of its own, in the same kind
-    as the stream and history dataset of its class. A `bars` dataset needs H and no F; its
-    class is picked per call from the timespan and multiplier (`bar_query_class`). Every other
+    as the stream and history dataset of its class. A `bars` dataset needs H and no F; with
+    S its query streams only the bars that have a channel. Every other
     combination is rejected when the spec is created.
 
     Example:
@@ -296,7 +296,7 @@ class DatasetSpec:
                 time_axis=("timestamp.gte", "timestamp.lt"),
             )
 
-            # The same kind's one-row endpoint: a Query of its own.
+            # The same kind's one-row endpoint: a `FetchQuery` of its own.
             STOCK_LAST_TRADE = DatasetSpec(
                 name="stocks.last_trade",
                 summary="The latest trade of each US-listed stock.",

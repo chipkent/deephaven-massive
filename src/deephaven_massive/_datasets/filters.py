@@ -18,13 +18,16 @@ every rule about them:
 The rules read the catalog's generated REST paths (`Catalog.rest_path`) and the dataset's
 declaration; they make no I/O, start no thread, and keep no state, so every function is safe on
 any thread. The REST transport sends the checked values (`_ingest/rest.py`), and the dataset
-factories reserve the typed parameters (`_namespaces/query_building.py`).
+factories reserve the typed parameters (`namespaces/_query_building.py`).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
+
+import numpy as np
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.source_columns import INSTANT_WIRE_TYPES
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath, WireUnit
 
 __all__ = [
+    "FilterValue",
     "check_filters",
     "filter_key",
     "filter_keys",
@@ -46,6 +50,30 @@ __all__ = [
     "symbol_family",
     "takes_instants",
 ]
+
+FilterValue: TypeAlias = (
+    str
+    | int
+    | float
+    | bool
+    | date
+    | datetime
+    | np.datetime64
+    | Sequence[str | int | float | date | np.datetime64]
+)
+"""A value in the `filters` mapping, which narrows a dataset by any of Massive's parameters.
+
+`filters` passes Massive's own query parameters that a dataset method has no argument for, keyed
+by the wire parameter name with its dots written as underscores, such as `strike_price_gte` or
+`ticker_any_of`. Annotate your own code with it, as `dm.FilterValue`, when you build such a
+mapping.
+
+A sequence is the value of an `_any_of` key: text items, numbers for a list of numbers
+(`strike_price_any_of`), or dates for a list of dates (`date_any_of`). A date or time takes
+every object `DateLike` names: a `date`, an aware `datetime` or `pandas.Timestamp`, a Java
+`LocalDate`, `Instant`, or `ZonedDateTime`, or a `numpy.datetime64`; a sequence of dates takes
+the day forms. Whether text is a date or a time depends on the parameter, so a filter reads
+only ISO-8601 text as one."""
 
 
 _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})

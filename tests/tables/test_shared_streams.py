@@ -27,14 +27,13 @@ from deephaven.dherror import DHError
 from deephaven.stream import blink_to_append_only
 from deephaven.table_factory import ring_table
 from deephaven.update_graph import shared_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import QueryCall, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -54,7 +53,10 @@ from deephaven_massive._tables.liveness import (
 )
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries._call import QueryCall
+from deephaven_massive.queries._query import shown_as
 from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
@@ -84,9 +86,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -1248,7 +1250,7 @@ def test_a_stream_log_line_cuts_a_long_query(
 ) -> None:
     # A query's text can grow with its arguments; the open and reuse lines cut it as the
     # `Query` column does, so one line never carries thousands of characters.
-    q = dataclasses.replace(stream_query(massive_session), _call=QueryCall("m." + "x" * 500))
+    q = shown_as(stream_query(massive_session), QueryCall("m." + "x" * 500))
     with caplog.at_level(logging.DEBUG, logger=_streams.__name__):
         first = q.blink()
         second = q.append_only()

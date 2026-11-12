@@ -33,6 +33,8 @@ from deephaven_massive._datasets.column_reference import (
     DatasetCall,
     QueryMethod,
     SyncResult,
+    _method_calls,
+    _methods,
     call_path,
     column_changes,
     page_name,
@@ -53,13 +55,13 @@ from deephaven_massive._massive import (
     provenance,
     source,
 )
-from deephaven_massive._namespaces.query_building import Namespace
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces._namespace import Namespace
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from deephaven_massive._query import Query
+    from deephaven_massive.queries import FetchQuery
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "datasets"
@@ -339,28 +341,28 @@ def test_every_dataset_docstring_names_its_page() -> None:
 class _Linked(Namespace):
     __slots__ = ()
 
-    def dividends(self) -> Query:
+    def dividends(self) -> FetchQuery:
         """Cash dividends. Columns: https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md."""
         raise NotImplementedError
 
-    def splits(self) -> Query:
+    def splits(self) -> FetchQuery:
         """Splits; the page named is another dataset's.
 
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.dividends.md
         """
         raise NotImplementedError
 
-    def ipos(self) -> Query:
+    def ipos(self) -> FetchQuery:
         raise NotImplementedError
 
-    def financials(self) -> Query:
+    def financials(self) -> FetchQuery:
         """Financials; the page named only starts like this one's.
 
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.financials.ratios.md
         """
         raise NotImplementedError
 
-    def news(self) -> Query:
+    def news(self) -> FetchQuery:
         """News; the page named only ends like this one's.
 
         https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/more.stocks.news.md
@@ -373,7 +375,7 @@ class _LinkedSession:
     def stocks(self) -> _Linked:
         raise NotImplementedError
 
-    def news(self) -> Query:
+    def news(self) -> FetchQuery:
         """Any news: https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.news.md."""
         raise NotImplementedError
 
@@ -654,6 +656,28 @@ CATALOG_INSERT = next(
     if c.name == "TimestampInsert"
 )
 """Every dataset's arrival-time description, the same on every page."""
+
+
+def test_bars_that_stream_at_some_timespans_name_them_beside_their_stream_methods() -> None:
+    bars = DatasetCall(
+        signature="m.stocks.bars(symbols, timespan)",
+        verbs=("history",),
+        methods=(
+            QueryMethod("history", "history(start, end=None)", "A range of rows."),
+            QueryMethod("ring", "ring(capacity)", "The latest rows."),
+        ),
+        stream_verbs=("blink", "ring"),
+        stream_condition="1-second and 1-minute bars",
+    )
+    assert _methods(bars) == (
+        "`history()`; for 1-second and 1-minute bars also `blink()`, `ring()`"
+    )
+    assert _method_calls(bars) == (
+        "`history(start, end=None)`; for 1-second and 1-minute bars also `blink()`, "
+        "`ring(capacity)`"
+    )
+    # A dataset whose every query has the same methods lists them alone.
+    assert _methods(_CALLS["stocks.trades"]) == "`blink()`, `history()`"
 
 
 def test_the_rendered_index() -> None:

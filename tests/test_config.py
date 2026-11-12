@@ -14,9 +14,10 @@ from typing import Any, cast
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _config, _query, _session
+from deephaven_massive import _config, _session
 from deephaven_massive._config import CONFIG_FILE_VARIABLE, MassiveConfig
 from deephaven_massive._enums import AssetClass, OnError, Subscription
+from deephaven_massive.queries import _call, _choice, _fetch, _history, _query, _stream
 
 ENV = (
     "MASSIVE_API_KEY",
@@ -145,7 +146,9 @@ def test_defaults_live_in_exactly_one_place() -> None:
         missing = dataclasses.MISSING
         assert f.default is not missing or f.default_factory is not missing, f.name
     assert list(inspect.signature(dm.MassiveSession).parameters) == ["config"]
-    others = inspect.getsource(_session) + inspect.getsource(_query)
+    others = "".join(
+        map(inspect.getsource, (_session, _call, _choice, _fetch, _history, _query, _stream))
+    )
     # The bucket name is matched as a string literal: _massive.flatfiles contains it.
     literals = ("120.0", "time(11, 30)", "files.massive.com", "api.massive.com", '"flatfiles"')
     for literal in literals:

@@ -4,15 +4,15 @@ Run it from a source checkout:
 
     uv run python scripts/render_reference.py
 
-It starts an embedded Deephaven server first, because the library's session module, which
-builds the dataset catalog, imports Deephaven, and the library itself never starts a server.
-Then it renders an index and one page per dataset from that catalog, each dataset's call (its
-method's signature and verbs), and the provenance of the generated wire schemas (their vendor
-pages and those pages' plan tables), makes `docs/datasets/` hold exactly those pages (deleting
-any other file or directory there, so no orphaned page survives a rename), and prints which
-columns each dataset gained or lost, then what it wrote and deleted. Run after a refresh of
-Massive's specifications, the column report is how the refresh shows what it does to each
-table.
+It starts an embedded Deephaven server first, before it imports the library, because importing
+the library imports Deephaven, which needs a running JVM, and the library itself never starts
+a server. Then it renders an index and one page per dataset from the dataset catalog, each
+dataset's call (its method's signature and verbs), and the provenance of the generated wire
+schemas (their vendor pages and those pages' plan tables), makes `docs/datasets/` hold exactly
+those pages (deleting any other file or directory there, so no orphaned page survives a
+rename), and prints which columns each dataset gained or lost, then what it wrote and deleted.
+Run after a refresh of Massive's specifications, the column report is how the refresh shows
+what it does to each table.
 
 It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
 from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
@@ -29,21 +29,37 @@ because a normal interpreter shutdown after the embedded JVM has run can crash o
 from __future__ import annotations
 
 import atexit
-import importlib
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from deephaven_server import Server
 
-# Neither module imports Deephaven (the package's own __init__.py imports lazily), so both
-# import before the server starts.
-from deephaven_massive import _massive
-from deephaven_massive._datasets.column_reference import column_changes, render, sync
 
-if TYPE_CHECKING:
-    from deephaven_massive import _config, _dataset_list, _session
+def _exit() -> None:
+    """Flush the output and leave, skipping the JVM's and jpy's finalizers.
+
+    Runs at interpreter exit. The status is 1 when an exception escaped (the interpreter has
+    printed it and set `sys.last_value`), and 0 otherwise.
+    """
+    status = 1 if getattr(sys, "last_value", None) is not None else 0
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
+
+
+# Registered first, so a server start that fails after the JVM loaded still exits safely.
+atexit.register(_exit)
+# Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
+Server(port=0, jvm_args=["-Xmx1g"]).start()
+
+# The library imports Deephaven, which needs the server started above.
+from deephaven_massive import _config, _dataset_list, _massive, _session  # noqa: E402 - needs the server above
+from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs the server above
+    column_changes,
+    render,
+    sync,
+)
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The dataset reference's directory, found from this script's place in the checkout."""
@@ -53,28 +69,13 @@ _CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
 
 
 def main() -> None:
-    """Start the server, render the pages, sync them into `docs/datasets/`, and report.
+    """Render the pages, sync them into `docs/datasets/`, and report.
 
-    Side effects: starts an embedded Deephaven server in this process, reads, deletes, and
-    writes files under `docs/datasets/`, rewrites `docs/configuration.md` when its settings
-    changed, and writes one line per dataset whose columns changed and one per file changed to
-    standard output.
+    Side effects: reads, deletes, and writes files under `docs/datasets/`, rewrites
+    `docs/configuration.md` when its settings changed, and writes one line per dataset whose
+    columns changed and one per file changed to standard output.
     """
-    # Registered first, so a server start that fails after the JVM loaded still exits safely.
-    atexit.register(_exit)
-    # Port 0 asks the OS for an ephemeral port, so the command never clashes with a server.
-    Server(port=0, jvm_args=["-Xmx1g"]).start()
-    # The session module, which builds the catalog, the dataset list, which reads each
-    # dataset's method, and the configuration import Deephaven, so they are imported only once
-    # the server runs. The type checker reads the static import above instead, so a renamed
-    # module, `CATALOG`, `dataset_calls`, or `with_settings_reference` fails the type check.
-    if TYPE_CHECKING:
-        session, dataset_list, config = _session, _dataset_list, _config
-    else:
-        session = importlib.import_module("deephaven_massive._session")
-        dataset_list = importlib.import_module("deephaven_massive._dataset_list")
-        config = importlib.import_module("deephaven_massive._config")
-    pages = render(session.CATALOG, _massive.provenance(), dataset_list.dataset_calls())
+    pages = render(_session.CATALOG, _massive.provenance(), _dataset_list.dataset_calls())
     committed = {p.name: p.read_text() for p in sorted(_DIRECTORY.glob("*.md")) if p.is_file()}
     for line in column_changes(committed, pages):
         sys.stdout.write(f"columns: {line}\n")
@@ -87,25 +88,13 @@ def main() -> None:
     if not result.written and not result.deleted:
         sys.stdout.write(f"{shown}/ is up to date\n")
     page = _CONFIGURATION_PAGE.read_text(encoding="utf-8")
-    rendered = config.with_settings_reference(page)
+    rendered = _config.with_settings_reference(page)
     shown_page = _CONFIGURATION_PAGE.relative_to(_DIRECTORY.parent.parent)
     if rendered == page:
         sys.stdout.write(f"{shown_page} is up to date\n")
     else:
         _CONFIGURATION_PAGE.write_text(rendered, encoding="utf-8")
         sys.stdout.write(f"wrote {shown_page}\n")
-
-
-def _exit() -> None:
-    """Flush the output and leave, skipping the JVM's and jpy's finalizers.
-
-    Runs at interpreter exit. The status is 1 when an exception escaped `main` (the
-    interpreter has printed it and set `sys.last_value`), and 0 otherwise.
-    """
-    status = 1 if getattr(sys, "last_value", None) is not None else 0
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(status)
 
 
 if __name__ == "__main__":

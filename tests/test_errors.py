@@ -27,9 +27,9 @@ from deephaven_massive._errors import (
     user_defect,
 )
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import QueryBase
 from deephaven_massive._session import MassiveSession
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import Query
 
 ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError, PermanentError]
 
@@ -326,7 +326,7 @@ def _public_api() -> dict[str, Callable[..., object]]:
     found: list[Callable[..., object]] = [
         value for name in dm.__all__ if inspect.isfunction(value := getattr(dm, name))
     ]
-    for cls in (MassiveSession, *_subclasses(Namespace), QueryBase, *_subclasses(QueryBase)):
+    for cls in (MassiveSession, *_subclasses(Namespace), Query, *_subclasses(Query)):
         if cls.__module__.startswith(f"{dm.__name__}."):  # not the stand-ins other tests define
             found.extend(_public_methods(cls))
     return {f"{f.__module__}.{f.__qualname__}": f for f in found}
@@ -342,9 +342,9 @@ _RAISE_NOTHING = frozenset(
     {
         "deephaven_massive._dataset_list.datasets",
         "deephaven_massive._debug_log.disable_debug_logging",
-        "deephaven_massive._namespaces.options.options.admin_messages",
-        "deephaven_massive._namespaces.reference.reference.market_holidays",
-        "deephaven_massive._namespaces.reference.reference.market_status",
+        "deephaven_massive.namespaces._options.OptionsNamespace.admin_messages",
+        "deephaven_massive.namespaces._reference.ReferenceNamespace.market_holidays",
+        "deephaven_massive.namespaces._reference.ReferenceNamespace.market_status",
     }
 )
 """The public functions that take no argument a caller can get wrong and raise nothing."""
@@ -370,9 +370,9 @@ def test_every_raises_section_lists_exactly_what_its_function_and_helpers_raise(
 def test_the_check_covers_the_public_api() -> None:
     checked = _checked_functions()
     for name in (
-        "deephaven_massive._namespaces.stocks.stocks.trades",
-        "deephaven_massive._query.Query.fetch",
-        "deephaven_massive._query.HistoryQuery.history",
+        "deephaven_massive.namespaces._stocks.StocksNamespace.trades",
+        "deephaven_massive.queries._fetch.FetchQuery.fetch",
+        "deephaven_massive.queries._history.HistoryQuery.history",
         "deephaven_massive._session.MassiveSession.release",
         "deephaven_massive._datasets.symbols.canonical_symbol_forex",
     ):
@@ -454,7 +454,7 @@ def test_raises_through_records_the_helpers_and_keeps_the_function() -> None:
 
 def test_the_walk_never_enters_the_wire_package() -> None:
     names = list(_library_modules(dm.__path__, f"{dm.__name__}."))
-    assert f"{dm.__name__}._namespaces.stocks" in names
+    assert f"{dm.__name__}.namespaces._stocks" in names
     assert not [name for name in names if name.startswith(_WIRE_PACKAGE)]
 
 

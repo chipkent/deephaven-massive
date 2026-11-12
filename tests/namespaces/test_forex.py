@@ -36,24 +36,26 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import forex
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    SymbolStreamQuery,
-    query_class,
-)
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
+from deephaven_massive.namespaces import _forex as forex
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
+    Query,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 
 if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
+
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 NS = 10**9
@@ -84,7 +86,7 @@ FOREX_SOURCES = {
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.forex
-    assert type(namespace) is forex._Forex
+    assert type(namespace) is forex.ForexNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -117,13 +119,13 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
     ("spec", "expected"),
     [
         (forex.QUOTES, StreamHistoryQuery),
-        (forex.LAST_QUOTE, Query),
-        (forex.BARS, HistoryQuery),
-        (forex.PREVIOUS_DAY_BAR, Query),
+        (forex.LAST_QUOTE, FetchQuery),
+        (forex.BARS, StreamHistoryQuery),
+        (forex.PREVIOUS_DAY_BAR, FetchQuery),
         (forex.FMV, SymbolStreamQuery),
-        (forex.SNAPSHOTS, Query),
-        (forex.MOVERS, Query),
-        (forex.CONVERSION, Query),
+        (forex.SNAPSHOTS, FetchQuery),
+        (forex.MOVERS, FetchQuery),
+        (forex.CONVERSION, FetchQuery),
     ],
 )
 def test_each_dataset_has_its_query_class(spec: DatasetSpec, expected: type) -> None:
@@ -218,7 +220,7 @@ def test_only_the_canonical_ticker_is_taken(
     massive_session: dm.MassiveSession, symbols: str | list[str]
 ) -> None:
     forex_ns = massive_session.forex
-    factories: tuple[Callable[[str | list[str]], QueryBase], ...] = (
+    factories: tuple[Callable[[str | list[str]], Query], ...] = (
         forex_ns.quotes,
         forex_ns.fmv,
         lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
@@ -239,10 +241,10 @@ def test_quotes(massive_session: dm.MassiveSession) -> None:
 
 def test_the_one_row_datasets(massive_session: dm.MassiveSession) -> None:
     last = massive_session.forex.last_quote(["C:GBPUSD", "C:EURUSD"])
-    assert type(last) is Query
+    assert type(last) is FetchQuery
     assert last._request == Request(symbols=("C:EURUSD", "C:GBPUSD"))
     prev = massive_session.forex.previous_day_bar("C:EURUSD")
-    assert type(prev) is Query
+    assert type(prev) is FetchQuery
     # The bar's request carries its timespan, so its rows get the 1-day day rules.
     assert prev._request == Request(symbols=("C:EURUSD",), timespan=dm.Timespan.DAY)
 
@@ -255,22 +257,25 @@ def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> No
 
 
 @pytest.mark.parametrize(
-    ("case", "expected"),
+    ("case", "streams"),
     [
-        ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.DAY, 1), HistoryQuery),
-        ((dm.Timespan.MINUTE, 5), HistoryQuery),
-        ((dm.Timespan.HOUR, 1), HistoryQuery),
-        ((dm.Timespan.DAY, 2), HistoryQuery),
+        ((dm.Timespan.SECOND, 1), True),
+        ((dm.Timespan.MINUTE, 1), True),
+        ((dm.Timespan.DAY, 1), False),
+        ((dm.Timespan.MINUTE, 5), False),
+        ((dm.Timespan.HOUR, 1), False),
+        ((dm.Timespan.DAY, 2), False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], expected: type
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], streams: bool
 ) -> None:
     timespan, multiplier = case
     query = massive_session.forex.bars("C:EURUSD", timespan, multiplier=multiplier)
-    assert type(query) is expected
+    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            query.blink()
     assert query._request == Request(
         symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )
@@ -284,7 +289,7 @@ def test_bars_default_to_one_minute_and_take_no_adjusted(
     # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
     assert query._request == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
     with pytest.raises(TypeError, match="adjusted"):
-        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-overload]  # no such argument
+        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-arg]  # no such argument
 
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -292,7 +297,7 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="SESSION exists only for futures"):
         bars("C:EURUSD", dm.Timespan.SESSION)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("C:EURUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
+        bars("C:EURUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
     with pytest.raises(ValueError, match="multiplier"):
         bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)
 
@@ -305,13 +310,13 @@ def test_fmv(massive_session: dm.MassiveSession) -> None:
 
 def test_snapshots(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.snapshots(dm.ALL)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(symbols=dm.ALL)
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.movers(dm.Direction.LOSERS)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(params=(("direction", dm.Direction.LOSERS),))
     with pytest.raises(TypeError, match=r"direction must be dm\.Direction"):
         massive_session.forex.movers("gainers")  # type: ignore[arg-type]  # a str is refused
@@ -319,7 +324,7 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 
 def test_conversion(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.conversion("AUD", "USD", amount=100, precision=4)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(
         params=(("amount", 100), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
     )
@@ -388,7 +393,7 @@ def test_invalid_pairs_fail_at_construction(
     massive_session: dm.MassiveSession, symbols: str | list[str], message: str
 ) -> None:
     forex_ns = massive_session.forex
-    factories: list[Callable[[str | list[str]], QueryBase]] = [
+    factories: list[Callable[[str | list[str]], Query]] = [
         forex_ns.quotes,
         lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
         forex_ns.fmv,
@@ -420,13 +425,9 @@ def test_the_one_row_datasets_refuse_every_pair(massive_session: dm.MassiveSessi
         massive_session.forex.previous_day_bar(dm.ALL)
 
 
-def test_a_missing_verb_names_the_dataset_that_has_it(massive_session: dm.MassiveSession) -> None:
-    quotes = massive_session.forex.quotes("C:EURUSD")
-    with pytest.raises(AttributeError, match=r"use m\.forex\.last_quote\(\.\.\.\)\.fetch\(\)"):
-        _ = quotes.fetch
-    day = massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY)
-    with pytest.raises(AttributeError, match=r"m\.forex\.previous_day_bar\(\.\.\.\)\.fetch"):
-        _ = day.fetch
+def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:
+    assert not hasattr(massive_session.forex.quotes("C:EURUSD"), "fetch")
+    assert not hasattr(massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY), "fetch")
 
 
 def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.MassiveSession) -> None:
@@ -443,14 +444,14 @@ def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.Massive
 
 def test_every_docstring_names_its_dataset_page() -> None:
     methods = {
-        "quotes": forex._Forex.quotes,
-        "last_quote": forex._Forex.last_quote,
-        "bars": forex._Forex.bars,
-        "previous_day_bar": forex._Forex.previous_day_bar,
-        "fmv": forex._Forex.fmv,
-        "snapshots": forex._Forex.snapshots,
-        "movers": forex._Forex.movers,
-        "conversion": forex._Forex.conversion,
+        "quotes": forex.ForexNamespace.quotes,
+        "last_quote": forex.ForexNamespace.last_quote,
+        "bars": forex.ForexNamespace.bars,
+        "previous_day_bar": forex.ForexNamespace.previous_day_bar,
+        "fmv": forex.ForexNamespace.fmv,
+        "snapshots": forex.ForexNamespace.snapshots,
+        "movers": forex.ForexNamespace.movers,
+        "conversion": forex.ForexNamespace.conversion,
     }
     assert {f"forex.{name}" for name in methods} == {spec.name for spec in forex.DATASETS}
     for name, method in methods.items():
@@ -1093,7 +1094,7 @@ def test_snapshot_polls_keep_one_row_per_symbol(
     fake_rest: FakeRestServer,
     poll_clock: FakeClock,
     rows_when: RowsWhen,
-    make: Callable[[dm.MassiveSession], Query],
+    make: Callable[[dm.MassiveSession], FetchQuery],
     path: str,
 ) -> None:
     first = {

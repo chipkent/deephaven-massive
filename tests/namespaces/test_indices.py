@@ -29,11 +29,12 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._enums import NotBars
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import HistoryQuery, Query, StreamHistoryQuery, query_class
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
+from deephaven_massive.namespaces import _indices as indices
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries._choice import query_class
 
 # The reply and envelope builders are plain functions of the fake, which no fixture hands over.
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -44,6 +45,9 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
+
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
 
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
@@ -59,7 +63,7 @@ def m(massive_session: dm.MassiveSession) -> dm.MassiveSession:
 
 def test_namespace_is_reached_from_the_session(m: dm.MassiveSession) -> None:
     namespace = m.indices
-    assert type(namespace) is indices._Indices
+    assert type(namespace) is indices.IndicesNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -297,16 +301,8 @@ def test_values_query(m: dm.MassiveSession) -> None:
     assert m.indices.values(dm.ALL)._request.symbols is dm.ALL
 
 
-def test_values_fetch_names_the_snapshots(m: dm.MassiveSession) -> None:
-    q = m.indices.values("I:SPX")
-    assert not hasattr(q, "fetch")
-    with pytest.raises(
-        AttributeError,
-        match=r"^indices\.values has no fetch\(\); its methods are blink\(\), append_only\(\), "
-        r"ring\(\), last_by\(\), history\(\); for each symbol's current state use "
-        r"m\.indices\.snapshots\(\.\.\.\)\.fetch\(\)$",
-    ):
-        _ = q.fetch
+def test_values_have_no_fetch(m: dm.MassiveSession) -> None:
+    assert not hasattr(m.indices.values("I:SPX"), "fetch")
 
 
 def test_values_history_has_no_rest_source(m: dm.MassiveSession) -> None:
@@ -331,19 +327,24 @@ def test_values_history_from_flat_files_needs_credentials(
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.DAY, 2, HistoryQuery),
-        (dm.Timespan.WEEK, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.DAY, 2, False),
+        (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_bars_pick_their_class(m: dm.MassiveSession, case: tuple[dm.Timespan, int, type]) -> None:
-    timespan, multiplier, expected = case
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    m: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
+) -> None:
+    timespan, multiplier, streams = case
     q = m.indices.bars("I:SPX", timespan, multiplier=multiplier)
-    assert type(q) is expected
+    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            q.blink()
     assert q._request.symbols == ("I:SPX",)
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
@@ -376,7 +377,7 @@ def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
 
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     q = m.indices.previous_day_bar(["I:SPX", "I:NDX"])
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
@@ -410,7 +411,7 @@ def test_snapshots_query(m: dm.MassiveSession) -> None:
         limit=10,
         filters={"ticker_gte": "I:A"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("I:NDX", "I:SPX")
     assert dict(q._request.params) == {"order": dm.Order.DESC, "sort": "ticker"}
     assert dict(q._request.filters) == {"ticker_gte": "I:A"}
@@ -445,7 +446,7 @@ def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
 )
 def test_daily_open_close_query(m: dm.MassiveSession, day: str | date) -> None:
     q = m.indices.daily_open_close(["I:SPX", "I:NDX"], day)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("I:NDX", "I:SPX")
     assert dict(q._request.params) == {"date": date(2025, 6, 2)}
 
@@ -493,16 +494,16 @@ def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
 
 def test_factories_return_the_class_of_their_dataset() -> None:
     assert query_class(indices.VALUES) is StreamHistoryQuery
-    assert query_class(indices.PREVIOUS_DAY_BAR) is Query
-    assert query_class(indices.SNAPSHOTS) is Query
-    assert query_class(indices.DAILY_OPEN_CLOSE) is Query
-    assert query_class(indices.BARS) is HistoryQuery
+    assert query_class(indices.PREVIOUS_DAY_BAR) is FetchQuery
+    assert query_class(indices.SNAPSHOTS) is FetchQuery
+    assert query_class(indices.DAILY_OPEN_CLOSE) is FetchQuery
+    assert query_class(indices.BARS) is StreamHistoryQuery
 
 
 @pytest.mark.parametrize("spec", indices.DATASETS, ids=lambda spec: spec.name)
 def test_each_docstring_names_its_dataset_page(spec: DatasetSpec) -> None:
     dataset = spec.name.split(".", 1)[1]
-    doc = getattr(indices._Indices, dataset).__doc__
+    doc = getattr(indices.IndicesNamespace, dataset).__doc__
     assert doc.splitlines()[0] == spec.summary
     assert f"docs/datasets/{spec.name}.md" in doc
 

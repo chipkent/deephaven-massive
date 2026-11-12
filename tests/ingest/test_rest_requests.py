@@ -16,8 +16,8 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import QueryBase
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import Query
 
 R = Transport.REST
 
@@ -102,13 +102,13 @@ FUTURES_BARS = DatasetSpec(
 NEWS_PATH = "/v2/reference/news"
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
     # An indicator is computed over bars of a timespan, which its factory always sets.
     if spec is SMA:
         kwargs.setdefault("timespan", Timespan.MINUTE)
     # A list dataset's symbols only filter it, as its factory says.
     kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
-    return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
+    return build_query(m._core, spec, query_type=Query, **cast("dict[str, Any]", kwargs))
 
 
 def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:

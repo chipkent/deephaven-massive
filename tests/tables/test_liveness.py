@@ -20,14 +20,13 @@ from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.update_graph import shared_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.liveness import (
     QueueWorker,
@@ -40,7 +39,8 @@ from deephaven_massive._tables.liveness import (
     weak_owner_callback,
 )
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
@@ -67,9 +67,9 @@ SPEC = DatasetSpec(
 
 
 def query(session: dm.MassiveSession, symbols: list[str] | None = None) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=symbols or ["AAPL"])
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols or ["AAPL"]
+    )
 
 
 # --- Components ------------------------------------------------------------------------------

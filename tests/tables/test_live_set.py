@@ -12,10 +12,10 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,9 +37,9 @@ SPEC = DatasetSpec(
 
 
 def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+    )
 
 
 def test_a_result_keeps_its_session_alive() -> None:

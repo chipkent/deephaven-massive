@@ -32,6 +32,9 @@ from deephaven.stream import blink_to_append_only
 from deephaven.time import to_j_local_date
 
 import deephaven_massive as dm
+import deephaven_massive.namespaces._stock_filings as stock_filings
+import deephaven_massive.namespaces._stock_financials as stock_financials
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._datasets.schema import ColumnType
@@ -45,17 +48,16 @@ from deephaven_massive._massive import (
     source,
     to_batch,
 )
-from deephaven_massive._namespaces import stock_filings, stock_financials, stocks
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
+from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
     HistoryQuery,
     Query,
-    QueryBase,
     StreamHistoryQuery,
     SymbolStreamQuery,
-    query_class,
 )
-from deephaven_massive._session import CATALOG
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.rest import FakeRestServer, Reply
 
 if TYPE_CHECKING:
@@ -63,6 +65,9 @@ if TYPE_CHECKING:
 
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
+
+NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
+"""The refusal of a stream of bars Massive doesn't stream."""
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
@@ -203,11 +208,11 @@ def spec_of(name: str) -> DatasetSpec:
     return CATALOG.by_name[f"stocks.{name}"]
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., QueryBase]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., QueryBase]", target)
+    return cast("Callable[..., Query]", target)
 
 
 def columns(name: str) -> dict[str, ColumnType]:
@@ -220,10 +225,10 @@ def columns(name: str) -> dict[str, ColumnType]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.stocks
-    assert type(namespace) is stocks._Stocks
+    assert type(namespace) is stocks.StocksNamespace
     assert isinstance(namespace, Namespace)
-    assert type(namespace.financials) is stock_financials._StockFinancials
-    assert type(namespace.filings) is stock_filings._StockFilings
+    assert type(namespace.financials) is stock_financials.StocksFinancialsNamespace
+    assert type(namespace.filings) is stock_filings.StocksFilingsNamespace
     assert namespace.financials is namespace.financials
     label = massive_session._core.label
     assert repr(namespace.financials) == f"<{label} stocks.financials>"
@@ -454,20 +459,23 @@ def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.Massiv
 @pytest.mark.parametrize(
     "case",
     [
-        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
-        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
-        (dm.Timespan.DAY, 1, HistoryQuery),
-        (dm.Timespan.MINUTE, 5, HistoryQuery),
-        (dm.Timespan.HOUR, 1, HistoryQuery),
-        (dm.Timespan.WEEK, 1, HistoryQuery),
+        (dm.Timespan.SECOND, 1, True),
+        (dm.Timespan.MINUTE, 1, True),
+        (dm.Timespan.DAY, 1, False),
+        (dm.Timespan.MINUTE, 5, False),
+        (dm.Timespan.HOUR, 1, False),
+        (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, type]
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
-    timespan, multiplier, cls = case
+    timespan, multiplier, streams = case
     query = massive_session.stocks.bars("AAPL", timespan, multiplier=multiplier)
-    assert type(query) is cls
+    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
+    if not streams:
+        with pytest.raises(ValueError, match=NOT_STREAMED):
+            query.blink()
     assert query._request.timespan is timespan
     assert query._request.multiplier == multiplier
     assert query._request.adjusted is True
@@ -507,7 +515,7 @@ def test_bars_declare_each_transport_by_timespan() -> None:
 
 def test_snapshots_take_all_and_the_otc_flag(massive_session: dm.MassiveSession) -> None:
     query = massive_session.stocks.snapshots(dm.ALL)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert dict(query._request.params) == {"include_otc": False}
     otc = massive_session.stocks.snapshots(["AAPL"], include_otc=True)
     assert dict(otc._request.params) == {"include_otc": True}
@@ -517,7 +525,7 @@ def test_snapshots_take_all_and_the_otc_flag(massive_session: dm.MassiveSession)
 
 def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     query = massive_session.stocks.movers(dm.Direction.LOSERS, include_otc=True)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request.symbols is None
     assert dict(query._request.params) == {"direction": dm.Direction.LOSERS, "include_otc": True}
     with pytest.raises(TypeError, match=r"direction must be dm\.Direction"):
@@ -539,7 +547,7 @@ def test_daily_open_close_names_a_new_york_day(
     massive_session: dm.MassiveSession, day: object, expected: date
 ) -> None:
     query = massive_session.stocks.daily_open_close("AAPL", cast("Any", day), adjusted=False)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert dict(query._request.params) == {"date": expected}
     assert query._request.adjusted is False
     assert stocks.DAILY_OPEN_CLOSE.per_symbol
@@ -575,7 +583,7 @@ def test_list_datasets_filter_by_optional_symbols(
     massive_session: dm.MassiveSession, name: str
 ) -> None:
     make = factory(massive_session, name)
-    assert type(make()) is Query
+    assert type(make()) is FetchQuery
     assert make()._request.symbols is None
     assert make("AAPL")._request.symbols == ("AAPL",)
     with pytest.raises(ValueError, match="leave symbols out, which returns every ticker"):
@@ -709,7 +717,7 @@ def test_one_row_datasets_are_queries_that_refuse_all(
 ) -> None:
     make = factory(massive_session, name)
     query = make(["MSFT", "AAPL"])
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request.symbols == ("AAPL", "MSFT")
     with pytest.raises(
         ValueError, match=rf"stocks\.{name} does not accept dm\.ALL; use {alternative}"
@@ -726,8 +734,6 @@ def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSes
     ):
         assert not hasattr(query, "fetch")
         assert not hasattr(query, "poll")
-    with pytest.raises(AttributeError, match=r"use m\.stocks\.last_trade\(\.\.\.\)\.fetch\(\)"):
-        cast("Any", namespace.trades("AAPL")).fetch(wait=True)
 
 
 def test_previous_day_bar_is_one_adjusted_day_by_default(
@@ -908,7 +914,7 @@ def test_one_row_datasets_poll_one_row_per_symbol(
     assert spec_of(name).poll_mode is dm.PollMode.REPLACE
     assert spec_of(name).poll_keys == ("Symbol",)
     serve(fake_rest, load_fixture, **{fixture: path})
-    table = cast("Query", factory(rest_session, name)("AAPL")).poll(60)
+    table = cast("FetchQuery", factory(rest_session, name)("AAPL")).poll(60)
     assert [row["Symbol"] for row in _rows_when(table, 1)] == ["AAPL"]
     rest_session.release(table)
 
@@ -1284,7 +1290,7 @@ def test_list_datasets_send_their_exact_request(
     name, kwargs, path, query, (column, value) = call
     fixture, _ = SOURCES[path]
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, fixture))))
-    out = table_rows(cast("Query", factory(rest_session, name)(**kwargs)).fetch(wait=True))
+    out = table_rows(cast("FetchQuery", factory(rest_session, name)(**kwargs)).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [(path, query)]
     assert out[0][column] == value
     listed = spec_of(name).ticker_list is not None
@@ -1776,15 +1782,15 @@ def test_a_flat_file_block_round_trips(
 
 # The keyed REST datasets whose response is a list of rows, with the call and concrete path
 # that serve them. Daily open/close answers one row per request, keyed by its symbol.
-def _with_defaults(name: str) -> Callable[[dm.MassiveSession], QueryBase]:
+def _with_defaults(name: str) -> Callable[[dm.MassiveSession], Query]:
     # A list dataset's call with every argument left at its default.
-    def call(m: dm.MassiveSession) -> QueryBase:
+    def call(m: dm.MassiveSession) -> Query:
         return factory(m, name)()
 
     return call
 
 
-KEYED_CALLS: dict[str, tuple[Callable[[dm.MassiveSession], QueryBase], str]] = {
+KEYED_CALLS: dict[str, tuple[Callable[[dm.MassiveSession], Query], str]] = {
     "snapshots": (lambda m: m.stocks.snapshots(dm.ALL), SNAPSHOTS_PATH),
     "movers": (
         lambda m: m.stocks.movers(dm.Direction.GAINERS),
@@ -1838,7 +1844,7 @@ def test_poll_keys_identify_one_row_and_none_is_spare(
         rows.append({**first, field.wire_key: _other(first.get(field.wire_key), field.wire_type)})
     body[result_key] = rows
     fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("Query", make(rest_session)).fetch(wait=True))
+    out = table_rows(cast("FetchQuery", make(rest_session)).fetch(wait=True))
     # A list key (`OtherManagers`) is compared as a tuple, so a set can hold it.
     keyed = [tuple(tuple(v) if isinstance(v := row[k], list) else v for k in keys) for row in out]
     assert len(set(keyed)) == len(rows)

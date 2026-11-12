@@ -21,6 +21,7 @@ from deephaven.table import Table
 from deephaven.table_factory import InputTable
 from deephaven.table_listener import TableUpdate, listen
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
@@ -67,7 +68,6 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     SymbolReadState,
 )
-from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
 TIMEOUT = 30.0

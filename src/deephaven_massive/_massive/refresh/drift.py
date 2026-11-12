@@ -1,7 +1,7 @@
 """Compare Massive's live published API with the vendored snapshot: the drift check.
 
-`python -m deephaven_massive._massive.refresh --check` calls `check`, which downloads the live
-vendor sources exactly as `--fetch` does (into a scratch directory, never over the vendored
+`scripts/refresh.py --check --report <file>` calls `check`, which downloads the live vendor
+sources exactly as `--fetch` does (into a scratch directory, never over the vendored
 snapshot), compares them with the snapshot, and returns a `Report`. Nothing in the source
 checkout changes. The report lists every difference as one `Drift` item in one of three
 sections, each with the action a person takes:
@@ -105,7 +105,7 @@ _OVERVIEW_PAGES: Final = frozenset({"overview", "quickstart"})
 # The vendor statuses that account for a path or channel without generating it.
 _NOT_GENERATED: Final = frozenset({"deprecated", "draft"})
 # The command a person runs to see the report locally.
-_COMMAND: Final = "uv run python -m deephaven_massive._massive.refresh"
+_COMMAND: Final = "uv run python scripts/refresh.py"
 
 
 class Section(Enum):
@@ -223,7 +223,10 @@ class Report:
                     lines += [f"Action: {section.action}", "", *found]
             lines += [
                 "",
-                f"Reproduce this report with `{_COMMAND} --check` in a source checkout.",
+                (
+                    f"Reproduce this report with `{_COMMAND} --check --report drift.md` in a "
+                    "source checkout."
+                ),
             ]
         if not self.bucket_listed:
             lines += [

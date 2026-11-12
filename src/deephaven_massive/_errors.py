@@ -420,12 +420,15 @@ def raises_through(*helpers: Callable[..., object]) -> Callable[[_F], _F]:
         A dataset method lets through the errors of the factory that checks its arguments::
 
             from deephaven_massive._errors import RAISES_THROUGH, raises_through
-            from deephaven_massive._namespaces.query_building import build_query
+            from deephaven_massive.namespaces._query_building import build_query
+            from deephaven_massive.queries import StreamHistoryQuery
 
 
             @raises_through(build_query)
             def trades(self, symbols):
-                return build_query(self._core, TRADES, symbols=symbols)
+                return build_query(
+                    self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols
+                )
 
 
             assert getattr(trades, RAISES_THROUGH) == (build_query,)

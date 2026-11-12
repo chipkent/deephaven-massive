@@ -26,6 +26,7 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -52,7 +53,6 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:

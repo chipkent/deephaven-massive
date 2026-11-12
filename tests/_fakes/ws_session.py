@@ -18,15 +18,16 @@ import json
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
+from typing_extensions import override
+
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
 from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables.transports import HostDecision
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -353,9 +354,9 @@ class WsSession:
             The query.
         """
         core = (session or self.session)._core
-        q = build_query(core, spec, symbols=cast("list[str]", symbols))
-        assert isinstance(q, SymbolStreamQuery)
-        return q
+        return build_query(
+            core, spec, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
+        )
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.

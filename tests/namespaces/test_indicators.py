@@ -19,10 +19,10 @@ from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import indicators
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _indicators as indicators
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 OWNER = "namespaces/indicators"
@@ -33,7 +33,7 @@ WINDOWED = [("sma", indicators.SMA), ("ema", indicators.EMA), ("rsi", indicators
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.indicators
-    assert type(namespace) is indicators._Indicators
+    assert type(namespace) is indicators.IndicatorsNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -76,7 +76,7 @@ def test_a_windowed_indicator_builds_its_query(
 ) -> None:
     factory = getattr(massive_session.indicators, name)
     query = factory(["X:BTCUSD", "AAPL"], 20)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is spec
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
@@ -118,7 +118,7 @@ def test_a_windowed_indicator_builds_its_query(
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_summary_opens_the_docstring(name: str) -> None:
-    doc = getattr(indicators._Indicators, name).__doc__
+    doc = getattr(indicators.IndicatorsNamespace, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"indicators.{name}"].summary
 
 
@@ -179,7 +179,7 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
-    factories: list[Callable[..., Query]] = [
+    factories: list[Callable[..., FetchQuery]] = [
         lambda **kw: i.sma("AAPL", 20, **kw),
         lambda **kw: i.ema("AAPL", 20, **kw),
         lambda **kw: i.rsi("AAPL", 14, **kw),
@@ -431,7 +431,7 @@ def test_every_signature_default_is_the_default_massive_documents(name: str) -> 
     path = source(R, cast("str", spec.fetch_path))
     assert isinstance(path, RestPath)
     documented = {p.name: p.default for p in path.params}
-    signature = inspect.signature(getattr(indicators._Indicators, name)).parameters
+    signature = inspect.signature(getattr(indicators.IndicatorsNamespace, name)).parameters
     compared = [
         n for n in (*_SIGNATURE_PARAMS, "timespan", "series_type", "adjusted") if n in signature
     ]

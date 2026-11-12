@@ -10,14 +10,14 @@ from typing import cast
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._query import QueryBase
+from deephaven_massive.queries import Query
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., QueryBase]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., QueryBase]", target)
+    return cast("Callable[..., Query]", target)
 
 
 @pytest.mark.parametrize(

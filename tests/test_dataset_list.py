@@ -50,8 +50,15 @@ def test_each_row_names_its_verbs_transports_and_documentation(dh_to_pylist: ToP
     }
     assert rows["stocks.last_trade"]["Methods"] == ["fetch", "poll"]
     assert rows["stocks.last_trade"]["Transports"] == ["REST"]
-    # Bars stream at some timespans only; the dataset lists every verb one of its calls has.
-    assert rows["stocks.bars"]["Methods"] == stream_and_history
+    # Bars stream at some timespans only: each stream method names the bars that have it.
+    bars = "(1-second and 1-minute bars at multiplier=1)"
+    assert rows["stocks.bars"]["Methods"] == [
+        "history",
+        f"blink {bars}",
+        f"append_only {bars}",
+        f"ring {bars}",
+        f"last_by {bars}",
+    ]
     ratios = rows["stocks.financials.ratios"]
     assert ratios["Documentation"] == f"{_PAGES}stocks.financials.ratios.md"
     assert rows["snapshots"]["Call"] == "m.snapshots"
@@ -63,6 +70,8 @@ def test_the_list_can_be_filtered_by_verb(dh_to_pylist: ToPylist) -> None:
     names = {row["Dataset"] for row in dh_to_pylist(streams)}
     assert "stocks.trades" in names
     assert "stocks.last_trade" not in names
+    # Not every bars query streams, so the bars datasets are not listed as plain streams.
+    assert "stocks.bars" not in names
 
 
 def test_every_column_is_described() -> None:
@@ -83,7 +92,7 @@ def test_every_dataset_has_its_call() -> None:
     assert list(calls) == list(CATALOG.by_name)
     assert calls["stocks.bars"] == DatasetCall(
         signature="m.stocks.bars(symbols, timespan, *, multiplier=1, adjusted=True)",
-        verbs=("blink", "append_only", "ring", "last_by", "history"),
+        verbs=("history",),
         arguments=("symbols", "timespan", "multiplier", "adjusted"),
         typed=("symbols", "timespan", "multiplier", "adjusted"),
         # Each argument's entry of the docstring's `Args`, its lines joined.
@@ -95,9 +104,12 @@ def test_every_dataset_has_its_call() -> None:
         ),
         # Each verb's call, with its positional arguments, and its docstring's summary.
         methods=calls["stocks.bars"].methods,
+        # The stream methods that only 1-second and 1-minute bars have.
+        stream_verbs=("blink", "append_only", "ring", "last_by"),
+        stream_condition="1-second and 1-minute bars at multiplier=1",
     )
     methods = {m.name: m for m in calls["stocks.bars"].methods}
-    assert list(methods) == ["blink", "append_only", "ring", "last_by", "history"]
+    assert list(methods) == ["history", "blink", "append_only", "ring", "last_by"]
     assert methods["ring"] == QueryMethod(
         "ring", "ring(capacity)", "The latest `capacity` rows the stream sends."
     )

@@ -10,6 +10,13 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._options as options
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive import _log_limits
 from deephaven_massive._datasets import row_times
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -39,15 +46,6 @@ from deephaven_massive._datasets.row_times import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._namespaces import (
-    crypto,
-    forex,
-    futures,
-    indicators,
-    indices,
-    options,
-    stocks,
-)
 
 INSTANT = pa.timestamp("ns", tz="UTC")
 A, T = AssetClass, Timespan

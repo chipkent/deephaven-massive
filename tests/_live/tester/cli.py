@@ -8,12 +8,12 @@
   `ready: no`, and saves the same lines in `DIR/setup-check.txt` for the bug report. The
   console install is the Python at `PATH` (`~/dh-massive/bin/python` by default)
   or the Docker image `NAME`. Exit 0 when no item failed, else 1.
-- `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
-  `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
-  `DIR/examples-output/`. The examples write their debug log and diagnostics to `DIR` too. It
-  first asks Massive which plan the key holds per subscription, and writes the settings file
-  the paid examples read for those plans. Exit 0 when no example failed (a refusal by the
-  key's plan is not a failure), else 1.
+- `examples [--folder DIR]` runs, in the embedded Deephaven server the script started, every
+  example of `docs/tester-examples/` in order (`examples.run_examples`), and saves what each
+  did under `DIR/examples-output/`. The examples write their debug log and diagnostics to
+  `DIR` too. It first asks Massive which plan the key holds per subscription, and writes the
+  settings file the paid examples read for those plans. Exit 0 when no example failed (a
+  refusal by the key's plan is not a failure), else 1.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -25,7 +25,6 @@ environment, and every line printed is cleaned of them.
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
 import sys
 from datetime import UTC, datetime
@@ -38,6 +37,7 @@ from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import check_machine, ready
 from tests._live.live_run.run_probe import probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
+from tests._live.tester import examples
 from tests._live.tester.bug_report import build_bundle
 from tests._live.tester.setup_check import check_setup
 
@@ -138,7 +138,6 @@ def main(
     argv: list[str],
     *,
     root: Path,
-    start_server: Callable[[], None],
     environ: MutableMapping[str, str] = os.environ,
     stdout: IO[str] = sys.stdout,
     check: Callable[[Path, argparse.Namespace, MutableMapping[str, str]], list[Item]] = (
@@ -157,7 +156,6 @@ def main(
     Args:
         argv: The arguments, without the program's name.
         root: The repository root.
-        start_server: Starts an embedded Deephaven server; only `examples` calls it.
         environ: The environment.
         stdout: Where the command prints.
         check: Checks both setups and the key (`check_both`).
@@ -197,8 +195,6 @@ def main(
         (folder / CHECK_OUTPUT).write_text(text, encoding="utf-8")
         return 0 if ready(items) else 1
     if arguments.command == "examples":
-        start_server()
-        examples = importlib.import_module("tests._live.tester.examples")
         tiers = plans(environ)
         if tiers is None:
             tiers = {}
