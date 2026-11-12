@@ -293,6 +293,5 @@ settles it.
   `Updated` keeps its name.
 - **86.** The forex conversion's `last` is the last quote of its `from`/`to` pair. Settled
   2026-11-12: in both directions of AUD/USD, 7 of 8 tries read one quote on the conversion,
-  `/v1/last_quote`, and the snapshot's `lastQuote`. The columns keep `Last*`: their fields
-  already take the quote's names (`LastBidPrice`), and the prefix names the object as the
-  conversion does.
+  `/v1/last_quote`, and the snapshot's `lastQuote`. Whether the conversion's `Last*` columns
+  take the snapshot's `LastQuote*` names is the owner's call.

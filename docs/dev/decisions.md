@@ -532,13 +532,10 @@ Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases b
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
 
-**108. The v2 snapshots' change from the previous close is `DayChange`; `Updated` and the
-conversion's `Last*` keep their names** (2026-11-12). Live reads settled the three pairs
-decision 101 left open (items 84 to 86). The v2 snapshots' and movers' `todaysChange` and
-`todaysChangePerc` are the option chain's `day.change` and `day.change_percent`, the latest
-price minus the previous close and that change in percent of it, so all six v2 sources take the
-chain's `DayChange` and `DayChangePercent` through `SPELLINGS`. The v2 `updated` is not the
-unified snapshot's `last_updated`, so it stays `Updated`. The conversion's `last` is the pair's
-last quote, but its fields already take the quote's names (`LastBidPrice`), and its prefix names
-the object as the conversion does, as decision 101 keeps object prefixes. Status: proposed, for
-the owner to accept.
+**108. The v2 snapshots' change from the previous close is `DayChange`; `updated` keeps
+`Updated`** (2026-11-12). Live reads settled two of the pairs decision 101 left open (items 84
+and 85). The v2 snapshots' and movers' `todaysChange` and `todaysChangePerc` are the option
+chain's `day.change` and `day.change_percent`, the latest price minus the previous close and
+that change in percent of it, so all six v2 sources take the chain's `DayChange` and
+`DayChangePercent` through `SPELLINGS`. The v2 `updated` is not the unified snapshot's
+`last_updated`, so it stays `Updated`.
