@@ -4,8 +4,9 @@ Each test records what Massive sent (`evidence`). A test marked `settles` assert
 requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
 asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
 from the wire REST client, because "a key is missing" and "a key holds an empty list" look the same
-once the library has read them; the library's own answer is recorded beside them. How to run these
-tests is in `docs/live-tests.md`.
+once the library has read them; the library's own answer is recorded beside them. The underlying
+and contract-symbol tests send values the library refuses (`tests/_live/bad_values.py`) and
+record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import calendar, greeks
+from tests._live import bad_values, calendar, greeks
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -1041,3 +1042,45 @@ def _calls_near_the_money(
     priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
     priced.sort(key=lambda r: abs(r["StrikePrice"] - spot))
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `C:EURUSD` and `X:BTCUSD` as the underlying.
+
+    The library takes only a stock or index ticker as `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_contracts_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contracts list answers to `underlying_ticker` `C:EURUSD` and `X:BTCUSD`.
+
+    The library takes only a stock or index ticker as `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS, evidence)
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("104")
+@pytest.mark.requests(1)
+def test_massive_answers_contract_details_of_a_stock_ticker(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contract overview answers for `AAPL`, a stock rather than a contract.
+
+    `m.options.contracts` refuses an underlying passed as `symbols` and names
+    `underlying=`. DATA counts the rows describing a contract named `AAPL`.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)

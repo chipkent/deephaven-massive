@@ -14,6 +14,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `calendar`: the US exchanges' holidays and half days, and the recent days the tests read;
 - `contracts`: the front futures contract of a day, by each product's roll rule;
 - `events`: the choice of recent splits and special dividends to check;
+- `bad_values`: the requests that send Massive a value the library refuses before sending,
+  and the verdict on what Massive answers;
 - `ticker_lists`: the forms of futures spread tickers, and the crypto pairs whose currencies
   do not join to their ticker;
 - `streams`: when a stream on a delayed plan must have delivered rows;
@@ -23,6 +25,8 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `futures_bar_buckets`: which bucket a futures bar of a session or longer covers, judged
   from the shorter bars inside it;
 - `summary`: the open-questions summary that ends a live run;
+- `same_field`: whether two Massive fields carry one quantity, read back to back and compared
+  within a tolerance;
 - `parallel`: which selected tests are live, and the refusal to run them on parallel workers.
 
 Its subpackage `live_run` holds the live-run program, which a tester runs with their own keys

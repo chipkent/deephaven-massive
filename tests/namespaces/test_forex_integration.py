@@ -10,6 +10,9 @@ library's own answer to the same request is recorded beside them. How to run the
 The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
 millisecond is moved to 00:00 UTC of that day, whatever the source; any other stamp is moved the
 same way and logs a WARNING that the bar may cover other days.
+
+The conversion tests send values `m.forex.conversion` refuses (`tests/_live/bad_values.py`) and
+record whether Massive refuses them too.
 """
 
 from __future__ import annotations
@@ -24,12 +27,15 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
+from tests._live import bad_values
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from deephaven_massive._massive import RestClient
 
 pytestmark = pytest.mark.integration
 
@@ -520,3 +526,46 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
     assert quote_rows, f"no forex quote arrived in {_STREAM_WAIT:.0f} s of an open market"
     assert {row["Symbol"] for row in quote_rows} == {_PAIR}
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("87")
+@pytest.mark.requests(1)
+def test_massive_answers_a_conversion_precision_of_5(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion `precision` of 5, which `m.forex.conversion` refuses.
+
+    The library accepts the values Massive's specification lists, 0 to 4. For DATA, read
+    `converted` in the recorded row: more than 4 decimals means Massive honored the value. A
+    decoded number drops trailing zeros, so fewer decimals do not prove that it was ignored.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.PRECISION, evidence)
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("88")
+@pytest.mark.requests(2)
+def test_massive_answers_a_conversion_amount_of_0_or_below(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion `amount` of 0 and of -100, which the library refuses.
+
+    DATA counts the conversions whose `converted` has the amount's sign: 0 for 0, negative for
+    -100.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.AMOUNT, evidence)
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("89")
+@pytest.mark.requests(1)
+def test_massive_answers_lower_case_currency_codes(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion from `aud` to `usd`, which the library refuses.
+
+    The library takes only three upper-case letters. DATA counts the conversions that name
+    `AUD` and `USD`: those read the lower-case codes as the upper-case ones.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.CURRENCY_CODE, evidence)

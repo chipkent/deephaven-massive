@@ -1,8 +1,8 @@
 # Contributing to deephaven-massive
 
 Thank you for helping. This page gets a development checkout running and points to the rules
-every change follows. [`AGENTS.md`](AGENTS.md) holds those rules in full, for people and coding
-agents alike; read it before your first pull request.
+every change follows. [`AGENTS.md`](AGENTS.md) and the skills in [`.claude/skills/`](.claude/skills/) hold those
+rules, for people and coding agents alike; read `AGENTS.md` before your first pull request.
 
 ## Set up
 
@@ -33,12 +33,15 @@ A release is one manual run of the Release workflow on `main`;
 
 ## Documentation
 
-User documentation has three parts:
+User documentation has four parts:
 
 - [`README.md`](README.md): the landing page, which takes a new user from "what is this?"
   through install and configuration to a tutorial of thirteen examples.
 - [`docs/troubleshooting.md`](docs/troubleshooting.md): every error message and symptom with
   its fix, the diagnostics tables, the debug log, and how to report a bug.
+- [`docs/configuration.md`](docs/configuration.md): every `MassiveConfig` setting and the
+  settings file. Its settings section is generated from the `MassiveConfig` docstring by
+  `uv run python scripts/render_reference.py`.
 - [`docs/datasets/`](docs/datasets/README.md): the generated dataset reference, one page per
   dataset with its call, arguments, plans, and columns. Never edit it by hand; regenerate it
   with `uv run python scripts/render_reference.py`. The rules of the arguments many datasets

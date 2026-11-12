@@ -4,7 +4,9 @@ Each test records what Massive sent (`evidence`). Most assert only that the requ
 so the evidence, not a pass, settles the open question; the condition key test asserts the
 answer the library relies on. The library's tables serve where they show the answer; raw rows
 from the wire REST client serve where the library renames or rejects the very keys or
-spellings in question. How to run these tests is in `docs/live-tests.md`.
+spellings in question. The asset-class test sends values the library refuses
+(`tests/_live/bad_values.py`) and records whether Massive refuses them too. How to run these
+tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from tests._live import bad_values
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -260,3 +263,17 @@ def _unreadable(ticker: str) -> bool:
     except ValueError:
         return True
     return False
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("92")
+@pytest.mark.requests(3)
+def test_massive_answers_an_asset_class_its_endpoint_does_not_list(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the reference endpoints answer to an `asset_class` their specification does not list.
+
+    The library refuses one: futures on the conditions and the ticker types, indices on the
+    exchanges. DATA counts the rows of the class sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.ASSET_CLASS, evidence)
