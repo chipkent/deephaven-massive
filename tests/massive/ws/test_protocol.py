@@ -773,15 +773,27 @@ def test_other_http_statuses_are_fatal(status: int) -> None:
     "error",
     [
         InvalidProxyStatus(Response(407, "x", Headers({}), b"")),
-        InvalidProxyMessage("the proxy's reply is not HTTP"),
         InvalidProxy("http://proxy", "bad"),
     ],
-    ids=["refused-credentials", "garbled-reply", "bad-setting"],
+    ids=["refused-credentials", "bad-setting"],
 )
 def test_a_proxy_failure_is_this_machines_to_fix(error: Exception) -> None:
     classified = _classify(error)
     assert isinstance(classified, WireError)
     assert classified.kind is WireFailure.LOCAL
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidProxyStatus(Response(502, "x", Headers({}), b"")),
+        InvalidProxyMessage("the proxy's reply is not HTTP"),
+    ],
+    ids=["proxy-502", "garbled-reply"],
+)
+def test_a_proxy_that_could_not_reach_the_server_is_retried(error: Exception) -> None:
+    # No answer from the server, as the REST and flat-file clients count it.
+    assert _classify(error) == 0.0
 
 
 def test_a_proxy_that_refuses_the_credentials_names_its_status() -> None:

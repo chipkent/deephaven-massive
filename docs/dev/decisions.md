@@ -542,23 +542,25 @@ two questions: whose move it is, and whether to log at ERROR.
   error (an HTTP error status from Massive or S3, a rejected key, a plan without the data, a
   WebSocket status message, another connection taking the WebSocket connection, a list of
   Massive's that lacks a pair); `NETWORK` when no answer came through the library's retries
-  (a TLS handshake that failed for another reason than the certificate included), or a live
-  table got no data for `max_outage`; `USER` when the user's code or settings stopped it (a
-  missing API key, delayed data `delayed_subscriptions` refuses, a closed session, a failing
-  symbol table, a certificate, proxy, or AWS profile setting, a read the user stopped);
+  (a TLS handshake that failed for another reason than the certificate, and a proxy that
+  could not reach the server, included), or a stream or `poll()` cycle got no data for
+  `max_outage`; `USER` when the user's code or settings stopped it (a missing API key,
+  delayed data `delayed_subscriptions` refuses, a closed session, a failing symbol table, a
+  certificate, proxy credential, or AWS profile setting, a read the user stopped);
   `LIBRARY` for a bug, Massive data the library cannot read and a failure inside a wire client
   included. One failure has one source on every transport. More members may come, so handlers
   keep a default case.
 - Every wire error carries exactly one `WireFailure`, which its client must choose (refused,
   no answer, local settings, stopped, unreadable, client defect), so no failure becomes
-  Massive's answer by default.
+  Massive's answer by default. A stop the library chooses itself (its other requests after
+  one fails, a failed poll or followed read) is never surfaced: the failure that caused it is.
 - `is_retryable`: true for HTTP 429, 500, 502, 503, and 504 and for `NETWORK`; false for every
   other status, authentication, entitlement, a closed session, and a taken connection, and
   always for a bug. A flat file not yet published and pages that disagree on `adjusted` are
   retryable too: neither is an HTTP status, and both messages say to retry. A read that fails
   because every symbol failed is retryable only when every symbol's error is. The library has
-  already retried a server failure or a lost connection, and waited out a rate limit's pause,
-  before it raises.
+  already retried a server failure or a lost connection before it raises, and a rate limit
+  reaches the user only after its pause outlasted how long the read waits.
 - `is_bug`: true for every `LIBRARY` error and for a user's bug the library caught (a failing
   symbol table, a parameter a path does not take, a symbol table row that is not Massive's
   ticker, a session made outside a server). The library logs a failure at ERROR exactly when

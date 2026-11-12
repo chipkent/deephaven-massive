@@ -79,7 +79,9 @@ Errors:
     `dm.SessionClosedError` means the session is closed. Each error's `source`, a
     `dm.ErrorSource`, says what stopped the call, its `is_retryable` says whether the same call
     may succeed later, and its `is_bug` says whether a bug caused it.
-    A wrong argument raises `TypeError` or `ValueError` at the call instead.
+    A wrong argument raises `TypeError` or `ValueError` at the call instead. In a read of
+    several symbols, a parameter only some symbols' endpoint lacks fails those symbols with a
+    `dm.MassiveError` whose `is_bug` is `True`.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 
 Server:

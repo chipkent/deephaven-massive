@@ -151,8 +151,10 @@ class ErrorSource(StrEnum):
     what you asked for. The message quotes Massive's answer."""
 
     NETWORK = "network"
-    """No answer came: the connection failed through every retry the library made, or a live
-    table got no data for longer than `MassiveConfig.max_outage`."""
+    """No answer came: a connection failed through every retry the library made, or a live
+    table got nothing for longer than `MassiveConfig.max_outage` (its stream's connection stayed
+    down, or its `poll()` cycle received no page). A `poll()` whose cycles kept failing keeps its
+    latest cycle's source instead."""
 
     USER = "user"
     """Your code or settings stopped the call, such as a missing API key, delayed data your
@@ -236,7 +238,11 @@ class MassiveError(Exception):
 
     @property
     def status(self) -> int | None:
-        """The HTTP status of the response behind the error, such as 404 or 429, or `None`."""
+        """The HTTP status of the response behind the error, or `None` when there was none.
+
+        Usually Massive's, such as 404 or 429. A flat file's comes from S3, and a proxy that
+        refused its credentials gives its own 407.
+        """
         return self._status
 
     @property
@@ -261,8 +267,9 @@ class MassiveError(Exception):
         other error, such as any other HTTP status, an `AuthenticationError`, an
         `EntitlementError`, a `SessionClosedError`, or a bug.
 
-        The library has already retried a server failure or a lost connection, and waited out a
-        rate limit's pause, so wait before you call again.
+        The library has already retried a server failure or a lost connection a few times, and
+        you see a rate limit only when its pause lasted longer than the read waits, so wait
+        before you call again.
         """
         return self._is_retryable
 
@@ -272,8 +279,8 @@ class MassiveError(Exception):
 
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
-        or a parameter the endpoint doesn't take; its message names the fix. The library logs a
-        bug at ERROR, and any other error below ERROR.
+        or a parameter one symbol's endpoint doesn't take; its message names the fix. The
+        library logs a bug at ERROR, and any other error below ERROR.
         """
         return self._is_bug
 
@@ -282,10 +289,12 @@ class AuthenticationError(MassiveError):
     """Your keys are missing, or Massive refused them: the API key, or the S3 keys of flat files.
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
-    live table fails with it when Massive's streaming server rejects the key. Every other stream on
-    that connection fails too. Massive gives the same answer to a plan with no streams of the asset
-    class, and the message says so. `history()` raises it when Massive's flat-file server rejects
-    the S3 keys. The message then names `s3_access_key_id` and `s3_secret_access_key`.
+    `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
+    401), and so does `history(..., wait=True)` when Massive's flat-file server rejects the S3
+    keys, whose message then names `s3_access_key_id` and `s3_secret_access_key`; without
+    `wait=True`, the table fails with it. A live table fails with it when Massive's streaming
+    server rejects the key, and so does every other stream on that connection. Massive gives
+    the same answer to a plan with no streams of the asset class, and the message says so.
     Its `source` is `ErrorSource.USER` when the key is missing, and `ErrorSource.MASSIVE` when
     Massive refused it.
 

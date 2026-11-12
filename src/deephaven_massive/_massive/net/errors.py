@@ -91,7 +91,9 @@ class WireFailure(enum.Enum):
     or is configured wrong (`HTTPS_PROXY`)."""
 
     STOPPED = "stopped"
-    """The caller stopped the request, or closed the client, before an answer came."""
+    """The caller stopped the request, or closed the client, before an answer came. A stop
+    the library chooses itself, such as its other requests after one fails, is never
+    surfaced: the caller raises the failure that caused it."""
 
     UNREADABLE = "unreadable"
     """Massive delivered data the client could not read: a malformed or truncated flat file,

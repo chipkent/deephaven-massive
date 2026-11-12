@@ -70,7 +70,9 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 
 In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
 failing the table. Every error Massive reports, and every failure the library catches, is a
-`dm.MassiveError`. A wrong argument raises `TypeError` or `ValueError`. These
+`dm.MassiveError`. A wrong argument raises `TypeError` or `ValueError` at the call. In a read
+of several symbols, a parameter only some symbols' endpoint lacks fails those symbols with a
+`dm.MassiveError` whose `is_bug` is `True`. These
 attributes of a `dm.MassiveError` tell your code what to do:
 
 | Attribute | What it says |
@@ -78,10 +80,11 @@ attributes of a `dm.MassiveError` tell your code what to do:
 | `is_retryable` | `True` when the same call may succeed later, such as after a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection to Massive that kept failing, or a flat file Massive has not published yet. `False` when it can't, such as for a plan that lacks the data, a refused key, a closed session, or a bug. |
 | `is_bug` | `True` when a bug caused the error: in the library, whose message says how to report it, or in your code, whose message names the fix. |
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
-| `status` | The HTTP status of Massive's answer, such as 404, or `None` when there was none. |
+| `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
-Wait before you call again, since the library has already retried a server failure or a lost
-connection a few times, and waited out a rate limit's pause.
+Wait before you call again. The library has already retried a server failure or a lost
+connection a few times. You see a rate limit only when its pause lasted longer than the read
+waits.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 

@@ -54,6 +54,7 @@ from websockets.client import process_exception
 from websockets.exceptions import (
     InvalidHandshake,
     InvalidProxy,
+    InvalidProxyMessage,
     InvalidProxyStatus,
     InvalidStatus,
     ProxyError,
@@ -273,8 +274,10 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     websockets' public rule, `websockets.client.process_exception`, decides: it retries an
     `OSError`, a timeout, an EOF during the upgrade, and HTTP 500, 502, 503, and 504, and
     treats everything else (HTTP 400 or 404, an invalid URI, ...) as fatal. Two cases override
-    it: an HTTP 429 is always retried, after its `Retry-After`, and a TLS certificate failure
-    is always fatal, although it is an `OSError`.
+    it: an HTTP 429 is always retried, after its `Retry-After`; a proxy that could not reach
+    the server (any status but 407, or a reply that is not HTTP) is retried, as the REST and
+    flat-file clients retry it; and a TLS certificate failure is always fatal, although it is
+    an `OSError`.
 
     Args:
         error: What opening the socket (TCP, TLS, proxy, HTTP upgrade) raised.
@@ -302,7 +305,7 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
         wait = retry_after_seconds(error.response.headers.get("Retry-After"), now)
         return 0.0 if wait is None else wait
-    if process_exception(error) is None:
+    if _proxy_failed_to_connect(error) or process_exception(error) is None:
         return 0.0
     if isinstance(error, InvalidProxyStatus):
         status = error.response.status_code
@@ -316,6 +319,21 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     )
 
 
+def _proxy_failed_to_connect(error: Exception) -> bool:
+    """Tell whether a proxy answered for a server it could not reach, rather than refusing.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        True for a proxy's status other than 407 (such as its own 502) and for a proxy reply
+        that is not HTTP: no answer from the server, which the clients retry alike.
+    """
+    if isinstance(error, InvalidProxyStatus):
+        return error.response.status_code != HTTPStatus.PROXY_AUTHENTICATION_REQUIRED
+    return isinstance(error, InvalidProxyMessage)
+
+
 def _fatal_kind(error: Exception) -> WireFailure:
     """Return what kind of failure a connection attempt websockets does not retry is.
 
@@ -323,8 +341,8 @@ def _fatal_kind(error: Exception) -> WireFailure:
         error: What the attempt raised.
 
     Returns:
-        `LOCAL` for a proxy that refused the connection, answered it wrongly, or is configured
-        wrong (the proxy settings are this machine's); `REFUSED` for a server that answered but
+        `LOCAL` for a proxy that refused the credentials (HTTP 407) or is configured wrong
+        (the proxy settings are this machine's); `REFUSED` for a server that answered but
         refused or broke the handshake (an HTTP status such as 401 or 404 included); and
         `CLIENT_DEFECT` for anything else, such as a URI the client built wrong.
     """
