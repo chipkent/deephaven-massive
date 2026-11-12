@@ -1,20 +1,21 @@
-"""Size the embedded Deephaven server a live-run process starts before it imports the library.
+"""The embedded Deephaven server a live-run child starts before it imports the library.
 
-Importing the library imports Deephaven, which needs a running JVM, and the live run's command
-line (`cli`) imports the library. So `scripts/live_run.py` starts the server first, with the
-JVM arguments `jvm_args` gives for its command line, and only then imports `cli`. This module
-imports neither the library nor Deephaven, so the script can call it before the server runs.
+Importing the library imports Deephaven, which needs a running JVM. The live run's parent (the
+commands a person types, `cli`) imports neither, and starts no JVM: it lives for days, and
+runs everything that reads Massive in a child of its own script. Only those children, the
+hidden commands of `child_commands`, import this module: `start_server` starts their server,
+with the JVM arguments `jvm_args` gives for their command line, and the script imports the
+library only after it runs. This module imports neither the library nor Deephaven.
 
-A built-in group's child (the hidden `_group` command) runs the group's sessions, so its heap
-is sized to the group: half the machine's memory up to 16 GB for a group that streams, 4 GB
-for the others; a JVM crash writes its log into the attempt's folder, so the crash travels
-with the results. Every other command opens no session (a group's sessions run in its child),
-so it runs with `PARENT_HEAP`.
+A built-in group's child (`_group`) runs the group's sessions, so its heap is sized to the
+group: half the machine's memory up to 16 GB for a group that streams, 4 GB for the others; a
+JVM crash writes its log into the attempt's folder, so the crash travels with the results. The
+probe's child (`_probe`) opens no session, so it runs with `PROBE_HEAP`.
 
-The server needs Java 17 or later, and `check` exists to say when it is missing; a server
-that cannot start would end the program before `check` could say so. `java_problem` runs the
+The server needs Java 17 or later. `check` says when it is missing, and the parent starts no
+server, so `check` always reaches its report. A child checks first too: `java_problem` runs the
 same Java check as `check` does (`machine_checks.java_item`) before the server starts, so a
-script prints its `FAIL java` line and stops instead.
+child without Java prints its `FAIL java` line and stops instead of failing to start one.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from deephaven_server import Server
+
 from tests._live.live_run import machine_checks
 from tests._live.live_run.children import run_command
 
@@ -32,12 +35,13 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 __all__ = [
-    "PARENT_HEAP",
+    "PROBE_HEAP",
     "SMALL_HEAP",
     "STREAM_GROUPS",
     "STREAM_HEAP_LIMIT",
     "java_problem",
     "jvm_args",
+    "start_server",
 ]
 
 STREAM_HEAP_LIMIT: Final = 16 << 30
@@ -46,26 +50,27 @@ STREAM_HEAP_LIMIT: Final = 16 << 30
 SMALL_HEAP: Final = 4 << 30
 """The heap of a group's child that does not stream, in bytes."""
 
-PARENT_HEAP: Final = 1 << 30
-"""The heap of every command but `_group`, in bytes: it opens no session."""
+PROBE_HEAP: Final = 1 << 30
+"""The heap of a process that only probes the key, in bytes: it opens no session."""
 
 STREAM_GROUPS: Final = frozenset({"stream-day", "throughput", "stream-night"})
 """The groups whose child streams for hours and gets the larger heap."""
 
 
 def jvm_args(argv: Sequence[str]) -> list[str]:
-    """Return the JVM arguments of the server a live-run command line starts.
+    """Return the JVM arguments of the server a child's command line starts.
 
     Args:
-        argv: The command line, without the program's name, as `cli.main` will read it.
+        argv: A child's command line, without the program's name, as `child_commands.main`
+            will read it.
 
     Returns:
         For `_group --out OUT --attempt ATTEMPT ...`, the group's heap (read from the attempt's
-        `request.json`) and `-XX:ErrorFile` in `OUT/ATTEMPT`; for any other command line, a
-        heap of `PARENT_HEAP` alone.
+        `request.json`) and `-XX:ErrorFile` in `OUT/ATTEMPT`; for `_probe`, a heap of
+        `PROBE_HEAP` alone.
     """
-    if not argv or argv[0] != "_group":
-        return [f"-Xmx{PARENT_HEAP >> 20}m"]
+    if argv[0] != "_group":
+        return [f"-Xmx{PROBE_HEAP >> 20}m"]
     child = argparse.ArgumentParser(add_help=False)
     child.add_argument("--out", type=Path, required=True)
     child.add_argument("--attempt", required=True)
@@ -91,3 +96,21 @@ def java_problem(environ: Mapping[str, str] = os.environ) -> str | None:
     java = machine_checks.java_command(environ)
     item = machine_checks.java_item(run_command([java, "-version"]))
     return None if item.verdict == machine_checks.OK else f"{item.verdict} java: {item.detail}"
+
+
+def start_server(argv: Sequence[str], *, environ: Mapping[str, str] = os.environ) -> str | None:
+    """Start a child's embedded server, sized to its command line, unless Java is missing.
+
+    Args:
+        argv: The child's command line, without the program's name (`jvm_args`).
+        environ: The environment, whose `JAVA_HOME` names the JDK the server starts.
+
+    Returns:
+        The `check` report's line for Java (`java_problem`) when no server could start for want
+        of Java 17 or later; None once the server runs.
+    """
+    problem = java_problem(environ)
+    if problem is None:
+        # Port 0 asks the OS for a free port, so the server never clashes with another one.
+        Server(port=0, jvm_args=jvm_args(argv)).start()
+    return problem

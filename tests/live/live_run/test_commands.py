@@ -26,7 +26,7 @@ from tests._live.live_run import commands, results, schedule
 from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunContext, RunMemory, RunRefusedError
 from tests._live.live_run.machine_checks import FAIL, OK, Item
-from tests._live.live_run.run_probe import ProbeResult
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.live_run.secret_scrub import SecretFilter, fingerprints
 from tests._live.live_run.state import RunState, check_of, entitlement_id, record
 

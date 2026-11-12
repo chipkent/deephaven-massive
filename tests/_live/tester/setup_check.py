@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from tests._live.live_run.run_probe import ProbeResult
+    from tests._live.live_run.probe_result import ProbeResult
 
 INSPECT_CONSOLE: Final = """\
 import importlib.metadata as metadata

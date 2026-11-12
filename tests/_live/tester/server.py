@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from tests._live.live_run.server import PARENT_HEAP
+from tests._live.live_run.server import PROBE_HEAP
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -31,7 +31,7 @@ def jvm_args(argv: Sequence[str]) -> list[str]:
 
     Returns:
         A heap of `EXAMPLES_HEAP` for `examples`, which builds the guide's tables, and of
-        `PARENT_HEAP` for every other command, which only probes the key.
+        `PROBE_HEAP` for every other command, which only probes the key.
     """
-    heap = EXAMPLES_HEAP if argv[:1] == ["examples"] else PARENT_HEAP
+    heap = EXAMPLES_HEAP if argv[:1] == ["examples"] else PROBE_HEAP
     return [f"-Xmx{heap >> 20}m"]

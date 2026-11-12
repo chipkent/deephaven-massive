@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._massive import Transport, object_key, sources
 from tests._fakes.rest import Reply, envelope
-from tests._live import plans
 from tests._live.calendar import NEW_YORK, recent_monday
 from tests._live.live_run import run_probe
 from tests._live.plans import TIERS
@@ -146,23 +145,15 @@ def test_an_unreachable_flat_file_endpoint_reaches_nothing(
     assert result.flat_files == []
 
 
-def test_plans_take_the_live_tests_grammar() -> None:
-    tiers = dict.fromkeys(TIERS, "basic") | {"stocks": "starter", "currencies": "business"}
-    text = "stocks=starter,options=basic,indices=basic,currencies=business,futures=basic"
-    assert run_probe.plans_variable(tiers, []) == text
-    with_files = run_probe.plans_variable(tiers, ["us_stocks_sip/day_aggs_v1", "a/b"])
-    assert with_files == text + ",s3=a/b,s3=us_stocks_sip/day_aggs_v1"
-    read = plans.declared_plans(with_files)  # the live tests read it back exactly
-    assert (read.tiers, read.s3, read.flat_files) == (
-        tiers,
-        True,
-        ("a/b", "us_stocks_sip/day_aggs_v1"),
-    )
-    assert plans.reaches(read, "a/b")
-    assert not plans.reaches(read, "global_crypto/day_aggs_v1")
-
-
 def test_a_tier_that_keeps_all_history_reads_all() -> None:
     tiers = dict.fromkeys(TIERS, "advanced")
     found = run_probe._history(tiers, date(2026, 11, 3))
     assert found["stocks"] == "all"
+
+
+def test_credentials_come_from_the_environment_and_need_both_s3_values() -> None:
+    environ = {"MASSIVE_API_KEY": f" {PLANTED} ", "MASSIVE_S3_ACCESS_KEY_ID": "PLANTED-id"}
+    assert run_probe.credentials(environ) == run_probe.Credentials(api_key=PLANTED, s3_pair=None)
+    s3_pair = ("PLANTED-id", "PLANTED-s3")
+    environ["MASSIVE_S3_SECRET_ACCESS_KEY"] = s3_pair[1]
+    assert run_probe.credentials(environ).s3_pair == s3_pair

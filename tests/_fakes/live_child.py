@@ -1,10 +1,10 @@
-"""A fake child process of the live-run program: pytest or a built-in group, scripted by a test.
+"""A fake child process of the live-run program: pytest, a built-in group, or the probe.
 
 The live-run program (`tests/_live/live_run/commands.py`) runs every group in a child process:
-pytest
-with the outcomes plugin, or its own script's `_group` command. Its tests must never run the
-real live suites, which would call Massive, so they point the program's interpreter at a
-wrapper that runs this file instead, with the same arguments. It does what the test scripts in
+pytest with the outcomes plugin, or its own script's `_group` command; and each probe of the
+key in its script's `_probe` command. Its tests must never run the real live suites or the
+real probe, which would call Massive, so they point the program's interpreter at a wrapper
+that runs this file instead, with the same arguments. It does what the test scripts in
 the JSON of the `FAKE_LIVE_CHILD` environment variable, in this order:
 
 - `print`: lines to print (a test plants secrets in them to see the program clean its logs);
@@ -16,6 +16,8 @@ the JSON of the `FAKE_LIVE_CHILD` environment variable, in this order:
 - `results`: for `_group`, the lines appended to the attempt's `results.jsonl`;
 - `prompt`: for `_group`, a line printed before the results, after which the child reads one
   line from its standard input (the upgrade check's Enter);
+- `probe`: for `_probe`, the object written to the `--result` file, a probe's result; with no
+  `probe`, the child writes nothing, as a probe child that failed;
 - `hang`: wait for a signal instead of exiting (never while collecting); `ignore_interrupt`
   also ignores SIGINT, so only SIGKILL ends it;
 - `exit`: the exit status, 0 by default.
@@ -75,6 +77,8 @@ def main() -> int:
         with (folder / "results.jsonl").open("a", encoding="utf-8") as file:
             for line in script.get("results", []):
                 file.write(json.dumps(line) + "\n")
+    elif "_probe" in argv and "probe" in script:
+        Path(_option(argv, "--result")).write_text(json.dumps(script["probe"]), encoding="utf-8")
     if script.get("hang") and "--collect-only" not in argv:
         if script.get("ignore_interrupt"):
             signal.signal(signal.SIGINT, signal.SIG_IGN)
