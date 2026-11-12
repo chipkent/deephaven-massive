@@ -91,7 +91,7 @@ import re
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import chain
 from types import MappingProxyType, NoneType
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeVar
 from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive.spec.types import (
@@ -602,17 +602,16 @@ _ITEMS_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
 """The JSON value types the items of a list column may hold to be kept as they are."""
 
 
-def _in_int64(values: list[object], *, has_null: bool) -> bool:
+def _in_int64(values: list[object]) -> bool:
     """Return whether every integer of a list of integers and nulls is in the signed 64-bit range.
 
     Args:
-        values: Integers, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which is then left out.
+        values: Integers and `None`s; the `None`s are left out.
 
     Returns:
         True when every integer is in range, or there is none.
     """
-    numbers = cast("list[int]", [v for v in values if v is not None] if has_null else values)
+    numbers = [v for v in values if type(v) is int]
     return not numbers or (_INT64[0] <= min(numbers) and max(numbers) <= _INT64[1])
 
 
@@ -620,7 +619,7 @@ _NUMBERS: Final = frozenset({int, float, NoneType})
 """The JSON value types of a `double` column that `float` converts as its converter does."""
 
 
-def _as_floats(values: list[object], *, has_null: bool) -> list[object] | None:
+def _as_floats(values: list[object]) -> list[object] | None:
     """Return a column of integers, floats, and nulls as floats, as the `double` converter gives.
 
     A `double` column often mixes integers in (a price of exactly 100 is sent as `100`), so this
@@ -628,18 +627,14 @@ def _as_floats(values: list[object], *, has_null: bool) -> list[object] | None:
     `float` rounds a large integer exactly as the converter does.
 
     Args:
-        values: Integers and floats, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which then stays `None`.
+        values: Integers, floats, and `None`s, which stay `None`.
 
     Returns:
         A new list of floats (and `None`s); or None when an integer is too large for a double,
         which the converter refuses.
     """
-    numbers = cast("list[int | float | None]", values)
     try:
-        if has_null:
-            return [None if v is None else float(v) for v in numbers]
-        return list(map(float, cast("list[int | float]", numbers)))
+        return [float(v) if isinstance(v, int | float) else None for v in values]
     except OverflowError:
         return None
 
@@ -648,7 +643,7 @@ _TEXTS: Final = frozenset({str, NoneType})
 """The JSON value types of a `decimal-text-number` column read as text in one pass."""
 
 
-def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | None:
+def _decimal_texts(values: list[object]) -> list[object] | None:
     """Return a column of decimal texts and nulls as floats, as `decimal-text-number` gives.
 
     The whole column is checked by one pattern test over its texts joined by newlines, after a
@@ -656,24 +651,23 @@ def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | No
     `float`, so a frame of text prices costs no Python call per value.
 
     Args:
-        values: Texts, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which then stays `None`.
+        values: Texts and `None`s, which stay `None`.
 
     Returns:
         A new list of floats (and `None`s); or None when some text is not a plain decimal, or
         spells a number too large for a finite double, which the converter refuses.
     """
-    texts = cast("list[str]", [v for v in values if v is not None] if has_null else values)
+    texts = [v for v in values if type(v) is str]
     joined = "\n".join(texts)
     # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
     # the column passes only when the joining newlines are the only ones.
     if joined.count("\n") != len(texts) - 1 or not _DECIMAL_TEXTS.fullmatch(joined):
         return None
-    numbers = list(map(float, texts))
+    numbers: list[object] = list(map(float, texts))
     if math.inf in numbers or -math.inf in numbers:
         return None
-    if not has_null:
-        return cast("list[object]", numbers)
+    if len(numbers) == len(values):  # no null to keep
+        return numbers
     found = iter(numbers)
     return [None if v is None else next(found) for v in values]
 
@@ -696,13 +690,12 @@ def _decimal_column(
 
     def decimal(values: list[object]) -> list[object] | None:
         types = set(map(type, values))
-        has_null = NoneType in types
         if types <= _NUMBERS:
             if arrow_checks_numbers or types <= _AS_SENT[WireType.DOUBLE]:
                 return values
-            return _as_floats(values, has_null=has_null)
+            return _as_floats(values)
         if types <= _TEXTS:
-            return _decimal_texts(values, has_null=has_null)
+            return _decimal_texts(values)
         return converted(values)
 
     return decimal
@@ -815,11 +808,11 @@ def _as_sent_column(
         if double_values and types <= _NUMBERS:
             if arrow_checks_numbers:
                 return values
-            return _as_floats(values, has_null=NoneType in types)
+            return _as_floats(values)
         return converted(values)
     if items_as_sent is not None:
         return values if _items_fit(values, items_as_sent, long_items=long_items) else None
-    if long_values and not _in_int64(values, has_null=NoneType in types):
+    if long_values and not _in_int64(values):
         return None
     return values
 
@@ -836,12 +829,8 @@ def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_ite
         True when every item's type is in `items_as_sent` and, under `long_items`, every item
         fits in a signed 64-bit integer.
     """
-    lists = cast("list[list[object]]", filter(None, values))
-    items = list(chain.from_iterable(lists))
-    item_types = set(map(type, items))
-    return item_types <= items_as_sent and (
-        not long_items or _in_int64(items, has_null=NoneType in item_types)
-    )
+    items = list(chain.from_iterable(v for v in values if type(v) is list))
+    return set(map(type, items)) <= items_as_sent and (not long_items or _in_int64(items))
 
 
 def unconvertible_message(field: Field, value: object) -> str:

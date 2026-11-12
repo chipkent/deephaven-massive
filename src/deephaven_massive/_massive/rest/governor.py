@@ -107,7 +107,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Self, cast
+from typing import TYPE_CHECKING, Final, Self
 
 from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
 from deephaven_massive._massive.net.retry import RATE_LIMIT_WAITS, SYSTEM_CLOCK, rate_limit_wait
@@ -364,11 +364,10 @@ class Admission:
                 says when its next request, a probe, goes, gives the patience and what it has
                 spent, the usual cause and the remedies, and quotes the latest refusal).
         """
-        permit, failure = self._governor.admit(self, cancel)
-        if failure is not None:
-            logger.debug("%s: the wait for a permit ends: %s", self.bucket, failure.message)
-            raise WireError(failure.message, status=failure.status)
-        permit = cast("Permit", permit)
+        permit = self._governor.admit(self, cancel)
+        if isinstance(permit, WireError):
+            logger.debug("%s: the wait for a permit ends: %s", self.bucket, permit.message)
+            raise WireError(permit.message, status=permit.status)
         if permit.probe:
             logger.debug(
                 "%s: the pause is over; this request probes alone, and the bucket's other "
@@ -836,7 +835,7 @@ class RequestGovernor:
             state.settle(now)
             return self._beyond_patience(state, patience, now)
 
-    def admit(self, admission: Admission, cancel: Cancel) -> tuple[Permit | None, WireError | None]:
+    def admit(self, admission: Admission, cancel: Cancel) -> Permit | WireError:
         """Grant an attempt at once or after waiting, recording the permit on its claim.
 
         `Admission.acquire` calls it, and turns a failure into its `WireError`.
@@ -846,14 +845,14 @@ class RequestGovernor:
             cancel: Ends the wait when set.
 
         Returns:
-            `(permit, None)` once granted, or `(None, error)` when the attempt must fail, as
+            The permit once granted, or the error when the attempt must fail, as
             `Admission.acquire` describes.
         """
         bucket, lane = admission.bucket, admission.lane
         state = self._buckets[bucket]
-        permit, failure = self._grant_at_once(admission, cancel)
-        if failure is not None or permit is not None:
-            return permit, failure
+        at_once = self._grant_at_once(admission, cancel)
+        if at_once is not None:
+            return at_once
         waiter = _Waiter(lane)
         stop_listening = cancel.on_set(waiter.wake.set)
         try:
@@ -861,8 +860,8 @@ class RequestGovernor:
                 with self._lock:
                     state.join(waiter)
                 self._notify(bucket)
-                permit, failure = self._wait(admission, waiter, cancel)
-                if failure is None:
+                outcome = self._wait(admission, waiter, cancel)
+                if not isinstance(outcome, WireError):
                     self._notify(bucket)
             finally:
                 stop_listening()
@@ -874,11 +873,9 @@ class RequestGovernor:
             if admission.permit is not None:  # interrupted after the grant: hand it back
                 self.release(admission.permit)
             raise
-        return permit, failure
+        return outcome
 
-    def _grant_at_once(
-        self, admission: Admission, cancel: Cancel
-    ) -> tuple[Permit | None, WireError | None]:
+    def _grant_at_once(self, admission: Admission, cancel: Cancel) -> Permit | WireError | None:
         """Grant a request that may start now with nothing queued before it, without waiting.
 
         Args:
@@ -886,9 +883,9 @@ class RequestGovernor:
             cancel: The request's cancellation.
 
         Returns:
-            `(permit, None)` for a request granted now; `(None, error)` when it must fail at
-            once (cancelled, or a pause longer than its read's patience covers); `(None,
-            None)` when it must queue.
+            The permit for a request granted now; the error when it must fail at once
+            (cancelled, or a pause longer than its read's patience covers); None when it must
+            queue.
         """
         bucket = admission.bucket
         state = self._buckets[bucket]
@@ -896,17 +893,15 @@ class RequestGovernor:
             now = self._clock.monotonic()
             failure = self._failure(admission, cancel, now=now)
             if failure is not None:
-                return None, failure
+                return failure
             if state.head() is not None:
-                return None, None
+                return None
             state.expire(now)
             if state.start_at(now) > now:
-                return None, None
-            return state.grant(bucket, admission), None
+                return None
+            return state.grant(bucket, admission)
 
-    def _wait(
-        self, admission: Admission, waiter: _Waiter, cancel: Cancel
-    ) -> tuple[Permit | None, WireError | None]:
+    def _wait(self, admission: Admission, waiter: _Waiter, cancel: Cancel) -> Permit | WireError:
         """Sleep until a queued request is admitted or must fail.
 
         Args:
@@ -915,13 +910,15 @@ class RequestGovernor:
             cancel: The request's cancellation.
 
         Returns:
-            `(permit, None)` once it is admitted, or `(None, error)` when it must fail, as
+            The permit once it is admitted, or the error when it must fail, as
             `Admission.acquire` describes.
         """
         while True:
             permit, delay, failure = self._step(admission, waiter, cancel)
-            if failure is not None or permit is not None:
-                return permit, failure
+            if failure is not None:
+                return failure
+            if permit is not None:
+                return permit
             self._clock.wait(waiter.wake, delay)
 
     def done(self, permit: Permit, *, answered: bool) -> None:
