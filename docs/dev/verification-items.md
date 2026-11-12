@@ -160,8 +160,9 @@ settles it.
   sent as `day` and its bars are dated and kept as session bars. Settled by
   `tests/namespaces/test_futures_integration.py` (Futures Basic), which compares `1day` with
   `1session` and `5day` with `5session` on the front E-mini contract, and records the library's
-  `DAY` bars beside them. The same test records what the futures aggregates answer to a
-  multiplier below 1 (`0session`), which the library sends for Massive to judge.
+  `DAY` bars beside them. `tests/queries/test_choice_integration.py` records what the futures
+  aggregates answer to a multiplier below 1 (`0session`), which the library sends for Massive to
+  judge.
 - **108.** What the option chain answers to an option contract as its underlying. Sent to
   Massive for it to judge; if it answers with no error, the chain should refuse a contract.
   Settled by `tests/namespaces/test_options_integration.py` (Options Starter), which sends

@@ -385,7 +385,7 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
 
 @pytest.mark.needs("futures:basic")
 @pytest.mark.settles("107")
-@pytest.mark.requests(6)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_futures_day_bars_against_session_bars(
     live_session: dm.MassiveSession,
@@ -405,9 +405,7 @@ def test_futures_day_bars_against_session_bars(
     `dm.Timespan.DAY` bars through the library, which dates and keeps them as 1-session bars,
     and records their windows and `Date` beside the raw `1session` labels. Reading it: equal
     pairs at both multipliers, and library windows that end on each bar's session, settle that
-    `DAY` is `SESSION` for futures; any difference means `DAY` needs its own rules. Last, it
-    sends `0session`, a multiplier below 1, which the library sends for Massive to judge: an
-    error means Massive refuses it, and no error means the library should.
+    `DAY` is `SESSION` for futures; any difference means `DAY` needs its own rules.
     """
     contract = front_contract("ES", recent_month[1])
     start = _midnight(recent_month[0])
@@ -441,8 +439,6 @@ def test_futures_day_bars_against_session_bars(
         for r in library
     ]
     evidence(f"library DAY bars (start, end, Date): {windows}")
-    zero = _aggregates(live_rest, contract, "0session", start=start, end=end, evidence=evidence)
-    evidence(f"{contract} 0session: {len(zero)} bars, the first {zero[:1]}")
     assert read["1day"]
     assert library
 

@@ -84,6 +84,12 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
             {"resolution": "1day", "window_start.gte": "2026-10-28", "limit": "5"},
         )
     ],
+    bad_values.FUTURES_MULTIPLIER: [
+        (
+            "/futures/v1/aggs/ESZ6",
+            {"resolution": "0session", "window_start.gte": "2026-10-28", "limit": "5"},
+        )
+    ],
     bad_values.SESSION_OUTSIDE_FUTURES: [
         (f"{_AGGS}/1/session/2026-10-28/2026-11-04", {"limit": "5"})
     ],

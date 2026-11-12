@@ -30,8 +30,8 @@ Evidence: TypeAlias = "Callable[[str], None]"
 
 
 @pytest.mark.needs("futures:basic")
-@pytest.mark.settles("100")
-@pytest.mark.requests(1)
+@pytest.mark.settles("100", "107")
+@pytest.mark.requests(2)
 def test_massive_answers_futures_bars_of_a_day(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
@@ -39,9 +39,12 @@ def test_massive_answers_futures_bars_of_a_day(
 
     The library sends `Timespan.DAY` for futures bars as `1day`, and dates and keeps them as
     one-session bars. DATA cannot be compared with the request: read whether the bars span a
-    day or a session.
+    day or a session. It also sends `0session`, a multiplier below 1, which the library sends
+    for Massive to judge: ERROR means Massive refuses it; EMPTY or DATA, that the library
+    should.
     """
     assert bad_values.ask_all(live_rest, bad_values.FUTURES_DAY, evidence)
+    assert bad_values.ask_all(live_rest, bad_values.FUTURES_MULTIPLIER, evidence)
 
 
 @pytest.mark.needs("stocks:basic")

@@ -52,6 +52,7 @@ __all__ = [
     "FILTER_EMPTY_ITEM",
     "FILTER_WHITESPACE",
     "FUTURES_DAY",
+    "FUTURES_MULTIPLIER",
     "INDICATOR_TIMESPAN",
     "LIMIT",
     "MULTIPLIER",
@@ -89,6 +90,7 @@ FILTER_WHITESPACE: Final = "filter list item with surrounding whitespace"
 FILTER_EMPTY_ITEM: Final = "filter list with an empty item"
 TRAILING_BALANCE_SHEET: Final = "balance sheets for the trailing twelve months"
 FUTURES_DAY: Final = "futures bars of a day resolution"
+FUTURES_MULTIPLIER: Final = "futures bars of a multiplier below 1"
 SESSION_OUTSIDE_FUTURES: Final = "session bars outside futures"
 MULTIPLIER: Final = "bar multiplier below 1"
 UNDERLYING_CHAIN: Final = "option chain of a currency or crypto pair"
@@ -764,6 +766,15 @@ def _bar_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 path="/futures/v1/aggs/{ticker}",
                 names={"ticker": front_contract("ES", today)},
                 query={"resolution": "1day", "window_start.gte": two_weeks_ago, "limit": 5},
+                bucket="futures",
+            ),
+        ),
+        FUTURES_MULTIPLIER: (
+            BadRequest(
+                label="futures resolution=0session",
+                path="/futures/v1/aggs/{ticker}",
+                names={"ticker": front_contract("ES", today)},
+                query={"resolution": "0session", "window_start.gte": two_weeks_ago, "limit": 5},
                 bucket="futures",
             ),
         ),
