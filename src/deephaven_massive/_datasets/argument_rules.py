@@ -45,7 +45,7 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "it raises `ValueError`. In a table its row is skipped and logged by default, and "
             "[`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.\n"
             "- To convert another source's tickers, such as Yahoo's `BRK-B`, use "
-            "`dm.canonical_symbol`."
+            "`dm.canonical_symbol`, naming the source's `convention` for a stock."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "

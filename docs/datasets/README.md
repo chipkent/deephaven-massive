@@ -230,7 +230,7 @@ Write each symbol as Massive's ticker:
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
 - Each symbol is sent as you write it, and Massive decides whether it names an instrument. A symbol Massive has no data for gives no rows.
 - A symbol that is empty or holds `,`, `/`, or `*` can't be sent: in text or a list it raises `ValueError`. In a table its row is skipped and logged by default, and [`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.
-- To convert another source's tickers, such as Yahoo's `BRK-B`, use `dm.canonical_symbol`.
+- To convert another source's tickers, such as Yahoo's `BRK-B`, use `dm.canonical_symbol`, naming the source's `convention` for a stock.
 
 <a id="start"></a>
 

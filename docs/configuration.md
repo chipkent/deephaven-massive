@@ -290,8 +290,8 @@ other pairs are read as usual. A stream lists the skipped pairs in its `m.stream
 row's `Error`, and so does a `poll()`. A `fetch()` of a live table shows the pair
 `DONE` with 0 rows in `m.symbol_reads()`.
 
-A list the library can't read at all is no missing pair: the stream or read fails,
-as it does when any request fails.
+If the library can't read Massive's crypto ticker list, the stream or read fails
+under any setting, as it does when any request fails.
 
 #### unreadable_symbols
 
