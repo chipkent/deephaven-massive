@@ -62,6 +62,7 @@ __all__ = [
     "START_AFTER_NOW",
     "TRAILING_BALANCE_SHEET",
     "UNDERLYING_CHAIN",
+    "UNDERLYING_CHAIN_CONTRACT",
     "UNDERLYING_CONTRACTS",
     "WINDOW",
     "Answer",
@@ -88,6 +89,7 @@ FUTURES_DAY: Final = "futures bars of a day resolution"
 SESSION_OUTSIDE_FUTURES: Final = "session bars outside futures"
 MULTIPLIER: Final = "bar multiplier below 1"
 UNDERLYING_CHAIN: Final = "option chain of a currency or crypto pair"
+UNDERLYING_CHAIN_CONTRACT: Final = "option chain of an option contract"
 UNDERLYING_CONTRACTS: Final = "option contracts of a currency or crypto pair"
 CONTRACT_SYMBOL: Final = "option contract details of a stock ticker"
 START_AFTER_END: Final = "start after end"
@@ -100,6 +102,9 @@ _CONVERSION: Final = "/v1/conversion/{from}/{to}"
 _SMA: Final = "/v1/indicators/sma/{stockTicker}"
 _DIVIDENDS: Final = "/stocks/v1/dividends"
 _CONDITIONS: Final = "/v3/reference/conditions"
+_CONTRACT: Final = "O:AAPL250117C00150000"
+"""An option contract, sent where the chain takes its underlying."""
+
 _PAIRS: Final = ("C:EURUSD", "X:BTCUSD")
 """A forex and a crypto pair: underlyings the library refuses, as it does an option contract."""
 
@@ -644,7 +649,7 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
 
 
 def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
-    """Return the options requests: a pair as the underlying, and a stock as a contract.
+    """Return the options requests: a pair or a contract as the underlying, a stock as a contract.
 
     Returns:
         The requests by check.
@@ -661,6 +666,17 @@ def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
                 matching=f"with underlying_asset.ticker {pair}",
             )
             for pair in _PAIRS
+        ),
+        UNDERLYING_CHAIN_CONTRACT: (
+            BadRequest(
+                label=f"chain of {_CONTRACT}",
+                path="/v3/snapshot/options/{underlyingAsset}",
+                names={"underlyingAsset": _CONTRACT},
+                query={"limit": 5},
+                bucket="options",
+                match=partial(_field_is, "underlying_asset.ticker", _CONTRACT),
+                matching=f"with underlying_asset.ticker {_CONTRACT}",
+            ),
         ),
         UNDERLYING_CONTRACTS: tuple(
             BadRequest(

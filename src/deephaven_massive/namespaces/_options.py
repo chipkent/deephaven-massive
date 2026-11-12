@@ -339,8 +339,7 @@ def _chain_underlying(value: object) -> str:
     """Check the chain's `underlying` argument: Massive's exact ticker of an instrument.
 
     Massive judges the instrument: it answers HTTP 400 ("Invalid ticker.") to the chain of a
-    currency or crypto pair, so such a pair is sent. An option contract is refused: what
-    Massive answers to one as an underlying has not been read.
+    currency or crypto pair, so any canonical ticker is sent, an option contract included.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"` or `"I:SPX"`.
@@ -350,15 +349,12 @@ def _chain_underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` is not canonical (`check_symbol`), or is an option contract.
+        ValueError: If `value` is not canonical (`check_symbol`).
     """
     if not isinstance(value, str):
         kind = "dm.ALL" if value is ALL else type(value).__name__
         raise TypeError(f"underlying must be one ticker, a str, not {kind}")
-    ticker = check_symbol(ClassFromPrefix.ANY, value)
-    if symbol_class(ticker) is AssetClass.OPTIONS:
-        raise ValueError(f"underlying must be the ticker of an underlying, not {value!r}")
-    return ticker
+    return check_symbol(ClassFromPrefix.ANY, value)
 
 
 @raises_through(_chain_underlying)
@@ -738,7 +734,7 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL` or an option contract, or isn't Massive's exact ticker;
+                - `underlying` is `dm.ALL`, or isn't Massive's exact ticker;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

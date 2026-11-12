@@ -1058,6 +1058,21 @@ def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)
 
 
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("108")
+@pytest.mark.requests(1)
+def test_massive_answers_a_chain_of_an_option_contract(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `O:AAPL250117C00150000`, a contract, as the underlying.
+
+    The library sends any canonical ticker as the chain's `underlying`. ERROR means Massive
+    judges it; EMPTY, or DATA, means it answers with no error, and the library should refuse
+    it. DATA counts the contracts on the contract sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN_CONTRACT, evidence)
+
+
 @pytest.mark.needs("options:basic")
 @pytest.mark.settles("103")
 @pytest.mark.requests(2)

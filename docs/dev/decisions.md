@@ -550,4 +550,6 @@ currency or crypto pair, a range whose start is after its end, and a range that 
 now. A reversed range also has no request to send, since `history()` turns a range into the
 bars or days inside it. Futures `Timespan.DAY` bars are sent as `resolution=1day`, which
 Massive serves as the same one-session buckets as `1session` bars, and are dated and kept as
-session bars; item 107 compares the two at larger multipliers.
+session bars; item 107 compares the two at larger multipliers. The chain also sends an option
+contract as its underlying, which no evidence supported refusing; item 108 records Massive's
+answer.

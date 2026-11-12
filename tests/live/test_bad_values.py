@@ -86,6 +86,9 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
         ("/v3/snapshot/options/C:EURUSD", {"limit": "5"}),
         ("/v3/snapshot/options/X:BTCUSD", {"limit": "5"}),
     ],
+    bad_values.UNDERLYING_CHAIN_CONTRACT: [
+        ("/v3/snapshot/options/O:AAPL250117C00150000", {"limit": "5"})
+    ],
     bad_values.UNDERLYING_CONTRACTS: [
         ("/v3/reference/options/contracts", {"underlying_ticker": "C:EURUSD", "limit": "5"}),
         ("/v3/reference/options/contracts", {"underlying_ticker": "X:BTCUSD", "limit": "5"}),

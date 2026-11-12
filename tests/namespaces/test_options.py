@@ -529,8 +529,9 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
     assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
     assert request_of(chain("X:BTCUSD"))["params"]["underlyingAsset"] == "X:BTCUSD"
-    with pytest.raises(ValueError, match=r"^underlying must be the ticker of an underlying, not"):
-        chain("O:AAPL250117C00150000")
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(chain(contract))["params"]["underlyingAsset"] == contract
     assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
