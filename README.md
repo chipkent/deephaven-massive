@@ -138,8 +138,8 @@ Close each example's session with `m.close()` before you paste the next, except 
 which Example 6 closes. A live table keeps running, and using your key's requests, until its
 session closes. Every session that uses your key shares one request rate, such as Basic's five
 requests a minute. Your key also gets one streaming connection per asset class, which sessions
-with the same settings share. A session with no live tables also closes by itself, quietly,
-once no variable holds it.
+in this server with the same settings share. A session with no live tables also closes by
+itself, quietly, once no variable holds it.
 
 | # | Example | Plan |
 |---|---|---|
