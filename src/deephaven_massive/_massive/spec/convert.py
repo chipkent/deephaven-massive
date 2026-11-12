@@ -91,7 +91,7 @@ import re
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import chain
 from types import MappingProxyType, NoneType
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING, Final, TypeGuard, TypeVar
 from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive.spec.types import (
@@ -102,7 +102,7 @@ from deephaven_massive._massive.spec.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._massive.spec.types import Field
 
@@ -602,6 +602,22 @@ _ITEMS_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
 """The JSON value types the items of a list column may hold to be kept as they are."""
 
 
+def _only(values: Sequence[object], kind: type[_T]) -> TypeGuard[list[_T]]:
+    """Tell whether a column holds values of one exact type only.
+
+    One pass of the builtin `type` over the column, with no Python call per value, so a fast
+    path can then convert the whole list with one builtin call.
+
+    Args:
+        values: The column.
+        kind: The one type; a subclass (a `bool` for `int`) does not count.
+
+    Returns:
+        True when every value's type is `kind`, or the column is empty.
+    """
+    return set(map(type, values)) <= {kind}
+
+
 def _in_int64(values: list[object]) -> bool:
     """Return whether every integer of a list of integers and nulls is in the signed 64-bit range.
 
@@ -611,12 +627,30 @@ def _in_int64(values: list[object]) -> bool:
     Returns:
         True when every integer is in range, or there is none.
     """
-    numbers = [v for v in values if type(v) is int]
+    numbers = values if _only(values, int) else [v for v in values if type(v) is int]
     return not numbers or (_INT64[0] <= min(numbers) and max(numbers) <= _INT64[1])
 
 
 _NUMBERS: Final = frozenset({int, float, NoneType})
 """The JSON value types of a `double` column that `float` converts as its converter does."""
+
+_LISTS: Final = frozenset({list, NoneType})
+"""The value types of a list column, whose items are checked in one pass."""
+
+_WHOLE_NUMBERS: Final = frozenset({int, float})
+"""The value types of a `double` column with no null, which `float` converts in one call."""
+
+
+def _numbers_only(values: Sequence[object]) -> TypeGuard[list[int | float]]:
+    """Tell whether a column holds integers and floats only, by one pass of the builtin `type`.
+
+    Args:
+        values: The column.
+
+    Returns:
+        True when every value's exact type is `int` or `float`, or the column is empty.
+    """
+    return set(map(type, values)) <= _WHOLE_NUMBERS
 
 
 def _as_floats(values: list[object]) -> list[object] | None:
@@ -634,6 +668,8 @@ def _as_floats(values: list[object]) -> list[object] | None:
         which the converter refuses.
     """
     try:
+        if _numbers_only(values):
+            return list(map(float, values))
         return [float(v) if isinstance(v, int | float) else None for v in values]
     except OverflowError:
         return None
@@ -657,7 +693,7 @@ def _decimal_texts(values: list[object]) -> list[object] | None:
         A new list of floats (and `None`s); or None when some text is not a plain decimal, or
         spells a number too large for a finite double, which the converter refuses.
     """
-    texts = [v for v in values if type(v) is str]
+    texts = values if _only(values, str) else [v for v in values if type(v) is str]
     joined = "\n".join(texts)
     # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
     # the column passes only when the joining newlines are the only ones.
@@ -817,6 +853,18 @@ def _as_sent_column(
     return values
 
 
+def _lists_or_nulls(values: Sequence[object]) -> TypeGuard[list[list[object] | None]]:
+    """Tell whether a column holds lists and nulls only, by one pass of the builtin `type`.
+
+    Args:
+        values: The column.
+
+    Returns:
+        True when every value's exact type is `list` or `NoneType`, or the column is empty.
+    """
+    return set(map(type, values)) <= _LISTS
+
+
 def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_items: bool) -> bool:
     """Tell whether every item of a column of lists can be returned as sent.
 
@@ -829,7 +877,10 @@ def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_ite
         True when every item's type is in `items_as_sent` and, under `long_items`, every item
         fits in a signed 64-bit integer.
     """
-    items = list(chain.from_iterable(v for v in values if type(v) is list))
+    lists = (
+        filter(None, values) if _lists_or_nulls(values) else [v for v in values if type(v) is list]
+    )
+    items: list[object] = list(chain.from_iterable(lists))
     return set(map(type, items)) <= items_as_sent and (not long_items or _in_int64(items))
 
 
