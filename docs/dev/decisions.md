@@ -576,10 +576,19 @@ two questions: whose move it is, and whether to log at ERROR.
   no answer, local settings, stopped, unreadable, client defect), so no failure becomes
   Massive's answer by default. A stop the library chooses itself (its other requests after
   one fails, a failed poll or followed read) is never surfaced: the failure that caused it is.
-- `is_retryable`: true for HTTP 429, 500, 502, 503, and 504 and for `NETWORK`; false for every
-  other status, authentication, entitlement, a closed session, and a taken connection, and
-  always for a bug. A flat file not yet published and pages that disagree on `adjusted` are
-  retryable too: neither is an HTTP status, and both messages say to retry. A read that fails
+- `is_retryable`: true for HTTP 429, 500, 502, 503, and 504, for no answer (`NETWORK`), and for
+  two answers that mean try again: HTTP 404 on a later page of a paged REST read
+  (`CutShortError`), and S3's `RequestTimeout` (HTTP 400) on a flat file. Both stay `MASSIVE`,
+  since Massive or S3 answered. The owner, on 2026-11-12: "Fable should research the cases and
+  determine the proper behavior." The research found that a new call of a cut-short read starts
+  over with a new cursor, as a followed read already does, and the message already says to
+  retry; why the later page answers 404 (a cursor's lifetime) is unverified, and item 117
+  records it. AWS documents `RequestTimeout` as a connection that stalled, and botocore's
+  standard, adaptive, and legacy retry modes all count it transient. The wire error marks it
+  (`means_retry`), so the public layer never matches on status 400. False for every other
+  status, authentication, entitlement, a closed session, and a taken connection, and always for
+  a bug. A flat file not yet published and pages that disagree on `adjusted` are retryable too:
+  neither is an HTTP status, and both messages say to retry. A read that fails
   because every symbol failed is retryable only when every symbol's error is, and raises the
   first bug among them when there is one. The library has already retried a server failure
   or a lost connection before it raises, and it raises a rate limit as soon as waiting it out

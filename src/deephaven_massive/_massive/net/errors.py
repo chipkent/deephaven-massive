@@ -141,6 +141,7 @@ class WireError(Exception):
         path: str | None = None,
         request_id: str | None = None,
         kind: WireFailure,
+        means_retry: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -156,6 +157,9 @@ class WireError(Exception):
                 `None` when the response had none.
             kind: What kind of failure it is; required, so that no failure is taken for
                 Massive's answer by default.
+            means_retry: True for an answer that means "try again" although its status alone
+                does not say so, such as S3's `RequestTimeout` (HTTP 400): the caller may
+                succeed by sending the request again later.
         """
         super().__init__(message)
         self._message = message
@@ -164,6 +168,7 @@ class WireError(Exception):
         self._path = path
         self._request_id = request_id
         self._kind = kind
+        self._means_retry = means_retry
 
     @property
     def message(self) -> str:
@@ -194,6 +199,11 @@ class WireError(Exception):
     def kind(self) -> WireFailure:
         """What kind of failure it is: whether Massive answered, and if not, why not."""
         return self._kind
+
+    @property
+    def means_retry(self) -> bool:
+        """True for an answer that means "try again" although its status alone does not say so."""
+        return self._means_retry
 
 
 class WireAuthError(WireError):

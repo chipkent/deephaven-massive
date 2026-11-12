@@ -229,6 +229,13 @@ def test_a_bug_is_never_retryable() -> None:
     [
         (WireError("HTTP 503", status=503, kind=WireFailure.REFUSED), True),
         (WireError("rate limited", status=429, kind=WireFailure.REFUSED), True),
+        # S3's RequestTimeout: an HTTP 400 that means try again.
+        (
+            WireError(
+                "HTTP 400 (RequestTimeout)", status=400, kind=WireFailure.REFUSED, means_retry=True
+            ),
+            True,
+        ),
         (WireError("connection reset", kind=WireFailure.NO_ANSWER), True),
         (WireError("TLS certificate verification failed", kind=WireFailure.LOCAL), False),
         (WireError("HTTP 404", status=404, kind=WireFailure.REFUSED), False),

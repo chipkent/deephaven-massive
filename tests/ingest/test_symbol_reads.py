@@ -188,6 +188,11 @@ def _monday() -> HistoryWindow:
         # A certificate this machine does not trust fails alike until its settings change.
         (MassiveError("TLS failed", source=ErrorSource.USER), FailureKind.PERMANENT),
         (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        # S3's RequestTimeout on a flat-file scan: an HTTP 400 that means try again.
+        (
+            MassiveError("HTTP 400 (RequestTimeout)", status=400, is_retryable=True),
+            FailureKind.TRANSIENT,
+        ),
         # Any other 404, such as one for a request of several symbols or of none (a path
         # Massive retired), would answer the same again.
         (MassiveError("HTTP 404 from GET /v1/retired", status=404), FailureKind.PERMANENT),

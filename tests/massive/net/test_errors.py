@@ -54,6 +54,12 @@ def test_a_wire_error_keeps_the_kind_its_client_chose(kind: WireFailure) -> None
     assert WireError("failed", kind=kind).kind is kind
 
 
+def test_only_the_client_marks_an_answer_that_means_retry() -> None:
+    assert not WireError("HTTP 400", status=400, kind=WireFailure.REFUSED).means_retry
+    timeout = WireError("HTTP 400", status=400, kind=WireFailure.REFUSED, means_retry=True)
+    assert timeout.means_retry
+
+
 def test_a_wire_error_has_no_kind_by_default() -> None:
     # A client must say what kind of failure it raises: none is taken for Massive's answer.
     assert inspect.signature(WireError).parameters["kind"].default is inspect.Parameter.empty

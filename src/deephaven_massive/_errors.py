@@ -209,6 +209,10 @@ class MassiveError(Exception):
     """The `source` of an error of this class created without one; a subclass whose every
     instance has another source sets its own."""
 
+    default_is_retryable: ClassVar[bool] = False
+    """Whether every error of this class created without `is_retryable` may succeed later, an
+    answer that means "try again" whatever its status; a subclass of such answers sets it."""
+
     default_is_bug: ClassVar[bool] = False
     """Whether an error of this class created without `is_bug` is a bug; a subclass whose every
     instance is a user's bug sets it. A `LIBRARY` error is a bug whatever this says."""
@@ -234,8 +238,9 @@ class MassiveError(Exception):
                 `default_source`, which is `ErrorSource.MASSIVE` unless a subclass sets another.
                 A `LIBRARY` error's message is ended with `LIBRARY_BUG` unless it holds it.
             is_retryable: Whether the same call may succeed later, or `None` (absent) to
-                decide from `status` and `source`: true for a status in `RETRYABLE_STATUSES` or
-                a `NETWORK` source. A bug is never retryable, whatever this says.
+                decide: true for the class's `default_is_retryable`, a status in
+                `RETRYABLE_STATUSES`, or a `NETWORK` source. A bug is never retryable, whatever
+                this says.
             is_bug: Whether a defect caused the error, or `None` (absent) for the class's
                 `default_is_bug`. A `LIBRARY` error is a bug whatever this says.
         """
@@ -251,7 +256,11 @@ class MassiveError(Exception):
             is_bug = self.default_is_bug
         self._is_bug = is_bug or self._source is ErrorSource.LIBRARY
         if is_retryable is None:
-            is_retryable = status in RETRYABLE_STATUSES or self._source is ErrorSource.NETWORK
+            is_retryable = (
+                self.default_is_retryable
+                or status in RETRYABLE_STATUSES
+                or self._source is ErrorSource.NETWORK
+            )
         self._is_retryable = is_retryable and not self._is_bug
 
     @property
@@ -278,11 +287,13 @@ class MassiveError(Exception):
         """Whether the same call may succeed if you make it again later.
 
         True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
-        504), a `NETWORK` error, a flat file Massive hasn't published yet, and pages of one read
-        on which Massive answered with a different `adjusted` than was asked. A `fetch()` or
-        `history()` of a watchlist whose every symbol failed is retryable only when every
-        symbol's error is. False for any other HTTP status, an `AuthenticationError`, an
-        `EntitlementError`, a `SessionClosedError`, or a bug.
+        504), no answer (a `NETWORK` error), and two answers that mean try again: HTTP 404 on a
+        later page of a paged REST read, and S3's `RequestTimeout` (HTTP 400) on a flat file.
+        True too for two failures the library finds itself: a flat file Massive hasn't
+        published yet, and pages of one read on which Massive answered with a different
+        `adjusted` than was asked. A `fetch()` or `history()` of a watchlist whose every symbol
+        failed is retryable only when every symbol's error is. False for any other HTTP status,
+        an `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or a bug.
 
         Before it raises, the library has retried a server failure or a lost connection a few
         times. It raises a rate limit as soon as the read would spend more than 10 minutes in
@@ -402,7 +413,8 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
         `WireEntitlementError`, and `MassiveError` for any other `WireError`, with the wire
         error's message, `status`, `request_id`, and `source`, and retryable as
-        `MassiveError` decides from them. The message of a stopped request ends with
+        `MassiveError` decides from them, or retryable when the wire error `means_retry`. The
+        message of a stopped request ends with
         `READ_STOPPED`, which says why and what to do.
     """
     public: type[MassiveError]
@@ -420,6 +432,7 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         status=error.status,
         request_id=error.request_id,
         source=wire_source(error) if source is None else source,
+        is_retryable=True if error.means_retry else None,
     )
 
 
@@ -634,10 +647,11 @@ class CutShortError(MassiveError):
     Internal: not exported from `dm`; `fetch()` and `history()` raise it as the `MassiveError`
     it is, with status 404. The REST transport raises it, and a read by symbol
     (`_ingest/symbol_reads.py`) names it: unlike any other 404, which the same request would
-    meet again, a page that vanished mid-read may be there when the symbol is read again, so
-    a followed read reads the symbol again (`symbol_reads.failure_kind`). The error itself
-    follows the rule for a 404 and is not `is_retryable`.
+    meet again, a page that vanished mid-read may be there when the symbol is read again: a
+    new call starts over with a new cursor, so the error is `is_retryable`.
     """
+
+    default_is_retryable = True
 
 
 class RowDataError(PermanentError):

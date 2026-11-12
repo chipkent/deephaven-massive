@@ -526,6 +526,8 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     assert (error.status, error.request_id) == (status, fake_s3.request_id)
     # S3 answers a timeout with HTTP 400, whose status alone does not say it may pass.
     assert error.kind is WireFailure.REFUSED  # S3 answered, a RequestTimeout included
+    # S3 documents a RequestTimeout as a stalled connection: an answer that means try again.
+    assert error.means_retry is (code == "RequestTimeout")
     assert isinstance(error.__cause__, ClientError)
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS

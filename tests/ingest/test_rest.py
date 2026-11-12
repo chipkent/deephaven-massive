@@ -3690,8 +3690,8 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
     )
     assert info.value.status == 404
-    # Not retryable by the rule for a 404, though a followed read reads the symbol again.
-    assert not info.value.is_retryable
+    # Unlike any other 404: a new call starts over with a new cursor.
+    assert info.value.is_retryable
 
 
 def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:

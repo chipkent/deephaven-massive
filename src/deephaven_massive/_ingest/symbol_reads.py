@@ -63,7 +63,6 @@ from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
     NEW_SESSION,
     AuthenticationError,
-    CutShortError,
     ErrorSource,
     MassiveError,
     PermanentError,
@@ -140,18 +139,16 @@ def failure_kind(error: MassiveError) -> FailureKind:
         error: The failure, as the transport raised or returned it.
 
     Returns:
-        `TRANSIENT` when the error `is_retryable` (a rate limit, a server error, a failure of
-        the network), and for a symbol's data cut short (`CutShortError`: a later page's 404,
-        which may be there when the symbol is read again). `PERMANENT`, meaning the same read
-        would fail again for this session's entitlements, for everything else: a refusal of
-        the plan (`EntitlementError`, which an upgrade of the plan lifts), a failure a retry
-        cannot fix (`PermanentError`: rows that break the schema, a parameter the path does not
-        take, a crypto pair Massive does not list), any bug, and any other HTTP status, such
-        as 400 or the 404 of a path Massive retired.
+        `TRANSIENT` when the error `is_retryable`: a rate limit, a server error, a failure of
+        the network, a symbol's data cut short (`CutShortError`: a later page's 404), or S3's
+        `RequestTimeout`. `PERMANENT`, meaning the same read would fail again for this
+        session's entitlements, for everything else: a refusal of the plan (`EntitlementError`,
+        which an upgrade of the plan lifts), a failure a retry cannot fix (`PermanentError`:
+        rows that break the schema, a parameter the path does not take, a crypto pair Massive
+        does not list), any bug, and any other HTTP status, such as 400 or the 404 of a path
+        Massive retired.
     """
-    if error.is_retryable or isinstance(error, CutShortError):
-        return FailureKind.TRANSIENT
-    return FailureKind.PERMANENT
+    return FailureKind.TRANSIENT if error.is_retryable else FailureKind.PERMANENT
 
 
 def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:

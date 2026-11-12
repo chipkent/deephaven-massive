@@ -172,6 +172,11 @@ settles it.
   `m.options.contracts` should refuse a contract as `underlying`. Settled by
   `tests/namespaces/test_options_integration.py` (Options Basic), which sends
   `O:AAPL250117C00150000`.
+- **117.** Why a later page of a paged REST read answers HTTP 404. The library assumes the
+  page's cursor expired or its page moved, so a new call, with a new cursor, may succeed:
+  `CutShortError` is retryable, and a followed read reads the symbol again. Settled by
+  `tests/massive/rest/test_client_integration.py` (any Basic plan), which asks for one
+  `next_url` of the ticker list at once and again after 90 seconds and records both answers.
 - **118.** What Massive answers to a filter list with an empty item (`ticker.any_of=AAPL,,MSFT`).
   Sent as written; if Massive reads the empty item as no filter, the library should refuse it.
   Settled by `tests/datasets/test_filters_integration.py` (Stocks Basic).

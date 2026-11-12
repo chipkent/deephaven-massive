@@ -705,8 +705,7 @@ class FlatFileClient:
             # chaining it would put the secret back in the traceback, so it is left out.
             quotes_secret = redact(str(error), self._secret_access_key) != str(error)
             cause = None if quotes_secret else error
-            code = error.response.get("Error", {}).get("Code")
-            if refusal.status in TRANSIENT_STATUSES or code in _TRANSIENT_CODES:
+            if refusal.status in TRANSIENT_STATUSES or refusal.means_retry:
                 return _Retryable(refusal, cause)
             raise refusal from cause
         except BotoCoreError as error:
@@ -1003,7 +1002,8 @@ class FlatFileClient:
         Returns:
             The error to raise: `WireAuthError` for a 403 that rejects the credentials
             themselves, `WireEntitlementError` for any other 403, and `WireError` for any other
-            status, each with the status, host, key, and `x-amz-request-id`.
+            status, each with the status, host, key, and `x-amz-request-id`; a `RequestTimeout`
+            (HTTP 400) is marked `means_retry`.
         """
         status = _status(error)
         details = error.response.get("Error", {})
@@ -1020,6 +1020,8 @@ class FlatFileClient:
             return WireError(
                 f"cannot {verb} {location}: HTTP {status} ({server})",
                 kind=WireFailure.REFUSED,
+                # S3 documents a `RequestTimeout` as a connection that stalled: try again.
+                means_retry=code in _TRANSIENT_CODES,
                 **context,
             )
         refused = f"HTTP 403 for {location} ({server})"
