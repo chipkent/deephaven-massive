@@ -45,7 +45,7 @@ def _example(name: str) -> replies.Example:
 @pytest.fixture
 def open_session(fake_rest: FakeRestServer) -> Callable[[], MassiveSession]:
     def make() -> MassiveSession:
-        return dm.MassiveSession(dm.MassiveConfig(api_key=PLANTED_KEY, rest_base_url=fake_rest.url))
+        return dm.MassiveSession(dm.MassiveConfig(api_key=PLANTED_KEY))
 
     return make
 

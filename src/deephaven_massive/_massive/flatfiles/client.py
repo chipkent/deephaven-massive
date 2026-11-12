@@ -126,9 +126,15 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.net.retry import Clock
 
 
-__all__ = ["FlatFileClient"]
+__all__ = ["S3_BUCKET", "S3_ENDPOINT_URL", "FlatFileClient"]
 
 _log = logging.getLogger(__name__)
+
+S3_ENDPOINT_URL: Final = "https://files.massive.com"
+"""Massive's flat-file S3 endpoint, the one every session's `FlatFileClient` reads."""
+
+S3_BUCKET: Final = "flatfiles"
+"""Massive's flat-file bucket on `S3_ENDPOINT_URL`."""
 
 # What one request gives its caller: an object's body, or a page of a listing.
 _Answer = TypeVar("_Answer")

@@ -386,9 +386,7 @@ def session(
     fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    m = dm.MassiveSession(
-        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=4)
-    )
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", max_concurrency=4))
     yield m
     m.close()
 
@@ -956,7 +954,7 @@ def _manual_session(
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     return m, clock
 
 
@@ -1477,9 +1475,7 @@ def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
             "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
         )
     ]  # once a session: the second cycle logs at DEBUG
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
-    )
+    config = dm.MassiveConfig(api_key="test-key", unlisted_symbols=dm.OnError.RAISE)
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
         table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
@@ -1513,9 +1509,7 @@ def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
     with pytest.raises(dm.MassiveError, match=r"no symbol of the symbol table is a crypto pair"):
         fetch(session, CRYPTO_LAST, symbols=new_table([string_col("Symbol", ["X:DOTUSD"])]))
     for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
-        config = dm.MassiveConfig(
-            api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=setting
-        )
+        config = dm.MassiveConfig(api_key="test-key", unlisted_symbols=setting)
         with dm.MassiveSession(config) as other:
             serve_pairs(fake_rest)
             caplog.clear()
@@ -1773,9 +1767,7 @@ def test_row_symbols_are_canonical(
     assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
     assert fake_rest.get_queries()[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
     # Under RAISE, a spelling the library cannot read fails the request, naming it.
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
-    )
+    config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=dm.OnError.RAISE)
     with dm.MassiveSession(config) as strict:
         assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
         with pytest.raises(
@@ -1795,7 +1787,7 @@ def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
     monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
-    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    config = dm.MassiveConfig(api_key="test-key")
     with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
         (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
         q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
@@ -1825,9 +1817,7 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
-    )
+    config = dm.MassiveConfig(api_key="test-key", noncanonical_symbols=dm.OnError.RAISE)
     with dm.MassiveSession(config) as strict:
         bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
         with pytest.raises(
@@ -3320,7 +3310,7 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
     fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
     try:
@@ -3342,7 +3332,6 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     config = dm.MassiveConfig(
         api_key="test-key",
-        rest_base_url=fake_rest.url,
         rest_basic_subscriptions={dm.Subscription.CURRENCIES},
     )
     m = dm.MassiveSession(config)
@@ -3377,7 +3366,6 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     config = dm.MassiveConfig(
         api_key="test-key",
-        rest_base_url=fake_rest.url,
         max_concurrency=3,
         rest_basic_subscriptions={dm.Subscription.CURRENCIES},
     )
@@ -3423,7 +3411,6 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
     config = dm.MassiveConfig(
         api_key="test-key",
-        rest_base_url=fake_rest.url,
         rest_basic_subscriptions={dm.Subscription.STOCKS},
     )
     m = dm.MassiveSession(config)
@@ -3489,7 +3476,6 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     monkeypatch.setattr(poll, "CLOCK", FakeClock(manual=True))
     config = dm.MassiveConfig(
         api_key="test-key",
-        rest_base_url=fake_rest.url,
         rest_basic_subscriptions={dm.Subscription.STOCKS},
     )
     m = dm.MassiveSession(config)
@@ -3948,9 +3934,7 @@ def test_a_set_stop_token_ends_a_read_before_its_first_request(
 
 def _delayed_session(fake_rest: FakeRestServer, *listed: Subscription) -> dm.MassiveSession:
     return dm.MassiveSession(
-        dm.MassiveConfig(
-            api_key="test-key", rest_base_url=fake_rest.url, delayed_subscriptions=set(listed)
-        )
+        dm.MassiveConfig(api_key="test-key", delayed_subscriptions=set(listed))
     )
 
 
@@ -4360,11 +4344,7 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     )
 
     def session_with(setting: dm.OnError) -> dm.MassiveSession:
-        return dm.MassiveSession(
-            dm.MassiveConfig(
-                api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
-            )
-        )
+        return dm.MassiveSession(dm.MassiveConfig(api_key="test-key", unavailable_symbols=setting))
 
     # IGNORE leaves the symbol out, as LOG does, and names it only at DEBUG.
     with session_with(dm.OnError.IGNORE) as m, caplog.at_level(logging.DEBUG, LOGGER):

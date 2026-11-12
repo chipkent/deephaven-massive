@@ -1570,9 +1570,7 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
     start = new_york_midnight_ns(day)
     close = start // 10**6 + 16 * 3_600_000
     credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
-    )
+    config = dm.MassiveConfig(api_key="test-key", **cast("dict[str, Any]", credentials))
     after = new_york_midnight_ns(date(2023, 3, 29)) // 10**6 - 1
     fake_rest.reply(
         f"/v2/aggs/ticker/BCC/range/1/day/{start // 10**6}/{after}",

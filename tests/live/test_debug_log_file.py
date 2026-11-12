@@ -93,7 +93,6 @@ def test_a_sessions_debug_log_holds_no_secret(
     fake_rest.reply("/v1/marketstatus/now", Reply({"market": "open"}))
     config = dm.MassiveConfig(
         api_key=PLANTED["MASSIVE_API_KEY"],
-        rest_base_url=fake_rest.url,
         s3_access_key_id=PLANTED["MASSIVE_S3_ACCESS_KEY_ID"],
         s3_secret_access_key=PLANTED["MASSIVE_S3_SECRET_ACCESS_KEY"],
     )

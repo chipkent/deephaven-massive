@@ -108,7 +108,7 @@ def test_every_exported_enum_is_tested() -> None:
         for name in dm.__all__
         if isinstance(getattr(dm, name), type)
         and issubclass(getattr(dm, name), Enum)
-        # The wire enums; `LogOutput` is the debug log's, tested with it.
+        # The wire enums; the others are tested with the modules that define them.
         and getattr(dm, name).__module__ == "deephaven_massive._enums"
     }
     assert exported == set(EXPECTED_VALUES)
@@ -500,3 +500,10 @@ def test_each_asset_class_has_one_subscription() -> None:
         dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
     }
     assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None
+
+
+def test_forex_has_one_spelling_in_the_enums() -> None:
+    # Massive's wire value is "fx"; the member is FOREX in both enums that name forex.
+    assert dm.Market.FOREX.value == "fx"
+    assert dm.AssetClass.FOREX.name == dm.Market.FOREX.name
+    assert "FX" not in dm.Market.__members__

@@ -68,7 +68,8 @@ class SessionClients:
         """Bind the clients to their session and take the session's lease on its REST governor.
 
         No client is created yet. The lease comes from the process's registry
-        (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
+        (`rate_limits.GOVERNORS`), keyed by the configuration's API key and Massive's REST base
+        URL (`_massive.REST_BASE_URL`),
         declaring its `rest_basic_subscriptions`; its release is registered as a session
         closer. The governor's listener and the source of the `m.rate_limits()` rows are the
         core's diagnostics, which hold no reference to the core.
@@ -83,7 +84,7 @@ class SessionClients:
         diagnostics = core.diagnostics
         self._lease = rate_limits.GOVERNORS.lease(
             api_key=config.api_key,
-            base_url=config.rest_base_url,
+            base_url=_massive.REST_BASE_URL,
             basic=config.rest_basic_subscriptions,
             label=core.label,
             listener=diagnostics.rate_limits_changed,
@@ -133,9 +134,8 @@ class SessionClients:
             The transport.
 
         A garbage-collected core raises the `MassiveError` of `_live_core`. An API key or
-        `rest_base_url` the client cannot use never reaches it: `MassiveConfig` applies the
-        client's rules (`_massive.check_api_key`, `_massive.check_rest_base_url`) and refuses
-        the value when the config is built.
+        API key the client cannot use never reaches it: `MassiveConfig` applies the client's
+        rule (`_massive.check_api_key`) and refuses the key when the config is built.
         """
         core = self._live_core()
         with core.registry_lock:
@@ -146,7 +146,7 @@ class SessionClients:
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,
-                    base_url=config.rest_base_url,
+                    base_url=_massive.REST_BASE_URL,
                     max_concurrency=config.max_concurrency,
                     governor=self._lease.governor,
                     on_refused=warnings.refused,
@@ -285,8 +285,8 @@ class SessionClients:
                 client = self._flat_files = factory(
                     access_key_id=access_key_id,
                     secret_access_key=secret_access_key,
-                    endpoint_url=config.s3_endpoint_url,
-                    bucket=config.s3_bucket,
+                    endpoint_url=_massive.S3_ENDPOINT_URL,
+                    bucket=_massive.S3_BUCKET,
                     max_pool=config.max_concurrency,
                 )
         if created:

@@ -101,9 +101,19 @@ if TYPE_CHECKING:
     from deephaven_massive._massive.rest.response import Page
     from deephaven_massive._massive.spec.types import RestPath
 
-__all__ = ["CONNECT_TIMEOUT", "MAX_BODY_BYTES", "READ_TIMEOUT", "RefusalHook", "RestClient"]
+__all__ = [
+    "CONNECT_TIMEOUT",
+    "MAX_BODY_BYTES",
+    "READ_TIMEOUT",
+    "REST_BASE_URL",
+    "RefusalHook",
+    "RestClient",
+]
 
 _log = logging.getLogger(__name__)
+
+REST_BASE_URL: Final = "https://api.massive.com"
+"""Massive's REST API, the base URL every session's `RestClient` is given."""
 
 # The source of retry jitter. `SystemRandom` draws from the OS and keeps no state, so threads
 # share it safely; jitter needs no cryptographic strength, only independence.

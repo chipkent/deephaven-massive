@@ -26,7 +26,6 @@ from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _massive
-from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
@@ -148,7 +147,7 @@ class MarketServer(FakeRestServer):
 def market(
     monkeypatch: pytest.MonkeyPatch, load_fixture: Callable[[str, str], bytes]
 ) -> Iterator[MarketServer]:
-    """Start the fake market, and point every new `MassiveConfig` at it with a planted key.
+    """Start the fake market, and point every new session at it with a planted key.
 
     Yields:
         The server.
@@ -176,9 +175,7 @@ def market(
     library = logging.getLogger("deephaven_massive")
     level, handlers = library.level, list(library.handlers)
     monkeypatch.setenv("MASSIVE_API_KEY", KEY)
-    defaults = MassiveConfig.__init__.__kwdefaults__
-    assert defaults is not None
-    monkeypatch.setitem(defaults, "rest_base_url", server.url)
+    monkeypatch.setattr(_massive, "REST_BASE_URL", server.url)
     yield server
     server.close()
     for handler in [h for h in library.handlers if h not in handlers]:
@@ -295,14 +292,14 @@ def _on_the_given_session(path: Path, folder: Path) -> Path:
 
 
 @pytest.mark.jvm_held
+@pytest.mark.usefixtures("market")
 def test_the_paid_examples_run_on_streams_from_the_fake_server(
-    market: MarketServer,
     make_ws_session: Callable[..., WsSession],
     tmp_path: Path,
     *,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
-    session = make_ws_session(rest_base_url=market.url)
+    session = make_ws_session()
     namespace: dict[str, Any] = {"m": session.session, "dm": dm}
     for name in LIVE:
         runs = _on_the_given_session(EXAMPLES / name, tmp_path)
@@ -350,7 +347,8 @@ def test_history_plus_live_keeps_one_row_per_minute(
             f"/v2/aggs/ticker/AAPL/range/1/minute/{first}/{last}",
             Reply(envelope(rows, ticker="AAPL", adjusted=True, resultsCount=2)),
         )
-        session = make_ws_session(rest_base_url=rest.url)
+        monkeypatch.setattr(_massive, "REST_BASE_URL", rest.url)
+        session = make_ws_session()
         namespace: dict[str, Any] = {"m": session.session, "dm": dm}
         runs = _on_the_given_session(EXAMPLES / "18_history_plus_live.py", tmp_path)
         outcome, _ = examples.run_example(runs, namespace)

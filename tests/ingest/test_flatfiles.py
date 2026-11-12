@@ -2454,8 +2454,7 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: {message}); check "
-        "MassiveConfig s3_bucket and s3_endpoint_url"
+        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: {message})"
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
     # Not skipped as holidays: the call fails, and its failure is logged with its id, at DEBUG
@@ -3008,12 +3007,10 @@ def test_a_close_during_a_request_reports_the_close(
 # --- The bucket and its client ---------------------------------------------------------------
 
 
-def test_the_client_comes_from_the_config_and_is_shared(
+def test_the_client_reads_massive_s_bucket_with_the_config_s_credentials_and_is_shared(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
 ) -> None:
-    m = dm.MassiveSession(
-        config(s3_endpoint_url="https://s3.example.com", s3_bucket="other", max_concurrency=3)
-    )
+    m = dm.MassiveSession(config(max_concurrency=3))
     try:
         fake_s3.put(TRADES_0303, b"")
         q = query(m, STOCK_TRADES, symbols=dm.ALL)
@@ -3024,14 +3021,14 @@ def test_the_client_comes_from_the_config_and_is_shared(
         # One client per session, created on first use from the configuration.
         assert fake_s3.clients == [
             {
-                "endpoint_url": "https://s3.example.com",
+                "endpoint_url": "https://files.massive.com",
                 "access_key": "AKIDFLATFILES",
                 "secret_key": "flat-file-secret",
                 "signature_version": "s3v4",
                 "max_pool_connections": 1,  # one client per connection slot
             }
         ]
-        assert {bucket for bucket, _ in fake_s3.requests} == {"other"}
+        assert {bucket for bucket, _ in fake_s3.requests} == {"flatfiles"}
     finally:
         m.close()
 

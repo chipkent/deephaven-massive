@@ -28,9 +28,12 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
 from deephaven_massive._massive import (
+    REST_BASE_URL,
+    S3_BUCKET,
+    S3_ENDPOINT_URL,
     FlatFileClient,
     RequestGovernor,
     RestClient,
@@ -48,15 +51,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from deephaven_massive._massive import CapturedReply
-
-REST_BASE_URL: Final = "https://api.massive.com"
-"""Massive's REST API."""
-
-S3_ENDPOINT_URL: Final = "https://files.massive.com"
-"""Massive's flat-file endpoint."""
-
-S3_BUCKET: Final = "flatfiles"
-"""Massive's flat-file bucket."""
 
 
 @dataclass(frozen=True)

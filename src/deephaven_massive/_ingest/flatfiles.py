@@ -60,7 +60,7 @@ session dates never rolls forward: a date names its own session's file exactly.
 A missing file is one S3 answers with HTTP 404 and the S3 error code `NoSuchKey`. Any other
 404 (another S3 code, or a page that is not S3's at all, such as the HTML "404 Not Found" page
 Massive's front end serves for a path it does not route) raises `MassiveError` naming the
-object and the settings to check (`MassiveConfig.s3_bucket` and `s3_endpoint_url`). A range
+object and giving Massive's answer. A range
 with no file at all is no error: it returns an empty table, with a WARNING per missing
 weekday, whatever the reason.
 
@@ -126,7 +126,6 @@ import traceback
 from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import timedelta
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, cast
 
 import pyarrow as pa
@@ -829,9 +828,8 @@ class FlatFileHistory:
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
         the venue and the `venues=` parameter for futures; `MassiveError` when the S3 client
         cannot be created, the bucket is unreachable, answers
-        a 404 that is not S3's `NoSuchKey` (a wrong bucket or endpoint: `"cannot read
-        s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
-        s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
+        a 404 that is not S3's `NoSuchKey` (`"cannot read s3://<bucket>/<key> at <endpoint>:
+        HTTP 404 (404: Not Found)"`), or answers another error, a file's connection drops
         part-way on its first read and on each of its three rereads, a file is not the
         expected gzip CSV (for example, it lacks the symbol or time header), a file's every
         row of the requested symbols was dropped because its key could not be read (`"...
@@ -1586,10 +1584,9 @@ def _public(error: WireError, key: _Key) -> MassiveError:
     """Return the public error for a wire error of one file, with the user's remedy.
 
     A rejected credential names the settings to check; a refusal names the plan and, for a
-    futures file, the venue and the `venues=` parameter; a 404 (a missing bucket, since a
-    missing file is no error) names the bucket and endpoint settings. Every other wire error
-    becomes its public counterpart through `_errors.from_wire`. Each keeps the wire error's
-    status and request id.
+    futures file, the venue and the `venues=` parameter. Every other wire error, a 404 that
+    is not a missing file included, becomes its public counterpart through
+    `_errors.from_wire`. Each keeps the wire error's status and request id.
 
     Args:
         error: The wire error.
@@ -1615,14 +1612,6 @@ def _public(error: WireError, key: _Key) -> MassiveError:
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
             "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes",
-            status=error.status,
-            request_id=error.request_id,
-        )
-    if error.status == HTTPStatus.NOT_FOUND:
-        # S3 answers a missing file with `NoSuchKey`, which the client reports as no file; any
-        # other 404 means the bucket or endpoint is not the one that holds the files.
-        return MassiveError(
-            f"{error.message}; check MassiveConfig s3_bucket and s3_endpoint_url",
             status=error.status,
             request_id=error.request_id,
         )

@@ -32,7 +32,7 @@ PAST = "2020-01-02T00:00:00+00:00"
 @pytest.fixture
 def open_session(fake_rest: FakeRestServer) -> Callable[[], MassiveSession]:
     def make() -> MassiveSession:
-        return dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+        return dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
 
     return make
 

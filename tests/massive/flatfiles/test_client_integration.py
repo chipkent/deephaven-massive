@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from botocore.exceptions import ClientError
 
-from deephaven_massive._massive import FlatFileClient, WireError, object_key
+from deephaven_massive._massive import S3_BUCKET, FlatFileClient, WireError, object_key
 from deephaven_massive._massive.net.cancel import Cancel
 
 if TYPE_CHECKING:
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 
     from types_boto3_s3.client import S3Client
 
-    from deephaven_massive import MassiveConfig
 
 pytestmark = pytest.mark.integration
 
@@ -77,7 +76,6 @@ def _raw_client(client: FlatFileClient, key: str) -> Iterator[S3Client]:
 def test_when_each_days_file_was_published(
     live_flat_files: FlatFileClient,
     *,
-    live_s3_config: MassiveConfig,
     flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
@@ -98,7 +96,7 @@ def test_when_each_days_file_was_published(
         for day in _weekdays_before(today, _DAYS):
             key = object_key(_DAY_FILE, day)
             try:
-                head = s3.head_object(Bucket=live_s3_config.s3_bucket, Key=key)
+                head = s3.head_object(Bucket=S3_BUCKET, Key=key)
             except ClientError as error:
                 evidence(f"{day} {day:%a}: no LastModified ({error.response.get('Error', {})})")
                 continue
@@ -114,7 +112,6 @@ def test_a_weekend_key_is_missing_not_refused(
     live_flat_files: FlatFileClient,
     *,
     recent_monday: date,
-    live_s3_config: MassiveConfig,
     flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
@@ -146,7 +143,7 @@ def test_a_weekend_key_is_missing_not_refused(
     answer, code = "exists", None
     try:
         with _raw_client(live_flat_files, key) as s3:
-            s3.get_object(Bucket=live_s3_config.s3_bucket, Key=key)["Body"].close()
+            s3.get_object(Bucket=S3_BUCKET, Key=key)["Body"].close()
     except ClientError as error:
         metadata = error.response.get("ResponseMetadata", {})
         code = error.response.get("Error", {}).get("Code")

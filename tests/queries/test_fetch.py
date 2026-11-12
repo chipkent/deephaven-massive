@@ -458,7 +458,7 @@ def test_a_followed_read_s_patience_starts_when_its_read_does(
     monkeypatch.setattr(rest_module.RestReader, "patience", recorded)
     fake_rest.on_request(heard)
     fake_rest.reply_default(Reply(envelope([])))
-    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_concurrency=1)
+    config = dm.MassiveConfig(api_key="test-key", max_concurrency=1)
     with dm.MassiveSession(config) as m:
         result = m.stocks.trades(live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=False

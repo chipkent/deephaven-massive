@@ -1437,7 +1437,7 @@ def test_a_collected_table_stops_its_poller(
 def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
     *, script: Script, clock: FakeClock, fake_rest: FakeRestServer
 ) -> None:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     pollers = cast("Any", m._core.rest_transport())._state.pollers
     script.rows()
     tables = [start(m, script=script, pollers=pollers, clock=clock)]
@@ -1684,7 +1684,7 @@ def rest_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     yield m
     m.close()
 
@@ -1774,7 +1774,7 @@ def routed_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     yield m
     m.close()
 
@@ -1907,9 +1907,7 @@ def ignoring_session(
     # A routed session whose polls leave out an unavailable symbol quietly.
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.IGNORE
-    )
+    config = dm.MassiveConfig(api_key="test-key", unavailable_symbols=dm.OnError.IGNORE)
     m = dm.MassiveSession(config)
     yield m
     m.close()
@@ -1922,9 +1920,7 @@ def raising_session(
     # A routed session whose polls fail on an unavailable symbol.
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
-    )
+    config = dm.MassiveConfig(api_key="test-key", unavailable_symbols=dm.OnError.RAISE)
     m = dm.MassiveSession(config)
     yield m
     m.close()
@@ -2184,7 +2180,7 @@ def feed_session(
 ) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     yield m
     m.close()
 
@@ -2457,7 +2453,7 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
         {"id": "c", "ticker": "@@2"},
     ]
     fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
-    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    config = dm.MassiveConfig(api_key="test-key")
     with dm.MassiveSession(config) as m:
         q = build_query(m._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02")
         table = q.poll(60, mode=mode)

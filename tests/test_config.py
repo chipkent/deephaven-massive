@@ -128,9 +128,6 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.rest_basic_subscriptions == frozenset()
     assert base.delayed_subscriptions == frozenset()
     assert base.flush_interval == 0.05
-    assert base.rest_base_url == "https://api.massive.com"
-    assert base.s3_endpoint_url == "https://files.massive.com"
-    assert base.s3_bucket == "flatfiles"
     assert base.noncanonical_symbols is dm.OnError.LOG
     assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
@@ -163,7 +160,8 @@ def test_frozen_and_secrets_hidden() -> None:
     text = repr(cfg)
     assert hidden_key not in text
     assert hidden_s3 not in text
-    assert "s3_access_key_id='id'" in text
+    assert text.startswith("MassiveConfig(s3_access_key_id='id', ")
+    assert "api_key" not in text
 
 
 def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
@@ -481,101 +479,6 @@ def test_equal_backoffs_are_accepted() -> None:
     assert cfg.max_reconnect_backoff == cfg.reconnect_backoff == 30.0
 
 
-def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
-    config = dm.MassiveConfig(
-        api_key="k",
-        s3_endpoint_url="https://reader:hunter2@files.massive.com",
-    )
-    shown = repr(config)
-    assert "hunter2" not in shown
-    assert "s3_endpoint_url='https://***@files.massive.com'" in shown
-    assert shown.startswith("MassiveConfig(s3_access_key_id=")
-    assert "api_key" not in shown
-
-
-@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url"])
-@pytest.mark.parametrize(
-    "url",
-    [
-        "",
-        "~",
-        "api.massive.com",
-        "ftp://api.massive.com",
-        "https://",
-        "https:///path",
-        "https://api.massive.com/a b",
-        " https://api.massive.com",
-        "http://[::1",
-        "https://u@",
-        "HTTPS://api.massive.com",
-    ],
-)
-def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> None:
-    with pytest.raises(ValueError, match=f"^{name} must be an http or https URL with a host"):
-        _replace(MassiveConfig(api_key="k"), **{name: url})
-
-
-@pytest.mark.parametrize(
-    "url",
-    ["http://127.0.0.1:8080", "http://localhost", "https://api.massive.com/", "http://[::1]:9000"],
-)
-def test_an_http_url_with_a_host_is_accepted(url: str) -> None:
-    config = MassiveConfig(api_key="k", rest_base_url=url, s3_endpoint_url=url)
-    assert (config.rest_base_url, config.s3_endpoint_url) == (url, url)
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "https://files.massive.com/v1?x=1",
-        "https://reader:pw@files.massive.com",
-        "http://minio:9000",
-    ],
-)
-def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> None:
-    assert MassiveConfig(api_key="k", s3_endpoint_url=url).s3_endpoint_url == url
-
-
-@pytest.mark.parametrize(
-    ("url", "reason"),
-    [
-        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
-        ("https://api.massive.com?apiKey=1", "must name only a scheme, host, and port"),
-        ("https://api.massive.com#top", "must name only a scheme, host, and port"),
-        ("https://u:hunter2@api.massive.com", "must name only a scheme, host, and port"),
-        ("http://api.massive.com", "would send the API key in clear text; use https"),
-        ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
-        ("https://api.massive.com:99999", "is not an absolute http or https URL"),
-        ("https://api.massive.com:0", "is not an absolute http or https URL"),
-    ],
-)
-def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
-    url: str, reason: str
-) -> None:
-    with pytest.raises(ValueError, match=f"^rest_base_url '.*' {reason}") as info:
-        MassiveConfig(api_key="k", rest_base_url=url)
-    assert "hunter2" not in str(info.value)
-
-
-def test_a_refused_url_never_shows_a_password() -> None:
-    with pytest.raises(ValueError, match="must be an http") as info:
-        MassiveConfig(api_key="k", rest_base_url="ftp://u:hunter2@api.massive.com")
-    assert "hunter2" not in str(info.value)
-    assert "'ftp://***@api.massive.com'" in str(info.value)
-
-
-@pytest.mark.parametrize("bucket", ["", "  "])
-def test_the_bucket_must_not_be_blank(bucket: str) -> None:
-    with pytest.raises(ValueError, match=r"^s3_bucket must name a bucket"):
-        MassiveConfig(api_key="k", s3_bucket=bucket)
-
-
-@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url", "s3_bucket"])
-def test_the_text_settings_must_be_strings(base: MassiveConfig, name: str) -> None:
-    with pytest.raises(TypeError, match=f"^{name} must be a str, not NoneType"):
-        _replace(base, **{name: None})
-
-
 def test_a_refused_ws_host_never_shows_a_password() -> None:
     with pytest.raises(ValueError, match=r"got '\*\*\*@delayed\.massive\.com'$") as info:
         dm.MassiveConfig(
@@ -640,9 +543,6 @@ rest_basic_subscriptions: [stocks, currencies]
 delayed_subscriptions:
   - options
 flush_interval: 0.25
-rest_base_url: https://rest.example.com
-s3_endpoint_url: "https://files.example.com"
-s3_bucket: 'bucket'
 noncanonical_symbols: raise
 unlisted_symbols: raise
 unreadable_symbols: ignore
@@ -666,9 +566,6 @@ connection_taken: reconnect
         rest_basic_subscriptions={Subscription.STOCKS, Subscription.CURRENCIES},
         delayed_subscriptions={Subscription.OPTIONS},
         flush_interval=0.25,
-        rest_base_url="https://rest.example.com",
-        s3_endpoint_url="https://files.example.com",
-        s3_bucket="bucket",
         noncanonical_symbols=OnError.RAISE,
         unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
@@ -701,10 +598,10 @@ def test_an_empty_mapping_sets_nothing(tmp_path: Path, caplog: pytest.LogCapture
 def test_from_file_logs_the_file_and_the_keys_it_set(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    file = _settings(tmp_path, "max_outage: 600\ns3_bucket: b\n")
+    file = _settings(tmp_path, "max_outage: 600\nconnection_taken: fail\n")
     with caplog.at_level(logging.INFO, logger="deephaven_massive._config"):
         MassiveConfig.from_file(file)
-    assert caplog.messages == [f"settings file {file} set max_outage, s3_bucket"]
+    assert caplog.messages == [f"settings file {file} set max_outage, connection_taken"]
 
 
 @pytest.mark.usefixtures("key")
@@ -779,7 +676,7 @@ def test_a_refusal_is_logged_at_debug(tmp_path: Path, caplog: pytest.LogCaptureF
 
 def test_a_file_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
     file = tmp_path / "settings.yaml"
-    file.write_bytes(b"s3_bucket: caf\xe9\n")
+    file.write_bytes(b"connection_taken: caf\xe9\n")
     with pytest.raises(
         ValueError,
         match=f"^settings file {re.escape(str(file))} is not UTF-8 text: invalid continuation byte",
@@ -788,7 +685,7 @@ def test_a_file_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_control_character_is_refused(tmp_path: Path) -> None:
-    assert "unacceptable character #x0007" in _refused(tmp_path, "s3_bucket: a\x07b\n")
+    assert "unacceptable character #x0007" in _refused(tmp_path, "connection_taken: a\x07b\n")
 
 
 def test_a_syntax_error_names_its_line_and_column(tmp_path: Path) -> None:
@@ -830,11 +727,11 @@ def test_a_second_document_is_refused(tmp_path: Path) -> None:
     ("text", "expected"),
     [
         (
-            "s3_bucket: !!python/object:os.system ls\n",
-            ", line 1, column 12: a tag (tag:yaml.org,2002:python/object:os.system) is not allowed",
+            "connection_taken: !!python/object:os.system ls\n",
+            ", line 1, column 19: a tag (tag:yaml.org,2002:python/object:os.system) is not allowed",
         ),
-        ("s3_bucket: !!str ON\n", ", line 1, column 12: a tag (tag:yaml.org,2002:str) is not"),
-        ("s3_bucket: !custom ON\n", ", line 1, column 12: a tag (!custom) is not allowed"),
+        ("connection_taken: !!str fail\n", ", line 1, column 19: a tag (tag:yaml.org,2002:str)"),
+        ("connection_taken: !custom fail\n", ", line 1, column 19: a tag (!custom) is not"),
         ("delayed_subscriptions: !!seq [options]\n", ", line 1, column 24: a tag"),
         ("websocket_hosts: !!map {stocks: a.example.com}\n", ", line 1, column 18: a tag"),
         ("!!python/name:os.system max_outage: 1\n", ", line 1, column 1: a tag"),
@@ -1044,27 +941,6 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
                 "long to read; write one such as 8"
             ),
         ),
-        # The text settings.
-        *(
-            (
-                text,
-                (
-                    f", line 1, column {column}: {name} is empty; write the value, or leave "
-                    "the setting out for its default"
-                ),
-            )
-            for text, name, column in [
-                ("rest_base_url:\n", "rest_base_url", 15),
-                ("s3_endpoint_url: ~\n", "s3_endpoint_url", 18),
-                ("s3_bucket: null\n", "s3_bucket", 12),
-                ("s3_bucket: NULL\n", "s3_bucket", 12),
-                ("s3_bucket: ''\n", "s3_bucket", 12),
-            ]
-        ),
-        (
-            "rest_base_url: [https://api.massive.com]\n",
-            ", line 1, column 16: rest_base_url must be text, not a list or mapping",
-        ),
     ],
 )
 def test_each_converter_refuses_what_it_cannot_convert(
@@ -1078,10 +954,10 @@ def test_tickers_like_on_and_no_stay_text(tmp_path: Path) -> None:
     # YAML 1.1 reads ON, NO, Y, and off as booleans, and 0700 as octal; the file keeps text.
     file = _settings(
         tmp_path,
-        "s3_bucket: NO\nwebsocket_hosts: {stocks: y}\n",
+        "websocket_hosts: {stocks: y, options: no}\n",
     )
     config = MassiveConfig.from_file(file)
-    assert config.s3_bucket == "NO"
+    assert config.websocket_hosts[AssetClass.OPTIONS] == "no"
     assert config.websocket_hosts[AssetClass.STOCKS] == "y"
 
 
@@ -1100,14 +976,8 @@ def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path
     assert message.startswith(
         ", line 1, column 1: websocket_hosts[stocks]='Socket.massive.com' must"
     )
-    message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
-    assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
-    message = _refused(tmp_path, "max_outage: 600\nrest_base_url: https://api.massive.com/v3\n")
-    assert message.startswith(
-        ", line 2, column 1: rest_base_url 'https://api.massive.com/v3' must name only a scheme"
-    )
-    message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")
-    assert message.startswith(", line 2, column 1: s3_endpoint_url must be an http or https URL")
+    message = _refused(tmp_path, "max_outage: 600\nflush_interval: 0\n")
+    assert message.startswith(", line 2, column 1: flush_interval must be positive")
     message = _refused(tmp_path, "reconnect_backoff: 200\n")
     assert message == ": max_reconnect_backoff must not be below reconnect_backoff"
 
@@ -1158,37 +1028,6 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
     assert not getattr(sys, "_is_gil_enabled", lambda: True)()
-
-
-def test_a_refused_rest_base_url_never_shows_its_query() -> None:
-    with pytest.raises(ValueError, match="must name only") as info:
-        MassiveConfig(api_key="k", rest_base_url="https://api.massive.com?apiKey=hunter2")
-    assert "'https://api.massive.com?***'" in str(info.value)
-    assert "hunter2" not in str(info.value)
-
-
-@pytest.mark.parametrize(
-    ("url", "shown"),
-    [
-        ("ftp://api.massive.com?apiKey=hunter2", "'ftp://api.massive.com?***'"),
-        ("https://api.massive.com?apiKey=hun ter2", "'https://api.massive.com?***'"),
-        ("ftp://u:pw@api.massive.com#hunter2", "'ftp://***@api.massive.com#***'"),
-    ],
-)
-def test_an_early_rest_base_url_refusal_never_shows_its_query(
-    url: str, shown: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.DEBUG, logger="deephaven_massive")
-    with pytest.raises(ValueError, match=r"^rest_base_url must be an http") as info:
-        MassiveConfig(api_key="k", rest_base_url=url)
-    assert str(info.value).endswith(f"not {shown}")
-    assert "hunter2" not in str(info.value)
-    assert "hunter2" not in caplog.text
-
-
-def test_an_s3_endpoint_refusal_still_shows_its_query() -> None:
-    with pytest.raises(ValueError, match=r"not 'ftp://files\.massive\.com\?x=1'$"):
-        MassiveConfig(api_key="k", s3_endpoint_url="ftp://files.massive.com?x=1")
 
 
 # --- The settings reference --------------------------------------------------------------------
@@ -1307,7 +1146,9 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert set(texts) == {f.name for f in dataclasses.fields(MassiveConfig)}
     # The default comes from the code, so the entry's last sentence giving it is left out, and
     # the paragraphs after the first are the setting's detail.
-    assert texts["s3_bucket"] == "Sets the S3 bucket flat files are read from."
+    assert texts["flush_interval"] == (
+        "Sets how many seconds pass between the batches of streamed rows added to live tables."
+    )
     assert "Defaults to" not in texts["reconnect_backoff"]
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["unavailable_symbols"] == (
@@ -1315,7 +1156,8 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
         "request with the arguments you gave it."
     )
     details = _config._setting_details()
-    assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
+    flush = "A shorter interval shows each row sooner, and a longer one adds more rows in each"
+    assert details["flush_interval"] == [f"{flush}\nupdate."]
     assert "EntitlementError" in details["delayed_subscriptions"][1]
     assert details["noncanonical_symbols"][1].startswith(
         "- `dm.OnError.LOG` skips the row and logs a warning naming the value.\n"

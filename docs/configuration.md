@@ -142,15 +142,6 @@ max_reconnect_backoff: 120  # the default
 
 # When another program with this key takes a stream's connection: fail, or reconnect.
 connection_taken: fail  # the default
-
-# Where REST requests go: change it only for another server.
-rest_base_url: https://api.massive.com  # the default
-
-# Where flat files are read from: change it only for another server.
-s3_endpoint_url: https://files.massive.com  # the default
-
-# The flat files' S3 bucket: change it only with s3_endpoint_url.
-s3_bucket: flatfiles  # the default
 ```
 
 <a id="settings-table"></a>
@@ -182,9 +173,6 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `reconnect_backoff` | Sets the shortest wait, in seconds, before reconnecting a dropped stream. | A number of seconds from 15 to `max_reconnect_backoff`, such as `60` | `30` |
 | `max_reconnect_backoff` | Sets the longest wait, in seconds, before reconnecting a dropped stream. | A number of seconds, at least `reconnect_backoff`, such as `300` | `120` |
 | `connection_taken` | Decides what a live table does when another connection with the same API key takes over its own. | `fail` or `reconnect` | `fail` |
-| `rest_base_url` | Sets the URL REST requests go to. | An `https` URL of a host alone, or `http` for your own machine, such as `https://api.massive.com` | `https://api.massive.com` |
-| `s3_endpoint_url` | Sets the URL flat files are read from. | An `http` or `https` URL, such as `https://files.massive.com` | `https://files.massive.com` |
-| `s3_bucket` | Sets the S3 bucket flat files are read from. | A bucket name, such as `flatfiles` | `flatfiles` |
 
 <a id="setting-details"></a>
 
@@ -389,20 +377,5 @@ connects with the same key, Massive closes this session's connection.
 Sessions with the same key and streaming settings share one connection whatever
 this setting. See
 [Live table messages](troubleshooting.md#live-table-messages).
-
-#### rest_base_url
-
-Change it only to reach a server other than Massive's, such as a local test server.
-The config refuses a URL with a path, a query, a fragment, a user and password, or
-port 0. It also refuses an `http` URL of a host that isn't on your own machine. The
-error shows `***` in place of the URL's query and password.
-
-#### s3_endpoint_url
-
-Change it only to reach a server other than Massive's.
-
-#### s3_bucket
-
-Change it only with `s3_endpoint_url`.
 
 <!-- End of the generated settings. -->

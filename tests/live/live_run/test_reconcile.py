@@ -87,7 +87,7 @@ def test_streamed_bars_are_compared_with_history_per_symbol_and_minute(
     seen: list[tuple[str, str, str]] = []
     folder = tmp_path / "reconcile"
     folder.mkdir()
-    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k")) as m:
         reconcile.run_reconcile(
             m,
             units=["stocks delayed", "indices delayed"],
@@ -201,7 +201,7 @@ def test_index_bars_are_compared_without_a_volume(
     seen: list[tuple[str, str, str]] = []
     folder = tmp_path / "reconcile"
     folder.mkdir()
-    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k")) as m:
         reconcile.run_reconcile(
             m,
             units=["indices delayed"],
@@ -277,7 +277,7 @@ def _night_reconcile(
     )
     seen: list[tuple[str, str, str]] = []
     folder.mkdir()
-    with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
+    with dm.MassiveSession(dm.MassiveConfig(api_key="k")) as m:
         reconcile.run_night_reconcile(
             m,
             units=["crypto real-time", "futures delayed"],

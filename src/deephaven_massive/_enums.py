@@ -339,7 +339,7 @@ class Market(StrEnum):
     STOCKS = "stocks"
     OTC = "otc"
     INDICES = "indices"
-    FX = "fx"
+    FOREX = "fx"
     CRYPTO = "crypto"
 
 

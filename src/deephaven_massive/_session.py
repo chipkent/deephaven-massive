@@ -50,7 +50,7 @@ import deephaven_massive.namespaces._stock_filings as stock_filings
 import deephaven_massive.namespaces._stock_financials as stock_financials
 import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive import _snapshots as snapshots
-from deephaven_massive._config import MassiveConfig, shown_setting
+from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
 from deephaven_massive._errors import MassiveError, raises_through
@@ -138,8 +138,7 @@ def _next_number() -> int:
 def _log_session(label: str, config: MassiveConfig) -> None:
     """Log, at INFO, a new session's label and its configuration, without its credentials.
 
-    The line holds every field the configuration's `repr` shows except `s3_access_key_id`, each
-    as `shown_setting` shows it, so a URL never shows a user and password; the
+    The line holds every field the configuration's `repr` shows except `s3_access_key_id`; the
     API key, the S3 access key id, and the S3 secret are each shown only as set or unset, since
     a log is attached to bug reports. The two S3 credentials are set together or not at all.
     The process itself (versions, the GIL, the snapshot, the proxy and CA settings) is
@@ -150,7 +149,7 @@ def _log_session(label: str, config: MassiveConfig) -> None:
         config: The session's configuration.
     """
     shown = ", ".join(
-        f"{field.name}={shown_setting(field.name, getattr(config, field.name))}"
+        f"{field.name}={getattr(config, field.name)!r}"
         for field in dataclasses.fields(config)
         if field.repr and field.name != "s3_access_key_id"
     )
@@ -228,12 +227,14 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
 
     Messages name the session by its label, such as `MassiveSession #1`.
 
-    Use one session per API key. Massive allows your account one streaming connection per asset
-    class. Two sessions with the same key share it only when their streaming settings match, such
-    as `websocket_hosts` and `max_outage`. Otherwise each opens its own, and the newer connection
-    takes the older one's place. The live tables on the older one then fail, or reconnect if their
-    session's `MassiveConfig.connection_taken` is `RECONNECT`. A WARNING names the clash when you
-    create the second session.
+    You can open several sessions with the same API key, and they share Massive's limits for
+    that key. They share one request rate, and Massive allows your account one streaming
+    connection per asset class. Sessions share that connection when their streaming settings
+    match, such as `websocket_hosts` and `max_outage`. Otherwise each opens its own, and the newer
+    connection takes the older one's place. The live tables on the older one then fail, or
+    reconnect if their session's `MassiveConfig.connection_taken` is `RECONNECT`. A WARNING names
+    the clash when you create the second session. A session that no variable holds and that runs
+    no live table closes by itself, with no warning.
 
     Example:
         ::
@@ -635,12 +636,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
             raise ValueError(
-                "table is not a live result of this session: release() takes a table that this "
-                "session returned from blink(), append_only(), ring(), last_by(), poll(), "
-                "fetch(), history(), connections(), streams(), rate_limits(), or "
-                "symbol_reads(). For a table derived from one, release the live table it came "
-                "from; a static fetch(wait=True) or history(..., wait=True) table has nothing to "
-                "release"
+                f"{self._core.label}: release() takes a live table that this session returned, "
+                "and this table is not one. For a table you made from a live table, release "
+                "the live table instead. A table of another session needs that session's "
+                "release(). A static table needs no release"
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)

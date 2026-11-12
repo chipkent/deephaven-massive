@@ -206,20 +206,6 @@ def test_creating_a_session_logs_its_configuration_without_secrets(
         assert secret not in line
 
 
-def test_the_logged_configuration_never_shows_a_url_s_password(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    config = dm.MassiveConfig(
-        api_key="k", s3_endpoint_url="https://reader:hunter2@files.massive.com"
-    )
-    with caplog.at_level(logging.INFO, logger="deephaven_massive._session"):
-        m = dm.MassiveSession(config)
-    m.close()
-    [line] = [r.getMessage() for r in caplog.records if "with api_key set" in r.getMessage()]
-    assert "s3_endpoint_url='https://***@files.massive.com'" in line
-    assert "hunter2" not in caplog.text
-
-
 def test_config_must_be_a_massive_config() -> None:
     with pytest.raises(TypeError, match=r"config must be a dm\.MassiveConfig"):
         dm.MassiveSession(cast("dm.MassiveConfig", {"api_key": "k"}))
@@ -687,13 +673,14 @@ def test_context_manager_closes() -> None:
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
         massive_session.release(cast("Table", "t"))
-    with pytest.raises(
-        ValueError, match=r"not a live result of this session: release\(\) takes"
-    ) as caught:
+    with pytest.raises(ValueError, match=r": release\(\) takes a live table") as caught:
         massive_session.release(new_table([string_col("Symbol", ["A"])]))
-    assert "a static fetch(wait=True) or history(..., wait=True) table" in str(caught.value)
-    assert "streams()" in str(caught.value)
-    assert "release the live table it came from" in str(caught.value)
+    assert str(caught.value) == (
+        f"{massive_session._core.label}: release() takes a live table that this session "
+        "returned, and this table is not one. For a table you made from a live table, release "
+        "the live table instead. A table of another session needs that session's release(). A "
+        "static table needs no release"
+    )
 
 
 def test_a_session_closed_while_a_stream_opens(
@@ -811,9 +798,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     )
     # The fake S3's test credentials, passed as a mapping as the flat-file tests do.
     credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
-    config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
-    )
+    config = dm.MassiveConfig(api_key="test-key", **cast("dict[str, Any]", credentials))
     made: dict[str, Table] = {}
     sessions: list[dm.MassiveSession] = []
 

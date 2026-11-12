@@ -16,7 +16,7 @@ logger's level:
   `deephaven_server.Server` may import the library before the server replaces `sys.stderr`: a
   handler made then would keep writing to the old stream, which Deephaven never sees. A session
   needs the running server, so by then `sys.stderr` is final.
-- **`enable_debug_logging(output=LogOutput.STDERR)`**, for a console that is already running,
+- **`enable_debug_logging(filename=None)`**, for a console that is already running,
   where a new environment variable takes effect only after a server restart.
 
 `disable_debug_logging()` undoes either: it removes and closes the handler and sets the logger's
@@ -97,7 +97,6 @@ import sys
 import threading
 import time
 from datetime import datetime
-from enum import Enum
 from importlib.metadata import PackageNotFoundError, distribution, requires, version
 from pathlib import Path
 from typing import Final
@@ -108,7 +107,6 @@ __all__ = [
     "FILE_VARIABLE",
     "FORMAT",
     "LEVEL_VARIABLE",
-    "LogOutput",
     "configure_from_environment",
     "disable_debug_logging",
     "enable_debug_logging",
@@ -140,25 +138,6 @@ logger = logging.getLogger(__name__)
 _library_logger = logging.getLogger("deephaven_massive")
 
 
-class LogOutput(Enum):
-    """Where `enable_debug_logging` writes the log, when it is not a file.
-
-    Pass a member, or a file path (`str` or `os.PathLike`), as `output`.
-
-    Example:
-        ::
-
-            import deephaven_massive as dm
-
-            dm.enable_debug_logging(dm.LogOutput.STDERR)  # the default
-            dm.enable_debug_logging("/tmp/massive.log")  # a file instead
-    """
-
-    STDERR = "stderr"
-    """`sys.stderr` as it is when the log is turned on, which Deephaven copies into its log,
-    the container's log, and the Deephaven IDE's log panel."""
-
-
 class _Switch:
     """What this module has done in the process: the handler it installed and the variables read.
 
@@ -183,7 +162,7 @@ class _Switch:
 _switch = _Switch()
 
 
-def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.STDERR) -> None:
+def enable_debug_logging(filename: str | os.PathLike[str] | None = None) -> None:
     """Send every record of the library, DEBUG and up, to stderr or to a file.
 
     Call it from a Deephaven console when something goes wrong, run the failing code again, and
@@ -199,11 +178,12 @@ def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.
     previous handler, if any, stays.
 
     Args:
-        output: `LogOutput.STDERR` (the default) for `sys.stderr` as it is at the call, or a
-            file to append the lines to, in UTF-8, created if missing.
+        filename: The file to append the lines to, in UTF-8, created if missing. Leave it out
+            for `sys.stderr` as it is at the call, which Deephaven copies into its log, the
+            container's log, and the Deephaven IDE's log panel.
 
     Raises:
-        TypeError: If `output` is neither a `LogOutput` nor a path.
+        TypeError: If `filename` is neither None nor a path (`str` or `os.PathLike`).
 
     Example:
         ::
@@ -214,11 +194,12 @@ def enable_debug_logging(output: LogOutput | str | os.PathLike[str] = LogOutput.
             m = dm.MassiveSession()
             t = m.stocks.last_trade(["AAPL"]).fetch()  # its requests are now in the log
     """
-    if not isinstance(output, LogOutput | str | os.PathLike):
+    if filename is not None and not isinstance(filename, str | os.PathLike):
         raise TypeError(
-            f"output must be a dm.LogOutput or a file path, not {type(output).__name__}"
+            "filename must be a file path (str or os.PathLike) or None, "
+            f"not {type(filename).__name__}"
         )
-    _install(logging.DEBUG, output, environment=False, source="enable_debug_logging()")
+    _install(logging.DEBUG, filename, environment=False, source="enable_debug_logging()")
 
 
 def disable_debug_logging() -> None:
@@ -314,7 +295,7 @@ def configure_from_environment() -> None:
         )
     source = "the environment" if value else f"the environment; {LEVEL_VARIABLE} unset, so DEBUG"
     try:
-        _install(level, path or LogOutput.STDERR, environment=True, source=source)
+        _install(level, path or None, environment=True, source=source)
     except OSError as error:
         raise OSError(
             f"{FILE_VARIABLE}={path!r} cannot be opened for appending: {error.strerror or error}"
@@ -322,7 +303,7 @@ def configure_from_environment() -> None:
 
 
 def _install(
-    level: int, output: LogOutput | str | os.PathLike[str], *, environment: bool, source: str
+    level: int, filename: str | os.PathLike[str] | None, *, environment: bool, source: str
 ) -> None:
     """Replace the library's handler with a new one, set the logger's level, log the environment.
 
@@ -332,7 +313,7 @@ def _install(
 
     Args:
         level: The level of the `deephaven_massive` logger.
-        output: `LogOutput.STDERR`, or the file to append to.
+        filename: The file to append to, or None for `sys.stderr`.
         environment: True when the environment variables asked for it: the handler is then
             not installed if `enable_debug_logging` has run meanwhile.
         source: What turned the log on, for the line, such as `"enable_debug_logging()"`.
@@ -341,8 +322,8 @@ def _install(
     """
     handler: logging.Handler = (
         logging.StreamHandler(sys.stderr)
-        if isinstance(output, LogOutput)
-        else logging.FileHandler(output, encoding="utf-8")
+        if filename is None
+        else logging.FileHandler(filename, encoding="utf-8")
     )
     formatter = logging.Formatter(FORMAT)
     formatter.converter = time.gmtime
@@ -367,7 +348,7 @@ def _install(
     logger.info(
         "logging deephaven_massive at %s to %s (from %s)",
         logging.getLevelName(level),
-        output.value if isinstance(output, LogOutput) else Path(output).resolve(),
+        "stderr" if filename is None else Path(filename).resolve(),
         source,
     )
     _log_environment()

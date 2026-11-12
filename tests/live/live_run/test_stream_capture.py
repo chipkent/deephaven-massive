@@ -317,7 +317,7 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
         for ticker, strike in contracts
     ]
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope(rows)))
-    harness = make_ws_session(rest_base_url=fake_rest.url)
+    harness = make_ws_session()
 
     def diagnostics_caught_up() -> None:
         # The first sample may run before the session's diagnostics show the new stream.
@@ -778,7 +778,7 @@ def test_an_options_unit_without_contracts_fails(
     make_ws_session: Callable[..., WsSession], fake_rest: FakeRestServer, tmp_path: Path
 ) -> None:
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([])))
-    harness = make_ws_session(rest_base_url=fake_rest.url)
+    harness = make_ws_session()
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,

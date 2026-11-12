@@ -531,3 +531,20 @@ the agent says whether it breaks code and, if so, which version comes next, befo
 Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
 owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
 `1.0.0`, standard Semantic Versioning.
+
+**106. Massive's endpoints are constants, not settings** (2026-11-12). `MassiveConfig` had
+`rest_base_url`, `s3_endpoint_url`, and `s3_bucket`, documented as "change it only to reach a
+server other than Massive's": settings that only tests needed. A setting is cheap to add and
+breaking to remove, so before `0.1.0` they leave the public settings. Massive's REST API, flat-file
+endpoint, and bucket are now wire constants, `_massive.REST_BASE_URL`, `S3_ENDPOINT_URL`, and
+`S3_BUCKET`, which the ingest layer reads by attribute each time it builds a client or a
+governor lease. A test points the library at a fake server by replacing the constant with
+`monkeypatch.setattr` before the session is created (the `fake_rest` fixture does it for every
+test that uses the fake REST server), as stream tests already replace the session's WebSocket
+transport. No hidden setting, environment variable, or private constructor argument replaces
+them: nothing a user can reach changes where the key is sent. A non-`NoSuchKey` 404 from the
+flat-file endpoint is reported as Massive's answer, since there is no setting left to check.
+The same review renamed `dm.Market.FX` to `dm.Market.FOREX` (one spelling of forex, as
+`dm.AssetClass.FOREX`), replaced `dm.LogOutput` with `enable_debug_logging(filename=None)`, and
+kept `subscription_confirmation_timeout`, `flush_interval`, and `max_reconnect_backoff`, which
+have documented user reasons to change.

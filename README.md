@@ -134,6 +134,13 @@ fixes.
 Paste each example into the **Console** panel of the Deephaven IDE and run it. The table gives
 each example's plan, and Examples 9 to 13 read the settings file that Example 8 saves.
 
+Close each example's session with `m.close()` before you paste the next, except Example 5's,
+which Example 6 closes. A live table keeps running, and using your key's requests, until its
+session closes. Every session that uses your key shares one request rate, such as Basic's five
+requests a minute. Your key also gets one streaming connection per asset class, which sessions
+with the same settings share. A session with no live tables also closes by itself, quietly,
+once no variable holds it.
+
 | # | Example | Plan |
 |---|---|---|
 | 1 | [Queries: read a week of Apple's daily bars](#read-daily-bars) | Stocks Basic |
