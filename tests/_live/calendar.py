@@ -3,16 +3,16 @@
 No live test reads a fixed date: a fixed date ages out of a Basic plan's two years of history
 and can land on a holiday. Each computes its days from the run's New York day with the
 exchanges' fixed holiday rules, here. The library keeps no holiday calendar on purpose, so this
-one lives with the tests; it reuses the library's weekend rule (`dates.is_trading_day`). A
-closure no rule predicts (a national day of mourning) is not known: a test that reads one finds
-no rows there and says so.
+one lives with the tests, with the exchanges' weekend rule: they trade Monday to Friday. It
+imports neither the library nor Deephaven, so the live run's parent, which starts no JVM,
+can use it. A closure no rule predicts (a national day of mourning) is not known: a test that
+reads one finds no rows there and says so.
 
 Every function is pure but `today`, which reads the clock.
 """
 
 from __future__ import annotations
 
-import importlib
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo
@@ -22,6 +22,9 @@ if TYPE_CHECKING:
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
 """The zone the US exchanges keep their calendar in."""
+
+SATURDAY: Final = 5
+"""`date.weekday()` of a Saturday: the exchanges trade on the five days before it."""
 
 StampDays = dict[str, tuple[date, date]]
 """The day-stamp checks' dates, by unit: `"day"` the full and the half trading day; `"week"`,
@@ -149,11 +152,10 @@ def market_holidays(year: int) -> frozenset[date]:
 def is_trading_day(day: date) -> bool:
     """Return whether the US stock exchanges open on a day.
 
-    The weekend rule is the library's own (`dates.is_trading_day` of stocks); the holidays,
-    which the library does not keep, come from `market_holidays`. So it describes the stock,
-    option, and index calendar. Crypto trades every day and forex on US holidays: the days they
-    share with stocks (the recent Monday) are at most a week older for it. A futures contract
-    is chosen by its own roll rules (`contracts`).
+    The exchanges trade Monday to Friday, except on the holidays of `market_holidays`. So it
+    describes the stock, option, and index calendar. Crypto trades every day and forex on US
+    holidays: the days they share with stocks (the recent Monday) are at most a week older for
+    it. A futures contract is chosen by its own roll rules (`contracts`).
 
     Args:
         day: The day.
@@ -161,10 +163,7 @@ def is_trading_day(day: date) -> bool:
     Returns:
         True for a stock trading day.
     """
-    dates = importlib.import_module("deephaven_massive._datasets.dates")
-    dm = importlib.import_module("deephaven_massive")
-    weekday: bool = dates.is_trading_day(dm.AssetClass.STOCKS, day)
-    return weekday and day not in market_holidays(day.year)
+    return day.weekday() < SATURDAY and day not in market_holidays(day.year)
 
 
 def trading_day_before(day: date) -> date:

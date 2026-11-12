@@ -497,6 +497,13 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
     instants are an empty range, which is allowed. Datetimes are compared in UTC, so the
     repeated hour of a daylight-saving fall-back is ordered correctly.
 
+    A reversed range is refused for two reasons. Massive answers it with no error where it is
+    sent as filters: the dividends, sent `ex_dividend_date.gte` a month ago and `.lte` a year
+    ago, answered HTTP 200 with no rows. And `history()` cannot send it at all: it turns the
+    range into the bars or days that fit inside it (`bar_periods.bar_starts`, the flat files'
+    days), a reversed range fits none, and so nothing would be requested, although the
+    aggregates range answers a reversed `{from}` and `{to}` with HTTP 400.
+
     Args:
         start: The parsed lower bound.
         end: The parsed upper bound.
@@ -665,6 +672,8 @@ def bounds(
         check_order(first, last)
     except ValueError:
         if end is None:  # `last` is now, in `first`'s kind, so only the order can fail
+            # Refused because Massive answers it with no error: AAPL's day bars from 10 to 20
+            # days ahead answered HTTP 200 with no rows, which would read as no trading.
             raise ValueError(
                 f"start ({first!r}) must not be after now ({last!r}); end=None reads through now"
             ) from None

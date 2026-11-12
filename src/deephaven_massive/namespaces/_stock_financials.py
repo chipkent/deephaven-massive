@@ -245,6 +245,8 @@ class StocksFinancialsNamespace(Namespace):
                     "AAPL", timeframe=dm.Timeframe.ANNUAL
                 ).fetch()
         """
+        # Refused because Massive answers it with no error: sent `trailing_twelve_months`, the
+        # balance sheets answered HTTP 200 with no rows, which would read as no statements.
         if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
             raise ValueError(
                 "balance sheets have no trailing twelve months; "
