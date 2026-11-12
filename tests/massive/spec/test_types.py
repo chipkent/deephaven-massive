@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -149,7 +149,7 @@ def test_a_projection_is_copied_and_read_only() -> None:
     mapping["value"] = "Value"
     assert membership.projection == {"last_updated": "Timestamp"}
     with pytest.raises(TypeError):
-        cast("dict[str, str]", membership.projection)["value"] = "Value"
+        membership.projection["value"] = "Value"  # type: ignore[index]  # the point: read-only
 
 
 def test_memberships_with_equal_projections_are_equal_and_hashable() -> None:
@@ -475,7 +475,7 @@ def test_provenance_urls_are_copied_and_read_only() -> None:
     urls.clear()
     assert provenance.urls == {(Transport.WS, "stocks/T"): (_URL,)}
     with pytest.raises(TypeError):
-        cast("dict[tuple[Transport, str], str]", provenance.urls)[Transport.WS, "x"] = _URL
+        provenance.urls[Transport.WS, "x"] = _URL  # type: ignore[index]  # the point: read-only
 
 
 def test_provenance_plans_are_copied_and_read_only() -> None:
@@ -491,7 +491,7 @@ def test_provenance_plans_are_copied_and_read_only() -> None:
     assert provenance.plans == {_URL: page}
     assert page.plans[0].history is None
     with pytest.raises(TypeError):
-        cast("dict[str, PlanAccess]", provenance.plans)["x"] = page
+        provenance.plans["x"] = page  # type: ignore[index]  # the point: read-only
     assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).plans == {}
 
 
@@ -501,7 +501,7 @@ def test_provenance_titles_are_copied_and_read_only() -> None:
     titles.clear()
     assert provenance.titles == {_URL: "Trades"}
     with pytest.raises(TypeError):
-        cast("dict[str, str]", provenance.titles)["x"] = "X"
+        provenance.titles["x"] = "X"  # type: ignore[index]  # the point: read-only
     assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).titles == {}
 
 
