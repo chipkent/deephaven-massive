@@ -9,7 +9,7 @@ import pkgutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -808,10 +808,11 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
             "BCC,248274,61.68,61.99,62.565,61.41,1680033600000000000,4073\n"
         ),
     )
-    # The fake S3's test credentials, passed as a mapping as the flat-file tests do.
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="fake-secret",  # noqa: S106  # fake credential
     )
     made: dict[str, Table] = {}
     sessions: list[dm.MassiveSession] = []

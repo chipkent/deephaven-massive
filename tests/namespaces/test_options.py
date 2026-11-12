@@ -1532,9 +1532,10 @@ def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.
         "FlatFileClient",
         functools.partial(_massive.FlatFileClient, clock=FakeClock()),
     )
-    s3_signing = "flat-file-secret"
     config = dm.MassiveConfig(
-        api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=s3_signing
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
     )
     m = dm.MassiveSession(config)
     yield m

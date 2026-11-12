@@ -1578,10 +1578,11 @@ def test_a_frame_lands_in_blink(
 @pytest.fixture
 def flat_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
     # Test credentials the fake S3 accepts.
-    s3_signing = "fake-secret"
     m = dm.MassiveSession(
         dm.MassiveConfig(
-            api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=s3_signing
+            api_key="test-key",
+            s3_access_key_id="AKIDFLATFILES",
+            s3_secret_access_key="fake-secret",  # noqa: S106  # fake credential
         )
     )
     yield m
@@ -1598,12 +1599,11 @@ def test_a_daily_bar_has_one_stamp_whichever_source_serves_it(
     day = date(2023, 3, 28)
     start = new_york_midnight_ns(day)
     close = start // 10**6 + 16 * 3_600_000
-    s3_signing = "fake-secret"
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
         s3_access_key_id="AKIDFLATFILES",
-        s3_secret_access_key=s3_signing,
+        s3_secret_access_key="fake-secret",  # noqa: S106  # fake credential
     )
     after = new_york_midnight_ns(date(2023, 3, 29)) // 10**6 - 1
     fake_rest.reply(

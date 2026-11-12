@@ -19,9 +19,10 @@ from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.s3 import FakeS3
 
 _P = ParamSpec("_P")
-S3_SIGNING = "flat-file-secret"
 CONFIG = dm.MassiveConfig(
-    api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=S3_SIGNING
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
 )
 
 

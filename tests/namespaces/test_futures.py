@@ -1110,10 +1110,11 @@ NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 @pytest.fixture
 def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(history_source, "_now", lambda: NOW)
-    s3_signing = "s3-test-key"
     m = dm.MassiveSession(
         dm.MassiveConfig(
-            api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=s3_signing
+            api_key="test-key",
+            s3_access_key_id="AKIDFLATFILES",
+            s3_secret_access_key="s3-test-key",  # noqa: S106  # fake credential
         )
     )
     yield m

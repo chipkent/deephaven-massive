@@ -220,9 +220,10 @@ def epoch_ns(moment: datetime) -> int:
     return int(moment.timestamp()) * 10**9
 
 
-S3_SIGNING = "flat-file-secret"
 CONFIG = dm.MassiveConfig(
-    api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=S3_SIGNING
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
 )
 
 NO_S3 = dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)

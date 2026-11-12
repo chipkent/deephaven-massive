@@ -920,9 +920,10 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
 @pytest.fixture
 def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
-    s3_signing = "flat-file-secret"
     config = dm.MassiveConfig(
-        api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=s3_signing
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
     )
     session = dm.MassiveSession(config)
     yield session

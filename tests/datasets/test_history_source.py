@@ -163,9 +163,10 @@ YIELDS = DatasetSpec(
 NOWHERE = replace(YIELDS, name="economy.nowhere", history_path=None, fetch_path="/fed/v1/inflation")
 
 
-S3_SIGNING = "flat-file-secret"
 CONFIG = dm.MassiveConfig(
-    api_key="test-key", s3_access_key_id="AKIDFLATFILES", s3_secret_access_key=S3_SIGNING
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
 )
 NO_S3 = replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
 AAPL = ("AAPL",)
