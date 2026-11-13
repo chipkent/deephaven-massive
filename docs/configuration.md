@@ -167,7 +167,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
 | `max_concurrency` | Sets how many REST requests the session runs at a time, and separately how many flat files it reads at a time. | A positive whole number, such as `4` | `8` |
-| `unsendable_symbols` | Decides what happens when a watchlist or other table you pass holds a value that can't be sent: an empty value, or one with `,` or `*`. | `log`, `ignore`, or `raise` | `log` |
+| `unsendable_symbols` | Decides what happens when a watchlist or other table you pass holds a value the library refuses: an empty value, one with `,` or `*`, or, in a table of `m.options.contracts()` underlyings, a currency or crypto pair, which Massive answers there with no error and no rows. | `log`, `ignore`, or `raise` | `log` |
 | `unlisted_symbols` | Decides what happens to a crypto pair that isn't on Massive's crypto ticker list, whether you pass it in code or in a table. | `log`, `ignore`, or `raise` | `log` |
 | `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read. | `log`, `ignore`, or `raise` | `log` |
 | `unavailable_symbols` | Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't request with the arguments you gave it. | `log`, `ignore`, or `raise` | `log` |
@@ -256,8 +256,8 @@ subscription still keeps to five requests a minute.
 
 #### unsendable_symbols
 
-Set `raise` to stop at the first empty value or one with `,` or
-`*`. Every other value is sent as written.
+Set `raise` to stop at the first such value. Every other value is sent
+as written.
 
 - `log` skips the row and logs a warning naming the value.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.

@@ -1121,6 +1121,23 @@ def test_a_table_of_index_underlyings_lists_each_one_s_contracts_by_its_bare_tic
     assert {r["Underlying"] for r in listed} == {"I:SPX"}
 
 
+def test_a_table_of_underlyings_skips_a_pair_row_of_the_contracts_list(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    # The contracts list answers a pair with no error and no rows, so a pair row is skipped
+    # under the default `unsendable_symbols`, as a pair passed alone is refused.
+    reply = Reply(body(load_fixture, "contracts_index.json"))
+    fake_rest.reply("/v3/reference/options/contracts", reply)
+    underlyings = new_table([string_col("Symbol", ["I:SPX", "C:EURUSD", "X:BTCUSD"])])
+    rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert fake_rest.get_queries() == [
+        ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
+    ]
+
+
 def test_a_table_of_underlyings_reads_each_one_s_chain(
     *,
     rest_session: dm.MassiveSession,

@@ -166,10 +166,10 @@ def test_read_symbols_skips_a_row_no_request_can_carry(
 
 def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
     assert skipped_rows_text([""]) == (
-        "skipping 1 symbol-table value no request can carry: ''; fix or delete that row"
+        "skipping 1 symbol-table value the library refuses: ''; fix or delete that row"
     )
     assert skipped_rows_text(["g", "f", "e", "d", "c", "b", "a"]) == (
-        "skipping 7 symbol-table values no request can carry: 'a', 'b', 'c', 'd', 'e', and 2 "
+        "skipping 7 symbol-table values the library refuses: 'a', 'b', 'c', 'd', 'e', and 2 "
         "more; fix or delete those rows"
     )
 
@@ -291,6 +291,15 @@ def underlyings(mode: OnError = OnError.RAISE) -> SymbolRowRule:
     return SymbolRowRule.for_values(options.CHAIN, values, mode)
 
 
+def contract_underlyings(mode: OnError = OnError.RAISE) -> SymbolRowRule:
+    # The rule of `m.options.contracts(underlying=table)`, which refuses a pair row.
+    table = new_table([string_col("Symbol", ["AAPL"])])
+    values = ValueTable(
+        "underlying", "underlying_ticker", "Symbol", table=table, pairs_refused=True
+    )
+    return SymbolRowRule.for_values(options.CONTRACTS, values, mode)
+
+
 def product_codes(mode: OnError = OnError.RAISE) -> SymbolRowRule:
     # The rule of a futures `product_code=table`: any code as written, in `ProductCode`.
     table = new_table([string_col("ProductCode", ["ES"])])
@@ -302,6 +311,30 @@ def test_a_table_of_underlyings_sends_every_value_as_written(dh_exec_ctx: object
     # Massive answers an underlying of another class; the library judges no ticker's shape.
     table = new_table([string_col("Symbol", ["I:SPX", "X:BTCUSD", None, "aapl"])])
     assert read_symbols(underlyings(), table, stream_id=7).symbols == ("I:SPX", "X:BTCUSD", "aapl")
+
+
+def test_a_contracts_table_refuses_a_pair_row_as_the_pair_passed_alone_is(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The contracts list answers a pair with no error and no rows, so a pair row is never sent.
+    # The pairs are this test's own: each value is logged once per dataset and process.
+    table = new_table([string_col("Symbol", ["C:WLPAIR", "X:WLPAIR", "AAPL", "I:SPX"])])
+    with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
+        rows = read_symbols(contract_underlyings(OnError.LOG), table, stream_id=None)
+    assert rows == CurrentSymbols(("AAPL", "I:SPX"), ("C:WLPAIR", "X:WLPAIR"))
+    [record] = [r.getMessage() for r in caplog.records if "'C:WLPAIR'" in r.getMessage()]
+    assert record.startswith(
+        "options.contracts a call's read: a symbol table holds 'C:WLPAIR', a currency or "
+        "crypto pair, which has no listed options: the contracts list answers it with no "
+        "error and no rows. Fix or delete the row"
+    )
+    with pytest.raises(ValueError, match=r"^options\.contracts: a symbol table holds 'C:WLPAIR'"):
+        read_symbols(contract_underlyings(), table, stream_id=None)
+    # A row no request can carry keeps its own reason.
+    with pytest.raises(ValueError, match="no request to Massive can carry"):
+        read_symbols(
+            contract_underlyings(), new_table([string_col("Symbol", ["A,B"])]), stream_id=None
+        )
 
 
 def test_a_skipped_underlying_is_logged_with_its_reason(

@@ -1824,7 +1824,7 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     with pytest.raises(
         ValueError,
         match=r"^m\.indices\.snapshots\(\): no row of the symbol table can be sent, so the result "
-        r"would follow nothing: skipping 1 symbol-table value no request can carry: "
+        r"would follow nothing: skipping 1 symbol-table value the library refuses: "
         r"'I:SPX,I:NDX'; fix or delete that row$",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", rows[:1])]))

@@ -275,7 +275,9 @@ def _require_text_column(table: Table, column: str, *, what: str) -> None:
         )
 
 
-def value_table(table: Table, *, argument: str, parameter: str, underlying: bool) -> ValueTable:
+def value_table(
+    table: Table, *, argument: str, parameter: str, underlying: bool, pairs_refused: bool
+) -> ValueTable:
     """Box a table passed where a dataset takes one value, after checking its column.
 
     `underlying=` reads its values from a `Symbol` column, as a symbol table does, and
@@ -288,6 +290,8 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
         parameter: The wire parameter each value is sent as, such as `"underlyingAsset"`.
         underlying: True for a table of underlyings, read from `Symbol`; False for product
             codes, read from `ProductCode`.
+        pairs_refused: True where the method refuses a currency or crypto pair passed alone,
+            so a pair row is refused too (`ValueTable.pairs_refused`).
 
     Returns:
         The boxed table (`ValueTable`).
@@ -306,7 +310,7 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
             f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
         )
     _require_text_column(table, column, what=f"a table passed as {argument}")
-    return ValueTable(argument, parameter, column, table)
+    return ValueTable(argument, parameter, column, table, pairs_refused)
 
 
 def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:

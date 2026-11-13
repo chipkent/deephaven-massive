@@ -62,6 +62,8 @@ class ValueTable:
         column: The table's column that holds the values: `"Symbol"` for underlyings,
             `"ProductCode"` for product codes, as `m.futures.products()` rows carry them.
         table: The user's table.
+        pairs_refused: True for the options contracts list, which answers a currency or crypto
+            pair with no error and no rows: a pair row is refused as the pair passed alone is.
         table_id: `id(table)`, the identity for equality and hashing.
     """
 
@@ -69,6 +71,7 @@ class ValueTable:
     parameter: str
     column: str
     table: Table = field(compare=False)
+    pairs_refused: bool = False
     table_id: int = field(init=False)
 
     def __post_init__(self) -> None:

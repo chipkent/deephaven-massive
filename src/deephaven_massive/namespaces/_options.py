@@ -23,7 +23,8 @@ chain, the snapshots, and the contract reference data carry the instrument Massi
 contract to as `Underlying`, Massive's ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
 of it. Neither column is ever mapped to the other. `underlying=` takes a ticker, sent
-as written, or a table of them in a `Symbol` column (`value_table`), each row sent as written.
+as written, or a table of them in a `Symbol` column (`value_table`), each row sent as written; the
+contracts list refuses a currency or crypto pair, passed alone or as a row.
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
@@ -44,6 +45,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import (
     ALL,
+    PAIR_CLASSES,
     check_symbol,
     symbol_class,
 )
@@ -356,10 +358,6 @@ def _chain_underlying(value: object) -> str:
     return check_symbol(value)
 
 
-_PAIR_CLASSES: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
-"""The classes whose tickers the contracts list answers with no error and no rows."""
-
-
 @raises_through(_chain_underlying)
 def _underlying(value: object) -> str:
     """Check the contracts list's `underlying` argument: any of Massive's tickers but a pair.
@@ -381,7 +379,7 @@ def _underlying(value: object) -> str:
         ValueError: If `value` can't be sent (`check_symbol`), or is a currency or crypto pair.
     """
     ticker = _chain_underlying(value)
-    if symbol_class(ticker) in _PAIR_CLASSES:
+    if symbol_class(ticker) in PAIR_CLASSES:
         raise ValueError(
             f"underlying={value!r} is a currency or crypto pair, which has no listed options; "
             "pass a ticker such as 'AAPL' or 'I:SPX'"
@@ -756,7 +754,11 @@ class OptionsNamespace(Namespace):
             )
         values = (
             value_table(
-                underlying, argument="underlying", parameter="underlyingAsset", underlying=True
+                underlying,
+                argument="underlying",
+                parameter="underlyingAsset",
+                underlying=True,
+                pairs_refused=False,
             )
             if isinstance(underlying, Table)
             else None
@@ -872,7 +874,8 @@ class OptionsNamespace(Namespace):
                 refused; leave `symbols` out instead.
             underlying: Only contracts of this underlying's exact Massive ticker, such as `"AAPL"`
                 or `"I:SPX"`. A table of them in a `Symbol` column is read value by value, each row
-                sent as written: a currency or crypto pair row gives no rows. A live table is
+                sent as written but a currency or crypto pair, which follows
+                `MassiveConfig.unsendable_symbols` (skipped and logged by default). A live table is
                 followed. In a static table, one failed value fails the call.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
@@ -905,7 +908,11 @@ class OptionsNamespace(Namespace):
         """
         values = (
             value_table(
-                underlying, argument="underlying", parameter="underlying_ticker", underlying=True
+                underlying,
+                argument="underlying",
+                parameter="underlying_ticker",
+                underlying=True,
+                pairs_refused=True,
             )
             if isinstance(underlying, Table)
             else None

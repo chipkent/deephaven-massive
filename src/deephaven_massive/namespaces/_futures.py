@@ -133,7 +133,11 @@ def _product_codes(product_code: object) -> tuple[dict[str, object], ValueTable 
     """
     if isinstance(product_code, Table):
         values = value_table(
-            product_code, argument="product_code", parameter="product_code", underlying=False
+            product_code,
+            argument="product_code",
+            parameter="product_code",
+            underlying=False,
+            pairs_refused=False,
         )
         return one_or_any_of("product_code", None, every="every product"), values
     return one_or_any_of("product_code", product_code, every="every product"), None

@@ -1106,7 +1106,7 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
     clock.wait_for_sleepers(1)
     assert script.values == [("ES", "NQ")]  # the code no request can carry is never requested
     (row,) = stream_rows()
-    assert row["Error"].startswith("skipping 1 symbol-table value no request can carry: 'CL,NG'")
+    assert row["Error"].startswith("skipping 1 symbol-table value the library refuses: 'CL,NG'")
     codes.add(new_table([string_col("ProductCode", ["6E"])]))
     until(lambda: codes.size == 4)
     script.rows()
@@ -1229,7 +1229,7 @@ def test_a_symbol_table_row_no_request_can_carry_is_skipped_and_shown(
     assert script.symbols == [("AAPL",)]  # the bad row is never requested
     (row,) = stream_rows()
     assert row["Error"] == (
-        "skipping 1 symbol-table value no request can carry: 'MSFT,NVDA'; fix or delete that row"
+        "skipping 1 symbol-table value the library refuses: 'MSFT,NVDA'; fix or delete that row"
     )
     watch.delete(new_table([string_col("Symbol", ["MSFT,NVDA"])]))  # deleting it clears the text
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested

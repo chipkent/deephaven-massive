@@ -512,13 +512,23 @@ def test_a_column_of_tickers_or_codes_must_hold_text(
     with pytest.raises(
         ValueError, match=r"^the ProductCode column of a table passed as product_code must be a"
     ):
-        value_table(numbers, argument="product_code", parameter="product_code", underlying=False)
+        value_table(
+            numbers,
+            argument="product_code",
+            parameter="product_code",
+            underlying=False,
+            pairs_refused=False,
+        )
     # A pandas Series of tickers is a sequence of str, so it reads as a list does.
     texts = new_table([string_col("Symbol", ["AAPL"])])
     assert build(massive_session, TRADES_SPEC, symbols=pd.Series(["AAPL"])) == build(
         massive_session, TRADES_SPEC, symbols=["AAPL"]
     )
-    assert value_table(texts, argument="underlying", parameter="u", underlying=True).table is texts
+    boxed = value_table(
+        texts, argument="underlying", parameter="u", underlying=True, pairs_refused=True
+    )
+    assert boxed.table is texts
+    assert boxed.pairs_refused
 
 
 # The query class of a dataset.)

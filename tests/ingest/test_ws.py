@@ -655,7 +655,7 @@ def test_a_watchlist_row_no_request_can_carry_is_skipped_and_shown(
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
     skipped = (
-        "skipping 1 symbol-table value no request can carry: 'MSFT,NVDA'; fix or delete that row"
+        "skipping 1 symbol-table value the library refuses: 'MSFT,NVDA'; fix or delete that row"
     )
 
     def error() -> object:
@@ -1477,9 +1477,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     del capped, every
 
 
-SKIPPED_SPY = (
-    "skipping 1 symbol-table value no request can carry: 'SPY,QQQ'; fix or delete that row"
-)
+SKIPPED_SPY = "skipping 1 symbol-table value the library refuses: 'SPY,QQQ'; fix or delete that row"
 """The `Error` text of a stream whose options watchlist holds the bad row `SPY,QQQ`."""
 
 

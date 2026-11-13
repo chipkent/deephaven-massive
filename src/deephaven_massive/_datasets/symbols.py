@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ALL",
-    "UNDERLYING_CLASSES",
+    "PAIR_CLASSES",
     "AllSymbols",
     "NormalizedSymbols",
     "SymbolTable",
@@ -179,8 +179,9 @@ _CURRENCY_CODE_LENGTH: Final = 3  # ISO 4217
 _OCC_TAIL: Final = 15
 """The characters after an OCC root: `YYMMDD`, `C` or `P`, and eight strike digits."""
 
-UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
-"""The classes whose tickers an option can be linked to: the ones an `underlying` takes."""
+PAIR_CLASSES: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes of currency and crypto pairs, which the options contracts list answers with no
+error and no rows."""
 
 _FOREX_PREFIX: Final = "C:"
 """The prefix of Massive's forex tickers."""

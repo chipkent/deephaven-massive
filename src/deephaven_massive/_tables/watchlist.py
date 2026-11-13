@@ -7,7 +7,8 @@ same way, through a rule made by `SymbolRowRule.for_values`. Each row is sent as
 `symbols=` is (`check_symbol` in `_datasets/symbols.py`), and Massive answers it: the library never
 rewrites a watchlist, so what the table says is what the stream subscribes and what `last_by()`
 matches. A null row is ignored. A row no request can carry (`is_sendable`: empty, or holding `,`
-or `*`) is never subscribed or requested; what else it does follows the session's
+or `*`), and a currency or crypto pair among the options contracts list's underlyings, is never
+subscribed or requested; what else it does follows the session's
 `MassiveConfig.unsendable_symbols`, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
@@ -55,7 +56,12 @@ from typing import TYPE_CHECKING, Final
 from deephaven.table_listener import TableListener, TableListenerHandle
 from typing_extensions import override
 
-from deephaven_massive._datasets.symbols import is_sendable, unsendable_reason
+from deephaven_massive._datasets.symbols import (
+    PAIR_CLASSES,
+    is_sendable,
+    symbol_class,
+    unsendable_reason,
+)
 from deephaven_massive._enums import OnError
 from deephaven_massive._log_limits import BoundedLog
 
@@ -75,6 +81,7 @@ __all__ = [
     "SymbolWatch",
     "invalid_row_message",
     "latest_rows_since_added",
+    "pair_row_message",
     "read_symbols",
     "skipped_rows_text",
     "watched_rows",
@@ -124,6 +131,22 @@ def invalid_row_message(symbol: str) -> str:
     )
 
 
+def pair_row_message(symbol: str) -> str:
+    """Say why a row of the options contracts list's underlyings is refused: it is a pair.
+
+    Args:
+        symbol: The row's value, a currency or crypto pair.
+
+    Returns:
+        The reason, the contracts list answers a pair with no error and no rows, and the
+        remedy, fix or delete the row.
+    """
+    return (
+        f"a symbol table holds {symbol!r}, a currency or crypto pair, which has no listed "
+        "options: the contracts list answers it with no error and no rows. Fix or delete the row"
+    )
+
+
 _FAILED_TABLE: Final = (
     "the symbol table passed to {dataset} failed upstream, so the result can no longer follow "
     "it: {cause}. Fix that table and call {dataset} again; a table made by "
@@ -141,25 +164,27 @@ def skipped_rows_text(values: Iterable[str]) -> str:
 
     Returns:
         Their count and the first five in sorted order, and what to do, such as
-        `skipping 1 symbol-table value no request can carry: ''; fix or delete that row`.
+        `skipping 1 symbol-table value the library refuses: ''; fix or delete that row`.
     """
     texts = sorted(values)
     shown = ", ".join(repr(text) for text in texts[:_SHOWN])
     more = f", and {len(texts) - _SHOWN} more" if len(texts) > _SHOWN else ""
     if texts[1:]:
         return (
-            f"skipping {len(texts)} symbol-table values no request can carry: {shown}{more}; "
+            f"skipping {len(texts)} symbol-table values the library refuses: {shown}{more}; "
             "fix or delete those rows"
         )
-    return f"skipping 1 symbol-table value no request can carry: {shown}; fix or delete that row"
+    return f"skipping 1 symbol-table value the library refuses: {shown}; fix or delete that row"
 
 
 @dataclass(frozen=True, slots=True)
 class SymbolRowRule:
     """How one dataset treats the rows of a symbol table: the session's setting for a bad row.
 
-    Every row is sent as written, and Massive answers it; the one row refused is a value no
-    request can carry (`is_sendable`). Built by the transport that reads the table
+    Every row is sent as written, and Massive answers it. The rows refused are a value no
+    request can carry (`is_sendable`) and, in a table of the options contracts list's
+    underlyings, a currency or crypto pair, which that list answers with no error and no rows
+    (`pairs_refused`). Built by the transport that reads the table
     (`SymbolRowRule.of`), on any thread; immutable, so a watch's listener and a poller share it
     freely.
 
@@ -168,11 +193,13 @@ class SymbolRowRule:
         unsendable: The session's `MassiveConfig.unsendable_symbols`.
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
+        pairs_refused: True to refuse a currency or crypto pair (`ValueTable.pairs_refused`).
     """
 
     dataset: str
     unsendable: OnError
     column: str = _SYMBOL
+    pairs_refused: bool = False
 
     @classmethod
     def of(cls, spec: DatasetSpec, unsendable: OnError) -> SymbolRowRule:
@@ -193,7 +220,8 @@ class SymbolRowRule:
     ) -> SymbolRowRule:
         """Return the rule of a table passed where a dataset takes one value.
 
-        An underlying or a futures product code is sent as written, as a symbol is.
+        An underlying or a futures product code is sent as written, as a symbol is, but a pair
+        where the method refuses one passed alone (`ValueTable.pairs_refused`).
 
         Args:
             spec: The dataset.
@@ -203,30 +231,54 @@ class SymbolRowRule:
         Returns:
             The rule, reading the table's `values.column`.
         """
-        return cls(spec.name, unsendable, column=values.column)
+        return cls(spec.name, unsendable, column=values.column, pairs_refused=values.pairs_refused)
 
-    @staticmethod
-    def accepts(symbol: str) -> bool:
-        """Tell whether a row's value can be sent (`is_sendable`).
+    def accepts(self, symbol: str) -> bool:
+        """Tell whether a row's value is sent (`is_sendable`, and not a refused pair).
 
         Args:
             symbol: The row's value, never null.
 
         Returns:
-            True for any non-empty value without `,` or `*`.
+            True for any non-empty value without `,` or `*`, but a currency or crypto pair
+            under `pairs_refused`.
         """
-        return is_sendable(symbol)
+        return is_sendable(symbol) and not self._refuses_pair(symbol)
+
+    def _refuses_pair(self, symbol: str) -> bool:
+        """Tell whether the rule refuses a row because it is a currency or crypto pair.
+
+        Args:
+            symbol: The row's value, never null.
+
+        Returns:
+            True under `pairs_refused` for a pair (`symbol_class` in `PAIR_CLASSES`).
+        """
+        return self.pairs_refused and symbol_class(symbol) in PAIR_CLASSES
 
     def refusal(self, symbol: str) -> str:
-        """Say why a row is refused and how to fix it (`invalid_row_message`).
+        """Say why a row is refused and how to fix it, prefixed with the dataset's name.
 
         Args:
             symbol: The row's value, which `accepts` refuses.
 
         Returns:
-            The message, prefixed with the dataset's name.
+            The message (`_reason`), such as `options.contracts: a symbol table holds ...`.
         """
-        return f"{self.dataset}: {invalid_row_message(symbol)}"
+        return f"{self.dataset}: {self._reason(symbol)}"
+
+    def _reason(self, symbol: str) -> str:
+        """Say why a row is refused and how to fix it.
+
+        Args:
+            symbol: The row's value, which `accepts` refuses.
+
+        Returns:
+            `pair_row_message` for a refused pair, else `invalid_row_message`.
+        """
+        if self._refuses_pair(symbol):
+            return pair_row_message(symbol)
+        return invalid_row_message(symbol)
 
     def skip(self, symbol: str, *, stream_id: int | None) -> None:
         """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.
@@ -250,7 +302,7 @@ class SymbolRowRule:
             "%s %s: %s; the row is skipped until it is fixed or deleted",
             self.dataset,
             reader,
-            invalid_row_message(symbol),
+            self._reason(symbol),
         )
 
 
@@ -260,7 +312,7 @@ class CurrentSymbols:
 
     Attributes:
         symbols: The symbols, sorted and de-duplicated.
-        skipped: The distinct values no request can carry, sorted; always empty under
+        skipped: The distinct values the rule refuses, sorted; always empty under
             `OnError.RAISE`, which raises instead.
     """
 
