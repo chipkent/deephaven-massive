@@ -93,10 +93,11 @@ is malformed or whose every row of the requested symbols was dropped, the sign o
 the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
-the placeholder `{venue}`, `venues` (all four by default) picks the venues read, and HTTP 403 on any
-venue raises `EntitlementError` naming the venue, `venues=`, and `refused_venues=`.
-When no other source can serve the call and `Request.refused_venues` is `LOG` or `IGNORE`, a
-refused venue is skipped instead, every file of it over the whole range, and the read names it
+the placeholder `{venue}`, `venues` (all four when the call left it out) picks the venues read,
+and HTTP 403 on any venue raises `EntitlementError` naming the venue, `venues=`, and
+`refused_venues=`. When no other source can serve the call and `Request.refused_venues` is `LOG`
+or `IGNORE` (always `LOG` when the call left `venues` out), a refused venue is skipped
+instead, every file of it over the whole range, and the read names it
 (`_ingest/refused_venues.py`); a call whose every venue is refused still raises. A 403 that
 rejects the S3 credentials themselves raises `AuthenticationError` for every class.
 
@@ -1713,7 +1714,8 @@ def _public(error: WireError, key: _Key) -> MassiveError:
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
             "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes, "
-            "or refused_venues=dm.OnError.LOG to skip the venues S3 refuses",
+            "or leave venues out or pass refused_venues=dm.OnError.LOG to skip the venues S3 "
+            "refuses",
             status=error.status,
             request_id=error.request_id,
         )

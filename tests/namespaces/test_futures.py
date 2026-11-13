@@ -110,24 +110,35 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
         assert two._request.venues == (dm.FuturesVenue.CBOT, dm.FuturesVenue.COMEX)
         assert factory(dm.ALL)._request.symbols is dm.ALL
         assert "venues={dm.FuturesVenue.CME}" in repr(cme)
-        # Left out, refused_venues is the session's setting; passed, the call's own.
-        assert q._request.refused_venues is dm.OnError.RAISE
-        assert "refused_venues" not in repr(q)
-        skips = factory("ESZ5", refused_venues=dm.OnError.LOG)
+        # Left out, venues reads every venue the plan allows, skipping a refused one; named,
+        # a refused venue follows refused_venues, the session's setting when left out.
+        assert q._request.refused_venues is dm.OnError.LOG
+        assert "venues" not in repr(q)
+        every = factory("ESZ5", venues=frozenset(dm.FuturesVenue))
+        assert every._request.venues == tuple(dm.FuturesVenue)
+        assert every._request.refused_venues is dm.OnError.RAISE
+        assert "venues=" in repr(every)
+        skips = factory("ESZ5", venues={dm.FuturesVenue.CME}, refused_venues=dm.OnError.LOG)
         assert skips._request.refused_venues is dm.OnError.LOG
         assert "refused_venues=dm.OnError.LOG" in repr(skips)
+        # Without named venues, refused_venues has nothing to decide.
+        ignored = factory("ESZ5", refused_venues=dm.OnError.RAISE)
+        assert ignored._request.refused_venues is dm.OnError.LOG
 
 
 def test_refused_venues_left_out_follows_the_session() -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="k", refused_venues=dm.OnError.IGNORE))
     try:
+        cme = {dm.FuturesVenue.CME}
         for q in (
-            m.futures.trades("ESZ5"),
-            m.futures.quotes("ESZ5"),
-            m.futures.bars("ESZ5", dm.Timespan.MINUTE),
+            m.futures.trades("ESZ5", venues=cme),
+            m.futures.quotes("ESZ5", venues=cme),
+            m.futures.bars("ESZ5", dm.Timespan.MINUTE, venues=cme),
         ):
             assert q._request.refused_venues is dm.OnError.IGNORE
-        bars = m.futures.bars("ESZ5", dm.Timespan.MINUTE, refused_venues=dm.OnError.RAISE)
+        bars = m.futures.bars(
+            "ESZ5", dm.Timespan.MINUTE, venues=cme, refused_venues=dm.OnError.RAISE
+        )
         assert bars._request.refused_venues is dm.OnError.RAISE
         assert m.stocks.trades("AAPL")._request.refused_venues is None
     finally:

@@ -560,24 +560,42 @@ def _check_axis(
         check_order(start, end)
 
 
-def _refused_venues(core: SessionCore, refused_venues: object) -> OnError:
-    """Return what a futures `history()` does with a refused venue: the call's, or the session's.
+def _venue_choice(
+    core: SessionCore, spec: DatasetSpec, *, venues: object, refused_venues: object
+) -> tuple[tuple[FuturesVenue, ...] | None, OnError | None]:
+    """Return the venues a futures `history()` reads and what it does with a refused one.
+
+    A dataset's flat files are per venue when its prefix holds the `{venue}` placeholder. When
+    the call names its venues, a refused one follows the call's `refused_venues`, or
+    `MassiveConfig.refused_venues` when the call left that out. When the call left `venues`
+    out, it reads every venue the plan allows: each one S3 refuses is skipped and logged, as
+    `dm.OnError.LOG` does, whatever `refused_venues` says.
 
     Args:
-        core: The session core, whose `MassiveConfig.refused_venues` applies when the call left
-            the argument out.
-        refused_venues: The argument as passed; None when it was left out.
+        core: The session core, for `MassiveConfig.refused_venues`.
+        spec: The dataset.
+        venues: The `venues` argument as passed; None when it was left out.
+        refused_venues: The `refused_venues` argument as passed; None when it was left out.
 
     Returns:
-        The `dm.OnError` member.
+        The venues in `FuturesVenue` order (`futures_venues`) and the `Request.refused_venues`
+        member; (None, None) for a dataset without venues.
 
     Raises:
-        TypeError: If `refused_venues` is neither None nor a `dm.OnError` member (the error of
-            `_require_enum`).
+        TypeError: The errors of `futures_venues` for a named `venues`, and the error of
+            `_require_enum` for a `refused_venues` that is neither None nor a `dm.OnError`.
+        ValueError: The error of `futures_venues` for an empty `venues`.
     """
-    if refused_venues is None:
-        return core.config.refused_venues
-    return _require_enum(refused_venues, OnError, "refused_venues")
+    if not any("{venue}" in prefix for prefix in spec.flat_file_prefixes.values()):
+        return None, None
+    policy = (
+        core.config.refused_venues
+        if refused_venues is None
+        else _require_enum(refused_venues, OnError, "refused_venues")
+    )
+    if venues is None:
+        return tuple(FuturesVenue), OnError.LOG
+    return futures_venues(venues), policy
 
 
 def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
@@ -805,11 +823,12 @@ def build_query(
         timespan: The bar timespan; for a bars dataset (`DatasetSpec.is_bars`) it is checked
             with the multiplier (`_check_bar_period`).
         multiplier: The bar multiplier.
-        venues: The futures venues whose flat files `history()` reads (`futures_venues`), or
-            None for a dataset without venues.
-        refused_venues: For a dataset with venues, what `history()` does with a venue whose
-            flat files S3 refuses (`Request.refused_venues`), or None when the call left it out,
-            for `MassiveConfig.refused_venues`; ignored for a dataset without venues.
+        venues: For a dataset with venues, the futures venues whose flat files `history()`
+            reads, as the call named them; None when the call left them out, for every venue
+            the plan allows (`_venue_choice`). Ignored for a dataset without venues.
+        refused_venues: For a dataset with venues, what `history()` does with a named venue
+            whose flat files S3 refuses; None when the call left it out, for
+            `MassiveConfig.refused_venues` (`_venue_choice`).
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None for an open start: a date
@@ -856,7 +875,7 @@ def build_query(
 
     Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
     raise the `TypeError` or `ValueError` of the helper that checks them (`check_symbols` in
-    `_datasets/symbols.py`, `_require_enum`, `futures_venues`, `Catalog.check_sort`,
+    `_datasets/symbols.py`, `_require_enum`, `_venue_choice`, `Catalog.check_sort`,
     `parse_date_like` in `_datasets/dates.py`, `_check_axis` for mixed, reversed, or
     calendar-date bounds, `_check_bar_period`, `require_positive_int` for `limit`). A `query_type`
     the dataset can't give is a library defect, the `MassiveError` of `_query_class`.
@@ -886,12 +905,13 @@ def build_query(
         if filters is None
         else _filters(spec, filters, typed=params or {}, arguments=arguments or {})
     )
+    read_venues, refused = _venue_choice(core, spec, venues=venues, refused_venues=refused_venues)
     request = Request(
         symbols=normalized,
         timespan=timespan,
         multiplier=multiplier,
-        venues=None if venues is None else futures_venues(venues),
-        refused_venues=None if venues is None else _refused_venues(core, refused_venues),
+        venues=read_venues,
+        refused_venues=refused,
         adjusted=adjusted,
         start=first,
         end=last,

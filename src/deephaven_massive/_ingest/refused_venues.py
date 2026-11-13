@@ -3,12 +3,14 @@
 Massive publishes futures flat files per venue (exchange), and a plan may include only some
 venues: S3 answers a file of a venue outside the plan with HTTP 403 (`WireEntitlementError`).
 When REST cannot serve the call and its `Request.refused_venues` is `dm.OnError.LOG` or
-`IGNORE`, the flat-file read skips such a venue instead of failing: `RefusedVenues` records each
+`IGNORE` (always `LOG` when the call left `venues` out, so it reads every venue the plan
+allows), the flat-file read skips such a venue instead of failing: `RefusedVenues` records each
 venue's first refusal as the reader threads meet them, so the venue's other files are never
 requested, and the read then drops every file of a refused venue, whatever its date, so the
-table never holds a venue for some days of the range and not others. `report` logs each refused
-venue once per `history()` call (a WARNING under `LOG`, DEBUG under `IGNORE`), with Massive's
-status and text, even when a table that follows a live symbol table reads the files again;
+table never holds a venue for some days of the range and not others. `report` logs the refused
+venues in one record, each venue once per `history()` call (a WARNING under `LOG`, DEBUG under
+`IGNORE`), with Massive's status and text, even when a table that follows a live symbol table
+reads the files again;
 `every_venue_refused` is the `EntitlementError` raised when no requested venue is left, whatever
 the setting. A static table's description names the skipped venues (`refused_note`); a
 followed table's description is fixed before its reads, so each symbol's transport in
@@ -24,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._errors import EntitlementError
-from deephaven_massive._log_limits import log_once
+from deephaven_massive._log_limits import first_seen
 
 if TYPE_CHECKING:
     from deephaven_massive._massive import WireEntitlementError
@@ -105,29 +107,29 @@ class RefusedVenues:
         return tuple((venue, refusals[venue]) for venue in FuturesVenue if venue in refusals)
 
     def report(self, dataset: str) -> None:
-        """Log each venue the read skips, once per call.
+        """Log the venues the read skips in one record, each venue once per call.
 
         A WARNING under `LOG`, a DEBUG line under `IGNORE`. Called after the read; logs nothing
-        when S3 refused no venue.
+        when S3 refused no venue, or only venues an earlier read of the call logged.
 
         Args:
             dataset: The dataset's name, such as `"futures.trades"`.
         """
-        level = logging.WARNING if self.policy is OnError.LOG else logging.DEBUG
-        for venue, error in self._refused():
-            log_once(
-                logger,
-                f"{self.call}\0{dataset}\0refused venue {venue.name}",
-                "%s history (%s): skipping %s's flat files for the whole range, as "
-                "refused_venues=%s says; pass venues= with only the venues the plan includes "
-                "to request none of them. S3 refused: %s",
-                dataset,
-                self.call,
-                venue.name,
-                self.policy.name,
-                error.message,
-                level=level,
-            )
+        refused = dict(self._refused())
+        keys = {f"{self.call}\0{dataset}\0refused venue {venue.name}": venue for venue in refused}
+        new = tuple((keys[key], refused[keys[key]]) for key in first_seen(keys))
+        if not new:
+            return
+        logger.log(
+            logging.WARNING if self.policy is OnError.LOG else logging.DEBUG,
+            "%s history (%s): skipping the flat files of %s for the whole range, since Massive "
+            "refused them; name only the exchanges the plan includes in venues= to request "
+            "none of them. S3 refused: %s",
+            dataset,
+            self.call,
+            _names(new),
+            "; ".join(f"{venue.name}: {error.message}" for venue, error in new),
+        )
 
     def every_venue_refused(self) -> EntitlementError:
         """Return the error of a call whose every requested venue S3 refused.

@@ -434,19 +434,22 @@ class MassiveConfig:
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.
         refused_venues: Decides what a futures `history()` does when Massive refuses the flat
-            files of some of the exchanges in its `venues`, as it does for an exchange the plan
-            doesn't include. A call's own `refused_venues` argument overrides it. Defaults to
-            `RAISE`.
+            files of an exchange the call names in `venues`, as it does for an exchange the
+            plan doesn't include. A call's own `refused_venues` argument overrides it. Defaults
+            to `RAISE`.
 
-            Set `dm.OnError.LOG` when your plan covers only some exchanges and a read of
-            `dm.ALL` should return the contracts of the exchanges it does cover.
+            It applies only to exchanges a call names. A call that leaves `venues` out reads
+            every exchange the plan allows: where only flat files can serve it, it skips each
+            one Massive refuses with a warning, whatever this setting says. Set
+            `dm.OnError.LOG` when your calls name exchanges your plan may not cover and should
+            read the ones it does.
 
             - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
-              exchange and `venues=`.
+              exchange, `venues=`, and `refused_venues=`.
             - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
-              logs one warning per exchange with Massive's status and text, and names the
-              exchanges in the table's description. A table that follows a live symbol table
-              names them in each symbol's `Transport` in `m.symbol_reads()` instead.
+              logs one warning with Massive's status and text, and names the exchanges in the
+              table's description. For a watchlist, each symbol's `Transport` in
+              `m.symbol_reads()` names them instead.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
               description or `m.symbol_reads()` name them.
 
@@ -1640,7 +1643,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
     ),
     "refused_venues": _Example(
-        OnError.RAISE, "A futures exchange whose flat files the plan lacks: log, ignore, or raise."
+        OnError.RAISE, "A futures exchange you name that the plan lacks: log, ignore, or raise."
     ),
     "websocket_hosts": _Example(
         {AssetClass.INDICES: BUSINESS_HOST},

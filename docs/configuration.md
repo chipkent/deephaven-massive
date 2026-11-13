@@ -127,7 +127,7 @@ unavailable_symbols: log  # the default
 # A flat-file line that isn't a readable row: log, ignore, or raise.
 malformed_rows: log  # the default
 
-# A futures exchange whose flat files the plan lacks: log, ignore, or raise.
+# A futures exchange you name that the plan lacks: log, ignore, or raise.
 refused_venues: raise  # the default
 
 # The WebSocket host per asset class: index values stream only from business.massive.com.
@@ -175,7 +175,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read. | `log`, `ignore`, or `raise` | `log` |
 | `unavailable_symbols` | Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't request with the arguments you gave it. | `log`, `ignore`, or `raise` | `log` |
 | `malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
-| `refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of some of the exchanges in its `venues`, as it does for an exchange the plan doesn't include. A call's own `refused_venues` argument overrides it. | `log`, `ignore`, or `raise` | `raise` |
+| `refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. A call's own `refused_venues` argument overrides it. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
 | `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
 | `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
@@ -345,15 +345,18 @@ file whose every line is malformed fails the read.
 
 #### refused_venues
 
-Set `log` when your plan covers only some exchanges and a read of
-`dm.ALL` should return the contracts of the exchanges it does cover.
+It applies only to exchanges a call names. A call that leaves `venues` out reads
+every exchange the plan allows: where only flat files can serve it, it skips each
+one Massive refuses with a warning, whatever this setting says. Set
+`log` when your calls name exchanges your plan may not cover and should
+read the ones it does.
 
 - `raise` makes `history()` raise `EntitlementError`, naming the
-  exchange and `venues=`.
+  exchange, `venues=`, and `refused_venues=`.
 - `log` skips every file of each refused exchange over the whole range,
-  logs one warning per exchange with Massive's status and text, and names the
-  exchanges in the table's description. A table that follows a live symbol table
-  names them in each symbol's `Transport` in `m.symbol_reads()` instead.
+  logs one warning with Massive's status and text, and names the exchanges in the
+  table's description. For a watchlist, each symbol's `Transport` in
+  `m.symbol_reads()` names them instead.
 - `ignore` does the same with no warning: only the `DEBUG` log and the
   description or `m.symbol_reads()` name them.
 

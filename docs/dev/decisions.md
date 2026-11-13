@@ -554,20 +554,21 @@ the two at larger multipliers. With no evidence for refusing them, the option ch
 contracts list also send an option contract as their underlying (items 108 and 109), and a filter
 list sends an empty item (item 118); each live check records Massive's answer.
 
-**107. A refused futures exchange follows `refused_venues`, `RAISE` by default** (2026-11-12).
-Massive publishes futures flat files per exchange, and a plan may include only some. The futures
-`trades`, `quotes`, and `bars` keep `venues`, so a read of `dm.ALL` or a long range can download
-less, and add `refused_venues: dm.OnError | None = None`, whose `None` means the argument was
-left out and `MassiveConfig.refused_venues` (`RAISE` by default) applies. Under `LOG` or `IGNORE`,
-a `history()` that REST cannot serve (`dm.ALL`, or `source=FLAT_FILES`) skips every file of an
-exchange S3 refuses, over the whole range, so the table has no holes, logs it (WARNING or DEBUG)
-with Massive's answer, and names it in the table's description; a call whose every exchange is
-refused raises. A list of tickers REST can serve still reads REST when S3 refuses its files.
-The library learns which exchanges a plan includes only from Massive's refusals: it encodes no
-plan tier and never guesses a ticker's exchange, since Massive can change its plans. A refusal
-of part of what a call asked for is the caller's to decide on the call, `RAISE` unless chosen,
-because asking for data the plan lacks is a bug in the caller; a problem with one value in the
-data stays a `MassiveConfig` setting, `LOG` by default. This supersedes decision 93's
-wording that one bad row never fails a table: `RAISE` fails it when a user chooses it.
-`canonicalize_symbols` keeps its `LOG` default (decision 93); the `OnError` docstring that said
-`RAISE` was wrong.
+**107. Futures `history()` reads every exchange the plan allows; a named one follows
+`refused_venues`** (2026-11-13). Massive publishes futures flat files per exchange, and a plan may
+include only some. The futures `trades`, `quotes`, and `bars` take `venues:
+AbstractSet[FuturesVenue] | None = None`, so a read of `dm.ALL` or a long range can download less.
+Left out, a read takes every exchange the plan allows: a `history()` that REST cannot serve
+(`dm.ALL`, or `source=FLAT_FILES`) skips every file of an exchange S3 refuses, over the whole range,
+so the table has no holes, logs one WARNING naming the skipped exchanges with Massive's answer, and
+names them in the table's description (or, for a table that follows a live symbol table, in each
+symbol's `Transport` in `m.symbol_reads()`). An exchange the call names follows `refused_venues:
+dm.OnError | None = None`, whose `None` means the argument was left out and
+`MassiveConfig.refused_venues` (`RAISE` by default) applies, because naming an exchange the plan
+lacks is a bug in the caller. A call whose every exchange is refused raises either way, and a list
+of tickers REST can serve still reads REST when S3 refuses its files. The library learns which
+exchanges a plan includes only from Massive's refusals: it encodes no plan tier and never guesses a
+ticker's exchange, since Massive can change its plans. A problem with one value in the data stays a
+`MassiveConfig` setting, `LOG` by default. This supersedes decision 93's wording that one bad row
+never fails a table: `RAISE` fails it when a user chooses it. `canonicalize_symbols` keeps its `LOG`
+default (decision 93); the `OnError` docstring that said `RAISE` was wrong.

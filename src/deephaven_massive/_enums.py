@@ -221,9 +221,10 @@ class Reread(StrEnum):
 class FuturesVenue(StrEnum):
     """A futures exchange, which picks the flat files a futures `history()` reads.
 
-    A futures dataset's `venues` argument takes a set of members and reads every exchange by
-    default, and its `refused_venues` argument says what happens when Massive refuses some of
-    them. Both apply only to flat files: streams cover every exchange.
+    A futures dataset's `venues` argument takes a set of members. Left out, a read takes every
+    exchange the plan allows and skips each one Massive refuses with a warning; the
+    `refused_venues` argument says what happens when Massive refuses an exchange the call
+    names. Both apply only to flat files: streams cover every exchange.
 
     Example:
         ::
@@ -492,8 +493,8 @@ class OnError(StrEnum):
     - `MassiveConfig.malformed_rows`, for a line of a flat file that is not a readable row. The
       default is `LOG`.
     - The `refused_venues` argument of the futures `trades`, `quotes`, and `bars`, and
-      `MassiveConfig.refused_venues` for a call that leaves it out, for a futures exchange whose
-      flat files Massive refuses. The default is `RAISE`.
+      `MassiveConfig.refused_venues` for a call that leaves it out, for a futures exchange the
+      call names in `venues` whose flat files Massive refuses. The default is `RAISE`.
 
     The members:
 
