@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -33,6 +33,12 @@ def session(fake_rest: FakeRestServer) -> Iterator[dm.MassiveSession]:
     m.close()
 
 
+def _endpoints(m: dm.MassiveSession) -> rest.RestEndpoints:
+    transport = m._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    return transport
+
+
 def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
     # One row of /v3/reference/tickers for a crypto pair.
     return {
@@ -44,7 +50,7 @@ def _ticker(symbol: str, base: str, quote: str) -> dict[str, object]:
 
 
 def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
-    governor = cast("rest.RestEndpoints", m._core.rest_transport())._state.client.governor
+    governor = _endpoints(m)._state.client.governor
     return {state.bucket: state.attempts for state in governor.snapshot() if state.attempts}
 
 
@@ -91,7 +97,7 @@ def test_a_delisted_pair_splits_from_the_list_of_delisted_tickers(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000",
         Reply(envelope([_ticker("X:FTTUSD", "FTT", "USD"), _ticker("X:BTCUSD", "BT", "CUSD")])),
     )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1")
     assert reader.crypto_pair("X:FTTUSD") == ("FTT", "USD")
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
     assert fake_rest.get_queries() == [
@@ -126,7 +132,7 @@ def test_the_crypto_ticker_list_is_charged_to_other_in_one_lane_of_its_own(
     fake_rest.reply(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
-    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(session)._reader("crypto pairs")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert requests_by_bucket(session) == {"other": 3}
     assert [bucket for bucket, _ in admitted] == ["other"] * 3
@@ -159,7 +165,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     message: str | None,
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1")
     if message is None:  # the row of the ticker itself decides
         assert reader.crypto_pair("X:DOTUSD") == ("DO", "TUSD")
         return
@@ -181,7 +187,7 @@ def test_a_pair_the_crypto_ticker_list_lacks_rereads_it_at_most_once_an_hour(
         Reply(envelope([_ticker("X:BTCUSD", "BTC", "USD"), _ticker("X:DOTUSD", "DOT", "USD")])),
         Reply(envelope([])),
     )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1")
     assert reader.crypto_pair("X:BTCUSD") == ("BTC", "USD")
     clock[0] += 3599
     with pytest.raises(UnlistedPairError, match="does not list it"):
@@ -206,7 +212,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
         Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
         Reply(envelope([])),
     )
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1")
     with pytest.raises(
         dm.EntitlementError,
         match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
@@ -220,7 +226,7 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1")
     claimed: list[Future[Any]] = []
 
     def pages(*_: object, **__: object) -> Iterator[Any]:

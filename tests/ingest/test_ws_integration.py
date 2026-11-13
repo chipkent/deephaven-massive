@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -61,6 +61,10 @@ _RECOVERY_WAIT = 120.0
 _FOLLOW_WAIT = 60.0
 """Seconds the watchlist check waits for each step: a pair's first trade, or a row's leaving.
 Bitcoin and Ether trade every few seconds at any hour."""
+
+
+_SocketT = TypeVar("_SocketT", bound="_Socket")
+_EndT = TypeVar("_EndT")
 
 
 class _Socket(Protocol):
@@ -247,15 +251,17 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     slot still held waits for it.
     """
     sockets: list[tuple[WsClient, _Socket]] = []
-    run_generation = cast(
-        "Callable[[WsClient, _Socket], Awaitable[object]]", WsClient._run_generation
-    )
 
-    async def recording(self: WsClient, websocket: _Socket) -> object:
-        sockets.append((self, websocket))
-        return await run_generation(self, websocket)
+    def recorded(
+        run: Callable[[WsClient, _SocketT], Awaitable[_EndT]],
+    ) -> Callable[[WsClient, _SocketT], Awaitable[_EndT]]:
+        async def recording(self: WsClient, websocket: _SocketT) -> _EndT:
+            sockets.append((self, websocket))
+            return await run(self, websocket)
 
-    monkeypatch.setattr(WsClient, "_run_generation", recording)
+        return recording
+
+    monkeypatch.setattr(WsClient, "_run_generation", recorded(WsClient._run_generation))
     table = live_session.crypto.trades("X:BTCUSD").append_only()
     first = wait_rows(live_session, table, time.monotonic() + _FIRST_WAIT)
     assert first, "no X:BTCUSD trade arrived before the drop"

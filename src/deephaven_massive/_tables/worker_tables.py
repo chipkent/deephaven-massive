@@ -24,9 +24,9 @@ import functools
 import logging
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar
 
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import MassiveError, required
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import FINAL_STATES, StreamRow, StreamState
 from deephaven_massive._tables.liveness import release_scope
@@ -214,7 +214,7 @@ class WorkerTables:
         worker: _W | None = None
         registered: list[int] = []  # the stream id, as soon as `_register` stores the row
         try:
-            core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+            core = required(self._core(), "the session")  # held until the call returns: live_set.py
             worker, row = make()
             self._register(core, row, fail=worker.fail, registered=registered)
             self._results.track(result, scope, worker.release)
@@ -316,7 +316,7 @@ class WorkerTables:
             stream_id: The table's `StreamId`.
         """
         with self._lock:
-            core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+            core = required(self._core(), "the session")  # held until the call returns: live_set.py
             state = self._workers[stream_id]
             released = state.row.state in _ACTIVE
             row = replace(
@@ -392,7 +392,7 @@ class WorkerTables:
             rows: How many rows the result holds, for `RowsPublished`.
         """
         with self._lock:
-            core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+            core = required(self._core(), "the session")  # held until the call returns: live_set.py
             done = functools.partial(
                 replace, state=StreamState.DONE, rows_published=rows, error=None
             )
@@ -425,7 +425,7 @@ class WorkerTables:
             return replace(row, state=state) if row.state in _ACTIVE else row
 
         with self._lock:
-            if cast("SessionCore", self._core()).closed:
+            if required(self._core(), "the session").closed:
                 return
             self.change_row(stream_id, change)
 

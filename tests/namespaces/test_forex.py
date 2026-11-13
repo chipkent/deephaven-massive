@@ -16,7 +16,7 @@ import string
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow as pa
@@ -403,7 +403,7 @@ def test_an_exhausted_generator_has_no_symbols(massive_session: dm.MassiveSessio
     pairs = (pair for pair in ["C:EURUSD"])
     list(pairs)
     with pytest.raises(ValueError, match="no symbols"):
-        massive_session.forex.quotes(cast("list[str]", pairs))  # any iterable is read
+        massive_session.forex.quotes(pairs)  # type: ignore[arg-type]  # the point: any iterable is read
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
@@ -923,8 +923,12 @@ FILES_PUBLISHED = datetime(2025, 3, 10, 16, tzinfo=UTC)
 @pytest.fixture
 def files_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(history_source, "_now", lambda: FILES_PUBLISHED)
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "flat-file-secret"}
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", **cast("Any", credentials)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+    )
+    m = dm.MassiveSession(config)
     yield m
     m.close()
 

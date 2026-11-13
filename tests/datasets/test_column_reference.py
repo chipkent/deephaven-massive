@@ -16,7 +16,7 @@ import re
 import shutil
 import typing
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TypeAlias
 
 import pytest
 
@@ -528,29 +528,43 @@ _CATALOG = Catalog(
 )
 
 
-def _plan_page(rows: tuple[tuple[str, str, str | None, str | None], ...]) -> object:
-    """Return a page's plan tables, built from a real one, as `Provenance.plans` holds them.
+_PlanRows: TypeAlias = tuple[tuple[str, str, str | None, str | None], ...]
+"""Each plan's name, access, recency, and history, as a vendor page lists them."""
+
+
+def _with_plans(base: Provenance, pages: Mapping[str, _PlanRows]) -> Provenance:
+    """Return provenance whose pages' plan tables are built from a real one.
 
     Args:
-        rows: Each plan's name, access, recency, and history.
+        base: The provenance without plans.
+        pages: Each page's plans, by its URL.
 
     Returns:
-        The page's plan access, with the summaries `"Access."`, `"Recency."`, and `""`.
+        `base` with each page's plan access, with the summaries `"Access."`, `"Recency."`, and
+        `""`.
     """
     terms = _REAL_PLANS.plans[0]
     return dataclasses.replace(
-        _REAL_PLANS,
-        access="Access.",
-        recency="Recency.",
-        history="",
-        plans=tuple(
-            dataclasses.replace(terms, plan=plan, access=access, recency=recency, history=history)
-            for plan, access, recency, history in rows
-        ),
+        base,
+        plans={
+            url: dataclasses.replace(
+                _REAL_PLANS,
+                access="Access.",
+                recency="Recency.",
+                history="",
+                plans=tuple(
+                    dataclasses.replace(
+                        terms, plan=plan, access=access, recency=recency, history=history
+                    )
+                    for plan, access, recency, history in rows
+                ),
+            )
+            for url, rows in pages.items()
+        },
     )
 
 
-_PROVENANCE = Provenance(
+_PROVENANCE_WITHOUT_PLANS = Provenance(
     fetched=dt.date(2026, 10, 27),
     urls={
         # A source of no asset class: its dataset, which has none either, keeps every page.
@@ -567,26 +581,6 @@ _PROVENANCE = Provenance(
         (R, "/trades/{ticker}"): ["https://docs.example/a.md", "https://docs.example/a.md"],
         (W, "crypto/XT"): ["https://docs.example/ws/crypto.md"],
     },
-    plans=cast(
-        "Mapping[str, Any]",
-        {
-            "https://docs.example/a.md": _plan_page(
-                (
-                    ("Stocks Basic", "Included", "End-of-day", "2 years"),
-                    ("Stocks Starter", "Included", None, None),
-                    ("Stocks Business", "Not included", None, None),
-                ),
-            ),
-            "https://massive.com/docs/websocket/stocks/trades.md": _plan_page(
-                (
-                    ("Stocks Basic", "Included", "Not included", None),
-                    ("Stocks Advanced", "Included", "Real-time", None),
-                ),
-            ),
-            # A page that lists no plan, only its summaries.
-            "https://docs.example/rest/stocks/ratios.md": _plan_page(()),
-        },
-    ),
     titles={
         "https://docs.example/rest/crypto/ratios.md": "Ratios",
         "https://docs.example/rest/stocks/ratios.md": "Ratios",
@@ -594,6 +588,22 @@ _PROVENANCE = Provenance(
         "https://massive.com/docs/websocket/stocks/trades.md": "Trades",
         "https://docs.example/a.md": "Trades",
         "https://docs.example/ws/crypto.md": "Crypto Trades",
+    },
+)
+_PROVENANCE = _with_plans(
+    _PROVENANCE_WITHOUT_PLANS,
+    {
+        "https://docs.example/a.md": (
+            ("Stocks Basic", "Included", "End-of-day", "2 years"),
+            ("Stocks Starter", "Included", None, None),
+            ("Stocks Business", "Not included", None, None),
+        ),
+        "https://massive.com/docs/websocket/stocks/trades.md": (
+            ("Stocks Basic", "Included", "Not included", None),
+            ("Stocks Advanced", "Included", "Real-time", None),
+        ),
+        # A page that lists no plan, only its summaries.
+        "https://docs.example/rest/stocks/ratios.md": (),
     },
 )
 
@@ -842,7 +852,9 @@ def test_the_rendered_ratios_page() -> None:
 
 
 def test_sort_and_filters_of_a_path_that_takes_neither() -> None:
-    bare = dataclasses.replace(cast("RestPath", _SOURCES[R, "/ratios"]), params=())
+    ratios = _SOURCES[R, "/ratios"]
+    assert isinstance(ratios, RestPath)
+    bare = dataclasses.replace(ratios, params=())
     catalog = Catalog(
         (_RATIOS,),
         source_tables=lambda transport: (
@@ -870,20 +882,20 @@ def test_a_page_whose_arguments_have_no_shared_rule_does_not_link_the_rules() ->
 
 def test_a_plan_column_names_the_class_of_each_differing_term() -> None:
     urls = ["https://docs.example/rest/crypto/ratios.md", "https://docs.example/rest/ratios.md"]
-    plans = {
-        urls[0]: _plan_page((("Stocks Basic", "Included", "Real-time", None),)),
-        urls[1]: _plan_page(
-            (
-                ("Stocks Basic", "Included", "End-of-day", None),
-                ("Stocks Starter", "Included", "Real-time", None),
-            )
-        ),
-    }
-    terms = Provenance(
+    base = Provenance(
         fetched=dt.date(2026, 10, 27),
         urls={(R, "/ratios"): urls},
-        plans=cast("Mapping[str, Any]", plans),
         titles=dict.fromkeys(urls, "Ratios"),
+    )
+    terms = _with_plans(
+        base,
+        {
+            urls[0]: (("Stocks Basic", "Included", "Real-time", None),),
+            urls[1]: (
+                ("Stocks Basic", "Included", "End-of-day", None),
+                ("Stocks Starter", "Included", "Real-time", None),
+            ),
+        },
     )
     page = render(_CATALOG, terms, _CALLS)["stocks.financials.ratios.md"]
     # A URL that names no class leaves its term unnamed; a term both pages share is not named.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import types
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from deephaven import time_table
@@ -35,12 +35,14 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     # The check itself, run on this thread with an update graph that says this is one of its
     # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
     graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
-    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
+    update_thread: ExecutionContext = types.SimpleNamespace(  # type: ignore[assignment]  # a fake
+        update_graph=types.SimpleNamespace(j_update_graph=graph)
+    )
     # The refusal names the way to do a listener's usual job without one.
     with pytest.raises(
         ValueError, match=r"update-graph thread.*pass a refreshing symbol table as symbols"
     ):
-        refuse_update_graph_thread(cast("ExecutionContext", update_thread))
+        refuse_update_graph_thread(update_thread)
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         refuse_update_graph_thread(dh_exec_ctx)
     refuse_update_graph_thread(dh_exec_ctx)
@@ -124,10 +126,10 @@ def _scripted(
     graph.clock = lambda: graph
     graph.exclusiveLock = lambda: graph
     graph.newCondition = lambda: graph
-    return cast(
-        "ExecutionContext",
-        types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph)),
+    scripted: ExecutionContext = types.SimpleNamespace(  # type: ignore[assignment]  # a fake
+        update_graph=types.SimpleNamespace(j_update_graph=graph)
     )
+    return scripted
 
 
 def test_a_signal_from_a_cycle_already_running_makes_the_wait_ask_again(

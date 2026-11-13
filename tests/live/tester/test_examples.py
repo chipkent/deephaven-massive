@@ -17,7 +17,7 @@ import weakref
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -679,7 +679,8 @@ class BrokenTable:
 
 
 def test_save_tables_records_a_table_it_cannot_read_and_goes_on(tmp_path: Path) -> None:
-    tables = {"broken": cast("Table", BrokenTable()), "fine": empty_table(1)}
+    broken: Table = BrokenTable()  # type: ignore[assignment]  # a table that fails to read
+    tables = {"broken": broken, "fine": empty_table(1)}
     unsaved = examples.save_tables(tables, tmp_path, SecretFilter(("K-2",)))
     assert unsaved == ["broken: RuntimeError: the stream failed: K-2"]
     assert (tmp_path / "broken.error.txt").read_text() == (

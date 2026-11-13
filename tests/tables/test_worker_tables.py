@@ -11,7 +11,7 @@ from __future__ import annotations
 import gc
 import threading
 import weakref
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import empty_table
@@ -82,7 +82,7 @@ def test_a_worker_shutdown_after_its_session_was_freed_only_stops_the_thread() -
         pass
 
     gone = Gone()
-    tables_ref = cast("weakref.ref[WorkerTables]", weakref.ref(gone))
+    tables_ref: weakref.ref[WorkerTables] = weakref.ref(gone)  # type: ignore[arg-type]  # it dies
     del gone
     stop = threading.Event()
     told: list[int] = []

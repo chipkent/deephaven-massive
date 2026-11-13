@@ -54,7 +54,7 @@ import functools
 import logging
 from dataclasses import replace
 from http import HTTPStatus
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -69,6 +69,8 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
     library_bug,
+    required,
+    required_instance,
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
@@ -243,8 +245,10 @@ def fetch_units(
     """
     asked = tuple(sorted(_ordered(symbols)))
     alone = _SYMBOL not in columns
-    # Explicit symbols give each path a tuple of them.
-    groups = [(path, cast("tuple[str, ...]", own)) for path, own in fetch_paths(spec, asked)]
+    groups = [
+        (path, required_instance(own, tuple, f"the symbols of {path}"))
+        for path, own in fetch_paths(spec, asked)
+    ]
     if alone:
         groups = [(template, (symbol,)) for template, own in groups for symbol in own]
     failed: dict[str, MassiveError] = {}
@@ -308,7 +312,7 @@ def history_units(
     failed: dict[str, MassiveError] = {}
     units: list[RestUnit] = []
     if not window.empty:
-        rest_path = reader.rest_path(cast("str", spec.history_path))
+        rest_path = reader.rest_path(required(spec.history_path, f"{spec.name}'s history path"))
         try:
             calls = history_calls(
                 spec,
@@ -465,7 +469,7 @@ def read_rest_by_value(
             rows, requests = reader.read_fetch(
                 spec,
                 request.for_value(value),
-                symbols=request.symbols,
+                symbols=request.static_symbols,
                 cancel=cancel,
                 pauses_live_tables=pauses,
                 unlisted=OnError.RAISE,
