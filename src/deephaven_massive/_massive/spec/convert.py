@@ -634,9 +634,6 @@ def _in_int64(values: list[object]) -> bool:
 _NUMBERS: Final = frozenset({int, float, NoneType})
 """The JSON value types of a `double` column that `float` converts as its converter does."""
 
-_LISTS: Final = frozenset({list, NoneType})
-"""The value types of a list column, whose items are checked in one pass."""
-
 _WHOLE_NUMBERS: Final = frozenset({int, float})
 """The value types of a `double` column with no null, which `float` converts in one call."""
 
@@ -853,18 +850,6 @@ def _as_sent_column(
     return values
 
 
-def _lists_or_nulls(values: Sequence[object]) -> TypeGuard[list[list[object] | None]]:
-    """Tell whether a column holds lists and nulls only, by one pass of the builtin `type`.
-
-    Args:
-        values: The column.
-
-    Returns:
-        True when every value's exact type is `list` or `NoneType`, or the column is empty.
-    """
-    return set(map(type, values)) <= _LISTS
-
-
 def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_items: bool) -> bool:
     """Tell whether every item of a column of lists can be returned as sent.
 
@@ -877,10 +862,7 @@ def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_ite
         True when every item's type is in `items_as_sent` and, under `long_items`, every item
         fits in a signed 64-bit integer.
     """
-    lists = (
-        filter(None, values) if _lists_or_nulls(values) else [v for v in values if type(v) is list]
-    )
-    items: list[object] = list(chain.from_iterable(lists))
+    items: list[object] = list(chain.from_iterable(v for v in values if isinstance(v, list)))
     return set(map(type, items)) <= items_as_sent and (not long_items or _in_int64(items))
 
 
