@@ -64,6 +64,7 @@ EXPECTED_EXPORTS = [
     "datasets",
     "disable_debug_logging",
     "enable_debug_logging",
+    "LogOutput",
     "SymbolsLike",
     "DateLike",
     "FilterValue",
@@ -76,7 +77,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 47
+    assert len(EXPECTED_EXPORTS) == 48
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 

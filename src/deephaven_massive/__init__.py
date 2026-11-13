@@ -126,7 +126,7 @@ from deephaven_massive._datasets.symbols import (
     canonical_symbol_stock_nasdaq,
     canonical_symbol_stock_yahoo,
 )
-from deephaven_massive._debug_log import disable_debug_logging, enable_debug_logging
+from deephaven_massive._debug_log import LogOutput, disable_debug_logging, enable_debug_logging
 from deephaven_massive._enums import (
     AssetClass,
     ConditionDataType,
@@ -174,6 +174,7 @@ __all__ = [
     "FuturesVenue",
     "HistorySource",
     "Locale",
+    "LogOutput",
     "Market",
     "MassiveConfig",
     "MassiveError",

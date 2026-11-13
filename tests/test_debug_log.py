@@ -280,9 +280,9 @@ def test_a_log_file_that_cannot_be_opened_names_the_variable(
     assert not [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
 
 
-def test_filename_must_be_a_path_or_none() -> None:
+def test_output_must_be_a_log_output_or_a_path() -> None:
     with pytest.raises(
-        TypeError, match=r"^filename must be a file path \(str or os\.PathLike\) or None, not int$"
+        TypeError, match=r"^output must be a dm\.LogOutput or a file path, not int$"
     ):
         dm.enable_debug_logging(cast("str", 3))
 
@@ -297,7 +297,7 @@ def test_turning_the_log_on_describes_the_process(
         monkeypatch.setenv("HTTPS_PROXY", "http://user:proxy-password@proxy:3128")
         monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/bundle.pem")
     with caplog.at_level(logging.INFO, logger=_debug_log.__name__):
-        dm.enable_debug_logging(filename=None)
+        dm.enable_debug_logging(dm.LogOutput.STDERR)
     [line] = [m for m in caplog.messages if m.startswith("deephaven-massive ")]
     gil = "on" if getattr(sys, "_is_gil_enabled", lambda: True)() else "off"
     setting = "set" if proxy else "unset"

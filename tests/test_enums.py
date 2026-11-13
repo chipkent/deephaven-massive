@@ -108,7 +108,7 @@ def test_every_exported_enum_is_tested() -> None:
         for name in dm.__all__
         if isinstance(getattr(dm, name), type)
         and issubclass(getattr(dm, name), Enum)
-        # The wire enums; the others are tested with the modules that define them.
+        # The wire enums; `LogOutput` is the debug log's, tested with it.
         and getattr(dm, name).__module__ == "deephaven_massive._enums"
     }
     assert exported == set(EXPECTED_VALUES)
