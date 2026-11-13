@@ -180,12 +180,11 @@ class MassiveError(Exception):
     """The base class of every error Massive or the library reports.
 
     One `except dm.MassiveError` catches them all. Its subclasses `AuthenticationError`,
-    `EntitlementError`, and `SessionClosedError` name three failures you can act on; the
-    library raises `MassiveError` itself for every other, such as a network error, an HTTP
-    error other than 401 or 403, a rate limit longer than the read waits out, or a bug in the
-    library. The message names what failed, and quotes Massive's text when Massive
-    answered. To branch on the failure, read `is_retryable`, `is_bug`, `source`, or `status`
-    instead of the message.
+    `EntitlementError`, and `SessionClosedError` name three failures you can act on. Every
+    other failure raises `MassiveError` itself, such as a network error, an HTTP error other
+    than 401 or 403, a rate limit longer than the read waits out, or a bug. The message names
+    what failed, and quotes Massive's text when Massive answered. To branch on the failure,
+    read `is_retryable`, `is_bug`, `source`, or `status` instead of the message.
 
     A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True`, a
     failure after the call returns fails their table instead, as it fails a live table: the

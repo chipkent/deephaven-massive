@@ -73,8 +73,8 @@ Enums:
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Every error Massive reports, and every failure inside a query method such as `fetch()`,
-    is a `dm.MassiveError`. `dm.AuthenticationError` means your API key is missing or Massive
+    `dm.MassiveError` covers every error Massive reports and every failure inside a method of
+    a query, such as `fetch()`. `dm.AuthenticationError` means your API key is missing or Massive
     refused your keys. `dm.EntitlementError` means your plan doesn't include the data.
     `dm.SessionClosedError` means the session is closed. Each error's `source` says what
     stopped the call, as a `dm.ErrorSource`. Its `is_retryable` says whether the same call may

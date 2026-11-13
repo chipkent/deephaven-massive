@@ -70,9 +70,9 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 
 In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
 failing the table. `dm.MassiveError` covers every error Massive reports and every failure
-inside a query method such as `fetch()` or `last_by()`. A wrong argument raises `TypeError`
-or `ValueError` at the call. These attributes of a `dm.MassiveError` tell your code what to
-do:
+inside a method of a query, such as `fetch()` or `last_by()`. A wrong argument raises
+`TypeError` or `ValueError` at the call. Branch on these attributes of a `dm.MassiveError`,
+never on its message:
 
 | Attribute | What it says |
 |---|---|
@@ -81,13 +81,12 @@ do:
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings, and the message names the fix), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
-After `m.close()`, a query method such as `fetch()` raises `dm.SessionClosedError`, and so
-does `m.streams()`. Create a new session to read again.
+After `m.close()`, a method of a query such as `fetch()` raises `dm.SessionClosedError`, and
+so does `m.streams()`. Create a new session to read again.
 
-A `fetch()` or `history()` of a watchlist can fail for some symbols and not others, such as
-when Massive refuses one symbol's request. Those symbols show their errors in
-`m.symbol_reads()`, the log reports them, and the read fails only when every symbol that was
-on the watchlist at the call failed.
+A `fetch()` or `history()` of a watchlist fails only when every symbol on the watchlist at the
+call failed. When only some fail, such as when Massive refuses one symbol's request, the log
+reports them and `m.symbol_reads()` shows each one's error.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 
@@ -109,8 +108,8 @@ for attempt in range(3):
         time.sleep(60)
 ```
 
-Branch on `is_retryable` and `is_bug`, never on the message. Wait before you call again, since
-the library has already retried, as `help(dm.MassiveError.is_retryable)` explains.
+The library has already retried before it raises, so a retry needs a pause.
+`help(dm.MassiveError.is_retryable)` says how long it waited.
 
 <a id="diagnostics"></a>
 
