@@ -100,7 +100,10 @@ These protect the owner's repository, money, and secrets.
   Deephaven call the same thing.
 - **A public change needs the owner's request or approval**: a new or changed public name,
   signature, module, package, default, column, setting, or failure behavior, even in a `fix:`
-  PR. It ships with its user docs, docstrings, and tests. `docs/dev/decisions.md` records
+  PR. A public change is approved only by the owner's message naming that change, after seeing
+  what it adds, removes, or alters for users. A work list, a plan, or "start the work" never
+  approves the public changes inside it; each gets its own question. Each public change ships
+  with its user docs, docstrings, and tests. `docs/dev/decisions.md` records
   broad decisions only: a rule or contract set or changed, a break, or a design choice worth
   remembering; not each new name. When the request leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
   under Decisions, and list it under Check before merging, where the owner judges it; no list

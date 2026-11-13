@@ -534,9 +534,9 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
 def test_massive_answers_a_conversion_precision_of_5(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
-    """What Massive answers to a conversion `precision` of 5, which `m.forex.conversion` refuses.
+    """What Massive answers to a conversion `precision` of 5, which its specification omits.
 
-    The library accepts the values Massive's specification lists, 0 to 4. It converts an
+    Massive's specification lists 0 to 4, and the library sends any `int`. It converts an
     amount of 1.2345678, whose exact conversion has about 12 decimals. DATA counts the rows
     whose `converted` is the amount times `last.bid` or `last.ask` rounded to 5 decimals,
     the value honored, and the line before it names the decimals `converted` was rounded to:
@@ -552,7 +552,7 @@ def test_massive_answers_a_conversion_precision_of_5(
 def test_massive_answers_a_conversion_amount_of_0_or_below(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
-    """What Massive answers to a conversion `amount` of 0 and of -100, which the library refuses.
+    """What Massive answers to a conversion `amount` of 0 and of -100, which the library sends.
 
     DATA counts the conversions whose `converted` has the amount's sign: 0 for 0, negative for
     -100.
@@ -566,9 +566,9 @@ def test_massive_answers_a_conversion_amount_of_0_or_below(
 def test_massive_answers_lower_case_currency_codes(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
-    """What Massive answers to a conversion from `aud` to `usd`, which the library refuses.
+    """What Massive answers to a conversion from `aud` to `usd`, which the library sends.
 
-    The library takes only three upper-case letters. DATA counts the conversions that name
-    `AUD` and `USD`: those read the lower-case codes as the upper-case ones.
+    DATA counts the conversions that name `AUD` and `USD`: those read the lower-case codes as
+    the upper-case ones.
     """
     assert bad_values.ask_all(live_rest, bad_values.CURRENCY_CODE, evidence)

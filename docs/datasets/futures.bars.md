@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers, a contracts table, or `dm.ALL` for every contract. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.DAY`. |
+| [`timespan`](README.md#timespan) | The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use `SESSION`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
 | [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses some exchanges' flat files. Left out, `MassiveConfig.refused_venues` applies. |

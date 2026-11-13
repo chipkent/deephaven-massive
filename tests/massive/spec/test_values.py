@@ -61,9 +61,8 @@ def test_text_is_sent_unchanged_and_an_enum_by_its_value() -> None:
     assert _encode("order", "asc") == "asc"
 
 
-def test_an_enum_value_outside_the_parameter_values_is_refused() -> None:
-    with pytest.raises(ValueError, match=r"'order' takes one of \['asc', 'desc'\], not 'up'"):
-        _encode("order", "up")
+def test_an_enum_value_outside_the_parameter_values_is_sent_for_massive_to_judge() -> None:
+    assert _encode("order", "up") == "up"
 
 
 @pytest.mark.parametrize("value", [1, None, b"x", _Code.ONE])

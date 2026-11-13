@@ -47,6 +47,10 @@ PLANS_VARIABLE: Final = "MASSIVE_LIVE_PLANS"
 S3_VARIABLES: Final = ("MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY")
 """The S3 pair, which a child that must not read flat files does not get."""
 
+ENTER_PROMPT: Final = "press Enter"
+"""How a line a child prints ends when the child waits for the person's Enter, which the parent
+reads from the terminal and passes on as a line on the child's input (`write_line`)."""
+
 
 def new_token() -> str:
     """Return a fresh random token for a child's command line.
