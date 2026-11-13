@@ -161,7 +161,8 @@ message too long, it holds too many.
 
 **Few questions, each complete.** Two full questions get better answers than six thin ones.
 Decide what is yours (section 1), send in full the questions that block work now, and hold the
-rest for a later message, where they go out in full too.
+rest for a later message, where they go out in full too. Until then, a status report gives only
+how many wait (section 6).
 
 **No label the owner did not coin, unless this message defines it.** Verification-item and
 decision numbers, question codes ("Q3", "L6", "option B" from an earlier message), names that
@@ -209,8 +210,9 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
    found (only a typo or one-word doc fix skips it), and you read its file list and diff
    against the request (`plan-parallel-prs` §6). If a risky change also had a separate
    reviewer agent, say whether a blocker is left. A PR missing any of these is not ready, so
-   say which. Each open decision, in full every time (section 4). Any manual step only the
-   owner can take.
+   say which. Each open decision that blocks work now, in full every time (section 4). For
+   questions held for a later message, give only how many wait, never their labels. Any
+   manual step only the owner can take.
    A user doc is ready to read only when a fresh calibrated-editor grade passes its bar
    (`writing-user-docs`); until then, report what blocks it, not the draft.
    If nothing, say "Nothing needs you" first.
