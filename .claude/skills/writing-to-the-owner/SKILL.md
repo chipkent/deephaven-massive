@@ -1,17 +1,18 @@
 ---
 name: writing-to-the-owner
-description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone: background with a concrete example first, then the question, options with their consequences, and a recommendation. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
+description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
 ---
 
 # Writing to the owner
 
 The owner decides from your message alone. They have not read your scratchpad, the agent
-reports, the review, or your last message, and they are coming back from other work. A question
-they cannot answer from the message in front of them costs a round trip and some of their trust.
-Their complaints, each made more than once: "You give me questions without sufficient detail to
-answer them", "I have no idea what these abbreviations are", "If you ever told me, it is buried
-in tons of discussion", and "Stop obsessing about useless legal shit … What do you really need
-to know?"
+reports, the review, the diff, or your last message, and they are coming back from other work.
+A question they cannot answer from the message in front of them costs a round trip and some of
+their trust. Their complaints, each made more than once: "Gibberish. What info do I need to make
+a decision?", "You have given me essentially zero context on this readme change but keep asking
+for information", "I have no idea what these abbreviations are", "If you ever told me, it is
+buried in tons of discussion", and "Stop obsessing about useless legal shit … What do you
+really need to know?"
 
 ## 1. Ask, or decide?
 
@@ -129,27 +130,61 @@ out incomplete, and a long list of questions goes unread.
 
 ## 4. The shape of a decision
 
-Write each question for a reader with no context: the owner has not seen the code, the
-discussion, or your last message. Each decision stands alone, in this order:
+The owner has not seen the code, the diff, or the discussion, and cannot approve a change they
+have never seen. Each question carries everything needed to decide it, in this order:
 
 1. **A heading in plain words** naming the subject: "When one of several symbols doesn't
    exist", not "Q4: 404 handling".
-2. **Background first**: what the thing is, in a line, with a concrete example (a call a user
-   makes and what happens today), and every term the decision uses.
-3. **The question**, in one sentence: "What should `history()` do then?"
-4. **Two to four options**, with "do nothing" when it is real. Each says what the user sees (an
-   example call and result), what changes in the project (which PR, files, docs), and what it
-   costs or risks.
-5. **A recommendation**, and why it beats the next-best option on the property that matters.
-6. **What waits on the answer.** Silence is not consent: the question stays open.
+2. **The thing being decided, shown.** Quote it: the new text of a doc, the lines of a diff,
+   the old and new signature, a table of old and new names. "The README note", "the logging
+   changes", or "how the implementation changed" gives the owner nothing to judge. Show the
+   lines that change, with enough around them to read.
+3. **The problem it solves, with one concrete example**: a call a user makes or a page they
+   read, what goes wrong today, and what they see after. If no user hits the problem, say so;
+   the question may not be worth asking.
+4. **Precedent, when it bears on the choice**: what Massive calls the thing (its field name or
+   docs, quoted and linked), and what Python, pandas, numpy, or Deephaven do. This answers the
+   owner's usual first questions, "why is this being made?" and "what does Massive name it?",
+   before they have to ask.
+5. **The question**, in one sentence: "Should the README keep this paragraph?"
+6. **Two to four options**, with "do nothing" when it is real. Each says what the user sees (an
+   example call and result), what changes in the project, and what it costs or risks.
+7. **A recommendation**, and why it beats the next-best option on the property that matters.
+8. **What waits on the answer.** Silence is not consent: the question stays open.
 
-Labels ("Q3", "option B", "L6", plan codes) work only inside one message. To ask again later,
-restate the background in a line, the question, each option in one line, and the
-recommendation.
+**Every time you ask, ask in full.** A question repeated in a later message (a reminder, a
+status report, a list of what is still open) restates all of the above, because the earlier
+message has scrolled away and the owner should not have to dig for it. A one-line pointer such
+as "the Codex reply on #613", "the decision-file migration", "item 86", or "Q3-3" is not a
+question: restate it in full or drop it from the list. If restating every question makes the
+message too long, it holds too many.
 
-When a message holds three or more decisions, or any public-API or design decision, have a
-Fable agent with no other context read it first and list every question it could not answer
-from the message alone. Fix those before sending.
+**Few questions, each complete.** Two full questions get better answers than six thin ones.
+Decide what is yours (section 1), send in full the questions that block work now, and hold the
+rest for a later message, where they go out in full too. Until then, a status report gives only
+how many wait (section 6).
+
+**No label the owner did not coin, unless this message defines it.** Verification-item and
+decision numbers, question codes ("Q3", "L6", "option B" from an earlier message), names that
+grew up inside a PR ("the walk", "the lock"), function names, and agent or reviewer names mean
+nothing to the owner. Say what the thing is in plain words; a function name may follow the
+plain words, never replace them. A PR or issue number comes with its title.
+
+### Before you send
+
+Read each question as the owner will, arriving from other work, and ask: **could the owner
+decide this from this message alone, without scrolling up or opening a link?** If not, add what
+is missing. The usual gaps:
+
+- a change described but not shown;
+- a problem with no user-facing example;
+- an unanswered "why?" or "what does Massive call it?";
+- a label or name this message does not define;
+- a repeat that points back instead of restating.
+
+When a message holds three or more decisions, or any public-API or design decision, also have a
+Fable agent with no other context read it and list every question it could not answer from the
+message alone. Fix those before sending.
 
 ## 5. Words
 
@@ -157,8 +192,7 @@ from the message alone. Fix those before sending.
   which review round).
 - Plain words, short sentences, the user's view before the implementation. File and function
   names come last.
-- No labels, codes, agent names, or scratchpad paths the owner did not coin. No bare answers
-  ("yes, yes, no").
+- No scratchpad paths, and no bare answers ("yes, yes, no").
 - Never forward a subagent's or reviewer's question as written: rewrite it to this standard, or
   decide it under section 1 and list it under **Decided**.
 - None of the AI tells in `docs/dev/user-docs.md#ai-tells` (asides, stacked "such as" and
@@ -176,8 +210,9 @@ Answer "status?", "what needs me?", and the like in this order, from live state:
    found (only a typo or one-word doc fix skips it), and you read its file list and diff
    against the request (`plan-parallel-prs` §6). If a risky change also had a separate
    reviewer agent, say whether a blocker is left. A PR missing any of these is not ready, so
-   say which. Each open decision (in full the first time; later its title, its
-   options in a line each, and the recommendation). Any manual step only the owner can take.
+   say which. Each open decision that blocks work now, in full every time (section 4). For
+   questions held for a later message, give only how many wait, never their labels. Any
+   manual step only the owner can take.
    A user doc is ready to read only when a fresh calibrated-editor grade passes its bar
    (`writing-user-docs`); until then, report what blocks it, not the draft.
    If nothing, say "Nothing needs you" first.
@@ -235,3 +270,44 @@ So these were never questions. Rewritten:
 >   code. The lower-level "gave up retrying" message that repeated it drops to INFO.
 > - The design records the three private helper functions and the background log-writer thread
 >   this PR adds.
+
+## Example 3: a change the owner had never seen
+
+As sent (the owner: "You have given me essentially zero context on this readme change but keep
+asking for information. This is unacceptable"):
+
+> **Still open:** keep or drop the README note in #605?
+
+The owner had not seen the note, did not know what problem it solved, and could not tell what
+dropping it would cost. Rewritten:
+
+> **A new paragraph in the README tutorial: close each example's session**
+>
+> The tutorial's thirteen examples are pasted one after another into the Deephaven console,
+> and each opens its own session. Nothing tells the reader to close one before the next. A live
+> table keeps polling until its session closes, so on a Basic key, which allows five requests a
+> minute across every session using it, Example 5's news poll keeps spending those requests
+> while Example 7 runs.
+>
+> PR #605 ("fix: rename Market.FX to FOREX and log debug to a file") adds this paragraph above
+> the table of examples:
+>
+> > Close each example's session with `m.close()` before you paste the next, except Example 5's,
+> > which Example 6 closes. A live table keeps running, and using your key's requests, until its
+> > session closes. Every session that uses your key shares one request rate, such as Basic's
+> > five requests a minute. Your key also gets one streaming connection per asset class, which
+> > sessions in this server with the same settings share. A session with no live tables also
+> > closes by itself, quietly, once no variable holds it.
+>
+> Should the README keep this paragraph?
+>
+> - **A. Keep it.** Readers close each session as they go, and a Basic key's requests go to the
+>   example in front of them. Cost: five sentences before the examples start.
+> - **B. Keep only the first two sentences.** Readers still close sessions, but don't learn
+>   that sessions share the key's rate and connections, which they need once they write their
+>   own scripts.
+> - **C. Drop it.** The tutorial stays shorter; a Basic-key reader who runs the examples in
+>   order has earlier polls competing with later examples, with no hint why.
+>
+> I recommend A: the sharing it explains is what a reader hits first after the tutorial, and
+> the README is where they look. PR #605 waits on this.
