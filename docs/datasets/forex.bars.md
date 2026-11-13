@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()` takes `dm.ALL` for one-minute and one-day bars. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.SESSION`. |
+| [`timespan`](README.md#timespan) | The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 
 ## Plans

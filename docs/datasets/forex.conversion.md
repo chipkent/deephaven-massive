@@ -21,10 +21,10 @@ m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
 
 | Argument | Description |
 | --- | --- |
-| `from_currency` | The currency to convert from, as three upper-case letters, such as `"AUD"`. |
-| `to_currency` | The currency to convert to, such as `"USD"`. |
-| `amount` | The amount to convert, positive and finite; 1.0 by default. |
-| `precision` | The decimal places of the result, 0 to 4; 2 by default. |
+| `from_currency` | The code of the currency to convert from, such as `"AUD"`. Massive answers HTTP 404 to a code it doesn't know, such as `"aud"`, and the read raises `MassiveError`. |
+| `to_currency` | The code of the currency to convert to, such as `"USD"`. |
+| `amount` | The amount to convert, any finite number; 1.0 by default. |
+| `precision` | The decimal places of the result; 2 by default. |
 
 ## Plans
 

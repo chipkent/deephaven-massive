@@ -98,7 +98,7 @@ def test_every_dataset_has_its_call() -> None:
         # Each argument's entry of the docstring's `Args`, its lines joined.
         descriptions=(
             "Stock tickers, or `dm.ALL`.",
-            "The bar's unit, any but `dm.Timespan.SESSION`.",
+            "The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.",
             "Units per bar.",
             "Adjusts volume as well as prices.",
         ),

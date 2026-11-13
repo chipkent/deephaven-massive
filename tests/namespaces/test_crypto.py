@@ -375,12 +375,13 @@ def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) ->
 
 def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.crypto.bars
-    with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
-        bars("X:BTCUSD", dm.Timespan.SESSION)
+    # Massive judges these values itself, so the query is built and they are sent.
+    assert bars("X:BTCUSD", dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
+    assert bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)._request.multiplier == 0
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars("X:BTCUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
-    with pytest.raises(ValueError, match="multiplier"):
-        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier="2")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted"):
         bars("X:BTCUSD", adjusted=True)  # type: ignore[call-arg]  # crypto bars have none
 

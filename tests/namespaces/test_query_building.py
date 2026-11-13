@@ -287,8 +287,8 @@ def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> Non
 def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
     m = massive_session
     assert dict(m.reference.tickers(sort="name")._request.params)["sort"] == "name"
-    with pytest.raises(ValueError, match=r"^reference\.tickers: sort 'nam' is not a sort field"):
-        m.reference.tickers(sort="nam")
+    # A field the path does not list is sent: Massive answers it with HTTP 400.
+    assert dict(m.reference.tickers(sort="nam")._request.params)["sort"] == "nam"
     statements = m.stocks.financials.balance_sheets
     assert dict(statements(sort="period_end.desc,fiscal_year")._request.params)["sort"] == (
         "period_end.desc,fiscal_year"
@@ -1098,18 +1098,18 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
     assert type(minute) is StreamHistoryQuery
 
 
-def test_bar_timespan_rules() -> None:
-    with pytest.raises(ValueError, match="futures bars have no DAY timespan"):
-        _check_bar_period(FUTURES_BARS, Timespan.DAY, 1)
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        _check_bar_period(STOCK_BARS, Timespan.SESSION, 1)
+def test_bar_periods_are_left_to_massive() -> None:
+    # Massive answers HTTP 400 to a multiplier below 1 and to session bars outside futures, and
+    # serves futures day bars, so none is refused here.
+    _check_bar_period(Timespan.DAY, 1)
+    _check_bar_period(Timespan.SESSION, 1)
+    _check_bar_period(Timespan.DAY, 0)
+    _check_bar_period(Timespan.MINUTE, -5)
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
-        _check_bar_period(STOCK_BARS, "day", 1)
-    with pytest.raises(ValueError, match="multiplier must be positive"):
-        _check_bar_period(STOCK_BARS, Timespan.DAY, 0)
+        _check_bar_period("day", 1)
 
 
 @pytest.mark.parametrize("multiplier", [True, 1.0])
 def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
     with pytest.raises(TypeError, match="multiplier must be an int"):
-        _check_bar_period(STOCK_BARS, Timespan.DAY, multiplier)
+        _check_bar_period(Timespan.DAY, multiplier)

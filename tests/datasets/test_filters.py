@@ -278,16 +278,9 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             "takes whole ms since the epoch",
         ),
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
-        (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
-        (DIVIDENDS, "distribution_type_any_of", " ", "has an empty value in"),
-        # An item is taken exactly as written: a space after a comma is refused, not trimmed.
-        (
-            DIVIDENDS,
-            "distribution_type_any_of",
-            "a, b",
-            "has the item ' b' with surrounding whitespace in",
-        ),
-        (DIVIDENDS, "distribution_type_any_of", ("a", " b"), "has the item ' b'"),
+        # An all-empty list sends no value, so it would ask for no filter at all.
+        (DIVIDENDS, "distribution_type_any_of", "", "has no value in"),
+        (DIVIDENDS, "distribution_type_any_of", ",", "has no value in"),
         # ISO-8601 text of no documented precision cannot end a day exactly.
         (
             NEWS,
@@ -426,16 +419,34 @@ def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
     assert param_base("date") == "date"
 
 
-def test_comma_items_splits_an_item_on_its_commas() -> None:
-    assert filters._comma_items("a,b", label="d filter 'k'", value=("a,b",)) == ["a", "b"]
-    # A blank value stays empty, for the caller to refuse.
-    assert filters._comma_items("a,,b", label="d filter 'k'", value=("a,,b",)) == ["a", "", "b"]
-    assert filters._comma_items("a, ", label="d filter 'k'", value=("a, ",)) == ["a", ""]
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [
+        ("a, b", ("a", " b")),
+        (("a", " b"), ("a", " b")),
+        (" ", (" ",)),
+        # An empty item is sent too, for Massive to read.
+        ("a,,b", ("a", "", "b")),
+    ],
+)
+def test_a_list_item_with_whitespace_or_none_is_sent_as_written(
+    value: ParamValue, sent: tuple[str, ...]
+) -> None:
+    # Massive reads the item it names: `ticker.any_of` of AAPL and " MSFT" returned MSFT's rows.
+    assert check(DIVIDENDS, {"distribution_type_any_of": value}) == {
+        "distribution_type_any_of": sent
+    }
 
 
-def test_comma_items_refuses_a_value_with_surrounding_whitespace() -> None:
-    with pytest.raises(ValueError, match=r"^d filter 'k' has the item ' b' with surrounding"):
-        filters._comma_items("a, b", label="d filter 'k'", value=("a, b",))
+def test_an_enum_filter_value_the_parameter_does_not_list_is_refused() -> None:
+    # Massive answers it with no rows and no error (`market=equities` on the tickers list).
+    with pytest.raises(
+        ValueError,
+        match=r"^options\.contracts filter 'contract_type' takes one of \['call', 'put'\], "
+        r"not 'up'$",
+    ):
+        check(OPTION_CONTRACTS, {"contract_type": "up"})
+    assert check(OPTION_CONTRACTS, {"contract_type": "call"}) == {"contract_type": "call"}
 
 
 def test_date_text_writes_a_day_only_for_a_list_of_dates() -> None:

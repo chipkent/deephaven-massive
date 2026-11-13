@@ -357,9 +357,9 @@ def test_bars_default_to_streamed_minutes(m: dm.MassiveSession) -> None:
     assert repr(q) == ("m.indices.bars('I:SPX', dm.Timespan.MINUTE)")
 
 
-def test_bars_reject_the_futures_session(m: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        m.indices.bars("I:SPX", dm.Timespan.SESSION)
+def test_bars_leave_the_futures_session_to_massive(m: dm.MassiveSession) -> None:
+    # Massive answers HTTP 400 to session bars outside futures, so they are sent.
+    assert m.indices.bars("I:SPX", dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
 
 
 def test_bars_have_no_adjusted_parameter(m: dm.MassiveSession) -> None:
@@ -371,8 +371,10 @@ def test_bars_have_no_adjusted_parameter(m: dm.MassiveSession) -> None:
 def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         m.indices.bars("I:SPX", "minute")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="multiplier must be positive"):
-        m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=0)
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=1.0)  # type: ignore[arg-type]  # the point: refused at run time
+    # Massive answers HTTP 400 to a multiplier below 1, so it is sent.
+    assert m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=0)._request.multiplier == 0
 
 
 def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:

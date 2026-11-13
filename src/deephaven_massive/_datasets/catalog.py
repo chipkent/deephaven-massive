@@ -89,9 +89,6 @@ only "if available", and the underlying that only the options rows of a mixed sn
 _SORT_SUFFIXES: Final = frozenset({"asc", "desc"})
 """The direction suffixes a part of a comma-separated `sort` may carry."""
 
-_NOT_SORT_FIELDS: Final = frozenset({"limit", "sort", "order"})
-"""The query parameters of a path that shape its pages rather than filter its rows by a field."""
-
 _LIST_TYPES: Final = frozenset({WireType.JSON_TEXT, WireType.LONG_ARRAY, WireType.STRING_ARRAY})
 """Wire types of a field that holds several values, such as a filing's list of tickers."""
 
@@ -1116,76 +1113,39 @@ class Catalog:
         return filled_columns(spec, keys, self.source)
 
     def check_sort(self, spec: DatasetSpec, sort: str, *, ordered: bool) -> None:
-        """Check a `sort` argument against every REST path of the dataset that takes `sort`.
+        """Check that a `sort` argument and an `order` can be sent together.
 
-        Runs synchronously when the query is built, as `check_filters` does, so a misspelled
-        field fails at the call rather than as an HTTP 400 at the verb. Massive documents
-        `sort` in two forms. Where a path lists its sort fields (an enum `sort`, such as
-        `ex_dividend_date` and `pay_date` on the dividends), `sort` must be one of them.
-        Where it documents `sort` as a comma-separated list of columns, each with an optional
-        `.asc` or `.desc` suffix (a text `sort`, such as `period_end.desc` on the financial
-        statements), each part must name a field of the path's rows (`Field.wire_key`) or a
-        filter of the path (the base name of a query parameter other than `limit`, `sort`, and
-        `order`) that names the last part of such a field's key, as every default Massive
-        documents for such a `sort` does: the futures snapshot sorts by its filter `ticker`,
-        which its rows nest as `details.ticker`. A filter that names no field of the rows (the
-        Benzinga news filter `stocks`) is no sort field. A path
-        without `sort` is left alone: whether its dataset may send one is `build_query`'s
-        concern.
+        Runs synchronously when the query is built, as `check_filters` does. Massive documents
+        `sort` in two forms: a path that lists its sort fields (an enum `sort`, such as
+        `ex_dividend_date` on the dividends), and a path that takes a comma-separated list of
+        fields, each with an optional `.asc` or `.desc` suffix (a text `sort`, such as
+        `period_end.desc` on the financial statements). Massive judges the fields itself: it
+        answers HTTP 400 to a value an enum `sort` does not list and to a field its rows do
+        not have, and it reads a part with surrounding whitespace (`"ticker, date"`) as the
+        field it names, so every such `sort` is sent as written. Only one combination cannot
+        be written into a request: a text `sort` takes its direction as the suffix of its last
+        part, so a part with its own suffix and an `order` would send two directions.
 
         Args:
             spec: The dataset.
             sort: The `sort` argument, a `str`.
-            ordered: True when `order` is set too, whose direction a suffixed part would
-                contradict.
+            ordered: True when `order` is set too.
 
         Raises:
-            ValueError: If `sort` is not one of an enum `sort`'s fields; or, on a text `sort`,
-                if a part has surrounding whitespace (`"date, ticker"`; nothing is trimmed),
-                is empty, names no field of the path's rows, or carries its own
-                `.asc` or `.desc` suffix while `order` is set. The message lists the fields
-                the path takes.
+            ValueError: If `ordered` and a part of `sort` carries its own `.asc` or `.desc`
+                suffix on a path whose `sort` is text.
 
         An unknown REST path raises the `KeyError` of `source`.
         """
+        if not ordered:
+            return
         for path in spec.rest_paths:
-            rest_path = self.rest_path(path)
-            param = next((p for p in rest_path.params if p.name == "sort"), None)
-            if param is None:
+            param = next((p for p in self.rest_path(path).params if p.name == "sort"), None)
+            if param is None or param.kind is ParamKind.ENUM:
                 continue
-            if param.kind is ParamKind.ENUM:
-                if sort not in param.values:
-                    raise ValueError(
-                        f"{spec.name}: sort {sort!r} is not a sort field of {path}; it takes "
-                        f"{list(param.values)}"
-                    )
-                continue
-            keys = {field.wire_key for field in rest_path.fields}
-            # A filter names a sort field only when it names a field of the rows, at any depth
-            # (the futures snapshot's `ticker` filter names `details.ticker`).
-            leaves = {key.rpartition(".")[2] for key in keys}
-            filters = {
-                p.name.partition(".")[0]
-                for p in rest_path.params
-                if not p.in_path and p.name not in _NOT_SORT_FIELDS
-            }
-            fields = sorted(keys | (filters & leaves))
             for part in sort.split(","):
-                if part != part.strip():
-                    raise ValueError(
-                        f"{spec.name}: sort part {part!r} has surrounding whitespace; write "
-                        f"{part.strip()!r}, parts joined by commas alone"
-                    )
-                name, dot, suffix = part.rpartition(".")
-                if not (dot and suffix in _SORT_SUFFIXES):
-                    name, suffix = part, ""
-                if name not in fields:
-                    raise ValueError(
-                        f"{spec.name}: sort part {part!r} names no field of {path}; sort takes "
-                        f"comma-separated fields, each with an optional .asc or .desc, of "
-                        f"{fields}"
-                    )
-                if suffix and ordered:
+                _, dot, suffix = part.rpartition(".")
+                if dot and suffix in _SORT_SUFFIXES:
                     raise ValueError(
                         f"{spec.name}: sort part {part!r} has its own direction, so it cannot "
                         "be combined with order; drop the suffix or the order"

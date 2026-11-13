@@ -66,14 +66,16 @@ _FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
     Timespan.SECOND: "sec",
     Timespan.MINUTE: "min",
     Timespan.HOUR: "hour",
+    Timespan.DAY: "day",
     Timespan.SESSION: "session",
     Timespan.WEEK: "week",
     Timespan.MONTH: "month",
     Timespan.QUARTER: "quarter",
     Timespan.YEAR: "year",
 }
-"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan; the
-endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
+"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan.
+Massive's documentation lists no `day` unit, but it serves `1day` bars in the shape of
+`1session` bars."""
 
 _ONE_DAY: Final = timedelta(days=1)
 

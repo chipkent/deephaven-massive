@@ -54,6 +54,7 @@ from deephaven_massive._datasets.bar_periods import (
     bar_starts,
     futures_bar_request,
     futures_first_bucket_day,
+    futures_session_unit,
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
@@ -263,6 +264,12 @@ def history_window(
             whole.latest.isoformat(),
         )
         return HistoryWindow(span, ended, None, instants, whole, now=moment)
+    if request.multiplier < 1 or (timespan is Timespan.SESSION and not futures):
+        # The library has no bar period to fit to the range here: a session outside futures,
+        # or a bar of no units or fewer. The range is requested as given, so Massive answers
+        # it, rather than the library returning no rows without a request.
+        whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
+        return HistoryWindow(span, ended, None, instants, whole, now=moment)
     keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
     # Futures intraday bars named by instants take `window_start` exactly. The aggregates' `{from}`
     # starts where the first whole period's days begin, so the bar of that period is returned
@@ -326,7 +333,7 @@ def _futures_sessions(
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(AssetClass.FUTURES, ended, timespan=timespan, multiplier=multiplier)
         return HistoryWindow(span, keep, span, requested, whole, now=now)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         # Only finished sessions, and no session ends on a Saturday or Sunday.
         last = min(span.last, futures_session(now) - _ONE_DAY)
@@ -476,7 +483,11 @@ def _flat_file_problems(
     if flat_file_prefix(spec, request) is None:
         if spec.is_bars and spec.flat_file_prefixes:
             spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
-            problems.append(f"{spec.name} flat files hold only {spans} bars")
+            # Futures day bars are read from REST; the session files hold session bars, which
+            # are not yet shown to be the same bars.
+            day = request.timespan is Timespan.DAY and Timespan.SESSION in spec.flat_file_prefixes
+            hint = "; use dm.Timespan.SESSION for every contract's daily bars" if day else ""
+            problems.append(f"{spec.name} flat files hold only {spans} bars{hint}")
         else:
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:

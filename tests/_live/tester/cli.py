@@ -32,10 +32,9 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final
 
 from tests._live.live_run.children import run_command
-from tests._live.live_run.cli import credentials
 from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import check_machine, ready
-from tests._live.live_run.run_probe import probe_key
+from tests._live.live_run.run_probe import credentials, probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
 from tests._live.tester import examples
 from tests._live.tester.bug_report import build_bundle
