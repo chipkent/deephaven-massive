@@ -51,15 +51,15 @@ reason features land slowly. A planned merge order limits it; stacking does not 
 - When a PR renames a public name, tell every open agent the new name; the second PR to land
   merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
   A brief that asks for a repository-wide grep to prove an old name is gone excludes
-  `docs/dev/decisions.md` and `docs/dev/verification-items.md`: both are append-only, so their
-  past entries keep the old name.
+  `docs/dev/decisions/` and `docs/dev/verification-items/`: their entries are never rewritten,
+  so past ones keep the old name.
 - Agents never force-push or rebase a pushed branch. Conflicts are resolved by the owning agent
   with a written rationale; the coordinator never pushes or resolves one itself.
 
 ## 4. Reserve numbers
 
-Take the highest decision number in `docs/dev/decisions.md` and verification-item number in
-`docs/dev/verification-items.md`, on `main` and in every open PR's diff, and assign each PR that
+Take the highest decision number in `docs/dev/decisions/` and verification-item number in
+`docs/dev/verification-items/`, on `main` and in every open PR's diff, and assign each PR that
 adds one its own next numbers, in merge order.
 
 ## 5. Launch

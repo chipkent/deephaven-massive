@@ -59,7 +59,7 @@ uv run pytest tests/datasets/test_column_reference.py -q     # the column-refere
    they are different fields that happen to share a text, add a `SHARED_DESCRIPTIONS` entry
    saying why. If the documentation leaves any doubt, write a live test that reads both fields
    for one symbol back to back, record a verification item, and ask the owner before renaming
-   ([decision 101](decisions.md)).
+   ([decision 101](decisions/0101-same-field-one-column-name-across-datasets-spellings.md)).
 4. A vendor description that is clearly wrong for its source (another asset class's or event's
    text, or a statement Massive's own documentation of the field contradicts) is corrected the
    same way, by a `DESCRIPTION_FIXES` entry that quotes it.

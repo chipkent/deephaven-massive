@@ -57,15 +57,16 @@ value chosen), not just that a choice was made.
 
 **Closed subjects:** never raise licensing, legal, affiliation, or "what users may post"
 questions. Decide them yourself and do the useful thing. A check that needs Massive's API with a key
-becomes a live test and a verification item (`docs/dev/verification-items.md`), and the claim it
+becomes a live test and a verification item (`docs/dev/verification-items/`), and the claim it
 supports is marked unverified until it runs. Either the owner runs one with their key, or you run it
 after their yes in the session (`AGENTS.md`, Limits). When a decision waits on the result, ask:
 give the exact command, what it costs (key use, and any WebSocket connection it takes from their
 live tables), and what the result settles.
 
-**Never re-ask what the owner already decided.** Before asking, check `docs/dev/decisions.md`,
-`AGENTS.md`, the skills, the issue and its comments (`gh issue view <n> --comments`), and the
-owner's earlier answers. If an earlier answer settles the case, follow it and cite it; if it
+**Never re-ask what the owner already decided.** Before asking, list the decisions
+(`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read every one whose name touches the
+subject; then check `AGENTS.md`, the skills, the issue and its comments
+(`gh issue view <n> --comments`), and the owner's earlier answers. If an earlier answer settles the case, follow it and cite it; if it
 may cover the case but leaves a gap, quote it and ask only about the gap.
 
 **A question from the owner is a question, not an instruction.** Answer it; change nothing

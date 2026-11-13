@@ -46,7 +46,7 @@ same property. Then look for:
   limits); network and Deephaven errors. A failure swallowed, logged without failing what needs
   it, or retried forever. State written before an operation that can still fail.
 - **Contract drift.** A public change (`AGENTS.md`, **A public change needs the owner's request
-  or approval**) without matching docs and tests, or without a `decisions.md` entry when it sets or changes a
+  or approval**) without matching docs and tests, or without a decision entry when it sets or changes a
   rule or contract; from `0.1.0`, a change that
   breaks code written to the last release without the owner's permission and the next version
   named; behavior inconsistent with how a sibling call treats the same concept.
@@ -108,7 +108,7 @@ same property. Then look for:
   gives a field another dataset already names a second name, a secret
   that can reach a message, `repr`, or log, and a new name that is an abbreviation. After a
   rename, `git grep` the old name across code, docs, the PR body, and its issue; past entries
-  in the append-only `docs/dev/decisions.md` and `verification-items.md` keep it.
+  in `docs/dev/decisions/` and `docs/dev/verification-items/`, never rewritten, keep it.
 
 ## 2. Prove the tests catch a regression
 
@@ -136,7 +136,7 @@ a docs or config change has nothing to break.
 
 Write or rewrite it to the branch's final state with the `writing-a-pr-description` skill. An
 open question in it ("should this return X?") is a finding: answer it from `AGENTS.md`,
-`decisions.md`, and the code and record the answer under Decisions. If it is the owner's call,
+`docs/dev/decisions/`, and the code and record the answer under Decisions. If it is the owner's call,
 ask with the `writing-to-the-owner` skill and don't build the contested part. A PR complete
 except for that part is not work in progress: push it with the question under Check before
 merging, where it blocks the merge, not the push.

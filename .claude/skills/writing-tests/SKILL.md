@@ -52,8 +52,8 @@ it costs, and what its result settles.
 
 - A live test names the open questions it answers with `@pytest.mark.verifies("N")` (it asserts
   the answer the library assumes) or `@pytest.mark.settles("N")` (it records evidence a person
-  reads). `N` is an item of `docs/dev/verification-items.md`; `tests/live/test_summary.py`
-  fails on a number the file does not list.
-- A new open question gets a new item in that file, with the next free number; a settled item
-  gets its one-line settlement there.
+  reads). `N` is an item of `docs/dev/verification-items/`; `tests/live/test_summary.py`
+  fails on a number no file there has.
+- A new open question gets a new item file, with the next free number, in the format of that
+  folder's README; a settled item gets its one-line settlement on its `Status:` line.
 - Each test's docstring says what its evidence means.
