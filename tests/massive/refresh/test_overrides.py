@@ -359,6 +359,12 @@ def test_the_option_chain_takes_the_v2_snapshots_names_for_its_day_change() -> N
     assert stocks.field("TodaysChangePerc").wire_key == "todaysChangePerc"
 
 
+def test_a_whole_key_spelling_names_a_field() -> None:
+    for (source, key), entry in overrides.SPELLINGS.items():
+        if entry.whole_key:
+            assert key in {f.wire_key for f in spec.source(Transport.REST, source).fields}, key
+
+
 def test_the_conversion_s_last_quote_takes_the_snapshot_s_quote_names() -> None:
     conversion = spec.source(Transport.REST, "/v1/conversion/{from}/{to}")
     assert conversion.field("LastQuoteBidPrice").wire_key == "last.bid"
