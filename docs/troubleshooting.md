@@ -81,10 +81,8 @@ do:
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings, and the message names the fix), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
 
-Wait before you call again, since the library has already retried, as
-`help(dm.MassiveError.is_retryable)` explains. After `m.close()`, a query method such as
-`fetch()`, or `m.streams()`, raises `dm.SessionClosedError`. Create a new session to read
-again.
+After `m.close()`, a query method such as `fetch()` raises `dm.SessionClosedError`, and so
+does `m.streams()`. Create a new session to read again.
 
 A `fetch()` or `history()` of a watchlist can fail for some symbols and not others, such as
 when Massive refuses one symbol's request. Those symbols show their errors in
@@ -111,7 +109,8 @@ for attempt in range(3):
         time.sleep(60)
 ```
 
-Branch on `is_retryable` and `is_bug`, never on the message.
+Branch on `is_retryable` and `is_bug`, never on the message. Wait before you call again, since
+the library has already retried, as `help(dm.MassiveError.is_retryable)` explains.
 
 <a id="diagnostics"></a>
 

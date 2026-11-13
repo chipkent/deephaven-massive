@@ -288,7 +288,8 @@ class MassiveError(Exception):
 
         True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
         504), no answer (a `NETWORK` error), and two answers that mean try again: HTTP 404 on a
-        later page of a paged REST read, and S3's `RequestTimeout` (HTTP 400) on a flat file.
+        later page of one symbol's REST read, and S3's `RequestTimeout` (HTTP 400) on a flat
+        file.
         True too for two failures the library finds itself: a flat file Massive hasn't
         published yet, and pages of one read on which Massive answered with a different
         `adjusted` than was asked. A `fetch()` or `history()` of a watchlist whose every symbol
@@ -308,8 +309,8 @@ class MassiveError(Exception):
 
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
-        or a parameter that one of the watchlist's symbols can't be read with; its
-        message names the fix. The library logs a bug at ERROR, and any other error below
+        or an argument that one of the watchlist's symbols doesn't take; its message names the
+        fix. The library logs a bug at ERROR, and any other error below
         ERROR.
         """
         return self._is_bug
@@ -324,10 +325,9 @@ class AuthenticationError(MassiveError):
     keys, and the message then names `s3_access_key_id` and `s3_secret_access_key`. Without
     `wait=True`, the table fails with it instead. A live table fails with it when Massive's
     streaming server rejects the key, and so does every other stream on that connection.
-    Massive gives the same answer to a plan with no streams of the asset class, and the message
-    says so.
-    Its `source` is `ErrorSource.USER` when the key is missing, and `ErrorSource.MASSIVE` when
-    Massive refused it.
+    Massive may give the same answer to a plan without streams of the asset class, so the
+    message says that too. Its `source` is `ErrorSource.USER` when the key is missing, and
+    `ErrorSource.MASSIVE` when Massive refused it.
 
     Example:
         ::
@@ -688,8 +688,8 @@ class UnlistedPairError(PermanentError):
 class SessionClosedError(MassiveError):
     """The session is closed, so it reads nothing more.
 
-    A query method such as `fetch()`, or `m.streams()`, called after `m.close()` raises it,
-    and so does a call that the close cut short. A live table that was running when the session
+    After `m.close()`, a query method such as `fetch()` raises it, and so do `m.streams()`
+    and a call that the close cut short. A live table that was running when the session
     closed fails with it. The message names the session and the fix, such as
     `"MassiveSession #1 is closed; open a new dm.MassiveSession() to read again"`. Its
     `source` is `ErrorSource.USER`, and `is_retryable` is False.
