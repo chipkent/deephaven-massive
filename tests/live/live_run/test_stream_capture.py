@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -664,14 +664,14 @@ def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> Non
             queued.append((stream.name, len(columns["Symbol"])))
 
     stream = stream_capture.Stream("stocks-minute-bars", "stocks delayed", lambda _m: None)
-    copier = stream_capture.RowCopier(stream, cast("stream_capture.Recorder", Queue()))
-    copier.on_update(
-        cast("TableUpdate", _Update({"Symbol": np.array(["AAPL", "NVDA"])})), is_replay=False
-    )
-    copier.on_update(
-        cast("TableUpdate", _Update({"Symbol": np.array([], dtype=object)})), is_replay=False
-    )
-    copier.on_update(cast("TableUpdate", _Update({})), is_replay=False)
+    recorder: stream_capture.Recorder = Queue()  # type: ignore[assignment]  # records the puts
+    copier = stream_capture.RowCopier(stream, recorder)
+    two: TableUpdate = _Update({"Symbol": np.array(["AAPL", "NVDA"])})  # type: ignore[assignment]  # a fake update
+    none: TableUpdate = _Update({"Symbol": np.array([], dtype=object)})  # type: ignore[assignment]  # a fake update
+    empty: TableUpdate = _Update({})  # type: ignore[assignment]  # a fake update
+    copier.on_update(two, is_replay=False)
+    copier.on_update(none, is_replay=False)
+    copier.on_update(empty, is_replay=False)
     assert queued == [("stocks-minute-bars", 2)]
 
 

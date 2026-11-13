@@ -122,7 +122,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -143,6 +143,7 @@ from deephaven_massive._errors import (
     RowDataError,
     cause_of,
     failure_text,
+    required,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
@@ -171,7 +172,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._datasets.symbols import AllSymbols
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -313,7 +314,7 @@ class CycleReader(Protocol):
     def __call__(
         self,
         *,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
@@ -707,7 +708,7 @@ class Poller:
         result may still use the poll; the poller stops when the poll's blink table shuts down.
         The session is alive: the poll's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).workers.release(self._stream_id)
+        required(self._core(), "the session").workers.release(self._stream_id)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the poller and fail its table, once: the session closed, or a thread died.
@@ -724,7 +725,7 @@ class Poller:
             False when the table had already failed.
         """
         self._stop.set()
-        return self._fail_once(cast("SessionCore", self._core()), error)
+        return self._fail_once(required(self._core(), "the session"), error)
 
     def _run(self) -> None:
         """Run cycles until stopped or failed, waiting `interval` from one start to the next.
@@ -866,7 +867,7 @@ class Poller:
             if not self._running:
                 return
             # The running cycle's frame holds the core (`_cycle`).
-            core = cast("SessionCore", self._core())
+            core = required(self._core(), "the session")
             began, began_at, good = self._watched
             if now - began <= self._interval:
                 return
@@ -915,7 +916,7 @@ class Poller:
         with entered(self._exec_ctx):
             self._fail_fatal(core, error)
 
-    def _symbols(self) -> tuple[NormalizedSymbols | None, tuple[str, ...]]:
+    def _symbols(self) -> tuple[tuple[str, ...] | AllSymbols | None, tuple[str, ...]]:
         """Return the cycle's symbols, reading a reactive table once.
 
         A row of a reactive table that is not Massive's exact ticker follows the session's
@@ -1420,7 +1421,7 @@ _SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
 """The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
 
 
-def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
+def _hashable(column: pa.ChunkedArray) -> list[object]:
     """Return a column's values in a form a set can hold: a list value as a tuple.
 
     A row's identity is a tuple of its key values, held in the poller's sets, so a list key
@@ -1430,12 +1431,13 @@ def _hashable(column: pa.ChunkedArray) -> list[Hashable]:
         column: One key column of a cycle.
 
     Returns:
-        Its values, each list as a tuple and every other value as is.
+        Its values, each list as a tuple and every other value as is. A value a set cannot
+        hold raises the set's `TypeError` where the poller adds it.
     """
-    values = column.to_pylist()
+    values: list[object] = list(column.to_pylist())
     if not pa.types.is_list(column.type):
-        return cast("list[Hashable]", values)
-    return [None if value is None else tuple(value) for value in values]
+        return values
+    return [tuple(value) if isinstance(value, list) else value for value in values]
 
 
 def _list_key_text(table: pa.Table, names: Sequence[str]) -> pa.Array:

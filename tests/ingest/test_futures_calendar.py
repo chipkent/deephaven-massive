@@ -15,7 +15,7 @@ import queue
 import threading
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
@@ -33,10 +33,19 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from deephaven_massive import _massive
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 TIMEOUT = 15.0
-CONTRACTS_PATH = cast("str", futures.CONTRACTS.fetch_path)
-SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
+
+
+def _fetch_path(spec: DatasetSpec) -> str:
+    path = spec.fetch_path
+    assert path is not None
+    return path
+
+
+CONTRACTS_PATH = _fetch_path(futures.CONTRACTS)
+SCHEDULES_PATH = _fetch_path(futures.SCHEDULES)
 PATHS = {"contracts_path": CONTRACTS_PATH, "schedules_path": SCHEDULES_PATH}
 """The paths the session passes: those of the futures reference datasets."""
 SPACING = RELOAD_SPACING.total_seconds()
@@ -231,7 +240,9 @@ def null_date(symbol: str, why: str, day: str) -> str:
 
 
 def idle(calendar: FuturesCalendar) -> None:
-    cast("_WatchedQueue", calendar._queue).wait_idle()
+    watched = calendar._queue
+    assert isinstance(watched, _WatchedQueue)
+    watched.wait_idle()
 
 
 def watched(calendar: FuturesCalendar, *symbols: str) -> None:

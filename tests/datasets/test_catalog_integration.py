@@ -44,7 +44,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -53,6 +53,7 @@ import deephaven_massive as dm
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
+from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamQuery
 from tests._live import streams
 
 if TYPE_CHECKING:
@@ -365,16 +366,21 @@ def _option(client: RestClient) -> str:
         else:
             assert chain, f"no AAPL option near {close} in the chain snapshot"
             contracts = [
-                (cast("dict[str, Any]", r["details"]), cast("dict[str, Any]", r.get("day") or {}))
-                for r in chain
+                (_json_object(r["details"]), _json_object(r.get("day") or {})) for r in chain
             ]
             expiry = min(str(details["expiration_date"]) for details, _ in contracts)
             busiest, _ = max(
                 (c for c in contracts if str(c[0]["expiration_date"]) == expiry),
-                key=lambda c: float(c[1].get("volume") or 0),
+                key=lambda c: float(str(c[1].get("volume") or 0)),
             )
             _FOUND["options"] = str(busiest["ticker"])
     return _FOUND["options"]
+
+
+def _json_object(value: object) -> Mapping[str, object]:
+    """Return a JSON object of Massive's answer, checked to be one."""
+    assert isinstance(value, dict), value
+    return value
 
 
 def _symbol(name: str, spec: DatasetSpec, client: RestClient, *, symbols: Mapping[Any, str]) -> str:
@@ -454,22 +460,6 @@ def _query(
     return method(**arguments)
 
 
-class _Fetches(Protocol):
-    """A query with `fetch()`."""
-
-    def fetch(self, *, wait: bool) -> Table:
-        """Return the dataset's current rows."""
-        ...
-
-
-class _Histories(Protocol):
-    """A query with `history()`."""
-
-    def history(self, start: date | datetime, end: date | datetime, *, wait: bool) -> Table:
-        """Return the dataset's rows over a range."""
-        ...
-
-
 def _run(query: Query, verb: str, *, bars: bool, day: date) -> Table:
     """Run one fetch or history verb on a query that offers it.
 
@@ -478,8 +468,10 @@ def _run(query: Query, verb: str, *, bars: bool, day: date) -> Table:
         time for ticks.
     """
     if verb == "fetch":
-        return cast("_Fetches", query).fetch(wait=True)
-    histories = cast("_Histories", query)
+        assert isinstance(query, FetchQuery)
+        return query.fetch(wait=True)
+    histories = query
+    assert isinstance(histories, HistoryQuery)
     if bars:
         return histories.history(day, day, wait=True)
     start = datetime(day.year, day.month, day.day, 15, tzinfo=_NEW_YORK)
@@ -585,7 +577,8 @@ def _poll_case(case: _Case, query: Query) -> tuple[list[str], list[str]]:
     Returns:
         The table's columns and what the case saw drift.
     """
-    table = cast("Any", query).poll(_POLL_INTERVAL)
+    assert isinstance(query, FetchQuery)
+    table = query.poll(_POLL_INTERVAL)
     cycles: set[object] = set()
     pause = threading.Event()  # never set; only paces the polling
     deadline = time.monotonic() + _POLL_WAIT
@@ -719,11 +712,12 @@ def _stream_case(
     Returns:
         The table's columns and what the case saw drift.
     """
-    table = cast("Any", query).append_only()
+    assert isinstance(query, StreamQuery)
+    table = query.append_only()
     before = _reconnects(_socket_rows(case))
     acked = wait_acked(case.session, 1, time.monotonic() + _STREAM_WAIT)
     family = case.name.rpartition(".")[2]
-    asset_class = cast("dm.AssetClass", case.spec.asset_class)
+    asset_class = case.spec.single_class
     status, due = rows_due(_MARKETS[asset_class], family)
     due = due and case.name not in _RARE
     quiet = due and _may_go_quiet(asset_class, family, live_plans)

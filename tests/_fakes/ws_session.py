@@ -13,10 +13,11 @@ imported only once the embedded JVM has started.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import threading
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
@@ -25,20 +26,26 @@ from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
 from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import AssetClass, ChannelFamily
     from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
     from tests._fakes.ws import FakeMassiveServer
 
 TIMEOUT = 15.0
 """Seconds any wait on the session or the server may take before the test fails."""
+
+_DEFAULTS = dm.MassiveConfig(api_key="test-key")
+"""The options a session gets unless a test passes its own."""
 
 REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
 """The host decision every stream gets unless a test passes its own `decide`."""
@@ -132,7 +139,14 @@ class WsSession:
         decide: Callable[[AssetClass, ChannelFamily], HostDecision] | None = None,
         flush_interval: float = 3600.0,
         backoff: float = 0.05,
-        **config: object,
+        rest_base_url: str = _DEFAULTS.rest_base_url,
+        subscription_confirmation_timeout: float = _DEFAULTS.subscription_confirmation_timeout,
+        connection_taken: dm.ConnectionTaken = _DEFAULTS.connection_taken,
+        max_outage: float = _DEFAULTS.max_outage,
+        noncanonical_symbols: dm.OnError = _DEFAULTS.noncanonical_symbols,
+        unlisted_symbols: dm.OnError = _DEFAULTS.unlisted_symbols,
+        unreadable_symbols: dm.OnError = _DEFAULTS.unreadable_symbols,
+        delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
     ) -> None:
         """Open the session; nothing connects until a stream verb runs.
 
@@ -142,7 +156,14 @@ class WsSession:
             flush_interval: The session's flush interval, in seconds; an hour by default, so
                 rows are published only by `flush()`.
             backoff: Each client's first reconnect backoff, in seconds (twice it at most).
-            **config: Further `MassiveConfig` options.
+            rest_base_url: As `MassiveConfig` takes it.
+            subscription_confirmation_timeout: As `MassiveConfig` takes it.
+            connection_taken: As `MassiveConfig` takes it.
+            max_outage: As `MassiveConfig` takes it.
+            noncanonical_symbols: As `MassiveConfig` takes it.
+            unlisted_symbols: As `MassiveConfig` takes it.
+            unreadable_symbols: As `MassiveConfig` takes it.
+            delayed_subscriptions: As `MassiveConfig` takes it.
         """
         self.server = server
         self.backoff = backoff
@@ -158,11 +179,21 @@ class WsSession:
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
         self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
-        self.config = dm.MassiveConfig(
-            api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
+        self.config = dataclasses.replace(
+            _DEFAULTS,
+            flush_interval=flush_interval,
+            rest_base_url=rest_base_url,
+            subscription_confirmation_timeout=subscription_confirmation_timeout,
+            connection_taken=connection_taken,
+            max_outage=max_outage,
+            noncanonical_symbols=noncanonical_symbols,
+            unlisted_symbols=unlisted_symbols,
+            unreadable_symbols=unreadable_symbols,
+            delayed_subscriptions=delayed_subscriptions,
         )
         self.session = dm.MassiveSession(self.config)
-        clients: Any = self.session._core._ports
+        clients = self.session._core._ports
+        assert isinstance(clients, SessionClients)
         self.connections = ws.WsConnections(
             self.session._core,
             resolve_host=self._resolve,
@@ -317,12 +348,18 @@ class WsSession:
             if what == "opens":
                 self._opens += 1
             elif what == "items":
-                rows, rejects = cast("tuple[list[object], list[object]]", event[2:4])
+                rows, rejects = event[2:4]
+                assert isinstance(rows, list)
+                assert isinstance(rejects, list)
                 self._items += len(rows) + len(rejects)
             elif what == "statuses":
-                self._statuses.append(cast("Status", event[1]))
+                status = event[1]
+                assert isinstance(status, _massive.Status)
+                self._statuses.append(status)
             else:
-                self._states.append(cast("WsState", event[0]))
+                state = event[0]
+                assert isinstance(state, _massive.WsState)
+                self._states.append(state)
             self.cond.notify_all()
 
     def wait(self, predicate: Callable[[WsSession], bool], what: str | None = None) -> None:
@@ -341,7 +378,7 @@ class WsSession:
             )
 
     def query(
-        self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
+        self, spec: DatasetSpec, symbols: SymbolsLike, session: dm.MassiveSession | None = None
     ) -> SymbolStreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
 
@@ -354,9 +391,7 @@ class WsSession:
             The query.
         """
         core = (session or self.session)._core
-        return build_query(
-            core, spec, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-        )
+        return build_query(core, spec, query_type=SymbolStreamQuery, symbols=symbols)
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.

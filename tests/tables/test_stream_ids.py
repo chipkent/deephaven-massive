@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars
@@ -23,10 +23,10 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-    )
+def stream_query(
+    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
+) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def test_stream_ids_come_from_one_allocator(

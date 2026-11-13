@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlencode
 
 import pyarrow as pa
@@ -25,9 +25,9 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._enums import ClassFromPrefix, Recency
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
+from deephaven_massive._massive import DriftReport, Transport, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.poll import Pollers, open_poll
@@ -315,7 +315,7 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
 def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
     # The endpoint's `ticker` parameter is single-valued and it has no `ticker.any_of`, so a
     # watchlist is one request per ticker.
-    news = cast("RestPath", source(R, "/v2/reference/news"))
+    news = CATALOG.rest_path("/v2/reference/news")
     assert "ticker.any_of" not in {p.name for p in news.params}
     assert reference.NEWS.ticker_list == "Tickers"
     ref: Any = massive_session.reference
@@ -466,8 +466,12 @@ def _rows(payload: object, result_key: str | None) -> list[dict[str, object]]:
     # The rows of a response body, found as the REST client finds them.
     found = payload
     for part in (result_key or "").split(".") if result_key else ():
-        found = cast("dict[str, object]", found)[part]
-    return cast("list[dict[str, object]]", found if isinstance(found, list) else [found])
+        assert isinstance(found, dict)
+        found = found[part]
+    listed = found if isinstance(found, list) else [found]
+    rows = [row for row in listed if isinstance(row, dict)]
+    assert len(rows) == len(listed)
+    return rows
 
 
 @dataclass(frozen=True)
@@ -519,7 +523,8 @@ def test_the_vendor_samples_decode(
     load_fixture: Callable[[str, str], bytes], sample: Sample
 ) -> None:
     spec = sample.spec
-    rest_path = cast("RestPath", source(R, cast("str", spec.fetch_path)))
+    assert spec.fetch_path is not None
+    rest_path = CATALOG.rest_path(spec.fetch_path)
     rows = _rows(json.loads(load_fixture(OWNER, f"{sample.fixture}.json")), rest_path.result_key)
     required = [f.column for f in required_fields(spec, rest_path)]
     batch, report = to_batch(rows, rest_path, required=required)
@@ -858,8 +863,8 @@ class _Statuses:
         *,
         symbols: object,
         values: object,
-        record: Callable[[object], None],
-        on_recency: Callable[[object], None],
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: object,
     ) -> poll.CycleRows:
@@ -894,7 +899,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         interval=timedelta(seconds=60),
         mode=mode,
         query="<Query test>",
-        read=cast("Any", _Statuses("open", "closed")),
+        read=_Statuses("open", "closed"),
         pollers=pollers,
         host="api.massive.com",
         path="/v1/marketstatus/now",

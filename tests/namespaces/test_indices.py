@@ -16,7 +16,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import pyarrow as pa
@@ -363,16 +363,16 @@ def test_bars_leave_the_futures_session_to_massive(m: dm.MassiveSession) -> None
 
 
 def test_bars_have_no_adjusted_parameter(m: dm.MassiveSession) -> None:
-    bars = cast("Callable[..., object]", m.indices.bars)
+    bars = m.indices.bars
     with pytest.raises(TypeError, match="adjusted"):
-        bars("I:SPX", adjusted=False)
+        bars("I:SPX", adjusted=False)  # type: ignore[call-arg]  # the point: refused at run time
 
 
 def test_bars_check_their_argument_types(m: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        m.indices.bars("I:SPX", cast("dm.Timespan", "minute"))
+        m.indices.bars("I:SPX", "minute")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="multiplier must be an int"):
-        m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=cast("int", 1.0))
+        m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=1.0)  # type: ignore[arg-type]  # the point: refused at run time
     # Massive answers HTTP 400 to a multiplier below 1, so it is sent.
     assert m.indices.bars("I:SPX", dm.Timespan.MINUTE, multiplier=0)._request.multiplier == 0
 
@@ -434,7 +434,7 @@ def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> 
 
 def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.indices.snapshots("I:SPX", order=cast("dm.Order", "asc"))
+        m.indices.snapshots("I:SPX", order="asc")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="limit must be positive"):
         m.indices.snapshots("I:SPX", limit=0)
 
@@ -473,14 +473,15 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
     with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
-        m.indices.daily_open_close("I:SPX", cast("str", 20250602))
+        m.indices.daily_open_close("I:SPX", 20250602)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize(
     "name", ["values", "bars", "previous_day_bar", "snapshots", "daily_open_close"]
 )
 def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
-    method = cast("Callable[..., object]", getattr(m.indices, name))
+    method: object = getattr(m.indices, name)
+    assert callable(method)
     extras: dict[str, tuple[object, ...]] = {
         "daily_open_close": ("2025-06-02",),
         "bars": (dm.Timespan.MINUTE,),
@@ -921,12 +922,12 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
 @pytest.fixture
 def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
-    fields = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    session = dm.MassiveSession(dm.MassiveConfig(**cast("dict[str, Any]", fields)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+    )
+    session = dm.MassiveSession(config)
     yield session
     session.close()
 

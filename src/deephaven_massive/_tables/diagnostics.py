@@ -71,7 +71,7 @@ import time
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
@@ -79,7 +79,7 @@ from deephaven import arrow as dh_arrow
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError, required
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
@@ -1557,7 +1557,7 @@ class Diagnostics:
         """
         with self._release_lock:
             self._rate_pending = False
-            pull = cast("RateLimitPull", self._rate_pull)
+            pull = required(self._rate_pull, "the rate-limit pull")
         rows, change = pull()
         self._rate_due = None if change is None else time.monotonic() + change
         return list(rows)

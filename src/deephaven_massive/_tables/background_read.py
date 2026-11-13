@@ -75,7 +75,7 @@ import logging
 import threading
 import time
 import weakref
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven import merge, new_table
 from deephaven.column import InputColumn
@@ -84,7 +84,7 @@ from deephaven.table import TableDefinition
 from deephaven.table_listener import TableListener, TableListenerHandle
 from typing_extensions import override
 
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug, required
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import (
@@ -223,7 +223,7 @@ class BackgroundRead:
         A pool that has stopped refuses it: the session closed after the read was registered,
         and the close failed its table already. The read is stopped then, and nothing runs.
         """
-        core = cast("SessionCore", self._core())  # the caller holds the session
+        core = required(self._core(), "the session")  # the caller holds the session
         if not core.reads.submit(self._read):
             logger.debug("call %d: the read pool stopped; the read never runs", self._call)
             self._stop.set()
@@ -239,7 +239,7 @@ class BackgroundRead:
         the result may still want its rows; the read stops when the blink table shuts down.
         The session is alive: the read's record keeps it in the live set until this has run.
         """
-        cast("SessionCore", self._core()).workers.release(self._call)
+        required(self._core(), "the session").workers.release(self._call)
 
     def fail(self, error: MassiveError) -> bool:
         """Stop the read and fail its table, once: the session closed, or a library thread died.
@@ -266,7 +266,7 @@ class BackgroundRead:
             False when the table had already failed or already has its rows.
         """
         self._stop.set()
-        core = cast("SessionCore", self._core())
+        core = required(self._core(), "the session")
         if self._fail_once(core, error):
             return True
         with self._publish_lock:
@@ -295,7 +295,7 @@ class BackgroundRead:
 
     def _read_now(self) -> None:
         """Run the transport call and publish its result or fail the table, as `_read` says."""
-        core = cast("SessionCore", self._core())  # registered before the task was submitted
+        core = required(self._core(), "the session")  # registered before the task was submitted
         with entered(self._exec_ctx):
             try:
                 self._publish(core, self._run(self._stop))

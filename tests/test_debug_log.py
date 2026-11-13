@@ -14,7 +14,7 @@ import re
 import sys
 import threading
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -284,7 +284,7 @@ def test_output_must_be_a_log_output_or_a_path() -> None:
     with pytest.raises(
         TypeError, match=r"^output must be a dm\.LogOutput or a file path, not int$"
     ):
-        dm.enable_debug_logging(cast("str", 3))
+        dm.enable_debug_logging(3)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize("proxy", [False, True])
