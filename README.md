@@ -372,7 +372,7 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 ```
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
-`DayChangePercent`. On Starter or Developer without the setting, the `snapshot` table fails with
+`TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
 an error that names the setting to change.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and

@@ -822,7 +822,7 @@ def test_movers_read_their_direction(
     serve(fake_rest, path, load_fixture(OWNER, "movers.json"))
     out = rows(rest_session.crypto.movers(dm.Direction.LOSERS).fetch(wait=True))
     assert fake_rest.get_queries() == [(path, {})]
-    assert [(r["Symbol"], r["LastTradeId"], r["DayChangePercent"]) for r in out] == [
+    assert [(r["Symbol"], r["LastTradeId"], r["TodaysChangePerc"]) for r in out] == [
         ("X:DRNUSD", "517478762", 221.858864)
     ]
 

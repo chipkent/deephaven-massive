@@ -554,13 +554,14 @@ the two at larger multipliers. With no evidence for refusing them, the option ch
 contracts list also send an option contract as their underlying (items 108 and 109), and a filter
 list sends an empty item (item 118); each live check records Massive's answer.
 
-**108. The v2 snapshots' change from the previous close is `DayChange`, the conversion's
-quote is `LastQuote*`, and `updated` keeps `Updated`** (2026-11-12). Live reads settled the
-three pairs decision 101 left open (items 84 to 86). The v2 snapshots' and movers'
-`todaysChange` and `todaysChangePerc` are the option chain's `day.change` and
-`day.change_percent`, the latest price minus the previous close and that change in percent of
-it, so all six v2 sources take the chain's `DayChange` and `DayChangePercent`. The forex
-conversion's `last` object is the pair's last quote, so its columns take the forex snapshot's
-names: `LastQuoteBidPrice`, `LastQuoteAskPrice`, `LastQuoteExchange`, and
+**108. The day's change is `TodaysChange` in every dataset, the conversion's quote is
+`LastQuote*`, and `updated` keeps `Updated`** (2026-11-13). Live reads settled the three pairs
+decision 101 left open (items 84 to 86). The option chain's `day.change` and
+`day.change_percent` are the v2 snapshots' and movers' `todaysChange` and `todaysChangePerc`,
+the latest price minus the previous close and that change in percent of it. The chain takes
+the v2 names, `TodaysChange` and `TodaysChangePerc`, because the stocks, forex, and crypto
+snapshots and movers are the most used feeds and keep their columns. The forex conversion's
+`last` object is the pair's last quote, so its columns take the forex snapshot's names:
+`LastQuoteBidPrice`, `LastQuoteAskPrice`, `LastQuoteExchange`, and
 `LastQuoteParticipantTimestamp`. Both renames are `SPELLINGS` entries. The v2 `updated` is not
 the unified snapshot's `last_updated`, so it stays `Updated`.

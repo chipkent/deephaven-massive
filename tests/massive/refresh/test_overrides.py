@@ -320,6 +320,7 @@ def test_every_spelling_cites_a_source_and_gives_a_reason() -> None:
         assert entry.source
         assert entry.reason
         assert entry.long_name == naming.snake(entry.long_name)
+        assert entry.long_name or not entry.whole_key
     for shared in overrides.SHARED_DESCRIPTIONS.values():
         assert shared.reason
         assert len(shared.long_names) >= 2
@@ -347,6 +348,15 @@ def test_the_futures_snapshot_takes_the_quote_and_trade_names() -> None:
     assert futures.field("LastQuoteAskPrice").wire_key == "last_quote.ask"
     assert futures.field("LastQuoteTimestamp").wire_key == "last_quote.last_updated"
     assert futures.field("LastTradeTimestamp").wire_key == "last_trade.last_updated"
+
+
+def test_the_option_chain_takes_the_v2_snapshots_names_for_its_day_change() -> None:
+    chain = spec.source(Transport.REST, _CHAIN)
+    stocks = spec.source(Transport.REST, "/v2/snapshot/locale/us/markets/stocks/tickers")
+    assert chain.field("TodaysChange").wire_key == "day.change"
+    assert chain.field("TodaysChangePerc").wire_key == "day.change_percent"
+    assert stocks.field("TodaysChange").wire_key == "todaysChange"
+    assert stocks.field("TodaysChangePerc").wire_key == "todaysChangePerc"
 
 
 def test_the_conversion_s_last_quote_takes_the_snapshot_s_quote_names() -> None:

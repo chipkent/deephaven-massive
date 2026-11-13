@@ -3451,8 +3451,8 @@
     {"column": "PrevDayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.v"},
     {"column": "PrevDayVwap", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -3492,8 +3492,8 @@
     {"column": "PrevDayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.v"},
     {"column": "PrevDayVwap", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -3531,8 +3531,8 @@
     {"column": "PrevDayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.v"},
     {"column": "PrevDayVwap", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -3570,8 +3570,8 @@
     {"column": "PrevDayVolume", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.v"},
     {"column": "PrevDayVwap", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": true, "type": "epoch", "unit": "ms|ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -3625,8 +3625,8 @@
     {"column": "PrevDayVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "PrevDayOtc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "prevDay.otc"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -3680,8 +3680,8 @@
     {"column": "PrevDayVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "prevDay.vw"},
     {"column": "PrevDayOtc", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "prevDay.otc"},
     {"column": "Ticker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "ticker"},
-    {"column": "DayChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChange"},
-    {"column": "DayChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
+    {"column": "TodaysChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChange"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "todaysChangePerc"},
     {"column": "Updated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "updated"}
    ],
    "memberships": []
@@ -4155,14 +4155,14 @@
    ],
    "fields": [
     {"column": "BreakEvenPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "break_even_price"},
+    {"column": "TodaysChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.change"},
+    {"column": "TodaysChangePerc", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.change_percent"},
     {"column": "DayOpen", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.open"},
     {"column": "DayHigh", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.high"},
     {"column": "DayLow", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.low"},
     {"column": "DayClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.close"},
     {"column": "DayVolume", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.volume"},
     {"column": "DayVwap", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.vwap"},
-    {"column": "DayChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.change"},
-    {"column": "DayChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.change_percent"},
     {"column": "DayLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "day.last_updated"},
     {"column": "DayPreviousClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "day.previous_close"},
     {"column": "ContractType", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "details.contract_type"},

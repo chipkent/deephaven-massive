@@ -38,7 +38,8 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   spells one field two ways (`strike_price` flat in `/v3/reference/options/contracts`,
   `details.strike_price` in the option chain), so the field has one column name in every
   dataset. The key is `(source, key)`, the dotted key of an object, whose name its fields'
-  columns begin with, or of a field; an empty long name drops a wrapper object's name. Each
+  columns begin with, or of a field; an empty long name drops a wrapper object's name, and
+  `whole_key` makes a field's long name replace its whole key, its objects' names included. Each
   entry cites the endpoint whose spelling it takes and says why the two are the same field:
   Massive documents them alike, with the same type and unit. The generator applies it before
   the lexicons and `NAMES`;
@@ -1772,11 +1773,14 @@ class Spelling:
             its fields' columns.
         source: The endpoint, and the field where it helps, whose spelling it takes.
         reason: Why the two are the same field: the documentation of both, quoted or named.
+        whole_key: Whether `long_name` names a field's whole key, its objects' names dropped,
+            for a field the other endpoint serves outside any object.
     """
 
     long_name: str
     source: str
     reason: str
+    whole_key: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1835,44 +1839,43 @@ _CONVERSION_QUOTE = (
     "`{key}_price`, the spelling of `/v3/quotes/{{fxTicker}}`."
 )
 
-_V2_SNAPSHOTS = tuple(
-    f"/v2/snapshot/locale/{market}/{path}"
-    for market in ("us/markets/stocks", "global/markets/forex", "global/markets/crypto")
-    for path in ("tickers", "{direction}")
-)
-_DAY_CHANGE = (
-    'The v2 snapshots and movers document `{key}` as "{text}", a number, as the option chain '
-    'documents `day.{chain_key}` ("The {measure} of the price change for the contract from the '
-    'previous trading day."), read as `day_{chain_key}`. Live reads of '
-    "2026-11-11 and 2026-11-12 (UTC) found both to be one quantity: for AAPL, MSFT, SPY, IWM, "
-    "and XLU, `todaysChange` was the latest price (the last trade or minute close) minus "
-    "`prevDay.c`, and `todaysChangePerc` 100 times that over `prevDay.c`; for SPY's option "
-    "chain, `day.change` was `day.close` minus `day.previous_close`, and `day.change_percent` "
-    "100 times that over `day.previous_close`. The forex and crypto snapshots and movers give "
-    "the field the same key and text as the stocks ones."
+_TODAYS_CHANGE = (
+    'The option chain documents `day.{key}` as "The {measure} of the price change for the '
+    'contract from the previous trading day.", a number, as the v2 stocks, forex, and crypto '
+    'snapshots and movers document `{v2_key}` ("{v2_text}"). Live reads of 2026-11-11 and '
+    "2026-11-12 (UTC) found both to be one quantity: for SPY's option chain, `day.change` was "
+    "`day.close` minus `day.previous_close`, and `day.change_percent` 100 times that over "
+    "`day.previous_close`; for AAPL, MSFT, SPY, IWM, and XLU, `todaysChange` was the latest "
+    "price (the last trade or minute close) minus `prevDay.c`, and `todaysChangePerc` 100 times "
+    "that over `prevDay.c`. The chain takes the v2 name, which the six snapshot and mover "
+    "tables already use."
 )
 
 SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
     {
         **{
-            (source, key): Spelling(
-                long_name=f"day_{chain_key}",
-                source=f"{_CHAIN} `day.{chain_key}`",
-                reason=_DAY_CHANGE.format(key=key, text=text, chain_key=chain_key, measure=measure),
+            (_CHAIN, f"day.{key}"): Spelling(
+                long_name=long_name,
+                source=f"/v2/snapshot/locale/us/markets/stocks/tickers `{v2_key}`",
+                reason=_TODAYS_CHANGE.format(
+                    key=key, measure=measure, v2_key=v2_key, v2_text=v2_text
+                ),
+                whole_key=True,
             )
-            for source in _V2_SNAPSHOTS
-            for key, text, chain_key, measure in (
+            for key, measure, long_name, v2_key, v2_text in (
                 (
-                    "todaysChange",
-                    "The value of the change from the previous day.",
                     "change",
                     "value",
+                    "todays_change",
+                    "todaysChange",
+                    "The value of the change from the previous day.",
                 ),
                 (
-                    "todaysChangePerc",
-                    "The percentage change since the previous day.",
                     "change_percent",
                     "percent",
+                    "todays_change_perc",
+                    "todaysChangePerc",
+                    "The percentage change since the previous day.",
                 ),
             )
         },

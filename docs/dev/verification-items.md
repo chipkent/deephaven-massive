@@ -240,8 +240,8 @@ settles it.
 - **84.** The v2 snapshots' `todaysChange` and `todaysChangePerc` are the option chain's
   `day.change` and `day.change_percent`. Settled 2026-11-11 and 2026-11-12: five stocks'
   change was the latest price minus `prevDay.c`, SPY's chain's `day.close` minus
-  `day.previous_close`, and each percent 100 times the change over that close; the v2 snapshots
-  and movers now name them `DayChange` and `DayChangePercent`.
+  `day.previous_close`, and each percent 100 times the change over that close; the option chain
+  now names them `TodaysChange` and `TodaysChangePerc`, as the v2 snapshots and movers do.
 - **85.** The v2 snapshots' `updated` is not the unified snapshot's `last_updated`. Settled
   2026-11-12: the unified snapshot sent no top-level `last_updated`, and the stocks and crypto
   `updated` matched none of its nested times (forex's matched `last_quote.last_updated`), so

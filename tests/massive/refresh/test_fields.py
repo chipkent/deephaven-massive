@@ -141,6 +141,35 @@ def test_a_spelling_that_coins_a_library_column_is_reported() -> None:
     assert [(p.gate, p.key) for p in rules.problems] == [("field-spelling", "last_updated")]
 
 
+def _whole(key: str, long_name: str) -> SourceFields:
+    """Return rules whose `SPELLINGS` give the field `key` the whole long name `long_name`."""
+    spelling = overrides.Spelling(
+        long_name=long_name, source="/v1/flat", reason="test", whole_key=True
+    )
+    return _rules(dataclasses.replace(_EMPTY, spellings={("us_x/trades_v1", key): spelling}))
+
+
+def test_a_whole_key_spelling_drops_the_field_s_object_names() -> None:
+    rules = _whole("session.change", "todays_change")
+    number = {"type": "number", "description": "The change."}
+    change = rules.field(RawField("session.change", number, required=True))
+    close = rules.field(RawField("session.close", number, required=True))
+    assert change is not None
+    assert close is not None
+    assert (change.column, close.column) == ("TodaysChange", "SessionClose")
+    assert rules.problems == []
+    assert rules.use().concepts["TodaysChange"] == "todays_change"
+
+
+def test_a_whole_key_spelling_that_coins_a_library_column_is_reported() -> None:
+    rules = _whole("quote.time", "timestamp")
+    instant = {"type": "string", "format": "date-time"}
+    item = rules.field(RawField("quote.time", instant, required=True))
+    assert item is not None
+    assert item.column == "Timestamp"
+    assert [(p.gate, p.key) for p in rules.problems] == [("field-spelling", "quote.time")]
+
+
 def test_a_field_records_its_corrected_own_description_without_notes() -> None:
     fix = overrides.DescriptionFix(vendor="Per share.", text="Per coin.", reason="test")
     rules = _rules(dataclasses.replace(_EMPTY, description_fixes={("us_x/trades_v1", "q.p"): fix}))
