@@ -197,16 +197,14 @@ def _wanted(
     symbols: NormalizedSymbols,
     *,
     pairs: Mapping[str, tuple[str, str]],
-    skipped: Mapping[str, object],
 ) -> tuple[frozenset[str] | None, frozenset[str]]:
     """Return what a new stream wants: its symbols and its topics at the start.
 
     Args:
         asset_class: The stream's class.
         channel: Its channel.
-        symbols: Its normalized symbols.
+        symbols: Its normalized symbols, without the pairs it skips (`_kept`).
         pairs: The base and quote of each crypto symbol, from Massive's crypto ticker list.
-        skipped: The crypto pairs the stream skips, which it neither wants nor subscribes.
 
     Returns:
         `(symbols, topics)`: for `dm.ALL`, None and the channel's wildcard; for a symbol
@@ -217,8 +215,25 @@ def _wanted(
         return None, frozenset({wildcard(channel)})
     if isinstance(symbols, SymbolTable):
         return frozenset(), frozenset()
-    kept = tuple(symbol for symbol in symbols if symbol not in skipped)
-    return frozenset(kept), stream_topics(asset_class, channel, kept, pairs=pairs)
+    return frozenset(symbols), stream_topics(asset_class, channel, symbols, pairs=pairs)
+
+
+def _kept(symbols: NormalizedSymbols, skipped: Mapping[str, object]) -> NormalizedSymbols:
+    """Return a new stream's symbols without the crypto pairs it skips at the call.
+
+    The stream neither subscribes a skipped pair nor publishes its rows, so a row of it that
+    reaches the connection through another stream's wildcard stays out of this stream.
+
+    Args:
+        symbols: The stream's normalized symbols.
+        skipped: The pairs it skips (`_listed_pairs`); only a symbol list skips any.
+
+    Returns:
+        A symbol list without the skipped pairs; `dm.ALL` or a reactive table unchanged.
+    """
+    if isinstance(symbols, tuple):
+        return tuple(symbol for symbol in symbols if symbol not in skipped)
+    return symbols
 
 
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is
@@ -249,6 +264,25 @@ def _skipped_pairs_parts(skipped: Mapping[str, tuple[_SkipReason, str]]) -> list
             f"be read ({skipped[unread[0]][1]})"
         )
     return parts
+
+
+def _restated(error: MassiveError, message: str) -> MassiveError:
+    """Return a failure that says `message` but keeps what `error` tells a caller.
+
+    Args:
+        error: The error the failure stems from, such as the `AuthenticationError` of a read
+            of Massive's crypto ticker list.
+        message: What the failure says.
+
+    Returns:
+        An error of `error`'s class with its `status`, `request_id`, and `cause`, chained to
+        it as `__cause__`.
+    """
+    restated = type(error)(
+        message, status=error.status, request_id=error.request_id, cause=error.cause
+    )
+    restated.__cause__ = error
+    return restated
 
 
 def _skipped_pairs_text(skipped: Mapping[str, tuple[_SkipReason, str]]) -> str:
@@ -407,7 +441,8 @@ class WsConnections:
             if asset_class is AssetClass.CRYPTO
             else {}
         )
-        wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs(), skipped=skipped)
+        symbols = _kept(symbols, skipped)
+        wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = require_real_time(
             spec,
             functools.partial(self._resolve, asset_class, spec.channel_family),
@@ -917,7 +952,8 @@ class WsConnections:
         no longer holds it; deleting and adding the row again looks it up again, and the stream
         keeps its other pairs.
         Under `RAISE` it fails the stream (`Flusher.fail`), and nothing is subscribed. A list
-        that still cannot be read after the retries fails the stream under any setting.
+        that still cannot be read after the retries fails the stream under any setting, with an
+        error of the read's own class and status (`_restated`), such as `AuthenticationError`.
 
         Args:
             stream_id: The stream.
@@ -925,7 +961,7 @@ class WsConnections:
             removed: Canonical symbols it no longer holds.
         """
         reader = f"crypto stream {stream_id}"
-        skipped = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
+        skipped, unreadable = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
         unread = {s: why for s, why in skipped.items() if why[0] is _SkipReason.LIST_UNREAD}
         if unread or (skipped and self._unlisted is OnError.RAISE):
             # A list that cannot be read affects every pair, so it fails the stream whatever
@@ -937,7 +973,11 @@ class WsConnections:
                 "instead"
             )
             parts = "; ".join(_skipped_pairs_parts(unread or skipped))
-            failure = MassiveError(f"cannot stream the symbol table's {parts}{hint}")
+            message = f"cannot stream the symbol table's {parts}{hint}"
+            # The read's own error keeps its class and status, as the call's read raises it.
+            failure = (
+                MassiveError(message) if unreadable is None else _restated(unreadable, message)
+            )
             logger.debug("%s: fails: %s", reader, failure)
             with self._lock:
                 connection = self.group.streams.get(stream_id)
@@ -952,7 +992,7 @@ class WsConnections:
 
     def _split_pairs(
         self, symbols: Iterable[str], *, reader: str, delays: Iterable[float]
-    ) -> dict[str, tuple[_SkipReason, str]]:
+    ) -> tuple[dict[str, tuple[_SkipReason, str]], MassiveError | None]:
         """Split the crypto pairs of one change, retrying a failed read of the list as a whole.
 
         Runs on the `symbol changes` worker. A pair the list does not hold is skipped
@@ -972,7 +1012,9 @@ class WsConnections:
                 worker, none at the call.
 
         Returns:
-            The skipped pairs, each with why: its `_SkipReason` and the error's text.
+            The skipped pairs, each with why: its `_SkipReason` and the error's text; and the
+            error of the read of the list that skipped pairs as `LIST_UNREAD`, or None when
+            none did.
 
         Raises:
             MassiveError: The lookup's own error, when its cause is `ErrorCause.LIBRARY_DEFECT`.
@@ -1006,8 +1048,8 @@ class WsConnections:
                 )
             if delay is None or self._closing.wait(delay):
                 skipped.update((s, (_SkipReason.LIST_UNREAD, str(failure))) for s in pending)
-                break
-        return skipped
+                return skipped, failure
+        return skipped, None
 
     def _listed_pairs(
         self, core: SessionCore, spec: DatasetSpec, symbols: NormalizedSymbols, *, stream_id: int

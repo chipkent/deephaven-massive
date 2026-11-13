@@ -41,7 +41,7 @@ from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
 from deephaven_massive._tables.execution_context import entered, update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.stream import open_stream_tables
+from deephaven_massive._tables.stream import Flusher, open_stream_tables
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive._tables.watchlist import SymbolWatch
 from tests._fakes.clock import FakeClock
@@ -2058,6 +2058,39 @@ AMBIGUOUS = {
 }
 
 
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_a_skipped_pair_s_rows_stay_out_of_its_stream_under_another_s_wildcard(
+    ws_session: WsSession, *, rows_when: RowsWhen
+) -> None:
+    # A stream of every pair subscribes the wildcard on the same connection, so Massive's rows
+    # of a pair another stream skipped reach the connection: only the wildcard's stream shows
+    # them.
+    every = ws_session.query(CRYPTO, dm.ALL).append_only()
+    ws_session.subscribed("XT.*")
+    listed = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
+    ws_session.publish(crypto_trade("BTC-USD"), crypto_trade("DOT-USD"))
+    shown = rows_when(every, lambda rows: len(rows) == 2)
+    assert sorted(r["Symbol"] for r in shown) == ["X:BTCUSD", "X:DOTUSD"]
+    assert [r["Symbol"] for r in rows_when(listed, lambda rows: len(rows) >= 1)] == ["X:BTCUSD"]
+    ws_session.session.release(listed)
+    ws_session.session.release(every)
+
+
+def crypto_trade(pair: str) -> dict[str, object]:
+    # A crypto trade as Massive sends it, naming its pair with a dash.
+    return {
+        "ev": "XT",
+        "pair": pair,
+        "p": 1.0,
+        "t": 1_700_000_000_000,
+        "s": 0.5,
+        "c": [2],
+        "i": "1",
+        "x": 1,
+        "r": 1_700_000_000_100,
+    }
+
+
 def test_an_ambiguous_crypto_pair_subscribes_the_topic_massive_gives(ws_session: WsSession) -> None:
     # Massive's crypto ticker list splits every pair, and each ticker is looked up once.
     ws_session.pair_answers.update(AMBIGUOUS)
@@ -2200,6 +2233,45 @@ def test_a_failed_read_of_the_pair_list_is_retried_once_per_try_then_fails_the_s
     assert retries == [retry, retry]
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        dm.AuthenticationError("the key was rejected", status=401, request_id="r1"),
+        dm.EntitlementError("no reference data", status=403, request_id="r2"),
+    ],
+    ids=["authentication", "entitlement"],
+)
+def test_a_watchlist_s_unreadable_pair_list_fails_its_stream_with_the_read_s_error(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error: dm.MassiveError,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The stream's failure keeps the class, status, and request id of the read, as the call's
+    # read raises it, and chains to it.
+    failures: list[dm.MassiveError] = []
+    fail = Flusher.fail
+
+    def recorded(flusher: Flusher, stream_ids: Iterable[int], failure: dm.MassiveError) -> None:
+        failures.append(failure)
+        fail(flusher, stream_ids, failure)
+
+    monkeypatch.setattr(Flusher, "fail", recorded)
+    ws_session.pair_answers["X:DOTUSD"] = error
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["X:BTCUSD"])]))
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    (failure,) = failures
+    assert type(failure) is type(error)
+    assert (failure.status, failure.request_id) == (error.status, error.request_id)
+    assert str(failure).startswith("cannot stream the symbol table's crypto pairs 1 [X:DOTUSD]")
+    assert isinstance(failure.__cause__, type(error))
+
+
 def test_an_unreadable_pair_list_at_the_call_raises_under_log(ws_session: WsSession) -> None:
     # A list that cannot be read affects every pair, so it is no pair Massive has no data for.
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
@@ -2220,10 +2292,10 @@ def test_a_retry_tries_only_the_pairs_not_yet_split(ws_session: WsSession) -> No
 
     ws_session.connections._crypto_pair = flaky
     ws_session.pair_answers.update({"X:ADAUSD": ("ADA", "USD"), "X:DOTUSD": ("DOT", "USD")})
-    skipped = ws_session.connections._split_pairs(
+    skipped, unreadable = ws_session.connections._split_pairs(
         {"X:ADAUSD", "X:DOTUSD"}, reader="crypto stream 1", delays=(0.0,)
     )
-    assert skipped == {}
+    assert (skipped, unreadable) == ({}, None)
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:ADAUSD", "X:DOTUSD"]
 
 
@@ -2261,7 +2333,7 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
     ws_session: WsSession, error: dm.MassiveError
 ) -> None:
     ws_session.pair_answers["X:DOTUSD"] = error
-    skipped = ws_session.connections._split_pairs(
+    skipped, unreadable = ws_session.connections._split_pairs(
         {"X:DOTUSD", "X:SOLUSD"},
         reader="crypto stream 1",
         delays=(3600.0,),  # would hang
@@ -2271,13 +2343,15 @@ def test_a_pair_list_failure_no_retry_can_fix_skips_the_pair_at_once(
     assert skipped == {"X:DOTUSD": (ws._SkipReason.LIST_UNREAD, why)} | {
         "X:SOLUSD": (ws._SkipReason.LIST_UNREAD, why)
     }
+    assert type(unreadable) is type(error)
+    assert str(unreadable) == why
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
 def test_a_close_stops_the_wait_to_retry_a_pair(ws_session: WsSession) -> None:
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("the list read timed out")
     ws_session.connections.close()
-    skipped = ws_session.connections._split_pairs(
+    skipped, unreadable = ws_session.connections._split_pairs(
         {"X:DOTUSD"},
         reader="crypto stream 1",
         delays=(3600.0,),  # only a close ends it
@@ -2288,6 +2362,7 @@ def test_a_close_stops_the_wait_to_retry_a_pair(ws_session: WsSession) -> None:
             "cannot stream 'X:DOTUSD': the list read timed out",
         )
     }
+    assert str(unreadable) == "cannot stream 'X:DOTUSD': the list read timed out"
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
