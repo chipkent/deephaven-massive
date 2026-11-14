@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError, Reread
+from deephaven_massive._enums import Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     BrokenGuaranteeError,
@@ -93,6 +93,7 @@ from deephaven_massive._errors import (
     required,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -1068,7 +1069,7 @@ class FollowCoordinator:
             if isinstance(error, UnlistedPairError)
             else None
         )
-        if unlisted is OnError.RAISE:
+        if unlisted is not None and effect_of(unlisted).fails:
             logger.debug(
                 "call %d follow %s: fails the result, under unlisted_symbols=RAISE: %s",
                 result.read.call,
@@ -1105,7 +1106,7 @@ class FollowCoordinator:
         mark_failure_logged(error)
         level = logging.WARNING if first else logging.DEBUG
         if unlisted is not None:
-            level = logging.WARNING if first and unlisted is OnError.LOG else logging.DEBUG
+            level = effect_of(unlisted, first=first).level
         elif error.cause is not ErrorCause.EXPECTED and first:
             level = logging.ERROR
         logger.log(

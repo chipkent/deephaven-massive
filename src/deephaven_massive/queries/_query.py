@@ -27,9 +27,6 @@ from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import (
-    OnError,
-)
 from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
@@ -37,6 +34,7 @@ from deephaven_massive._errors import (
     failure_text,
     raises_through,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -443,18 +441,18 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        unlisted = self._core.config.unlisted_symbols
+        unlisted = effect_of(self._core.config.unlisted_symbols)
         pairs = [
             name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
         ]
-        if pairs and unlisted is OnError.RAISE:
+        if pairs and unlisted.fails:
             raise failed[pairs[0]].error
         if len(failed) == len(call_time):
             raise failed[call_time[0]].error
         warned = {
             name: outcome
             for name, outcome in failed.items()
-            if not (unlisted is OnError.IGNORE and name in pairs)
+            if not (name in pairs and unlisted.level <= logging.DEBUG)
         }
         if warned:
             logger.warning(

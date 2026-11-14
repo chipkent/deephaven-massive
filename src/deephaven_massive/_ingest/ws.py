@@ -80,7 +80,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
+from deephaven_massive._enums import AssetClass, ChannelFamily
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
@@ -102,6 +102,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionStream,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list, mark_failure_logged
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
@@ -921,7 +922,7 @@ class WsConnections:
         """
         reader = f"crypto stream {stream_id}"
         skipped = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
-        if skipped and self._unlisted is OnError.RAISE:
+        if skipped and effect_of(self._unlisted).fails:
             failure = MassiveError(
                 f"cannot stream the symbol table's {'; '.join(_skipped_pairs_parts(skipped))}; "
                 "set dm.MassiveConfig(unlisted_symbols=dm.OnError.LOG) to skip such a pair "
@@ -1027,7 +1028,7 @@ class WsConnections:
                 if no pair can, so the result would follow nothing, or if the lookup meets a
                 defect of the library (`ErrorCause.LIBRARY_DEFECT`), which is never skipped.
         """
-        if self._unlisted is OnError.RAISE:
+        if effect_of(self._unlisted).fails:
             self.resolve_pairs(symbols)
             return symbols
         reader = f"{spec.name} call"
@@ -1050,7 +1051,8 @@ class WsConnections:
             skipped: The skipped pairs, with why.
             reader: Who read them: `crypto stream <id>`, or the dataset's call.
         """
-        pairs = _logged_pairs if self._unlisted is OnError.LOG else _ignored_pairs
+        level = effect_of(self._unlisted).level
+        pairs = _logged_pairs if level > logging.DEBUG else _ignored_pairs
         for symbol, (_, why) in sorted(skipped.items()):
             pairs.log(
                 symbol,

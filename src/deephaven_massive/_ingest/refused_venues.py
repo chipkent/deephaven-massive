@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._errors import EntitlementError
 from deephaven_massive._log_limits import first_seen
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from deephaven_massive._massive import WireEntitlementError
@@ -121,7 +122,7 @@ class RefusedVenues:
         if not new:
             return
         logger.log(
-            logging.WARNING if self.policy is OnError.LOG else logging.DEBUG,
+            effect_of(self.policy).level,
             "%s history (%s): skipping the flat files of %s for the whole range, since Massive "
             "refused them; name only the exchanges the plan includes in venues= to request "
             "none of them. S3 refused: %s",

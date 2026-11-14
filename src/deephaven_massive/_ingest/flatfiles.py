@@ -190,6 +190,7 @@ from deephaven_massive._massive import (
     WireType,
     object_key,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import FlatFileRead
@@ -542,7 +543,7 @@ class _Transform:
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
+        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
         file_class = spec.single_class
@@ -880,7 +881,7 @@ class FlatFileHistory:
         threads = f"{self._core.thread_prefix} call-{call} files"
         refusals = None
         policy = request.refused_venues
-        if infer_holidays and policy is not None and policy is not OnError.RAISE:
+        if infer_holidays and policy is not None and not effect_of(policy).fails:
             refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}")
         return self._read(
             spec,
@@ -1558,7 +1559,7 @@ class FlatFileHistory:
         setting = self._core.config.malformed_rows
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
-                if file.malformed_lines and setting is OnError.RAISE:
+                if file.malformed_lines and effect_of(setting).fails:
                     raise RowDataError(_malformed_message(transform.dataset, file))
                 rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
                 served += rows.num_rows
@@ -1607,7 +1608,7 @@ def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
         setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
     """
     logger.log(
-        logging.WARNING if setting is OnError.LOG else logging.DEBUG,
+        effect_of(setting).level,
         "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",
         dataset,
         file.malformed_lines,

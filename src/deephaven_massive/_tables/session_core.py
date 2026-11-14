@@ -78,9 +78,9 @@ from typing import TYPE_CHECKING, Final, TypeVar
 from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError
 from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._log_limits import BoundedLog, bounded_list
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -372,7 +372,7 @@ class SessionCore:
             The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
         """
         return self.catalog.dataset_schema(
-            spec, raw_symbol=self.config.unreadable_symbols is not OnError.RAISE
+            spec, raw_symbol=not effect_of(self.config.unreadable_symbols).fails
         )
 
     @property
