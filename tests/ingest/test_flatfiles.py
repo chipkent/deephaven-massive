@@ -3624,84 +3624,118 @@ class MemorySampler:
         )
 
 
-def test_memory_per_reader_does_not_grow_with_the_file(
+MEMORY_BLOCK = 16 * 1024
+"""The block size of the bounded-memory tests' reads."""
+
+MEMORY_ROWS = 64_000
+"""The rows of the bounded-memory tests' long file: about 310 blocks of `MEMORY_BLOCK`."""
+
+PYTHON_SLACK = 64 * MEMORY_BLOCK
+"""How far a read's Python peak may rise, or differ between two files, without a regression.
+
+Python's peak includes the read-ahead's decompressed text, taken while the parse threads work,
+so it varies from run to run by up to about 40 blocks. A reader that kept a Python copy of each
+compressed chunk it read rises by about 175 over the last two thirds of the long file.
+"""
+
+ARROW_SLACK = 14 * MEMORY_BLOCK
+"""How far a read's Arrow pool may rise, or differ between two files, without a regression.
+
+Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result and
+legitimately grow it by about 6 blocks over the last two thirds of the long file (about 7
+between the two files), but each small batch also costs allocation overhead that its byte count
+does not show: kept as one batch per block instead of merged, they grow it by about 21 (24
+between the files).
+"""
+
+
+def stored_plain(csv_text: str) -> bytes:
+    # Stored without compression, so the compressed body is as large as its text: a reader
+    # that kept the body, or a copy of each compressed chunk, would hold a block of memory per
+    # block of the file, as plainly as one that kept the text.
+    return gzip.compress(csv_text.encode(), compresslevel=0)
+
+
+@pytest.fixture
+def measured_read(
     *,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> Iterator[Callable[[dm.SymbolsLike], ReadMemory]]:
+    # Stores the long file of `MEMORY_ROWS` trades as 2025-03-03 and yields a function that
+    # reads that day's file for some symbols and measures the read's memory.
+    #
     # A reader holds a window of its file, not the file: the chunks it reads ahead to parse
     # (`PARSE_THREADS + 1` chunks of `CHUNK_BLOCKS` blocks), plus at most `_TABLE_BLOCKS` blocks
     # of gathered rows. Small blocks, in chunks of four, give a file of about 310 blocks, cheap
     # to build and read, in which that window fills within the first third. Each block costs
-    # the same to read whatever its size, so the block count sets the test's time; at this
-    # count every regression named below still lands well past its slack. One parse thread:
-    # with several, how many parsed chunks coexist depends on how the threads happen to run
-    # (they truly run together without the GIL), which moves Arrow's peak by a few chunks from
-    # one read to the next, more than the slack below.
-    block = 16 * 1024
-    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
+    # the same to read whatever its size, so the block count sets the tests' time; at this
+    # count every regression named in `PYTHON_SLACK`, `ARROW_SLACK`, and the tests still lands
+    # well past its slack. Each read under `tracemalloc` costs about as much as the rest of a
+    # test together, so the reads are split between two tests, each well within the time
+    # limit. One parse thread: with several, how many parsed chunks coexist depends on how the
+    # threads happen to run (they truly run together without the GIL), which moves Arrow's
+    # peak by a few chunks from one read to the next, more than the slack.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", MEMORY_BLOCK)
     monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 4)
     monkeypatch.setattr(flatfiles, "PARSE_THREADS", 1)
     window = (flatfiles.PARSE_THREADS + 1) * 4 + flatfiles._TABLE_BLOCKS
-    rows = 64_000
-    text = synthetic_trades(rows)
-    blocks = len(text) // block
+    text = synthetic_trades(MEMORY_ROWS)
+    blocks = len(text) // MEMORY_BLOCK
     assert blocks > 6 * window  # the last two thirds of the file dwarf the window
-
-    def stored(csv_text: str) -> bytes:
-        # Stored without compression, so the compressed body is as large as its text: a
-        # reader that kept the body, or a copy of each compressed chunk, would hold a block
-        # of memory per block of the file, as plainly as one that kept the text.
-        return gzip.compress(csv_text.encode(), compresslevel=0)
-
-    fake_s3.put(TRADES_0303, stored(text))
-    fake_s3.put(TRADES_0304, stored(TRADE_HEADER + trade(1, 1741012200000000000)))
+    fake_s3.put(TRADES_0303, stored_plain(text))
+    fake_s3.put(TRADES_0304, stored_plain(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
     m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
 
-    def read(symbols: dm.SymbolsLike) -> Callable[[], Table]:
+    def measure(symbols: dm.SymbolsLike) -> ReadMemory:
         q = query(m, STOCK_TRADES, symbols=symbols)
-        return lambda: q.history(
-            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
+        return sampler.measure(
+            lambda: q.history(
+                "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
+            )
         )
 
     try:
         # A first read creates the client: botocore parses its service model once per client.
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04", wait=True)
-        every = sampler.measure(read(dm.ALL))
-        rare = sampler.measure(read(["RARE"]))
-        fake_s3.put(TRADES_0303, stored(synthetic_trades(rows // 4)))
-        short = sampler.measure(read(["RARE"]))
+        yield measure
     finally:
         m.close()
-    assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
-    # Python's peak includes the read-ahead's decompressed text, taken while the parse threads
-    # work, so it varies from run to run by up to about 40 blocks. A reader that kept a Python
-    # copy of each compressed chunk it read rises by about 175 over the last two thirds of the
-    # file.
-    python_slack = 64 * block
-    # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
-    # and legitimately grow it by about 6 blocks over the last two thirds of the file (about
-    # 7 between the two files), but each small batch also costs allocation overhead that its
-    # byte count does not show: kept as one batch per block instead of merged, they grow it by
-    # about 21 (24 between the files).
-    arrow_slack = 14 * block
+
+
+def test_memory_per_reader_does_not_grow_with_the_file_when_every_row_survives(
+    measured_read: Callable[[dm.SymbolsLike], ReadMemory],
+) -> None:
+    every = measured_read(dm.ALL)
+    assert every.rows == MEMORY_ROWS
     # From a third of the way through the file to its end, a reader that kept each block it
     # read would rise by about 280 blocks. When every row survives, the result itself (a
     # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
     # with the file, but by far less than a block per table.
-    assert every.python_rise < python_slack
-    assert every.arrow_rise < arrow_slack
-    assert rare.python_rise < python_slack
-    assert rare.arrow_rise < arrow_slack
+    assert every.python_rise < PYTHON_SLACK
+    assert every.arrow_rise < ARROW_SLACK
+
+
+def test_memory_per_reader_does_not_grow_with_the_file_of_a_selective_read(
+    measured_read: Callable[[dm.SymbolsLike], ReadMemory], fake_s3: FakeS3
+) -> None:
+    rare = measured_read(["RARE"])
+    fake_s3.put(TRADES_0303, stored_plain(synthetic_trades(MEMORY_ROWS // 4)))
+    short = measured_read(["RARE"])
+    assert (rare.rows, short.rows) == (MEMORY_ROWS // 100, MEMORY_ROWS // 400)
+    # A reader that kept each block it read would rise by about 280 blocks from a third of the
+    # way through the file to its end.
+    assert rare.python_rise < PYTHON_SLACK
+    assert rare.arrow_rise < ARROW_SLACK
     # The rises leave out whatever a read sets up before its first block, such as the whole
     # body read or decompressed up front: reading a file four times as long must peak about as
     # high as reading the short one. A reader that read the whole body first would peak about
     # 235 blocks higher.
-    assert rare.python_peak - short.python_peak < python_slack
-    assert rare.arrow_peak - short.arrow_peak < arrow_slack
+    assert rare.python_peak - short.python_peak < PYTHON_SLACK
+    assert rare.arrow_peak - short.arrow_peak < ARROW_SLACK
 
 
 def test_the_production_block_size() -> None:
