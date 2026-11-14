@@ -9,7 +9,7 @@ ticker or do not.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -28,7 +28,9 @@ def _json(load_fixture: Callable[[str, str], bytes], name: str) -> dict[str, lis
     Returns:
         The decoded JSON.
     """
-    return cast("dict[str, list[dict[str, Any]]]", json.loads(load_fixture(_OWNER, name)))
+    payload = json.loads(load_fixture(_OWNER, name))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _products(load_fixture: Callable[[str, str], bytes]) -> list[dict[str, Any]]:
@@ -37,7 +39,9 @@ def _products(load_fixture: Callable[[str, str], bytes]) -> list[dict[str, Any]]
     Returns:
         The rows.
     """
-    return cast("list[dict[str, Any]]", json.loads(load_fixture(_OWNER, "combo_products.json")))
+    rows = json.loads(load_fixture(_OWNER, "combo_products.json"))
+    assert isinstance(rows, list)
+    return rows
 
 
 @pytest.mark.parametrize(

@@ -206,14 +206,18 @@ def log_failure(
         *args: The message's other arguments, before the failure's text.
         expected: The level of an expected failure; WARNING by default, DEBUG for one the
             caller also raises.
-        exc_info: The exception whose traceback the record carries, or None for none.
+        exc_info: The exception whose traceback the record carries, or None (absent) for none,
+            except that a bug always carries its own.
 
     Returns:
         True when this call logged the failure at its level; False when the same failure had
         been logged already, and this call logged at DEBUG.
     """
     first = mark_failure_logged(error)
-    level = expected if not is_bug_of(error) else logging.ERROR
+    bug = is_bug_of(error)
+    level = expected if not bug else logging.ERROR
+    if bug and exc_info is None:
+        exc_info = error  # a bug is logged with its traceback, wherever it is absorbed
     log.log(
         level if first else logging.DEBUG,
         message,

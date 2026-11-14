@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from deephaven.table import Table
 
@@ -24,7 +24,8 @@ ToRows = Callable[[Table], list[dict[str, Any]]]
 
 def vendor_sample(load_fixture: Fixture) -> dict[str, Any]:
     # The vendor sample, without its `next_url`, which names Massive's host.
-    body = cast("dict[str, Any]", json.loads(load_fixture(OWNER, "snapshots.json")))
+    body = json.loads(load_fixture(OWNER, "snapshots.json"))
+    assert isinstance(body, dict)
     body.pop("next_url", None)
     return body
 
@@ -61,12 +62,14 @@ def test_the_schema_has_the_options_columns_of_the_options_snapshot() -> None:
 
 
 def test_the_summary_opens_the_docstring() -> None:
-    doc = cast("str", dm.MassiveSession.snapshots.__doc__)
+    doc = dm.MassiveSession.snapshots.__doc__
+    assert doc is not None
     assert doc.splitlines()[0] == snapshots.SNAPSHOTS.summary
 
 
 def test_the_vendor_sample_decodes(load_fixture: Fixture) -> None:
-    rest_path = cast("RestPath", source(R, "/v3/snapshot"))
+    rest_path = source(R, "/v3/snapshot")
+    assert isinstance(rest_path, RestPath)
     rows = vendor_sample(load_fixture)["results"]
     required = [f.column for f in required_fields(snapshots.SNAPSHOTS, rest_path)]
     batch, report = to_batch(rows, rest_path, required=required)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
 pytestmark = pytest.mark.integration
 
@@ -63,9 +64,9 @@ def _wait_for(read: Callable[[], Reads], done: Callable[[Reads], bool]) -> Reads
         pause.wait(0.25)
 
 
-def _change(table: Table, *, add: str | None = None, delete: str | None = None) -> None:
+def _change(table: InputTable, *, add: str | None = None, delete: str | None = None) -> None:
     """Add a symbol to the watchlist, or delete one from it."""
-    editable = cast("Any", table)
+    editable = table
     if add is not None:
         editable.add(new_table([string_col("Symbol", [add])]))
     if delete is not None:

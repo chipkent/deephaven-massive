@@ -32,6 +32,9 @@ Three more attributes tell code what to do about an error:
 hides one, and below ERROR otherwise (`_log_limits.log_failure`). `library_bug` and
 `user_defect` build the two kinds of bug message, `source_of` and `is_bug_of` read the source
 and the bug flag of any exception, and `failure_text` is the text a log record gives it.
+`required` and `required_instance` return a value the library's design guarantees, such as a
+dataset's REST path or the session a caller holds, and raise `BrokenGuaranteeError`, a
+`LIBRARY` error, when it is missing or of another type.
 
 The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
 `WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
@@ -84,6 +87,7 @@ __all__ = [
     "RAISES_THROUGH",
     "READ_STOPPED",
     "AuthenticationError",
+    "BrokenGuaranteeError",
     "CutShortError",
     "EntitlementError",
     "ErrorSource",
@@ -99,6 +103,8 @@ __all__ = [
     "is_bug_of",
     "library_bug",
     "raises_through",
+    "required",
+    "required_instance",
     "source_of",
     "user_defect",
     "wire_source",
@@ -108,6 +114,7 @@ RAISES_THROUGH: Final = "raises_through"
 """The attribute in which `raises_through` records a function's helpers."""
 
 _F = TypeVar("_F", bound="Callable[..., object]")
+_V = TypeVar("_V")
 
 
 NEW_SESSION: Final = "open a new dm.MassiveSession() to read again"
@@ -554,6 +561,62 @@ def library_bug(message: str) -> str:
     """
     stop = "" if message.endswith((".", "!", "?")) else "."
     return f"{message}{stop} {LIBRARY_BUG}"
+
+
+class BrokenGuaranteeError(MassiveError):
+    """A guarantee of the library's own code that broke: a bug in the library.
+
+    Internal: not exported from `dm`; a user catches it as the `MassiveError` it is, whose
+    `source` is `ErrorSource.LIBRARY` and `is_bug` True, and whose message ends with
+    `LIBRARY_BUG`. A handler that absorbs one symbol's or one cycle's failure logs a bug with
+    its traceback (`_log_limits.log_failure`), so it is never taken for an expected failure.
+    `required` and `required_instance` raise it.
+    """
+
+    default_source = ErrorSource.LIBRARY
+
+
+def required(value: _V | None, what: str) -> _V:
+    """Return a value the library's design guarantees, raising a library defect when it is None.
+
+    Use it where the type allows None but the code relies on a value set elsewhere: a path a
+    dataset's spec declares for the read the caller makes, or the referent of a weak reference
+    to an object the caller holds.
+
+    Args:
+        value: The value, or None if the guarantee broke.
+        what: What the value is, for the message, such as `"stocks.trades's history path"`.
+
+    Returns:
+        `value`.
+
+    Raises:
+        BrokenGuaranteeError: Saying `what` is missing, when `value` is None.
+    """
+    if value is None:
+        raise BrokenGuaranteeError(library_bug(f"{what} is missing"))
+    return value
+
+
+def required_instance(value: object, kind: type[_V], what: str) -> _V:
+    """Return a value the library's design guarantees is of a type, raising a library defect if not.
+
+    Args:
+        value: The value.
+        kind: The type the design guarantees, such as `datetime`.
+        what: What the value is, for the message, such as `"the request's start"`.
+
+    Returns:
+        `value`.
+
+    Raises:
+        BrokenGuaranteeError: Naming `what`, `kind`, and the value's type, when `value` is not
+            an instance of `kind`.
+    """
+    if not isinstance(value, kind):
+        problem = f"{what} is {type(value).__name__}, not {kind.__name__}"
+        raise BrokenGuaranteeError(library_bug(problem))
+    return value
 
 
 def user_defect(problem: str, fix: str) -> str:

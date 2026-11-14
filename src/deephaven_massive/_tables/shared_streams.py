@@ -32,11 +32,17 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven.dherror import DHError
 
-from deephaven_massive._errors import NEW_SESSION, MassiveError, SessionClosedError, copy_error
+from deephaven_massive._errors import (
+    NEW_SESSION,
+    MassiveError,
+    SessionClosedError,
+    copy_error,
+    required,
+)
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
@@ -249,7 +255,7 @@ class SharedStreams:
             SessionClosedError: If the session closed while the result was built
                 (`"MassiveSession #1 is closed; ..."`).
         """
-        core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+        core = required(self._core(), "the session")  # held until the call returns: live_set.py
         key: StreamKey = (spec.name, channel, request.symbol_key())
         scope: LivenessScope | None = None
         handle, opened = self._acquire(
@@ -683,7 +689,7 @@ class SharedStreams:
             stream_id: The stream whose hold is dropped.
         """
         with self._lock:
-            core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+            core = required(self._core(), "the session")  # held until the call returns: live_set.py
             state = self._streams[stream_id]
             held = state.row.held_results - 1
             opened = state.handle is not None
@@ -733,7 +739,7 @@ class SharedStreams:
             stream_id: The stream whose blink table shut down.
         """
         with self._lock:
-            core = cast("SessionCore", self._core())  # held until the call returns: live_set.py
+            core = required(self._core(), "the session")  # held until the call returns: live_set.py
             state = self._streams.get(stream_id)
             if state is None:
                 return

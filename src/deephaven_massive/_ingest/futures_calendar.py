@@ -705,6 +705,7 @@ class FuturesCalendar:
                         is_bug=error is not None and error.is_bug,
                     )
                 ),
+                exc_info=error if error is not None and error.is_bug else None,
             )
 
 

@@ -16,6 +16,7 @@ from deephaven_massive._errors import (
     NEW_SESSION,
     RAISES_THROUGH,
     AuthenticationError,
+    BrokenGuaranteeError,
     EntitlementError,
     ErrorSource,
     MassiveError,
@@ -29,6 +30,8 @@ from deephaven_massive._errors import (
     is_bug_of,
     library_bug,
     raises_through,
+    required,
+    required_instance,
     source_of,
     user_defect,
 )
@@ -302,6 +305,27 @@ def test_a_user_defect_message_names_the_fix_and_asks_for_no_report() -> None:
     text = user_defect("the symbol table failed upstream: boom", "fix that table")
     assert text == "the symbol table failed upstream: boom; fix that table"
     assert LIBRARY_BUG not in text
+
+
+def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> None:
+    assert required(0, "a count") == 0  # a falsy value is present
+    with pytest.raises(BrokenGuaranteeError) as raised:
+        required(None, "stocks.trades's history path")
+    assert str(raised.value) == f"stocks.trades's history path is missing. {LIBRARY_BUG}"
+    # A user's `except dm.MassiveError` catches it, as the library bug it is.
+    assert isinstance(raised.value, MassiveError)
+    assert (raised.value.source, raised.value.is_bug) == (ErrorSource.LIBRARY, True)
+    assert not raised.value.is_retryable
+
+
+def test_required_instance_returns_a_value_and_names_another_type_a_library_defect() -> None:
+    assert required_instance(3, int, "a count") == 3
+    with pytest.raises(BrokenGuaranteeError) as raised:
+        required_instance(None, str, "stocks.trades's history path")
+    assert str(raised.value) == (
+        f"stocks.trades's history path is NoneType, not str. {LIBRARY_BUG}"
+    )
+    assert failure_text(raised.value) == str(raised.value)  # its message says it is a bug
 
 
 def test_failure_text_adds_the_report_only_to_a_library_defect() -> None:

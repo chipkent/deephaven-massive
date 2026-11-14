@@ -127,7 +127,7 @@ from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecut
 from dataclasses import dataclass, field
 from datetime import timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -169,8 +169,10 @@ from deephaven_massive._errors import (
     RowDataError,
     SessionClosedError,
     from_wire,
+    required,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
+from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -203,7 +205,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import Field, FlatFile, FlatFileClient
+    from deephaven_massive._massive import FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -531,19 +533,20 @@ class _Transform:
         schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
-        file_class = cast("AssetClass", spec.asset_class)
+        file_class = spec.single_class
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
         # Every column of a flat-file source is a field: no key of one comes from the request.
-        header = {c.column: cast("Field", c.field).wire_key for c in renamed}
+        header = {
+            c.column: required(c.wire_key, f"{prefix} column {c.column}'s field") for c in renamed
+        }
         keys = spec.keys_for(Transport.FLAT_FILES, prefix)
         # The session key is renamed to `Date`; the files' own header holds it.
         session_header = None if keys.date is None else header[DATE]
         time_name = time_column(spec.times)
-        to_ns = functools.partial(
-            _time_nanos, f"{spec.name}.{time_name}", cast("TimeUnit", by_column[time_name].unit)
-        )
+        time_unit = required(by_column[time_name].unit, f"{prefix} column {time_name}'s unit")
+        to_ns = functools.partial(_time_nanos, f"{spec.name}.{time_name}", time_unit)
         symbols = request.symbols
         plan = ReadPlan(
             columns=tuple(
@@ -734,7 +737,9 @@ class _Transform:
             )
             first = first_failure(sent, failed)
             if first is not None:
-                odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
+                odd[required(source.wire_key, f"column {name}'s field")] = DriftSample(
+                    None, str(first)
+                )
         return rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
 
 
@@ -864,9 +869,9 @@ class FlatFileHistory:
             prefix=prefix,
             roll=_ends_at_an_instant(spec, window),
             infer_holidays=infer_holidays,
-            tile=cast("AssetClass", spec.asset_class) if tiled else None,
+            tile=spec.single_class if tiled else None,
             threads=threads,
-            stop=cast("Cancel | None", stop),
+            stop=as_cancel(stop),
         )
 
     def read_history(

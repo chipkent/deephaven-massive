@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, cast
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -147,7 +147,7 @@ def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     for series in SERIES:
         factory = getattr(massive_session.economy, series.method)
         with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-            factory(order=cast("dm.Order", "desc"))
+            factory(order="desc")
 
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
@@ -161,7 +161,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(ValueError, match="limit must be positive"):
         e.labor_market(limit=0)
     with pytest.raises(TypeError, match="sort must be a str"):
-        e.labor_market(sort=cast("str", 1))
+        e.labor_market(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- End to end through the fake REST server -------------------------------------------------

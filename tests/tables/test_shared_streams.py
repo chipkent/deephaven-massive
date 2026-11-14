@@ -17,7 +17,7 @@ import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import arrow as dh_arrow
@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from types import FrameType
 
+    from _typeshed import TraceFunction
     from deephaven.execution_context import ExecutionContext
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
@@ -86,10 +87,10 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-    )
+def stream_query(
+    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
+) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -832,7 +833,7 @@ def _interrupt_at_the_cleanup_back_edge() -> Iterator[list[bool]]:
     visits: list[int] = []
     fired: list[bool] = []
 
-    def local(frame: FrameType, event: str, arg: object) -> object:
+    def local(frame: FrameType, event: str, arg: object) -> TraceFunction | None:
         if event == "line" and frame.f_lineno == line and not fired:
             visits.append(1)
             got = frame.f_locals.get("handle", frame.f_locals.get("claim"))
@@ -841,14 +842,14 @@ def _interrupt_at_the_cleanup_back_edge() -> Iterator[list[bool]]:
                 raise KeyboardInterrupt
         return local
 
-    def tracer(frame: FrameType, event: str, arg: object) -> object:
+    def tracer(frame: FrameType, event: str, arg: object) -> TraceFunction | None:
         if frame.f_code is SharedStreams._acquire_once.__code__:
             visits.clear()
             return local
         return None
 
     previous = sys.gettrace()
-    sys.settrace(cast("Any", tracer))
+    sys.settrace(tracer)
     try:
         yield fired
     finally:
@@ -1296,7 +1297,7 @@ def test_a_stream_open_names_its_symbols_bounded(
     *,
     fake_streams: FakeStreamTransport,
     caplog: pytest.LogCaptureFixture,
-    symbols: object,
+    symbols: dm.SymbolsLike,
     shown: str,
 ) -> None:
     q = stream_query(massive_session, symbols)

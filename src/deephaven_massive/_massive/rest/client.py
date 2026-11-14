@@ -46,7 +46,7 @@ import random
 import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 from urllib.parse import urlsplit
 
 import urllib3
@@ -222,9 +222,17 @@ class _Job:
     patience: Patience
 
 
-_REFUSED: Final = object()
-"""The outcome of an attempt Massive refused with HTTP 429: try again, once the governor lets
-the request start, without counting a retry."""
+class _Refused:
+    """An attempt Massive refused with HTTP 429.
+
+    Try again, once the governor lets the request start, without counting a retry.
+    """
+
+    __slots__ = ()
+
+
+_REFUSED: Final = _Refused()
+"""The outcome of every refused attempt."""
 
 
 class RestClient:
@@ -534,10 +542,10 @@ class RestClient:
             retry = 0
             while True:
                 outcome = self._attempt(job, request, stop)
-                if outcome is _REFUSED:
+                if isinstance(outcome, _Refused):
                     continue
                 if not isinstance(outcome, _Retryable):
-                    return cast("Page", outcome)
+                    return outcome
                 if retry == MAX_RETRIES:
                     _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
@@ -550,7 +558,7 @@ class RestClient:
 
     def _attempt(
         self, job: _Job, request: RequestTarget, stop: Cancel
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send one attempt of a request, once the governor admits it.
 
         Args:
@@ -623,7 +631,7 @@ class RestClient:
         *,
         pool: urllib3.PoolManager,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send an admitted attempt and report its end to the governor.
 
         Args:
@@ -703,7 +711,7 @@ class RestClient:
         body: bytearray,
         elapsed: float,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
         The body is cleaned of the key once, here, before anything reads it, so no row, error,

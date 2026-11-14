@@ -115,6 +115,24 @@ def test_a_failure_is_logged_at_error_only_when_it_is_a_bug(
     assert record.exc_info is not None
 
 
+@pytest.mark.parametrize(
+    ("error", "traced"),
+    [
+        (MassiveError("broke", source=ErrorSource.LIBRARY), True),
+        (MassiveError("fix it", source=ErrorSource.USER, is_bug=True), True),
+        (KeyError("k"), True),
+        (MassiveError("refused"), False),
+    ],
+)
+def test_a_bug_is_logged_with_its_traceback_though_the_caller_passes_none(
+    caplog: pytest.LogCaptureFixture, *, error: BaseException, traced: bool
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="traced"):
+        log_failure(logging.getLogger("traced"), error, "failed: %s")
+    [record] = caplog.records
+    assert (record.exc_info is not None) is traced
+
+
 def test_a_failure_marked_as_logged_is_logged_by_log_failure_at_debug_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

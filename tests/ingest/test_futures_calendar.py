@@ -15,7 +15,7 @@ import queue
 import threading
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
@@ -33,10 +33,19 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from deephaven_massive import _massive
+    from deephaven_massive._datasets.catalog import DatasetSpec
 
 TIMEOUT = 15.0
-CONTRACTS_PATH = cast("str", futures.CONTRACTS.fetch_path)
-SCHEDULES_PATH = cast("str", futures.SCHEDULES.fetch_path)
+
+
+def _fetch_path(spec: DatasetSpec) -> str:
+    path = spec.fetch_path
+    assert path is not None
+    return path
+
+
+CONTRACTS_PATH = _fetch_path(futures.CONTRACTS)
+SCHEDULES_PATH = _fetch_path(futures.SCHEDULES)
 PATHS = {"contracts_path": CONTRACTS_PATH, "schedules_path": SCHEDULES_PATH}
 """The paths the session passes: those of the futures reference datasets."""
 SPACING = RELOAD_SPACING.total_seconds()
@@ -231,7 +240,9 @@ def null_date(symbol: str, why: str, day: str) -> str:
 
 
 def idle(calendar: FuturesCalendar) -> None:
-    cast("_WatchedQueue", calendar._queue).wait_idle()
+    watched = calendar._queue
+    assert isinstance(watched, _WatchedQueue)
+    watched.wait_idle()
 
 
 def watched(calendar: FuturesCalendar, *symbols: str) -> None:
@@ -561,6 +572,7 @@ def test_an_unreadable_lookup_answer_is_logged_as_a_library_defect(
         correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     [record] = [r for r in caplog.records if "futures schedules: looking up" in r.getMessage()]
     assert record.levelno == logging.ERROR
+    assert record.exc_info is not None  # a bug, with its traceback
     assert record.getMessage() == (
         f"test: futures schedules: looking up its product failed: bad page. {LIBRARY_BUG} (ESM4)"
     )

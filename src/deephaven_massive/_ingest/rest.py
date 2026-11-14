@@ -121,7 +121,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeVar
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -147,6 +147,8 @@ from deephaven_massive._errors import (
     failure_text,
     from_wire,
     library_bug,
+    required,
+    required_instance,
 )
 from deephaven_massive._ingest import host_decision
 from deephaven_massive._ingest.crypto_tickers import CryptoTickerList, recording_split
@@ -179,6 +181,7 @@ from deephaven_massive._ingest.rest_rows import (
     whole_bars,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
+from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
     RestUnit,
     fetch_units,
@@ -205,7 +208,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
@@ -1227,7 +1229,9 @@ class RestReader:
         listed: list[pa.RecordBatch] = []
         unmatched = 0
         for batch in batches:
-            rows, missed = _listed_rows(batch, named, column=cast("str", spec.ticker_list))
+            rows, missed = _listed_rows(
+                batch, named, column=required(spec.ticker_list, f"{spec.name}'s ticker list")
+            )
             listed.append(rows)
             unmatched += missed
         if unmatched:
@@ -1640,7 +1644,7 @@ class RestReader:
         spec: DatasetSpec,
         request: Request,
         *,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
@@ -1699,7 +1703,7 @@ class RestReader:
                     raise
                 self._unavailable(
                     spec,
-                    cast("str", spec.fetch_path),
+                    required(spec.fetch_path, f"{spec.name}'s fetch path"),
                     (value,),
                     reason="HTTP 404: no data",
                     missing=True,
@@ -1722,7 +1726,7 @@ class RestReader:
         spec: DatasetSpec,
         request: Request,
         *,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         record: Callable[[DriftReport], None],
         on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
@@ -1839,7 +1843,7 @@ class RestReader:
         self,
         spec: DatasetSpec,
         request: Request,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         *,
         cancel: Cancel,
     ) -> tuple[list[tuple[RestPath, list[Call]]], list[str]]:
@@ -1889,7 +1893,7 @@ class RestReader:
                 continue
             # Only a reactive table's symbols can meet a refusing path here: static symbols
             # were planned when the table was made, so `own` is a tuple.
-            names = cast("tuple[str, ...]", own)
+            names = required_instance(own, tuple, f"the symbols refused by {template}")
             self._unavailable(spec, template, names, reason=reason, missing=False)
             left_out.extend(f"{name} ({reason})" for name in names)
         if unlisted:
@@ -1989,7 +1993,7 @@ class RestReader:
         self,
         spec: DatasetSpec,
         request: Request,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         *,
         split: CryptoSplit | None = None,
         cancel: Cancel | None = None,
@@ -2028,7 +2032,7 @@ class RestReader:
         request: Request,
         *,
         template: str,
-        own: NormalizedSymbols | None,
+        own: tuple[str, ...] | AllSymbols | None,
         split: CryptoSplit | None,
         cancel: Cancel | None,
     ) -> tuple[RestPath, list[Call]]:
@@ -2063,7 +2067,7 @@ class RestReader:
         spec: DatasetSpec,
         request: Request,
         *,
-        symbols: NormalizedSymbols | None,
+        symbols: tuple[str, ...] | AllSymbols | None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
@@ -2110,7 +2114,7 @@ class RestReader:
         split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
-            asked = cast("tuple[str, ...]", symbols)  # only named pairs are split
+            asked = required_instance(symbols, tuple, "the split pairs' symbols")
             if set(asked) <= found.keys():
                 raise MassiveError(
                     f"{spec.name} fetch(): no symbol of the symbol table is a crypto pair "
@@ -2482,8 +2486,8 @@ class RestEndpoints:
         table, _ = reader.read_fetch(
             spec,
             request,
-            symbols=request.symbols,
-            cancel=_token(stop),
+            symbols=request.static_symbols,
+            cancel=as_cancel(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
             unlisted=unlisted,
         )
@@ -2507,7 +2511,7 @@ class RestEndpoints:
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
         split = None if split_pairs else _unsplit
-        self._reader("check").plan_fetch(spec, request, request.symbols, split=split)
+        self._reader("check").plan_fetch(spec, request, request.static_symbols, split=split)
 
     def fetch_by_symbol(
         self,
@@ -2540,7 +2544,7 @@ class RestEndpoints:
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
         reader = self._reader(f"call-{call}")
-        cancel = _token(stop)
+        cancel = as_cancel(stop)
         units, failed = fetch_units(
             reader,
             spec,
@@ -2604,7 +2608,7 @@ class RestEndpoints:
             request=request,
             values=values,
             call=call,
-            cancel=_token(stop),
+            cancel=as_cancel(stop),
             to_table=functools.partial(self._static, spec),
         )
 
@@ -2660,7 +2664,7 @@ class RestEndpoints:
             spec,
             request,
             window=window,
-            split=functools.partial(reader.crypto_pair, cancel=_token(stop)),
+            split=functools.partial(reader.crypto_pair, cancel=as_cancel(stop)),
             days=days,
         )
         announce(
@@ -2678,7 +2682,7 @@ class RestEndpoints:
             request=request,
             limit=None,
             window=window,
-            cancel=_token(stop),
+            cancel=as_cancel(stop),
             patience=patience,
         )
         logger.info(
@@ -2741,7 +2745,7 @@ class RestEndpoints:
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
         reader = self._reader(f"call-{call}")
-        cancel = _token(stop)
+        cancel = as_cancel(stop)
         units, failed = history_units(
             reader, spec, request, window=window, symbols=symbols, cancel=cancel
         )
@@ -2815,15 +2819,11 @@ class RestEndpoints:
             interval=interval,
             mode=mode,
             query=query,
-            # The poller hands each cycle the `Cancel` passed as `stop` below.
-            read=cast(
-                "poll.CycleReader",
-                functools.partial(
-                    reader.read_cycle,
-                    spec,
-                    request,
-                    pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
-                ),
+            read=_cycle_reader(
+                reader,
+                spec,
+                request,
+                pace=PaceCheck(f"{spec.name} poll()", interval.total_seconds()),
             ),
             pollers=self._state.pollers,
             host=host,
@@ -3021,7 +3021,9 @@ def _history_plan(
     A parameter the path does not take raises the `ValueError` of `shared_params`.
     """
     if isinstance(request.symbols, AllSymbols):
-        rest_path = reader.rest_path(cast("str", spec.grouped_daily_path))
+        rest_path = reader.rest_path(
+            required(spec.grouped_daily_path, f"{spec.name}'s grouped daily path")
+        )
         path, query = shared_params(spec, rest_path, request, fixed={})
         # A class that does not trade at weekends has no grouped day on a Saturday or Sunday.
         wanted = None if days is None else set(days)
@@ -3031,7 +3033,7 @@ def _history_plan(
             if is_trading_day(spec.asset_class, day) and (wanted is None or day in wanted)
         ]
         return rest_path, [Call({**path, "date": day}, query) for day in planned], ReadShape.PER_DAY
-    rest_path = reader.rest_path(cast("str", spec.history_path))
+    rest_path = reader.rest_path(required(spec.history_path, f"{spec.name}'s history path"))
     calls = history_calls(spec, rest_path, request, window=window, split=split)
     shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED
     return rest_path, calls, shape
@@ -3053,6 +3055,45 @@ def _unsplit(symbol: str) -> tuple[str, str]:
     return "", ""
 
 
+def _cycle_reader(
+    reader: RestReader, spec: DatasetSpec, request: Request, *, pace: PaceCheck
+) -> poll.CycleReader:
+    """Return a poller's reader of one cycle: `RestReader.read_cycle`, bound to a dataset.
+
+    Args:
+        reader: The reader of the session's paths.
+        spec: The dataset.
+        request: The normalized arguments.
+        pace: The table's pace check.
+
+    Returns:
+        The cycle reader, which takes the poller's stop token back as the `Cancel` it is.
+    """
+
+    def read(
+        *,
+        symbols: tuple[str, ...] | AllSymbols | None,
+        values: tuple[str, ...] | None,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: threading.Event,
+    ) -> poll.CycleRows:
+        return reader.read_cycle(
+            spec,
+            request,
+            symbols=symbols,
+            values=values,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=required(as_cancel(cancel), "the poller's stop token"),
+            pace=pace,
+        )
+
+    return read
+
+
 def _without(
     path: tuple[RestPath, list[Call]], unlisted: Mapping[str, UnlistedPairError]
 ) -> tuple[RestPath, list[Call]]:
@@ -3067,18 +3108,3 @@ def _without(
     """
     rest_path, calls = path
     return rest_path, [call for call in calls if call.symbol not in unlisted]
-
-
-def _token(stop: threading.Event | None) -> Cancel | None:
-    """Return a background read's stop token as the wire layer's `Cancel` it is.
-
-    The ports type the token as the `threading.Event` the tables layer may name;
-    `SessionClients.read_stop` makes every one a `Cancel`.
-
-    Args:
-        stop: The token, or None.
-
-    Returns:
-        The same object, typed as a `Cancel`.
-    """
-    return cast("Cancel | None", stop)

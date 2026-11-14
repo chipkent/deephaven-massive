@@ -6,7 +6,7 @@ import gc
 import importlib
 import threading
 import weakref
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -36,10 +36,10 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-    )
+def stream_query(
+    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
+) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def test_a_result_keeps_its_session_alive() -> None:

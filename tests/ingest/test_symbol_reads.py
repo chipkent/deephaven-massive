@@ -10,7 +10,7 @@ import dataclasses
 import logging
 import re
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -136,7 +136,9 @@ def session(
 
 def _rows(outcome: SymbolOutcome) -> list[dict[str, Any]]:
     assert isinstance(outcome, SymbolRows)
-    return cast("list[dict[str, Any]]", dh_arrow.to_arrow(outcome.table).to_pylist())
+    rows = dh_arrow.to_arrow(outcome.table).to_pylist()
+    assert isinstance(rows, list)
+    return rows
 
 
 def _failure(outcome: SymbolOutcome) -> SymbolFailure:

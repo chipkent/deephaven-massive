@@ -24,15 +24,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Final, cast
+from typing import Final
 
 from deephaven.dherror import DHError
 from deephaven.time import to_j_local_date, to_j_zdt
 
 from deephaven_massive._datasets.dates import TimeTextError, parse_date_like
-
-if TYPE_CHECKING:
-    from deephaven_massive._datasets.dates import DateLike
 
 __all__ = ["deephaven_time_text"]
 
@@ -43,7 +40,7 @@ _JAVA_CLASS: Final = re.compile(r"^[\w.$]+(?:Exception|Error): ")
 `java.lang.RuntimeException: `."""
 
 
-def deephaven_time_text(value: DateLike, name: str) -> DateLike:
+def deephaven_time_text(value: object, name: str) -> object:
     """Turn Deephaven date or time text into its Java value; leave every other bound alone.
 
     Call it on each date argument at the API layer, before the dataset layer parses it. ISO-8601
@@ -91,7 +88,7 @@ def deephaven_time_text(value: DateLike, name: str) -> DateLike:
                 "the whole day, or a time such as '2025-03-03T00:00 ET'"
             )
         logger.debug("%s=%r read as Deephaven text: %s", name, value, java)
-        return cast("DateLike", java)
+        return java
     raise ValueError(
         f"{name}={value!r} is neither ISO-8601 (such as '2025-03-03' or "
         "'2025-03-03T09:30:00-05:00') nor Deephaven date or time text (such as "

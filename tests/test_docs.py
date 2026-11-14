@@ -37,7 +37,7 @@ from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import deephaven
@@ -52,6 +52,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
 from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Source, WsClient
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -193,7 +194,9 @@ def readme_server(
             crypto_pair=_crypto_pair,
             client_factory=client,
         )
-        cast("Any", made._core._ports)._streams = connections
+        clients = made._core._ports
+        assert isinstance(clients, SessionClients)
+        clients._streams = connections
         made._core.on_close(connections.close)
         opened.append(made)
         return made

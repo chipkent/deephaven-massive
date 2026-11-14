@@ -8,19 +8,20 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from types import MethodType, SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import agg, empty_table
 from deephaven import arrow as dh_arrow
+from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
@@ -35,7 +36,9 @@ from deephaven_massive._tables.liveness import (
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from deephaven.liveness_scope import LivenessScope
+    from deephaven.table_listener import TableUpdate
+
+    from deephaven_massive._tables.session_core import SessionCore
 
 TIMEOUT = 30.0
 
@@ -101,10 +104,18 @@ def open_test_read(m: dm.MassiveSession, run: Run, *, note: str | None = None) -
     )
 
 
+def _read_of(fail: Callable[[MassiveError], bool]) -> BackgroundRead:
+    # A registered read's fail hook is the read's bound method.
+    assert isinstance(fail, MethodType)
+    read = fail.__self__
+    assert isinstance(read, BackgroundRead)
+    return read
+
+
 def the_read(m: dm.MassiveSession) -> BackgroundRead:
-    # The one read the session registered: its fail hook is the read's bound method.
+    # The one read the session registered.
     (state,) = m._core.workers._workers.values()
-    return cast("BackgroundRead", cast("Any", state.fail).__self__)
+    return _read_of(state.fail)
 
 
 def failed(table: Table) -> bool:
@@ -285,7 +296,7 @@ def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
 def _reads(m: dm.MassiveSession) -> list[BackgroundRead]:
     # Every read the session registered, in call order.
     states = sorted(m._core.workers._workers.items())
-    return [cast("BackgroundRead", cast("Any", state.fail).__self__) for _, state in states]
+    return [_read_of(state.fail) for _, state in states]
 
 
 def test_reads_beyond_max_concurrency_wait_their_turn_on_the_read_pool(
@@ -392,9 +403,11 @@ def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
     (call,) = massive_session._core.workers._workers
     landed = background_read._RowsLanded(weakref.ref(massive_session._core), call)
     added = SimpleNamespace(size=lambda: 3)
-    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
+        j_table_update=SimpleNamespace(added=lambda: added)
+    )
     with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
-        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_update(update, is_replay=False)
         landed.on_error(RuntimeError("the table broke"))
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", 3)
@@ -527,9 +540,11 @@ def test_a_read_racing_close_after_registering_never_starts(
     track = ResultRegistry.track
     reads: list[BackgroundRead] = []
 
-    def track_then_close(self: ResultRegistry, *args: object) -> ResultRecord:
+    def track_then_close(
+        self: ResultRegistry, *args: *tuple[Table, LivenessScope, Callable[[], None]]
+    ) -> ResultRecord:
         reads.append(the_read(massive_session))
-        record = track(self, *cast("tuple[Table, LivenessScope, Callable[[], None]]", args))
+        record = track(self, *args)
         massive_session.close()
         return record
 
@@ -711,7 +726,9 @@ def read_state(m: dm.MassiveSession, to_pylist: Callable[[Table], list[dict[str,
     # The read's state in m.streams(), once every row queued so far is applied.
     assert m._core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = to_pylist(m.streams())
-    return cast("str", row["State"])
+    state = row["State"]
+    assert isinstance(state, str)
+    return state
 
 
 def open_read_case(
@@ -1033,11 +1050,14 @@ def test_the_landing_listener_of_a_freed_session_records_nothing(
         pass
 
     gone = Gone()
-    landed = background_read._RowsLanded(cast("Any", weakref.ref(gone)), 7)
+    core: weakref.ref[SessionCore] = weakref.ref(gone)  # type: ignore[arg-type]  # a dead core
+    landed = background_read._RowsLanded(core, 7)
     del gone
     added = SimpleNamespace(size=lambda: 3)
-    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
+        j_table_update=SimpleNamespace(added=lambda: added)
+    )
     with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
-        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_update(update, is_replay=False)
     (record,) = [r for r in caplog.records if r.name == background_read.__name__]
     assert record.getMessage() == "call 7 done: its 3 rows landed in the result"

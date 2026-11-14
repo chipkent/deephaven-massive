@@ -61,7 +61,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
@@ -76,6 +76,8 @@ from deephaven_massive._errors import (
     MassiveError,
     SessionClosedError,
     from_wire,
+    required,
+    required_instance,
     wire_source,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
@@ -95,6 +97,7 @@ from deephaven_massive._massive import (
     DriftReport,
     Transport,
     WireAuthError,
+    WireError,
     WsState,
 )
 from deephaven_massive._tables.diagnostics import (
@@ -116,7 +119,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import Reject, Source, Status, WireError
+    from deephaven_massive._massive import Reject, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
@@ -722,7 +725,7 @@ class Connection:
         if stream is None:
             self._unknown(stream_id, self.change_symbols, (added, removed))
             return
-        symbols = (cast("frozenset[str]", stream.symbols) | added) - removed
+        symbols = (required(stream.symbols, f"stream {stream_id}'s symbols") | added) - removed
         # The stream's session resolved every added crypto pair before posting the change.
         with self._lock:
             pairs = dict(self._group.pairs)
@@ -1032,16 +1035,17 @@ class Connection:
         self._next_reconnect_at = None  # shown only while a reconnect waits for its time
         if state is WsState.TAKEN:
             self.subscriptions.ended()
-            self._taken(cast("float", detail))
+            self._taken(required_instance(detail, float, "a TAKEN state's next attempt"))
             return
         if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
             self.subscriptions.ended()
-            self._next_reconnect_at = int(cast("float", detail) * 1e9)
-            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=cast("float", detail))
+            at = required_instance(detail, float, f"a {state.value} state's next attempt")
+            self._next_reconnect_at = int(at * 1e9)
+            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=at)
             self._outage(detail=self._slot_text() if state is WsState.WAITING_SLOT else None)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
-            self._failed(cast("WireError", detail))
+            self._failed(required_instance(detail, WireError, "a FAILED state's error"))
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
         self._state = ConnectionState(state.value)
@@ -1089,7 +1093,7 @@ class Connection:
         Returns:
             True when the connection closed.
         """
-        at = cast("float", self._taken_at)
+        at = required(self._taken_at, "the time the connection was taken")
         group = self._group
         error = MassiveError(
             f"another connection with this API key took the WebSocket connection to "
@@ -1465,7 +1469,7 @@ class Connection:
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
         if episodes.failure is None:
-            since = utc_text(cast("float", episodes.down_since))
+            since = utc_text(required(episodes.down_since, "the outage's start"))
             episodes.failure = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} has been down "
                 f"since {since}, longer than MassiveConfig.max_outage "
@@ -1523,7 +1527,7 @@ class Connection:
         subscriptions = self.subscriptions
         acknowledged = subscriptions.acknowledged
         topics = _TopicStates(
-            generation=cast("int", subscriptions.generation),  # set while connected
+            generation=required(subscriptions.generation, "a connected socket's generation"),
             acknowledged=acknowledged,
             answered=acknowledged | subscriptions.no_ack,
             deferred=subscriptions.deferred,
@@ -1906,7 +1910,9 @@ def _sharing_value(name: str, value: object) -> Hashable:
         A hashable value, equal for equal settings.
     """
     if name == "api_key":
-        return hashlib.sha256(cast("str", value).encode()).digest()
+        return hashlib.sha256(
+            required_instance(value, str, "the api_key setting").encode()
+        ).digest()
     if isinstance(value, Mapping):
         return frozenset(value.items())
     return value

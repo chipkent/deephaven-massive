@@ -1,11 +1,12 @@
 """Tests for `SessionClients`, the one holder of a session's wire clients."""
 
+import dataclasses
 import gc
 import re
 import threading
 import weakref
 from collections.abc import Callable, Iterator
-from typing import Any, cast
+from typing import ParamSpec
 
 import pytest
 
@@ -19,15 +20,12 @@ from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.s3 import FakeS3
 
-
-def config(**overrides: object) -> dm.MassiveConfig:
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    fields.update(overrides)
-    return dm.MassiveConfig(**cast("dict[str, Any]", fields))
+_P = ParamSpec("_P")
+CONFIG = dm.MassiveConfig(
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+)
 
 
 def clients_of(m: dm.MassiveSession) -> SessionClients:
@@ -38,13 +36,13 @@ def clients_of(m: dm.MassiveSession) -> SessionClients:
 
 @pytest.fixture
 def session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     yield m
     m.close()
 
 
 def test_every_session_gets_its_own_clients(session: dm.MassiveSession) -> None:
-    other = dm.MassiveSession(config())
+    other = dm.MassiveSession(CONFIG)
     try:
         assert clients_of(session) is not clients_of(other)
     finally:
@@ -72,7 +70,7 @@ def test_every_read_of_a_session_shares_one_client(session: dm.MassiveSession) -
 
 
 def test_a_client_created_after_close_is_closed_at_once(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m.close()
     m._core.flat_file_transport()
     client = clients_of(m)._flat_files
@@ -81,7 +79,9 @@ def test_a_client_created_after_close_is_closed_at_once(fake_s3: FakeS3) -> None
 
 
 def test_the_flat_file_transport_needs_s3_credentials(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config(s3_access_key_id=None, s3_secret_access_key=None))
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
+    )
     try:
         with pytest.raises(ValueError, match="flat files need MassiveConfig s3_access_key_id"):
             m._core.flat_file_transport()
@@ -101,7 +101,7 @@ def test_every_stream_transport_shares_the_sessions_connections(
 
 
 def test_the_connections_close_with_the_session(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m._core.stream_transport()
     connections = clients_of(m)._streams
     assert connections is not None
@@ -155,7 +155,7 @@ def test_the_futures_calendar_reads_through_the_rest_transport(
 def test_the_connections_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
     # The connections live as long as the session and their close is a session closer, which the
     # session's finalizer holds: a strong reference to the core would keep it alive forever.
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m._core.stream_transport()
     connections = clients_of(m)._streams
     core = weakref.ref(m._core)
@@ -189,7 +189,7 @@ def test_every_rest_call_of_a_session_shares_one_client(session: dm.MassiveSessi
 
 
 def test_a_rest_client_created_after_close_is_closed_at_once(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m.close()
     m._core.rest_transport()
     state = clients_of(m)._rest
@@ -202,16 +202,18 @@ def test_racing_first_rest_calls_keep_one_client(
 ) -> None:
     # The client is built outside the lock; a call that loses the race closes its own.
     built: list[_massive.RestClient] = []
-    real = _massive.RestClient
 
-    def factory(api_key: str, **settings: object) -> _massive.RestClient:
-        client = real(api_key, **cast("dict[str, Any]", settings))
-        built.append(client)
-        if len(built) == 1:  # the other call installs its client first
-            session._core.rest_transport()
-        return client
+    def racing(real: Callable[_P, _massive.RestClient]) -> Callable[_P, _massive.RestClient]:
+        def factory(*args: _P.args, **kwargs: _P.kwargs) -> _massive.RestClient:
+            client = real(*args, **kwargs)
+            built.append(client)
+            if len(built) == 1:  # the other call installs its client first
+                session._core.rest_transport()
+            return client
 
-    monkeypatch.setitem(vars(_massive), "RestClient", factory)
+        return factory
+
+    monkeypatch.setitem(vars(_massive), "RestClient", racing(_massive.RestClient))
     transport = session._core.rest_transport()
     assert isinstance(transport, rest.RestEndpoints)
     assert len(built) == 2
@@ -256,7 +258,7 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
 
 
 def test_the_rest_state_does_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m._core.rest_transport()
     core = weakref.ref(m._core)
     state = clients_of(m)._rest
@@ -283,7 +285,7 @@ def _wait_for(condition: Callable[[], bool]) -> bool:
 def test_the_clients_do_not_keep_the_core_alive(fake_s3: FakeS3) -> None:
     # The core holds its clients, so a strong reference back would make a cycle, and an unclosed
     # session would then wait for the cyclic collector before its connections are closed.
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     m._core.flat_file_transport()
     core = weakref.ref(m._core)
     gc.disable()
@@ -303,7 +305,7 @@ def test_a_transport_holds_the_core_itself(session: dm.MassiveSession) -> None:
 
 
 def test_clients_whose_session_is_gone_report_it_closed(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     clients = clients_of(m)
     label = m._core.label
     m.close()
@@ -329,25 +331,30 @@ def test_the_client_is_created_under_the_registry_lock(
         if acquired:
             lock.release()
 
-    real = _massive.FlatFileClient
+    def probing(
+        real: Callable[_P, _massive.FlatFileClient],
+    ) -> Callable[_P, _massive.FlatFileClient]:
+        def factory(*args: _P.args, **kwargs: _P.kwargs) -> _massive.FlatFileClient:
+            probe = threading.Thread(target=try_lock)
+            probe.start()
+            probe.join()
+            return real(*args, **kwargs)
 
-    def factory(**settings: object) -> _massive.FlatFileClient:
-        probe = threading.Thread(target=try_lock)
-        probe.start()
-        probe.join()
-        return real(**cast("dict[str, Any]", settings))
+        return factory
 
     # `setitem`, as the flat-file tests do: teardown removes the entry again.
-    monkeypatch.setitem(vars(_massive), "FlatFileClient", factory)
+    monkeypatch.setitem(vars(_massive), "FlatFileClient", probing(_massive.FlatFileClient))
     session._core.flat_file_transport()
     session._core.flat_file_transport()
     assert taken_elsewhere == [False]
 
 
 def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: FakeS3) -> None:
-    first = dm.MassiveSession(config(rest_basic_subscriptions={dm.Subscription.OPTIONS}))
-    second = dm.MassiveSession(config())
-    other_key = dm.MassiveSession(config(api_key="other-key"))
+    first = dm.MassiveSession(
+        dataclasses.replace(CONFIG, rest_basic_subscriptions={dm.Subscription.OPTIONS})
+    )
+    second = dm.MassiveSession(CONFIG)
+    other_key = dm.MassiveSession(dataclasses.replace(CONFIG, api_key="other-key"))
     try:
         shared = clients_of(first)._lease.governor
         assert clients_of(second)._lease.governor is shared
@@ -368,7 +375,9 @@ def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: Fake
 
 
 def test_a_collected_session_releases_its_lease(fake_s3: FakeS3) -> None:
-    m = dm.MassiveSession(config(rest_basic_subscriptions={dm.Subscription.STOCKS}))
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, rest_basic_subscriptions={dm.Subscription.STOCKS})
+    )
     governor = clients_of(m)._lease.governor
     gc.disable()
     try:

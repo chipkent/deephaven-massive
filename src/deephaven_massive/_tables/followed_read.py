@@ -127,7 +127,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven import dtypes, merge, new_table
 from deephaven.column import InputColumn, int_col, long_col, string_col
@@ -135,7 +135,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import TableDefinition
 
 from deephaven_massive._enums import Reread
-from deephaven_massive._errors import MassiveError, SessionClosedError
+from deephaven_massive._errors import MassiveError, SessionClosedError, required
 from deephaven_massive._tables.background_read import GROUP_ROWS
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState, shown_query
@@ -358,7 +358,7 @@ class FollowedRead:
             rows,
             decided_at_step=decided_at_step,
             parts_before=parts_before,
-            empty=cast("Table", self._empty),
+            empty=required(self._empty, f"call {self.call}'s empty row group"),
         )
         with self._publish_lock:
             # Checked under the lock: a failure sets the token before it publishes.
@@ -367,7 +367,7 @@ class FollowedRead:
                     "call %d %s: stopped, so its download is not published", self.call, symbol
                 )
                 return parts_before
-            cast("BlinkPublisher", self._publisher).add(groups)
+            required(self._publisher, f"call {self.call}'s publisher").add(groups)
         return parts
 
     def fail_table(self, error: MassiveError) -> bool:
@@ -390,7 +390,7 @@ class FollowedRead:
                 return False
             self.stop_token.set()
             closed = self.core.fail_stream(self.call, error)
-            cast("BlinkPublisher", self._publisher).publish_failure(
+            required(self._publisher, f"call {self.call}'s publisher").publish_failure(
                 error if closed in (None, str(error)) else SessionClosedError(closed)
             )
             self._failed = True
@@ -427,7 +427,7 @@ class FollowedRead:
 
     def stop_watch(self) -> None:
         """Stop the watch's listener: a Deephaven call, so the reaper runs it."""
-        cast("SymbolWatch", self._watch).stop()
+        required(self._watch, f"call {self.call}'s symbol watch").stop()
 
 
 class _WatchRouter:
@@ -554,9 +554,9 @@ def _shut_down(
             (`WorkerTables.shutdown_callback`), run last.
     """
     # Alive: the session's record of the result holds it until `worker_shut_down` below.
-    read = cast("FollowedRead", read_ref())
+    read = required(read_ref(), "the followed read")
     read.stop_token.set()
-    core = cast("SessionCore", core_ref())
+    core = required(core_ref(), "the session")
     read.shut_down_event.set()
     core.follows.stop_following(read)
     core.defer(read.stop_watch)  # a Deephaven call: never here
@@ -658,13 +658,14 @@ def _row_groups(
         The static row groups, with `_BOOKKEEPING` then the dataset's columns as vectors; and
         how many of them hold rows.
     """
-    size = 0 if rows is None else rows.size
-    groups = [
-        _key_row(symbol, seq, part=part, decided_at_step=decided_at_step).join(
-            cast("Table", rows).slice(start, min(size, start + GROUP_ROWS)).group_by()
-        )
-        for part, start in enumerate(range(0, size, GROUP_ROWS))
-    ]
+    groups: list[Table] = []
+    if rows is not None:
+        groups = [
+            _key_row(symbol, seq, part=part, decided_at_step=decided_at_step).join(
+                rows.slice(start, min(rows.size, start + GROUP_ROWS)).group_by()
+            )
+            for part, start in enumerate(range(0, rows.size, GROUP_ROWS))
+        ]
     parts = len(groups)
     groups += [
         _key_row(symbol, seq, part=part, decided_at_step=decided_at_step).natural_join(

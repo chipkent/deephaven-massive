@@ -31,7 +31,7 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeVar
 
 from deephaven import dtypes
 from deephaven.table import Table
@@ -54,8 +54,8 @@ from deephaven_massive._datasets.filters import (
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, Order, Timespan, _require_enum
-from deephaven_massive._errors import ErrorSource, MassiveError, library_bug
-from deephaven_massive._massive import ParamKind, Transport
+from deephaven_massive._errors import ErrorSource, MassiveError, library_bug, required
+from deephaven_massive._massive import ParamKind
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive.queries import FetchQuery, Query
 from deephaven_massive.queries._call import QueryCall
@@ -68,7 +68,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolsLike
-    from deephaven_massive._massive import RestPath
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -210,7 +209,7 @@ def accepted_values(core: SessionCore, spec: DatasetSpec, name: str) -> tuple[st
     Returns:
         The accepted wire values, in the specification's order.
     """
-    path = cast("RestPath", core.catalog.source(Transport.REST, cast("str", spec.fetch_path)))
+    path = core.catalog.rest_path(required(spec.fetch_path, f"{spec.name}'s fetch path"))
     return next(param.values for param in path.params if param.name == name)
 
 

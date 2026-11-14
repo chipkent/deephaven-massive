@@ -28,7 +28,7 @@ import csv
 import gzip
 import io
 import threading
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import boto3
 from botocore.awsrequest import AWSResponse, HTTPHeaders
@@ -141,10 +141,11 @@ class FakeS3:
         Args:
             monkeypatch: The test's monkeypatch, which undoes the wrapping afterwards.
         """
-        create = cast("Callable[..., object]", boto3.session.Session.client)
+        create = boto3.session.Session.client
 
         def client(session: boto3.session.Session, *args: object, **kwargs: object) -> object:
-            return self.attach(cast("S3Client", create(session, *args, **kwargs)))
+            made = create(session, *args, **kwargs)  # type: ignore[call-overload]  # forwards any
+            return self.attach(made)
 
         monkeypatch.setattr(boto3.session.Session, "client", client)
 
@@ -232,11 +233,10 @@ class FakeS3:
         events = client.meta.events
         events.register("before-parameter-build.s3.GetObject", self._remember)
         # A `before-call` handler that returns a response replaces the HTTP request.
-        events.register("before-call.s3.GetObject", cast("Callable[..., None]", self._answer))
+        answer, listing = self._answer, self._answer_listing
+        events.register("before-call.s3.GetObject", answer)  # type: ignore[arg-type]  # returns a reply
         events.register("before-parameter-build.s3.ListObjectsV2", self._remember_listing)
-        events.register(
-            "before-call.s3.ListObjectsV2", cast("Callable[..., None]", self._answer_listing)
-        )
+        events.register("before-call.s3.ListObjectsV2", listing)  # type: ignore[arg-type]  # returns a reply
         close = client.close
 
         def recorded_close() -> None:
@@ -245,17 +245,17 @@ class FakeS3:
             close()
 
         # The library takes the client's `close` when it creates the client, after this runs.
-        cast("Any", client).close = recorded_close
+        client.close = recorded_close  # type: ignore[method-assign]  # the point: count the closes
         # The client's settings, read through private attributes the type stubs do not declare.
-        settings = cast("Any", client.meta.config)
-        credentials = cast("Any", client)._request_signer._credentials
+        settings = client.meta.config
+        credentials = client._request_signer._credentials  # type: ignore[attr-defined]  # not in botocore's type stubs
         recorded: dict[str, object] = {
             "endpoint_url": client.meta.endpoint_url,
             # None when boto3 found no credentials: the fake answers unsigned requests too.
             "access_key": None if credentials is None else credentials.access_key,
             "secret_key": None if credentials is None else credentials.secret_key,
-            "signature_version": settings.signature_version,
-            "max_pool_connections": settings.max_pool_connections,
+            "signature_version": settings.signature_version,  # type: ignore[attr-defined]  # not in botocore's type stubs
+            "max_pool_connections": settings.max_pool_connections,  # type: ignore[attr-defined]  # not in botocore's type stubs
         }
         with self._lock:
             self.clients.append(recorded)

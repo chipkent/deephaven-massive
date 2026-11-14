@@ -17,9 +17,10 @@ import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3
+import botocore.config
 import botocore.loaders
 import botocore.utils
 import certifi
@@ -56,6 +57,10 @@ from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import TypeAlias
+
+    from botocore.endpoint import Endpoint
+    from types_boto3_s3 import S3Client
+    from urllib3 import PoolManager
 
 
 TIMEOUT = 30.0
@@ -1137,11 +1142,11 @@ def factory_calls(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> list[dict
         The arguments of each `Session.client` call, in order.
     """
     calls: list[dict[str, object]] = []
-    create = cast("Callable[..., object]", boto3.session.Session.client)
+    create = boto3.session.Session.client
 
     def client(session: boto3.session.Session, *args: object, **kwargs: object) -> object:
         calls.append(kwargs)
-        return create(session, *args, **kwargs)
+        return create(session, *args, **kwargs)  # type: ignore[call-overload]  # forwards any service
 
     monkeypatch.setattr(boto3.session.Session, "client", client)
     return calls
@@ -1179,12 +1184,16 @@ def test_the_client_follows_the_shared_tls_and_proxy_rules_and_never_retries_its
         client.close()
     (kwargs,) = factory_calls
     assert kwargs["verify"] == bundle
-    config = cast("Any", kwargs["config"])  # botocore declares no type for its settings
+    config = kwargs["config"]
+    assert isinstance(config, botocore.config.Config)
     # An empty mapping, not None: None would make botocore look the proxy up itself.
-    assert config.proxies == ({} if proxy is None else {"https": proxy})
-    assert config.proxies_config == {"proxy_ca_bundle": bundle}
-    assert config.retries == {"total_max_attempts": 1, "mode": "standard"}
-    assert (config.connect_timeout, config.read_timeout) == (60.0, 60.0)
+    proxies = {} if proxy is None else {"https": proxy}
+    assert config.proxies == proxies  # type: ignore[attr-defined]  # not in botocore's type stubs
+    assert config.proxies_config == {"proxy_ca_bundle": bundle}  # type: ignore[attr-defined]  # not in botocore's type stubs
+    retries = {"total_max_attempts": 1, "mode": "standard"}
+    assert config.retries == retries  # type: ignore[attr-defined]  # not in botocore's type stubs
+    timeouts = (config.connect_timeout, config.read_timeout)  # type: ignore[attr-defined]  # not in botocore's type stubs
+    assert timeouts == (60.0, 60.0)
 
 
 def test_botocore_never_looks_the_proxy_up_itself(
@@ -1888,12 +1897,13 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []
 
 
-def _ssl_context_of(client: object) -> ssl.SSLContext:
+def _ssl_context_of(client: S3Client) -> ssl.SSLContext:
     """Return the `SSLContext` a boto3 client's connections to the endpoint are made with."""
     # botocore keeps the client's urllib3 pool manager, and the context it gives every
     # connection, in private attributes with no public accessor; reading them is the only way
     # to check that no two connection slots share a context.
-    manager: Any = cast("Any", client)._endpoint.http_session._manager
+    endpoint: Endpoint = client._endpoint  # type: ignore[attr-defined]  # not in botocore's type stubs
+    manager: PoolManager = endpoint.http_session._manager  # type: ignore[attr-defined]  # not in botocore's type stubs
     context: ssl.SSLContext = manager.connection_pool_kw["ssl_context"]
     return context
 
@@ -1909,17 +1919,20 @@ def test_no_two_held_connection_slots_share_an_ssl_context(fake_s3: FakeS3) -> N
     client = make_client(max_pool=3)
     files = [client.open(key) for key in keys]
     try:
+        held = [file for file in files if file is not None]
+        assert len(held) == 3
         built = list(client._clients)
         assert (len(built), client._idle) == (3, [])  # one client per held slot
-        pools = [cast("Any", each.meta.config).max_pool_connections for each in built]
+        pools = [each.meta.config.max_pool_connections for each in built]  # type: ignore[attr-defined]  # not in botocore's type stubs
         assert pools == [1, 1, 1]
         assert len({id(_ssl_context_of(each)) for each in built}) == 3
-        cast("FlatFile", files[0]).close()
+        held[0].close()
         files[0] = client.open(keys[0])  # takes the slot given back, and its client
         assert client._clients == built
     finally:
         for file in files:
-            cast("FlatFile", file).close()
+            if file is not None:
+                file.close()
         client.close()
 
 
@@ -1979,8 +1992,9 @@ def test_an_attempt_never_waits_for_the_lock_a_client_build_holds(
     # AWS configuration. An attempt on a client its caller already holds needs nothing the
     # lock guards, so it is sent while the lock is held elsewhere.
     def attempt() -> object:
+        unused: S3Client = None  # type: ignore[assignment]  # the call never reads its client
         return client._attempt(
-            cast("Any", None), lambda _: "sent", key="k", location="s3://bucket/k", verb="read"
+            unused, lambda _: "sent", key="k", location="s3://bucket/k", verb="read"
         )
 
     with ThreadPoolExecutor(1) as pool, client._lock:  # the lock is let go first
