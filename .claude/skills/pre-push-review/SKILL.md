@@ -75,7 +75,8 @@ same property. Then look for:
   anything but imports, and for each new `cast`, `Any`, `# type: ignore`, `# noqa`,
   `# pragma: no cover`, `getattr` with a constant name, or code that exists only so ruff, mypy, or
   coverage pass. Each is a blocker unless the owner accepted it: fix the design so the tools see
-  the true API.
+  the true API. An import after a Deephaven server start with `# noqa: E402 - needs the server
+  above` is accepted in advance (`AGENTS.md`), so no finding.
 - **A closed set handled by a catch-all** (`AGENTS.md`, **Every choice over a closed set
   handles each case by name**). Search the added lines:
   `git diff origin/main...HEAD -- src | grep -nE '^\+.*(\belse:|\bcase\s|\.get\(|isinstance|except\b)'`.
