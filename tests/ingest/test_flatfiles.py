@@ -52,7 +52,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
@@ -808,6 +808,7 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
             dates=(date(2025, 3, 3),),
             call=1,
             forced=True,
+            logged=LoggedKeys(),
         )
     for symbol in ("AAPL", "MSFT"):
         failed = out[symbol]
@@ -1716,7 +1717,14 @@ def test_a_stopped_read_stops_its_roll_forward(
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
-            FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
+            FUTURES_TRADES,
+            q._request,
+            window,
+            dates=dates,
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
@@ -1785,7 +1793,14 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
-            FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
+            FUTURES_TRADES,
+            q._request,
+            window,
+            dates=dates,
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
     assert waits == list(range(stopped_at + 1))
 
@@ -2493,19 +2508,26 @@ def test_a_refused_venues_rows_of_other_sessions_leave_no_session_uncertain(
         m.close()
 
 
+@pytest.mark.parametrize(
+    ("policy", "level"), [(OnError.LOG, logging.WARNING), (OnError.IGNORE, logging.DEBUG)]
+)
 def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
     *,
     fake_s3: FakeS3,
     two_days_of_venues: Callable[[], None],
     caplog: pytest.LogCaptureFixture,
+    policy: OnError,
+    level: int,
 ) -> None:
     # A table that follows a live symbol table has its description before any read, so each
     # symbol's source names the skipped venue; reading again in the same call logs nothing new.
+    # What a call logged lives in its own `LoggedKeys`, never in the process: a call that
+    # starts afresh, even with an id already used, logs the venue again.
     two_days_of_venues()
     fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
     asked = Request(
         venues=tuple(FuturesVenue),
-        refused_venues=OnError.LOG,
+        refused_venues=policy,
         start=date(2025, 3, 4),
         end=date(2025, 3, 4),
     )
@@ -2513,7 +2535,7 @@ def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
     with dm.MassiveSession(CONFIG) as m:
         transport = files_transport(m)
 
-        def read(call: int) -> dict[str, SymbolOutcome]:
+        def read(call: int, logged: LoggedKeys) -> dict[str, SymbolOutcome]:
             return transport.history_by_symbol(
                 FUTURES_TRADES,
                 asked,
@@ -2522,17 +2544,21 @@ def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
                 dates=(date(2025, 3, 4),),
                 call=call,
                 forced=True,
+                logged=logged,
             )
 
-        with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.refused_venues"):
-            first, again, other = read(7), read(7), read(8)
-    for outcome in (first, again, other):
+        seven, eight = LoggedKeys(), LoggedKeys()
+        with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
+            outcomes = [read(7, seven), read(7, seven), read(8, eight), read(7, LoggedKeys())]
+    for outcome in outcomes:
         rows = outcome["ESH5"]
         assert isinstance(rows, SymbolRows)
         assert rows.source == "flat files without NYMEX (refused)"
         assert pick(rows.table, "ReportSequence") == [(40,), (41,), (43,)]
-    calls = [re.search(r"call-\d+", r.getMessage()) for r in caplog.records]
-    assert [match.group() for match in calls if match] == ["call-7", "call-8"]
+    skipped = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
+    calls = [re.search(r"call-\d+", r.getMessage()) for r in skipped]
+    assert [match.group() for match in calls if match] == ["call-7", "call-8", "call-7"]
+    assert {r.levelno for r in skipped} == {level}
 
 
 def test_a_refused_venue_is_not_requested_again_in_the_call(
@@ -4043,5 +4069,12 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     stop.set()
     with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
-            STOCK_TRADES, request, window, dates=[day], call=1, infer_holidays=True, stop=stop
+            STOCK_TRADES,
+            request,
+            window,
+            dates=[day],
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
