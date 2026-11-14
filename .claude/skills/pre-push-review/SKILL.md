@@ -78,7 +78,7 @@ same property. Then look for:
   the true API.
 - **A closed set handled by a catch-all** (`AGENTS.md`, **Every choice over a closed set
   handles each case by name**). Search the added lines:
-  `git diff origin/main...HEAD -- src | grep -nE '^\+.*(\belse:|case [a-z_]+:|\.get\(|isinstance|except\b)'`.
+  `git diff origin/main...HEAD -- src | grep -nE '^\+.*(\belse:|case [A-Za-z_][A-Za-z0-9_]*:|\.get\(|isinstance|except\b)'`.
   For each hit that chooses over an enum, a union, the forms of `symbols`, or a fixed set of
   values, name the member or type a later change could add and what the code would do with it.
   A default branch (`case _:` or a bare capture such as `case other:`), `dict.get` default, or type-filtered drop that takes it silently is a
