@@ -595,7 +595,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               `CLOSED`. `DONE` can mean 0 rows, when Massive has no data for the symbol. `REMOVED`
               means its row left the watchlist, and `STOPPED` that the result was released.
             - `Transport`: `REST`, `flat files`, or `flat files and REST` when some days' files were
-              missing.
+              missing. A futures read that skipped exchanges Massive refused, under
+              `refused_venues`, names them: `flat files without NYMEX (refused)`.
             - `AddedAt`: when its row last joined the watchlist.
             - `ReadAt`: when the download behind its rows began.
             - `Rows`: its rows in the result.

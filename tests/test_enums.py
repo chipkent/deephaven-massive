@@ -330,6 +330,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.refused_venues": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
@@ -374,6 +375,9 @@ ENUM_PARAMETERS = {
     "FuturesNamespace.trades.venues": _FUTURES_ENUMS,
     "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.trades.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.quotes.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.refused_venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.timespan": (
         "namespaces/test_futures.py::test_bars_take_the_day_timespan"
     ),
