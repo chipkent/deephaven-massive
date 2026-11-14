@@ -44,7 +44,7 @@ from deephaven_massive._datasets.row_times import (
     within,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 
 INSTANT = pa.timestamp("ns", tz="UTC")
 A, T = AssetClass, Timespan
@@ -281,7 +281,7 @@ def test_a_streamed_bar_s_own_end_is_recomputed() -> None:
 def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_one_second(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     rule = TimeRule("futures.bars", RowTimes.BAR, A.FUTURES, T.SECOND, 1)
     sent = bars(
         [
