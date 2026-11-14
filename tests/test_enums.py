@@ -500,3 +500,10 @@ def test_each_asset_class_has_one_subscription() -> None:
         dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
     }
     assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None
+
+
+def test_forex_has_one_spelling_in_the_enums() -> None:
+    # Massive's wire value is "fx"; the member is FOREX in both enums that name forex.
+    assert dm.Market.FOREX.value == "fx"
+    assert dm.AssetClass.FOREX.name == dm.Market.FOREX.name
+    assert "FX" not in dm.Market.__members__
