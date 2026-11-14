@@ -102,17 +102,17 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "venues": (
             "The futures exchanges whose flat files `history()` reads, as a set of "
-            "`dm.FuturesVenue` members. Each exchange's file of a day holds every contract it "
-            "trades, so naming fewer exchanges downloads less.\n"
+            "`dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. "
+            "Each exchange's file of a day holds every contract it trades, so naming fewer "
+            "exchanges downloads less.\n"
             "\n"
-            "`history()` reads REST instead when Massive refuses an exchange's files and REST "
-            "can serve the read. When it must read flat files (`dm.ALL`, or "
-            "`source=dm.HistorySource.FLAT_FILES`):\n"
+            "Massive refuses the files of an exchange your plan doesn't include. `history()` "
+            "reads REST instead when REST can serve the read. When it must read flat files "
+            "(`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):\n"
             "\n"
-            "- Left out, `venues` is every exchange your plan allows. The read skips each "
-            "exchange Massive refuses, and logs one warning naming them. The table's "
-            "description names them too, or for a watchlist, each symbol's `Transport` in "
-            "`m.symbol_reads()`.\n"
+            "- Left out, the read tries every exchange and skips each one Massive refuses. It "
+            "logs one warning naming them. The table's description names them too. For a "
+            "watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.\n"
             "- An exchange you name follows [`refused_venues`](#refused_venues).\n"
             "- If Massive refuses every exchange, the read fails."
         ),
@@ -122,8 +122,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "`MassiveConfig.refused_venues`, which is `RAISE` unless you set it.\n"
             "\n"
             "- `RAISE` fails the read with `EntitlementError`, naming the exchange.\n"
-            "- `LOG` skips each refused exchange for the whole range, with the warning and "
-            "description `venues` describes.\n"
+            "- `LOG` skips each refused exchange for the whole range, logs one warning naming "
+            "them, and lists them in the table's description.\n"
             "- `IGNORE` skips them too, logging only at DEBUG."
         ),
     }

@@ -305,11 +305,11 @@ How many `timespan` units each bar spans, 1 by default. `timespan=dm.Timespan.MI
 
 ### venues
 
-The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members. Each exchange's file of a day holds every contract it trades, so naming fewer exchanges downloads less.
+The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. Each exchange's file of a day holds every contract it trades, so naming fewer exchanges downloads less.
 
-`history()` reads REST instead when Massive refuses an exchange's files and REST can serve the read. When it must read flat files (`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):
+Massive refuses the files of an exchange your plan doesn't include. `history()` reads REST instead when REST can serve the read. When it must read flat files (`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):
 
-- Left out, `venues` is every exchange your plan allows. The read skips each exchange Massive refuses, and logs one warning naming them. The table's description names them too, or for a watchlist, each symbol's `Transport` in `m.symbol_reads()`.
+- Left out, the read tries every exchange and skips each one Massive refuses. It logs one warning naming them. The table's description names them too. For a watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.
 - An exchange you name follows [`refused_venues`](#refused_venues).
 - If Massive refuses every exchange, the read fails.
 
@@ -320,7 +320,7 @@ The futures exchanges whose flat files `history()` reads, as a set of `dm.Future
 What a flat-file read does when Massive refuses the files of an exchange you name in [`venues`](#venues). It takes a `dm.OnError`. Left out, it follows `MassiveConfig.refused_venues`, which is `RAISE` unless you set it.
 
 - `RAISE` fails the read with `EntitlementError`, naming the exchange.
-- `LOG` skips each refused exchange for the whole range, with the warning and description `venues` describes.
+- `LOG` skips each refused exchange for the whole range, logs one warning naming them, and lists them in the table's description.
 - `IGNORE` skips them too, logging only at DEBUG.
 
 ## Column types
