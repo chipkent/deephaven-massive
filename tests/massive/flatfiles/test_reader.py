@@ -1083,3 +1083,9 @@ def test_in_order_cancels_the_work_not_started_when_closed_early() -> None:
         release.set()
     assert 3 not in worked
     assert 4 not in worked
+
+
+def test_a_watched_body_refuses_to_seek() -> None:
+    watched = reader._Watched(io.BytesIO(b"body"), threading.Event())
+    with pytest.raises(io.UnsupportedOperation, match=r"a response body cannot seek \(to 0\)"):
+        watched.seek(0)

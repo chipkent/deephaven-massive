@@ -18,7 +18,7 @@ import re
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 import pytest
@@ -103,20 +103,47 @@ INDICATOR = DatasetSpec(
 )
 
 
-def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
+def build(
+    session: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    symbols: dm.SymbolsLike | None = None,
+    symbols_optional: bool = True,
+    all_alternative: str | None = None,
+    timespan: Timespan | None = None,
+    venues: collections.abc.Set[FuturesVenue] | None = None,
+    start: dm.DateLike | None = None,
+    end: dm.DateLike | None = None,
+    params: Mapping[str, object] | None = None,
+    filters: Mapping[str, dm.FilterValue] | None = None,
+    limit: int | None = None,
+) -> Query:
     # Most tests build a list dataset without symbols, which only filter it; the refusal of
     # None for a dataset that needs symbols has its own test.
-    kwargs.setdefault("symbols_optional", True)
-    return build_query(session._core, spec, query_type=Query, **cast("dict[str, Any]", kwargs))
+    return build_query(
+        session._core,
+        spec,
+        query_type=Query,
+        symbols=symbols,
+        symbols_optional=symbols_optional,
+        all_alternative=all_alternative,
+        timespan=timespan,
+        venues=venues,
+        start=start,
+        end=end,
+        params=params,
+        filters=filters,
+        limit=limit,
+    )
 
 
 def test_list_params() -> None:
     assert list_params(sort=None, order=None) == {}
     assert list_params(sort="ticker", order=Order.DESC) == {"sort": "ticker", "order": Order.DESC}
     with pytest.raises(TypeError, match="sort must be a str"):
-        list_params(sort=cast("str", 1), order=None)
+        list_params(sort=1, order=None)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        list_params(sort=None, order=cast("Order", "desc"))
+        list_params(sort=None, order="desc")  # type: ignore[arg-type]  # the point: refused at run time
     # Whether `order` needs `sort` depends on the dataset's paths, which `build_query` reads.
     assert list_params(sort=None, order=Order.DESC) == {"order": Order.DESC}
 
@@ -139,7 +166,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
     assert "limit=5" in repr(massive_session.stocks.dividends("AAPL", limit=5))
     assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.limit is None
     with pytest.raises(TypeError, match="limit must be an int"):
-        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=cast("int", "10"))
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit="10")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=True)
     with pytest.raises(ValueError, match="limit must be positive"):
@@ -257,9 +284,9 @@ def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> Non
     plain = build(massive_session, DIVIDENDS)._request
     assert (plain.venues, plain.refused_venues) == (None, None)
     with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
@@ -281,11 +308,11 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
             build(massive_session, DIVIDENDS, filters={key: "2025-01-01"})
     with pytest.raises(TypeError, match="filters must be a mapping"):
-        build(massive_session, DIVIDENDS, filters=[("a", 1)])
+        build(massive_session, DIVIDENDS, filters=[("a", 1)])  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="filter names must be str"):
-        build(massive_session, DIVIDENDS, filters={1: "a"})
+        build(massive_session, DIVIDENDS, filters={1: "a"})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match="sequence of str or date; got dict"):
-        build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
+        build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
     # A dataset without a time axis takes its timestamp filters through `filters`, and the
@@ -325,7 +352,7 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
         massive_session,
         INDICATOR,
         filters={
-            "timestamp_gte": instant,
+            "timestamp_gte": instant,  # type: ignore[dict-item]  # a Java time, which the types do not name
             "timestamp_lt": pd.Timestamp("2025-01-02T14:30:00.002Z"),
         },
     )._request.filters
@@ -336,11 +363,13 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
     assert all(type(value) is datetime for _, value in filters)
     for day in (to_j_local_date("2025-01-02"), np.datetime64("2025-01-02")):
         assert build(
-            massive_session, INDICATOR, filters={"timestamp_gte": day}
+            massive_session,
+            INDICATOR,
+            filters={"timestamp_gte": day},  # type: ignore[dict-item]  # a Java time, which the types do not name
         )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
     # A Java day in a list is a day; the next element is the first the list refuses.
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
-        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})
+        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})  # type: ignore[list-item]  # a Java time, which the types do not name; 1 is refused
     # An instant between two microseconds rounds outward: an upper bound up, any other down,
     # whether the name is a filter key or a wire name.
     between = to_j_instant("2025-01-02T14:30:00.000001001Z")
@@ -383,7 +412,7 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
 
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
-        build(massive_session, INDICATOR, timespan="day")
+        build(massive_session, INDICATOR, timespan="day")  # type: ignore[arg-type]  # the point: refused at run time
 
 
 NEWS = DatasetSpec(
@@ -450,7 +479,7 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
             spec,
             query_type=Query,
             symbols=["AAPL"],
-            adjusted=cast("bool", "false"),
+            adjusted="false",  # type: ignore[arg-type]  # the point: refused at run time
         )
     # One channel only: adjusted never travels in params, where a transport could drop it.
     with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):

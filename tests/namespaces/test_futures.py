@@ -16,7 +16,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -145,7 +145,7 @@ def test_refused_venues_left_out_follows_the_session() -> None:
         m.close()
 
 
-_PLAIN = cast("Any", "text")
+_PLAIN = "text"
 
 
 @pytest.mark.parametrize(
@@ -194,7 +194,7 @@ def test_an_exhausted_generator_is_no_symbols(massive_session: dm.MassiveSession
     symbols: Iterator[str] = iter(["ESZ5"])
     list(symbols)
     with pytest.raises(ValueError, match="no symbols"):
-        massive_session.futures.quotes(cast("Any", symbols))
+        massive_session.futures.quotes(symbols)  # type: ignore[arg-type]  # the point: any iterable
 
 
 @pytest.mark.parametrize(
@@ -238,7 +238,7 @@ def test_bars_take_the_day_timespan(
         dm.Timespan.DAY
     )
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        massive_session.futures.bars("ESZ5", cast("Any", "minute"))
+        massive_session.futures.bars("ESZ5", "minute")  # type: ignore[arg-type]  # the point: refused at run time
     hours = massive_session.futures.bars("ESZ5", dm.Timespan.HOUR, multiplier=0)
     assert hours._request.multiplier == 0
 
@@ -283,7 +283,7 @@ def test_contracts(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="filter 'active' takes a bool, not 'yes'"):
         massive_session.futures.contracts(filters={"active": "yes"})
     with pytest.raises(TypeError, match="sort must be a str"):
-        massive_session.futures.contracts(sort=cast("str", 1))
+        massive_session.futures.contracts(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) -> None:
@@ -318,7 +318,7 @@ def test_products(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match="filter 'sector' takes"):
         massive_session.futures.products(filters={"sector": "nonsense"})
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        massive_session.futures.products(order=cast("dm.Order", "asc"))
+        massive_session.futures.products(order="asc")  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_exchanges(massive_session: dm.MassiveSession) -> None:
@@ -375,8 +375,11 @@ _PRODUCT_DATASETS = ["snapshots", "contracts", "products", "market_status", "sch
 def _with_product_code(namespace: object, name: str, product_code: object) -> Query:
     factory = getattr(namespace, name)
     if name == "snapshots":
-        return cast("Query", factory(dm.ALL, product_code=product_code))
-    return cast("Query", factory(product_code=product_code))
+        query = factory(dm.ALL, product_code=product_code)
+    else:
+        query = factory(product_code=product_code)
+    assert isinstance(query, Query)
+    return query
 
 
 @pytest.mark.parametrize("name", _PRODUCT_DATASETS)
@@ -437,12 +440,12 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
         massive_session.futures.schedules(start="2025-12-26", end="2025-12-22")
     # The axis is a calendar date of sessions, so a datetime bound is refused.
     evening = datetime(2025, 12, 22, 18, tzinfo=CHICAGO)
-    for bounds in ({"start": evening}, {"end": evening}):
-        with pytest.raises(
-            ValueError,
-            match=r"^futures\.schedules: session_end_date is a calendar date; pass dates$",
-        ):
-            massive_session.futures.schedules(**cast("dict[str, Any]", bounds))
+    schedules = massive_session.futures.schedules
+    calendar_date = r"^futures\.schedules: session_end_date is a calendar date; pass dates$"
+    with pytest.raises(ValueError, match=calendar_date):
+        schedules(start=evening)
+    with pytest.raises(ValueError, match=calendar_date):
+        schedules(end=evening)
     for key in ("session_end_date", "session_end_date_gt"):
         with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
             massive_session.futures.schedules(filters={key: "2025-12-22"})
@@ -1170,9 +1173,12 @@ NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
 @pytest.fixture
 def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(history_source, "_now", lambda: NOW)
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "s3-test-key"}
     m = dm.MassiveSession(
-        dm.MassiveConfig(api_key="test-key", **cast("dict[str, Any]", credentials))
+        dm.MassiveConfig(
+            api_key="test-key",
+            s3_access_key_id="AKIDFLATFILES",
+            s3_secret_access_key="s3-test-key",  # noqa: S106  # fake credential
+        )
     )
     yield m
     m.close()

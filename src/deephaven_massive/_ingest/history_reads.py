@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
@@ -49,7 +49,12 @@ from deephaven_massive._datasets.history_source import (
     rest_history_problem,
 )
 from deephaven_massive._datasets.row_times import time_column
-from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    MassiveError,
+    required_instance,
+)
 from deephaven_massive._ingest.refused_venues import refused_note, refused_source
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
 from deephaven_massive._log_limits import bounded_list
@@ -369,8 +374,12 @@ def _rest_day_reads(
         if not isinstance(window.span, DaySpan):
             opens = day_start(spec.asset_class, day)
             closes = day_start(spec.asset_class, day + _ONE_DAY)
-            start = max(cast("datetime", request.start), opens)
-            end = closes if request.end is None else min(cast("datetime", request.end), closes)
+            first = required_instance(request.start, datetime, f"{spec.name}'s history start")
+            start = max(first, opens)
+            if request.end is not None:
+                end = min(required_instance(request.end, datetime, f"{spec.name}'s end"), closes)
+            else:
+                end = closes
         one = replace(request, start=start, end=end)
         reads.append((one, history_window(spec, one, start=start, end=end, now=window.now), None))
     return reads

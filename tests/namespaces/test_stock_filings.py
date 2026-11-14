@@ -4,12 +4,13 @@ The checks every dataset of the `m.stocks` tree shares (catalog gates, fixtures,
 arguments) are in `test_stocks.py`; the fixtures stay with them, under `namespaces/stocks`.
 """
 
+import functools
 import inspect
 import json
 import threading
 from collections.abc import Callable
 from datetime import date, timedelta
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -19,7 +20,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._massive import RestPath, Transport, WireType, source
+from deephaven_massive._massive import Transport, WireType
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _stock_filings as stock_filings
 from deephaven_massive.queries import FetchQuery, Query
@@ -55,7 +56,28 @@ def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., Query]", target)
+    assert callable(target)
+    method = target
+
+    @functools.wraps(method)
+    def make(*args: object, **kwargs: object) -> Query:
+        query = method(*args, **kwargs)
+        assert isinstance(query, Query)
+        return query
+
+    return make
+
+
+def fetch_query(session: dm.MassiveSession, name: str, **kwargs: object) -> FetchQuery:
+    query = factory(session, name)(**kwargs)
+    assert isinstance(query, FetchQuery)
+    return query
+
+
+def fetch_path(name: str) -> str:
+    path = spec_of(name).fetch_path
+    assert path is not None
+    return path
 
 
 def columns(name: str) -> dict[str, ColumnType]:
@@ -75,7 +97,7 @@ def test_filings_index_takes_a_form_type(massive_session: dm.MassiveSession) -> 
     query = massive_session.stocks.filings.index(form_type="10-K")
     assert dict(query._request.params) == {"form_type": "10-K"}
     with pytest.raises(TypeError, match="form_type must be a str"):
-        massive_session.stocks.filings.index(form_type=cast("Any", 10))
+        massive_session.stocks.filings.index(form_type=10)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession) -> None:
@@ -86,7 +108,7 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
     several = filings.institutional_holdings(filer_cik=["0001067983", "0000102909"])
     assert dict(several._request.params) == {"filer_cik.any_of": ("0001067983", "0000102909")}
     with pytest.raises(TypeError, match="filer_cik must be a str"):
-        filings.institutional_holdings(filer_cik=cast("Any", 1067983))
+        filings.institutional_holdings(filer_cik=1067983)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="filer_cik is empty; pass None for every filer"):
         filings.institutional_holdings(filer_cik=[])
     with pytest.raises(ValueError, match=r"^filer_cik_any_of is set through its own argument"):
@@ -137,7 +159,7 @@ def test_insider_activity_takes_issuers_and_no_owner(massive_session: dm.Massive
     assert dict(query._request.params) == {"issuer_cik.any_of": ("0001045810", "0000320193")}
     assert "owner_cik" not in inspect.signature(activity).parameters
     with pytest.raises(TypeError, match="issuer_cik must be a str"):
-        activity(issuer_cik=cast("Any", 1045810))
+        activity(issuer_cik=1045810)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="issuer_cik is empty"):
         activity(issuer_cik=[])
     with pytest.raises(ValueError, match="its own argument, issuer_cik="):
@@ -211,9 +233,9 @@ INSIDER_ROWS = {
 def test_insider_datasets_normalize_every_documented_field(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture, name: str
 ) -> None:
-    path = cast("str", spec_of(name).fetch_path)
+    path = fetch_path(name)
     fake_rest.reply(path, Reply(body=json.loads(load_fixture(FIXTURES, SOURCES[path][0]))))
-    table = cast("FetchQuery", factory(rest_session, name)()).fetch(wait=True)
+    table = fetch_query(rest_session, name).fetch(wait=True)
     assert fake_rest.get_queries(one_value=True) == [(path, {"limit": "10000"})]
     (row,) = table_rows(table)
     # Every row carries the instant its page arrived, last.
@@ -254,14 +276,17 @@ def test_a_13f_row_without_its_filer_is_dropped(
 def _other(value: object, wire_type: WireType) -> object:
     # A wire value that differs from `value` and still converts to the field's type.
     if wire_type in {WireType.JSON_TEXT, WireType.STRING_ARRAY}:
-        return [*cast("list[object]", value or []), "other"]
+        assert value is None or isinstance(value, list)
+        return [*(value or []), "other"]
     if wire_type is WireType.DATE:
-        base = date(2020, 1, 1) if value is None else date.fromisoformat(cast("str", value))
+        assert value is None or isinstance(value, str)
+        base = date(2020, 1, 1) if value is None else date.fromisoformat(value)
         return (base + timedelta(days=1)).isoformat()
     if wire_type is WireType.BOOL:
         return not value
     if wire_type in {WireType.LONG, WireType.DOUBLE}:
-        return cast("float", value or 0) + 1
+        assert value is None or isinstance(value, int | float)
+        return (value or 0) + 1
     return f"{value or ''}Z"
 
 
@@ -303,10 +328,10 @@ def test_the_ownership_filings_poll_their_fixtures_with_null_keys(
 ) -> None:
     # The real fixtures leave nullable key columns empty: a null there is a value, so the
     # first cycle publishes every row instead of failing the table.
-    template = cast("str", spec_of(name).fetch_path)
+    template = fetch_path(name)
     body = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))
     fake_rest.reply(template, Reply(body=body))
-    table = cast("FetchQuery", factory(rest_session, name)(start="2025-01-02")).poll(60, mode=mode)
+    table = fetch_query(rest_session, name, start="2025-01-02").poll(60, mode=mode)
     rows = _rows_when(table, len(body["results"]))
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
@@ -324,13 +349,13 @@ def test_a_filing_under_two_filers_polls_as_two_rows(
 ) -> None:
     # EDGAR lists one accession under each filer: an issuer and the reporting owner, who has
     # no ticker. Both rows must survive the poll, not only the first.
-    path = cast("str", spec_of(name).fetch_path)
+    path = fetch_path(name)
     body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
     first = body["results"][0]
     owner = {k: v for k, v in first.items() if k != "ticker"} | {"cik": "0001214128"}
     body["results"] = [first, owner]
     fake_rest.reply(path, Reply(body=body))
-    table = cast("FetchQuery", factory(rest_session, name)(start="2025-01-02")).poll(60)
+    table = fetch_query(rest_session, name, start="2025-01-02").poll(60)
     rows = _rows_when(table, 2)
     assert sorted((row["Cik"], row["AccessionNumber"]) for row in rows) == sorted(
         [(first["cik"], first["accession_number"]), ("0001214128", first["accession_number"])]
@@ -359,9 +384,9 @@ def _poll_lines(
 ) -> tuple[Table, list[dict[str, Any]]]:
     # Serve `lines` as one response and poll the dataset with its default mode until every
     # line is published.
-    path = cast("str", spec_of(name).fetch_path)
+    path = fetch_path(name)
     server.reply(path, Reply(body={"status": "OK", "request_id": "r", "results": lines}))
-    table = cast("FetchQuery", factory(session, name)(start="2025-01-02")).poll(60)
+    table = fetch_query(session, name, start="2025-01-02").poll(60)
     return table, _rows_when(table, len(lines))
 
 
@@ -374,8 +399,8 @@ def test_ownership_filing_lines_that_differ_in_one_column_poll_as_two_rows(
     name: str,
     wire_key: str,
 ) -> None:
-    template = cast("str", spec_of(name).fetch_path)
-    field = next(f for f in cast("RestPath", source(R, template)).fields if f.wire_key == wire_key)
+    template = fetch_path(name)
+    field = next(f for f in CATALOG.rest_path(template).fields if f.wire_key == wire_key)
     first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
     other = first | {wire_key: _other(first.get(wire_key), field.wire_type)}
     table, rows = _poll_lines(rest_session, fake_rest, name=name, lines=[first, other])
@@ -402,7 +427,7 @@ def test_an_ownership_filing_line_with_an_empty_optional_key_still_polls(
 ) -> None:
     # Massive marks the field optional (or the form lets the filer leave it out): one line
     # without it is a value, not a data failure that would stop the live table.
-    template = cast("str", spec_of(name).fetch_path)
+    template = fetch_path(name)
     first = json.loads(load_fixture(FIXTURES, SOURCES[template][0]))["results"][0]
     table, _ = _poll_lines(rest_session, fake_rest, name=name, lines=[first | {wire_key: None}])
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
@@ -427,12 +452,12 @@ def test_a_filing_without_a_ticker_keeps_a_null_symbol(
     name: str,
 ) -> None:
     # No filings schema marks `ticker` required, and the index documents it "if available".
-    path = cast("str", spec_of(name).fetch_path)
+    path = fetch_path(name)
     body = json.loads(load_fixture(FIXTURES, SOURCES[path][0]))
     first = body["results"][0]
     body["results"] = [first, {k: v for k, v in first.items() if k != "ticker"}]
     fake_rest.reply(path, Reply(body=body))
-    out = table_rows(cast("FetchQuery", factory(rest_session, name)()).fetch(wait=True))
+    out = table_rows(fetch_query(rest_session, name).fetch(wait=True))
     assert [row["Symbol"] for row in out] == [first["ticker"], None]
     key = spec_of(name).keys_for(R, path).symbol
     assert key is not None

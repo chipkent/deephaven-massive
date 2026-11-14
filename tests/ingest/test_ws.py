@@ -22,11 +22,14 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from types import MethodType
+from typing import TYPE_CHECKING, Any, Protocol
 
+import jpy
 import pytest
 from deephaven import agg, dtypes, new_table, update_graph
 from deephaven.column import string_col
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -36,6 +39,8 @@ from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.rest import RestReader
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables import poll
@@ -53,7 +58,6 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
-    from deephaven.table_factory import InputTable
 
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries import SymbolStreamQuery
@@ -75,7 +79,7 @@ UserTables: TypeAlias = "Callable[[Table, str, str], list[Table]]"
 FailuresHeard: TypeAlias = "Callable[[Table], Callable[[], int]]"
 Opener: TypeAlias = "Callable[[WsSession, list[Table], InputTable | None], Live]"
 W = Transport.WS
-_JAVA_SYSTEM = cast("Any", importlib.import_module("jpy")).get_type("java.lang.System")
+_JAVA_SYSTEM = jpy.get_type("java.lang.System")
 
 
 # --- The datasets the end-to-end tests stream -------------------------------------------------
@@ -1393,6 +1397,12 @@ def test_static_contracts_take_the_room_before_a_watchlists(
 # --- Sessions sharing connections, and how long a stream runs ----------------------------------
 
 
+def clients(session: dm.MassiveSession) -> SessionClients:
+    ports = session._core._ports
+    assert isinstance(ports, SessionClients)
+    return ports
+
+
 def join(ws_session: WsSession) -> dm.MassiveSession:
     # A second session with the same key and settings, sharing the wrapper's connections; the
     # wrapper's own session is closed by its fixture, this one by the test.
@@ -1405,7 +1415,7 @@ def join(ws_session: WsSession) -> dm.MassiveSession:
         client_factory=ws_session.factory,
     )
     assert connections.group is ws_session.connections.group
-    cast("Any", session._core._ports)._streams = connections
+    clients(session)._streams = connections
     session._core.on_close(connections.close)
     return session
 
@@ -1504,7 +1514,9 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
 
     def stalled(suffix: str) -> bool:
         pattern = f"{STALL}; {re.escape(cap)}{suffix}"  # each source keeps its own part
-        return re.fullmatch(pattern, cast("str", error() or "")) is not None
+        text = error()
+        assert text is None or isinstance(text, str)
+        return re.fullmatch(pattern, text or "") is not None
 
     wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
@@ -1670,8 +1682,10 @@ def test_a_java_held_callback_of_a_freed_session_does_nothing() -> None:
     class _Gone:
         pass
 
-    gone = weakref.ref(_Gone())
-    ws._weakly(cast("weakref.ref[ws.WsConnections]", gone), "_shut_down", 1)
+    freed: ws.WsConnections = _Gone()  # type: ignore[assignment]  # a fake: a session, freed below
+    gone = weakref.ref(freed)
+    del freed
+    ws._weakly(gone, "_shut_down", 1)
 
 
 def test_an_ended_connection_holds_no_stream(
@@ -1685,10 +1699,8 @@ def test_an_ended_connection_holds_no_stream(
     theirs = ws_session.query(TRADES, ["MSFT"], other).blink()
     ws_session.subscribed("T.AAPL", "T.MSFT")
     connection = ws_session.connection()
-    stream = cast(
-        "ws_connection.ConnectionStream",
-        ws_session.on_loop(connection, lambda: connection._streams[1]),
-    )
+    stream = ws_session.on_loop(connection, lambda: connection._streams[1])
+    assert isinstance(stream, ws_connection.ConnectionStream)
     # A freed session shows no row: an update for its stream is dropped.
     monkeypatch.setattr(stream.sink, "_core", lambda: None)
     ws_session.on_loop(
@@ -1715,12 +1727,12 @@ def test_an_ended_connection_holds_no_stream(
 def looked_up(ws_session: WsSession, *tickers: str) -> None:
     # Wait until the calendar has asked Massive's contracts for every ticker.
     def asked() -> bool:
-        sent = {
-            ticker
-            for path, query in ws_session.fetched
-            if path == "/futures/v1/contracts"
-            for ticker in cast("tuple[str, ...]", query["ticker.any_of"])
-        }
+        sent: set[str] = set()
+        for path, query in ws_session.fetched:
+            if path == "/futures/v1/contracts":
+                asked_for = query["ticker.any_of"]
+                assert isinstance(asked_for, tuple)
+                sent.update(asked_for)
         return set(tickers) <= sent
 
     ws_session.wait(lambda _: asked())
@@ -2037,9 +2049,14 @@ def test_a_futures_watchlist_change_whose_schedule_wait_a_close_ends_is_dropped(
 
 def lookups(session: WsSession) -> list[tuple[str, str]]:
     # Each crypto ticker the transport looked up, with the thread it ran on.
-    return [
-        cast("tuple[str, str]", call[1:]) for call in session.journal if call[0] == "crypto_pair"
-    ]
+    found: list[tuple[str, str]] = []
+    for call in session.journal:
+        if call[0] == "crypto_pair":
+            _, ticker, thread = call
+            assert isinstance(ticker, str)
+            assert isinstance(thread, str)
+            found.append((ticker, thread))
+    return found
 
 
 # Each of these reads as two different pairs (DOT-USD or DO-TUSD); only Massive's list says which.
@@ -2115,7 +2132,9 @@ def stream_error(
 ) -> str | None:
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "RUNNING"
-    return cast("str | None", row["Error"])
+    text = row["Error"]
+    assert text is None or isinstance(text, str)
+    return text
 
 
 @pytest.mark.usefixtures("fresh_pair_logs")
@@ -2362,9 +2381,10 @@ def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
         "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
     )
     watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True, dh_input_table=dh_input_table)
+    assert isinstance(watchlist, InputTable)
     result = ws_session.query(CRYPTO, watchlist).append_only()
     ws_session.subscribed("XT.BTC-USD")
-    cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
@@ -2398,7 +2418,7 @@ def test_a_close_ends_the_workers_wait_for_futures_schedules(
         return []
 
     monkeypatch.setattr(ws_session.connections, "fetch_rows", unanswered)
-    monkeypatch.setattr(cast("Any", other._core._ports)._streams, "fetch_rows", unanswered)
+    monkeypatch.setattr(clients(other)._streams, "fetch_rows", unanswered)
     try:
         watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
@@ -2537,9 +2557,10 @@ def test_an_unlisted_pair_added_later_fails_the_stream_under_raise(
 ) -> None:
     ws_session = make_ws_session(unlisted_symbols=dm.OnError.RAISE)
     watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True, dh_input_table=dh_input_table)
+    assert isinstance(watchlist, InputTable)
     result = ws_session.query(CRYPTO, watchlist).append_only()
     ws_session.subscribed("XT.BTC-USD")
-    cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
+    watchlist.add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
@@ -2562,10 +2583,11 @@ def test_an_unlisted_pair_added_later_is_skipped_quietly_under_ignore(
 ) -> None:
     ws_session = make_ws_session(unlisted_symbols=dm.OnError.IGNORE)
     watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True, dh_input_table=dh_input_table)
+    assert isinstance(watchlist, InputTable)
     result = ws_session.query(CRYPTO, watchlist).append_only()
     ws_session.subscribed("XT.BTC-USD")
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-        cast("InputTable", watchlist).add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
+        watchlist.add(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
         wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("the pair is skipped until its row" in r.getMessage() for r in caplog.records)
@@ -2699,7 +2721,10 @@ def test_a_removal_never_overtakes_a_slow_lookup_of_the_same_pair(
         return "X:DOTUSD" in e[1]
 
     wait_for(lambda: position(added_dot) is not None and position(removed_dot) is not None)
-    assert cast("int", position(added_dot)) < cast("int", position(removed_dot))
+    added, removed = position(added_dot), position(removed_dot)
+    assert added is not None
+    assert removed is not None
+    assert added < removed
     ws_session.subscribed("XT.ETH-USD")
     ws_session.unsubscribed("XT.DOT-USD")
     ws_session.session.release(result)
@@ -2807,7 +2832,11 @@ def test_every_library_thread_is_named_after_its_session_or_connection_group(
     readers: list[str] = []
 
     def decide(*_: object, fetch: Callable[..., object], **__: object) -> HostDecision:
-        readers.append(cast("Any", fetch).func.__self__.threads)
+        assert isinstance(fetch, functools.partial)
+        assert isinstance(fetch.func, MethodType)
+        reader = fetch.func.__self__
+        assert isinstance(reader, RestReader)
+        readers.append(reader.threads)
         return REALTIME
 
     monkeypatch.setattr(host_decision, "decide", decide)
@@ -2957,6 +2986,7 @@ def open_live(
     if shape == WATCHING or shape.endswith("of a watchlist"):
         watchlist = symbol_watchlist(dh_input_table)
     if shape == WATCHING:
+        assert watchlist is not None
         quotes = ws_session.query(QUOTES, watchlist).last_by()
         ws_session.subscribed(f"Q.{WATCHED}")
         ws_session.publish(quote(WATCHED))

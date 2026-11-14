@@ -27,7 +27,7 @@ state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -295,7 +295,7 @@ def widen(values: pa.Array, target: pa.DataType) -> tuple[pa.Array, int | None]:
     changed = pc.fill_null(pc.or_(pc.not_equal(back, values), beyond), fill_value=False)
     if not pc.any(changed).as_py():
         return widened, None
-    return widened, cast("int", pc.filter(values, changed)[0].as_py())
+    return widened, int(pc.filter(values, changed)[0].as_py())
 
 
 class RoundedFields:

@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from deephaven_massive._datasets.bar_periods import (
     bar_starts,
@@ -79,6 +79,7 @@ from deephaven_massive._datasets.futures_sessions import (
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
 from deephaven_massive._datasets.symbols import AllSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._errors import required
 from deephaven_massive._massive import ParamKind, Transport, source
 
 if TYPE_CHECKING:
@@ -146,7 +147,7 @@ def session_date_param(spec: DatasetSpec) -> str:
     Returns:
         The parameter's wire name.
     """
-    rest_path = source(Transport.REST, cast("str", spec.history_path))
+    rest_path = source(Transport.REST, required(spec.history_path, f"{spec.name}'s history path"))
     [name] = [param.name for param in rest_path.params if param.kind is ParamKind.DATE]
     return name
 

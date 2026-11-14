@@ -4,8 +4,6 @@ The descriptions are read from merged schemas, the process's catalog's and synth
 the merge is what applies the rules to every column.
 """
 
-from typing import cast
-
 import pytest
 
 import deephaven_massive.namespaces._crypto as crypto
@@ -222,7 +220,7 @@ def test_every_transport_has_one_user_facing_spelling() -> None:
         Transport.WS: "WebSocket",
     }
     with pytest.raises(TypeError):  # read-only: no caller can respell a transport
-        cast("dict[Transport, str]", TRANSPORT_LABELS)[Transport.WS] = "WS"
+        TRANSPORT_LABELS[Transport.WS] = "WS"  # type: ignore[index]  # the point: read-only
 
 
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:

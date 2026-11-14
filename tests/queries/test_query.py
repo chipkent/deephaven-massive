@@ -5,7 +5,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from deephaven import dtypes, new_table, time_table
@@ -512,11 +512,10 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
     symbol = SAMPLE_SYMBOLS[spec.asset_class]
     refused = Timespan.DAY if spec.asset_class is AssetClass.FUTURES else Timespan.SESSION
     spans = [span for span in Timespan if span is not refused] if spec.is_bars else [None]
-    # A feed polls only with a start.
-    bounds: dict[str, object] = {"start": "2025-01-02"} if spec.is_feed else {}
+    start = "2025-01-02" if spec.is_feed else None  # a feed polls only with a start
     for symbols in ((symbol,), new_table([string_col("Symbol", [symbol])])):
         for span in spans:
-            yield make(session, spec, symbols=symbols, timespan=span, **bounds)
+            yield make(session, spec, symbols=symbols, timespan=span, start=start)
 
 
 def verb_results(query: Query, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
@@ -614,9 +613,12 @@ def test_a_wait_false_result_takes_view_and_update_view(
 
 def test_wait_must_be_a_bool(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(TypeError, match="wait must be a bool, not int"):
-        news(massive_session).fetch(wait=cast("bool", 0))
+        news(massive_session).fetch(wait=0)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="wait must be a bool, not str"):
-        trades(massive_session).history("2025-03-03", wait=cast("bool", "no"))
+        trades(massive_session).history(
+            "2025-03-03",
+            wait="no",  # type: ignore[arg-type]  # the point: refused at run time
+        )
     assert rest.calls == []
     assert massive_session._core.workers._workers == {}
 
