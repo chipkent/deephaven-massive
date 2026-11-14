@@ -752,13 +752,24 @@ def test_the_worker_outlives_an_unexpected_error(
 
 
 def test_a_lookup_the_worker_has_no_rule_for_is_a_logged_defect(
-    *, calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Only contract and schedule lookups are queued; anything else is logged as a defect, never
-    # read as a schedule lookup, and the worker keeps serving.
+    # read as a schedule lookup, and the good lookups taken with it in one batch still load.
+    fetch.hold(CONTRACTS_PATH)
+    calendar.watch(["ZCK4"])
+    fetch.wait(1)  # the worker is busy, so it takes the next two items together
     with caplog.at_level(logging.ERROR):
         calendar._put(("prices", frozenset({"ESM4"})))
+        calendar.watch(["ESM4"])
+        fetch.release.set()
         idle(calendar)
-    assert "the futures lookup queue holds ('prices', frozenset({'ESM4'}))" in caplog.text
-    watched(calendar, "ESM4")
+    assert caplog.messages == [
+        (
+            "test: futures schedules: the lookup queue holds ('prices', frozenset({'ESM4'})), "
+            f"which is no lookup; the worker skips it and loads the others. {LIBRARY_BUG}"
+        )
+    ]
+    contracts = [query for path, query in fetch.calls if path == CONTRACTS_PATH]
+    assert [query["ticker.any_of"] for query in contracts] == [("ZCK4",), ("ESM4",)]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])

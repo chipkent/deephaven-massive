@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import logging
 import threading
 import weakref
 from collections.abc import Callable, Mapping
@@ -603,6 +604,34 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
     drain()
     until(lambda: massive_session._core.workers._workers == {})
     until(lambda: massive_session._core.follows.following == 0)
+    assert script.calls == []
+
+
+def test_an_interrupt_after_the_blink_table_is_made_stops_no_watch(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    drain: Callable[[], None],
+) -> None:
+    # The build is undone after its blink table exists but before the watch does, as a
+    # test timeout's signal or a Ctrl-C can do: the table shuts down before `attach` runs.
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+
+    def interrupted(*_args: object, **_kwargs: object) -> Table:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(followed_read, "describe", interrupted)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        with pytest.raises(KeyboardInterrupt):
+            follow(massive_session, wl, script)
+        drain()  # the shutdown's work on the reaper has run
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert "shut down before its watch was made; no watch to stop" in caplog.text
+    assert massive_session._core.workers._workers == {}
+    assert massive_session._core.follows.following == 0
     assert script.calls == []
 
 

@@ -24,6 +24,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import Timespan
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import (
@@ -342,6 +343,7 @@ def _by_symbol(
         symbols=["MSFT", "AAPL", "MSFT"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=forced,
     )
@@ -460,14 +462,28 @@ def test_the_flat_file_transport_reads_by_symbol_and_skips_an_empty_window(
     request = Request(start=MONDAY, end=MONDAY)
     window = history_window(TRADES, request, start=MONDAY, end=MONDAY)
     out = files.history_by_symbol(
-        TRADES, request, window, symbols=["MSFT", "AAPL"], dates=(MONDAY,), call=7, forced=False
+        TRADES,
+        request,
+        window,
+        symbols=["MSFT", "AAPL"],
+        dates=(MONDAY,),
+        call=7,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert scans == [("AAPL", "MSFT")]
     assert [_dates(o) for o in out.values()] == [["2025-03-03"], ["2025-03-03"]]
     instant = datetime(2025, 3, 3, 5, tzinfo=UTC)
     empty = history_window(TRADES, request, start=instant, end=instant, now=instant)
     nothing = files.history_by_symbol(
-        TRADES, request, empty, symbols=["AAPL"], dates=(), call=8, forced=False
+        TRADES,
+        request,
+        empty,
+        symbols=["AAPL"],
+        dates=(),
+        call=8,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert _dates(nothing["AAPL"]) == []
     assert len(scans) == 1
@@ -491,6 +507,7 @@ def test_a_missing_day_of_daily_bars_keeps_only_that_day_from_rest(
         symbols=["AAPL"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=False,
     )

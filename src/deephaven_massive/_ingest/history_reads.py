@@ -57,7 +57,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest.refused_venues import refused_note, refused_source
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
-from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._log_limits import LoggedKeys, bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
@@ -95,6 +95,7 @@ class FlatFileScan(Protocol):
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -106,6 +107,7 @@ class FlatFileScan(Protocol):
             dates: The partition dates of the files the window needs.
             call: The call id.
             infer_holidays: True to take a missing weekday file for a holiday.
+            logged: The facts the call has logged, each logged once per call.
             stop: A read's stop token, or None.
 
         Returns:
@@ -168,6 +170,7 @@ def read_history(
         files=files,
         dates=dates,
         call=call,
+        logged=LoggedKeys(),  # a one-time call reads once, so the read keeps what it logged
         stop=stop,
         problem=problem,
         forced=forced,
@@ -203,6 +206,7 @@ def _scan(
     files: FlatFileScan,
     dates: Sequence[date],
     call: int,
+    logged: LoggedKeys,
     stop: threading.Event | None,
     problem: str | None,
     forced: bool,
@@ -222,6 +226,7 @@ def _scan(
         files: The call's flat-file transport.
         dates: The partition dates of the files the window needs.
         call: The call id.
+        logged: The facts the call has logged (`FlatFileHistory.history`).
         stop: A read's stop token, or None.
         problem: Why REST cannot serve the request (`rest_history_problem`), or None.
         forced: True for `source=FLAT_FILES`.
@@ -239,7 +244,14 @@ def _scan(
     infer = forced or problem is not None
     try:
         return files.history(
-            spec, request, window, dates=dates, call=call, infer_holidays=infer, stop=stop
+            spec,
+            request,
+            window,
+            dates=dates,
+            call=call,
+            infer_holidays=infer,
+            logged=logged,
+            stop=stop,
         )
     except (EntitlementError, AuthenticationError) as error:
         if infer:
@@ -466,6 +478,7 @@ def read_history_by_symbol(
     symbols: Sequence[str],
     dates: Sequence[date],
     call: int,
+    logged: LoggedKeys,
     stop: threading.Event | None,
     forced: bool,
 ) -> dict[str, SymbolOutcome]:
@@ -491,6 +504,8 @@ def read_history_by_symbol(
         symbols: The canonical symbols; a repeated one is read once.
         dates: The partition dates of the files the window needs.
         call: The call id.
+        logged: The facts the call has logged, kept across its reads, so a refused futures
+            venue is logged once per call (`refused_venues.RefusedVenues.report`).
         stop: A read's stop token, or None.
         forced: True for `source=FLAT_FILES`, which never reads REST.
 
@@ -521,6 +536,7 @@ def read_history_by_symbol(
             files=files,
             dates=dates,
             call=call,
+            logged=logged,
             stop=stop,
             problem=problem,
             forced=forced,

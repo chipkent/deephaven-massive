@@ -58,7 +58,7 @@ from deephaven_massive._ingest import (
 )
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 from deephaven_massive._massive import Cancel, RestPath, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.background_read import BackgroundRead
@@ -3317,7 +3317,7 @@ def test_each_path_logs_its_bucket_and_why_once(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())  # as in a fresh process
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())  # as in a fresh process
     snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     snapshots.reply(NEWS_PATH, Reply(envelope([])))
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
