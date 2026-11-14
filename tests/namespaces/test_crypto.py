@@ -17,6 +17,7 @@ import io
 import itertools
 import json
 import logging
+import re
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -306,7 +307,7 @@ def test_trades_send_their_tickers_as_written(massive_session: dm.MassiveSession
     q = massive_session.crypto.trades(["X:ETHUSD", "X:BTCUSD", "X:BTCUSD"])
     assert type(q) is StreamHistoryQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
-    for spelling in ("BTC-USD", "BTC/USD", "x:btcusd"):  # Massive answers them
+    for spelling in ("X:BTC-USD", "X:btcusd"):  # Massive answers any text with the X: prefix
         assert request_of(massive_session.crypto.trades(spelling)).symbols == (spelling,)
     with pytest.raises(ValueError, match=r"^cannot send the symbol 'BTC,USD' to Massive"):
         massive_session.crypto.trades("BTC,USD")
@@ -474,11 +475,18 @@ def test_no_symbols_is_refused(
         call(massive_session.crypto)
 
 
-@pytest.mark.parametrize("text", ["BTC-XYZ", "C:EURUSD", "O:AAPL250117C00150000"])
-def test_a_symbol_that_is_no_crypto_pair_is_sent_as_written(
+@pytest.mark.parametrize("text", ["BTCUSD", "BTC-USD", "x:btcusd", "C:EURUSD"])
+def test_a_symbol_without_the_crypto_prefix_is_refused(
     massive_session: dm.MassiveSession, text: str
 ) -> None:
-    assert request_of(massive_session.crypto.trades(text)).symbols == (text,)
+    with pytest.raises(
+        ValueError,
+        match=rf"^crypto\.trades: '{re.escape(text)}' lacks the X: prefix of every crypto "
+        r"ticker, such as 'X:BTCUSD'; pass Massive's ticker$",
+    ):
+        massive_session.crypto.trades(text)
+    with pytest.raises(ValueError, match="lacks the X: prefix"):
+        massive_session.crypto.last_trade(["X:BTCUSD", text])
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
@@ -1161,3 +1169,17 @@ def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed_under_rais
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
         ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
     ]
+
+
+def test_a_crypto_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default `unsendable_symbols`, a row without the X: prefix is skipped and
+    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
+    fake_rest.reply(
+        "/v2/snapshot/locale/global/markets/crypto/tickers", Reply({"status": "OK", "tickers": []})
+    )
+    table = new_table([string_col("Symbol", ["BTCUSD", "X:NODATAUSD"])])
+    out = rest_session.crypto.snapshots(table).fetch(wait=True)
+    assert out.size == 0
+    assert [query["tickers"] for _, query in fake_rest.get_queries()] == [["X:NODATAUSD"]]

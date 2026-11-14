@@ -7,7 +7,8 @@ same way, through a rule made by `SymbolRowRule.for_values`. Each row is sent as
 `symbols=` is (`check_symbol` in `_datasets/symbols.py`), and Massive answers it: the library never
 rewrites a watchlist, so what the table says is what the stream subscribes and what `last_by()`
 matches. A null row is ignored. A row no request can carry (`is_sendable`: empty, or holding `,`
-or `*`), and a currency or crypto pair among the options contracts list's underlyings, is never
+or `*`), a row without the prefix of its dataset's class (`missing_prefix`: `O:`, `I:`, `C:`, or
+`X:`), and a currency or crypto pair among the options contracts list's underlyings, is never
 subscribed or requested; what else it does follows the session's
 `MassiveConfig.unsendable_symbols`, which `SymbolRowRule` carries:
 
@@ -59,6 +60,7 @@ from typing_extensions import override
 from deephaven_massive._datasets.symbols import (
     PAIR_CLASSES,
     is_sendable,
+    missing_prefix,
     symbol_class,
     unsendable_reason,
 )
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ValueTable
+    from deephaven_massive._enums import AssetClass, ClassFromPrefix
 
 __all__ = [
     "CURRENT_STEP",
@@ -182,11 +185,11 @@ class SymbolRowRule:
     """How one dataset treats the rows of a symbol table: the session's setting for a bad row.
 
     Every row is sent as written, and Massive answers it. The rows refused are a value no
-    request can carry (`is_sendable`) and, in a table of the options contracts list's
-    underlyings, a currency or crypto pair, which that list answers with no error and no rows
-    (`pairs_refused`). Built by the transport that reads the table
-    (`SymbolRowRule.of`), on any thread; immutable, so a watch's listener and a poller share it
-    freely.
+    request can carry (`is_sendable`), a symbol without the prefix of the dataset's class
+    (`missing_prefix`), and, in a table of the options contracts list's underlyings, a currency
+    or crypto pair, which that list answers with no error and no rows (`pairs_refused`). Built
+    by the transport that reads the table (`SymbolRowRule.of`), on any thread; immutable, so a
+    watch's listener and a poller share it freely.
 
     Attributes:
         dataset: The dataset's name, such as `stocks.quotes`, for messages and log records.
@@ -194,12 +197,15 @@ class SymbolRowRule:
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
         pairs_refused: True to refuse a currency or crypto pair (`ValueTable.pairs_refused`).
+        asset_class: The class whose prefix every row needs (`missing_prefix`); None for a
+            table of underlyings or product codes, whose values carry no class's prefix.
     """
 
     dataset: str
     unsendable: OnError
     column: str = _SYMBOL
     pairs_refused: bool = False
+    asset_class: AssetClass | ClassFromPrefix | None = None
 
     @classmethod
     def of(cls, spec: DatasetSpec, unsendable: OnError) -> SymbolRowRule:
@@ -210,9 +216,9 @@ class SymbolRowRule:
             unsendable: The session's `MassiveConfig.unsendable_symbols`.
 
         Returns:
-            The rule.
+            The rule, which refuses a symbol without the prefix of the dataset's class.
         """
-        return cls(spec.name, unsendable)
+        return cls(spec.name, unsendable, asset_class=spec.asset_class)
 
     @classmethod
     def for_values(
@@ -234,16 +240,20 @@ class SymbolRowRule:
         return cls(spec.name, unsendable, column=values.column, pairs_refused=values.pairs_refused)
 
     def accepts(self, symbol: str) -> bool:
-        """Tell whether a row's value is sent (`is_sendable`, and not a refused pair).
+        """Tell whether a row's value is sent: sendable, with its prefix, and not a refused pair.
 
         Args:
             symbol: The row's value, never null.
 
         Returns:
-            True for any non-empty value without `,` or `*`, but a currency or crypto pair
-            under `pairs_refused`.
+            True for any non-empty value without `,` or `*` that has the prefix of `asset_class`,
+            but a currency or crypto pair under `pairs_refused`.
         """
-        return is_sendable(symbol) and not self._refuses_pair(symbol)
+        return (
+            is_sendable(symbol)
+            and missing_prefix(self.asset_class, symbol) is None
+            and not self._refuses_pair(symbol)
+        )
 
     def _refuses_pair(self, symbol: str) -> bool:
         """Tell whether the rule refuses a row because it is a currency or crypto pair.
@@ -274,11 +284,17 @@ class SymbolRowRule:
             symbol: The row's value, which `accepts` refuses.
 
         Returns:
-            `pair_row_message` for a refused pair, else `invalid_row_message`.
+            `invalid_row_message` for a value no request can carry, `pair_row_message` for a
+            refused pair, else the prefix it lacks (`missing_prefix`).
         """
+        if not is_sendable(symbol):
+            return invalid_row_message(symbol)
         if self._refuses_pair(symbol):
             return pair_row_message(symbol)
-        return invalid_row_message(symbol)
+        return (
+            f"a symbol table holds {symbol!r}, which {missing_prefix(self.asset_class, symbol)}. "
+            "Fix or delete the row"
+        )
 
     def skip(self, symbol: str, *, stream_id: int | None) -> None:
         """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.

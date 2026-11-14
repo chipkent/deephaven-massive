@@ -483,8 +483,9 @@ class OnError(StrEnum):
     - `canonicalize_symbols(on_error=)`, for a value Massive would read as another
       instrument, such as Yahoo's `VOD.L`. The default there is `LOG`.
     - `MassiveConfig.unsendable_symbols`, for a row of a table of symbols passed as `symbols` that
-      can't be sent: an empty value, or one with `,` or `*`. Such a `str` or
-      list value you pass always raises, whatever the setting.
+      the library refuses: an empty value, one with `,` or `*`, or an options, index, forex,
+      or crypto symbol without its class's prefix. Such a `str` or list value you pass always
+      raises, whatever the setting.
       The default is `LOG`.
     - `MassiveConfig.unlisted_symbols`, for a crypto pair that Massive's crypto ticker list does
       not hold, in a stream, `fetch()`, or `poll()`. The default is

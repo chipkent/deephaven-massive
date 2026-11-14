@@ -52,7 +52,12 @@ from deephaven_massive._datasets.filters import (
     takes_instants,
 )
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
+from deephaven_massive._datasets.symbols import (
+    AllSymbols,
+    SymbolTable,
+    check_symbols,
+    missing_prefix,
+)
 from deephaven_massive._enums import FuturesVenue, OnError, Order, Timespan, _require_enum
 from deephaven_massive._errors import ErrorCause, MassiveError, library_bug, required
 from deephaven_massive._massive import ParamKind
@@ -662,8 +667,9 @@ def _normalized_symbols(
         ValueError: If `symbols` is None for a dataset that needs symbols, a table lacks a
             `Symbol` column, or `dm.ALL` is given to a dataset that refuses it.
 
-    A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, and
-    a ticker `check_symbols` refuses its error.
+    A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, a
+    ticker `check_symbols` refuses its error, and a ticker without its class's prefix the
+    `ValueError` of `_require_prefixes`.
     """
     normalized: NormalizedSymbols | None = None
     if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
@@ -693,9 +699,31 @@ def _normalized_symbols(
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = check_symbols(symbols)
+        _require_prefixes(spec, normalized)
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     return normalized
+
+
+def _require_prefixes(spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols) -> None:
+    """Refuse a ticker passed in code without the prefix of its dataset's class (`missing_prefix`).
+
+    Args:
+        spec: The dataset, whose class names the prefix: `O:`, `I:`, `C:`, or `X:`, or none
+            for stocks, futures, and a dataset of every class.
+        symbols: The checked tickers, or `ALL`, which needs no prefix.
+
+    Raises:
+        ValueError: If a ticker lacks the prefix, naming the prefix and an example.
+    """
+    if isinstance(symbols, AllSymbols):
+        return
+    for symbol in symbols:
+        reason = missing_prefix(spec.asset_class, symbol)
+        if reason is not None:
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("%s refused: %r %s", spec.name, symbol, reason)
+            raise ValueError(f"{spec.name}: {symbol!r} {reason}; pass Massive's ticker")
 
 
 def _typed_params(

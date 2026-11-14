@@ -2087,7 +2087,9 @@ def open_stream_tables(
                 stream_id, core=core, plan=plan, publisher=publisher, symbols=received
             )
             if isinstance(symbols, SymbolTable):
-                rule = SymbolRowRule(plan.dataset, core.config.unsendable_symbols)
+                rule = SymbolRowRule(
+                    plan.dataset, core.config.unsendable_symbols, asset_class=plan.asset_class
+                )
                 watch = SymbolWatch(
                     rule,
                     symbols.table,

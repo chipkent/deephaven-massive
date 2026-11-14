@@ -557,13 +557,21 @@ list sends an empty item (item 118); each live check records Massive's answer.
 
 **104. A ticker is sent as written, and Massive judges it** (2026-11-11). The owner, on
 2026-11-11: "I agree on not erroring on missing symbols. That should be a significant
-simplification." The library judges no ticker's shape: no prefix, character class, or option
-symbol pattern refuses or rewrites a value Massive could answer. A ticker Massive has no data
-for is no error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it
-in `m.symbol_reads()`. The library refuses only a value of the wrong Python type, and one no
-request can carry: an empty symbol, or one holding `,` (Massive's list parameters and WebSocket
-subscriptions split on it) or `*` (the WebSocket's every-ticker wildcard). Such a value raises
-`ValueError` in code, and a table's row follows `MassiveConfig.unsendable_symbols`, which replaces
+simplification." The library judges no ticker's shape but its class's prefix: no character
+class or option symbol pattern refuses or rewrites a value Massive could answer. The prefix
+stays because the owner chose, on 2026-11-14, to "Restore only the asset-class prefix check.
+Each namespace requires its documented prefix (`O:` for options, `X:` for crypto, `C:` for
+forex, `I:` for indices), and the error names the expected prefix. Nothing else about a
+ticker's shape is checked. A ticker with the right prefix that Massive has no data for still
+gives no rows instead of an error." An options, index, forex, or crypto dataset refuses a symbol
+without its prefix, naming the prefix and an example; stocks and futures have none, and a
+dataset of every class routes by the prefix instead. A ticker Massive has no data for is no
+error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it in
+`m.symbol_reads()`. The library refuses only a value of the wrong Python type, a symbol without
+its class's prefix, and one no request can carry: an empty symbol, or one holding `,`
+(Massive's list parameters and WebSocket subscriptions split on it) or `*` (the WebSocket's
+every-ticker wildcard). Such a value raises `ValueError` in code, and a table's row follows
+`MassiveConfig.unsendable_symbols`, which replaces
 `noncanonical_symbols`. A `/` is sent, percent-encoded so it stays in its path segment, and
 Massive answers it (verification item 115). A row's
 ticker is kept as Massive writes it, except the spellings a transport writes differently from

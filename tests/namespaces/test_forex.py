@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -213,8 +214,8 @@ def test_conversion_keeps_the_vendor_symbol() -> None:
 # --- factories ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("symbols", ["eur-usd", "EURUSD", "eurusd", "c:eurusd"])
-def test_any_pair_spelling_is_sent_as_written(
+@pytest.mark.parametrize("symbols", ["C:eur-usd", "C:EUR/USD", "C:eurusd"])
+def test_any_pair_spelling_with_the_forex_prefix_is_sent_as_written(
     massive_session: dm.MassiveSession, symbols: str
 ) -> None:
     forex_ns = massive_session.forex
@@ -227,6 +228,18 @@ def test_any_pair_spelling_is_sent_as_written(
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
         assert factory(symbols)._request.symbols == (symbols,)  # Massive answers it
+
+
+@pytest.mark.parametrize("symbols", ["EURUSD", "eur-usd", "c:eurusd", "X:BTCUSD"])
+def test_a_symbol_without_the_forex_prefix_is_refused(
+    massive_session: dm.MassiveSession, symbols: str
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"^forex\.quotes: '{re.escape(symbols)}' lacks the C: prefix of every forex "
+        r"ticker, such as 'C:EURUSD'; pass Massive's ticker$",
+    ):
+        massive_session.forex.quotes(symbols)
 
 
 def test_quotes(massive_session: dm.MassiveSession) -> None:
@@ -1185,3 +1198,17 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     }
     for name, keys in revised.items():
         assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)
+
+
+def test_a_forex_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default `unsendable_symbols`, a row without the C: prefix is skipped and
+    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
+    fake_rest.reply(
+        "/v2/snapshot/locale/global/markets/forex/tickers", Reply({"status": "OK", "tickers": []})
+    )
+    table = new_table([string_col("Symbol", ["EURUSD", "C:NODATA"])])
+    out = rest_session.forex.snapshots(table).fetch(wait=True)
+    assert out.size == 0
+    assert [query["tickers"] for _, query in fake_rest.get_queries()] == [["C:NODATA"]]

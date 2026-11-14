@@ -467,7 +467,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -501,7 +501,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -537,7 +537,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -582,7 +582,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -622,7 +622,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -662,7 +662,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -810,7 +810,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit;
@@ -894,7 +894,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker in `symbols` is empty or holds `,` or `*`;
+                - a ticker in `symbols` is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column;
                 - `underlying` is empty, holds `,` or `*`, or is a currency or crypto pair;
                 - `as_of` is a `datetime` or isn't a date;
@@ -963,7 +963,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `O:`;
                 - a table has no `Symbol` column;
                 - `date` is a `datetime` or isn't a date.
 

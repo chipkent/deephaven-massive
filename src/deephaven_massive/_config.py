@@ -346,9 +346,10 @@ class MassiveConfig:
 
             Change it only with `s3_endpoint_url`.
         unsendable_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value the library refuses: an empty value, one with `,` or `*`, or, in a table of
-            `m.options.contracts()` underlyings, a currency or crypto pair, which Massive
-            answers there with no error and no rows. Defaults to `LOG`.
+            a value the library refuses: an empty value, one with `,` or `*`, an options,
+            index, forex, or crypto symbol without its class's prefix (`O:`, `I:`, `C:`, or
+            `X:`), or, in a table of `m.options.contracts()` underlyings, a currency or crypto
+            pair, which Massive answers there with no error and no rows. Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` to stop at the first such value. Every other value is sent
             as written.
