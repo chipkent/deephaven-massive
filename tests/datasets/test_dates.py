@@ -39,6 +39,7 @@ from deephaven_massive._datasets.futures_sessions import (
     futures_session_open,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import WireUnit
 
 T = TypeVar("T")
@@ -418,6 +419,14 @@ def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
         instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=None, upper=True)
 
 
+def test_an_instant_bound_in_the_field_only_unit_is_a_defect() -> None:
+    # `MS_OR_NS` tells units apart by a value's size, so it has no step: a parameter given it
+    # is a defect of the spec refresh, named as one, never a bare KeyError.
+    day = date(2025, 3, 3)
+    with pytest.raises(BrokenGuaranteeError, match=r"^the parameter t\.lte counts in ms\|ns, "):
+        instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=WireUnit.MS_OR_NS, upper=True)
+
+
 def test_a_trading_day_is_a_weekday_a_forex_sunday_or_any_crypto_day() -> None:
     saturday, sunday, monday = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
     for asset_class in (AssetClass.STOCKS, AssetClass.FUTURES, ClassFromPrefix.ANY):
@@ -672,5 +681,5 @@ def test_date_like_alias() -> None:
 
 def test_every_unit_but_nanoseconds_has_its_step() -> None:
     # A `.gt` or `.lte` bound steps back one unit; a new unit must name its step, never be
-    # refused as nanoseconds. No parameter counts in the field-only `MS_OR_NS`.
+    # refused as nanoseconds. A parameter in the field-only `MS_OR_NS` is a defect.
     assert set(dates_module._UNIT_STEPS) == set(WireUnit) - {WireUnit.NS, WireUnit.MS_OR_NS}
