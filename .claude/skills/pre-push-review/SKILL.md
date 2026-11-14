@@ -76,6 +76,15 @@ same property. Then look for:
   `# pragma: no cover`, `getattr` with a constant name, or code that exists only so ruff, mypy, or
   coverage pass. Each is a blocker unless the owner accepted it: fix the design so the tools see
   the true API.
+- **A closed set handled by a catch-all** (`AGENTS.md`, **Every choice over a closed set
+  handles each case by name**). Search the added lines:
+  `git diff origin/main...HEAD -- src | grep -nE '^\+.*(\belse:|case _:|\.get\(|isinstance|except\b)'`.
+  For each hit that chooses over an enum, a union, the forms of `symbols`, or a fixed set of
+  values, name the member or type a later change could add and what the code would do with it.
+  A default branch, `dict.get` default, or type-filtered drop that takes it silently is a
+  finding: name every case and end in `assert_never` or `BrokenGuaranteeError`. A fallback
+  passes only with a comment saying why; a new lookup table over an enum needs its every-member
+  test.
 - **The library doing Massive's job.** A check that refuses a value Massive could judge (a
   ticker's shape, an allowed parameter value, a valid combination) is a finding unless it is a
   wrong Python type, a value the library cannot express, or one with evidence that Massive

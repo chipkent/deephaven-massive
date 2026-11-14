@@ -32,6 +32,10 @@ holds the harness details that keep a test deterministic and the JVM alive.
 - Unit tests never reach Massive: they use the fakes and payload fixtures under
   `tests/data/<test owner path>/`.
 - Every behavior change gets a test that fails without the change.
+- A choice over a closed set (`AGENTS.md`, **Every choice over a closed set handles each case
+  by name**) gets a test for each member, parametrized over the enum so a new member joins it,
+  and one that passes a value no case handles and expects the refusal. Mark that call
+  `# type: ignore[arg-type]  # the point: refused at run time`.
 
 ## Input tables that stand in for a watchlist
 

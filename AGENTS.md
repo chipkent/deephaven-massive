@@ -202,6 +202,14 @@ These protect the owner's repository, money, and secrets.
   None` after the check that guarantees it), for readers and the type checker; it never
   validates input or guards anything at run time, since `python -O` removes it. Prefer it to a
   `cast`, which asserts the same fact without checking it.
+- **Every choice over a closed set handles each case by name** (an enum's members, a union of
+  types, the forms of `symbols`, a fixed set of values), so a new member or type fails loudly in
+  a test instead of corrupting data or dropping rows. A `match` or `if` chain ends in
+  `assert_never` where mypy can check it, or else raises `BrokenGuaranteeError`; a lookup table
+  over an enum has a test that every member is in it. No `else` or default case, `dict.get`
+  default, type-filtering comprehension, or silent `except` absorbs a value nobody planned for;
+  an intended fallback (a documented `OnError` behavior, an optional field Massive may omit)
+  says why in a comment.
 - **Lint size and complexity limits flag smells**: fix the design. A suppression at a site
   needs the owner's acceptance first, asked with its reason; never raise a global limit to make
   code pass. Too-many-arguments is off because
