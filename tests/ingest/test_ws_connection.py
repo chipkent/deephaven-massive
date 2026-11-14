@@ -2326,3 +2326,13 @@ def test_a_taken_connection_decides_to_close_once(
     closes = [r for r in caplog.records if "the connection closes" in r.getMessage()]
     assert len(closes) == 1
     del first, second
+
+
+def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
+    # Every state has its rule; a new one fails until it has, never only shows in the row.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with pytest.raises(AssertionError):
+        ws_session.on_loop(connection, lambda: connection._on_state("BOGUS", None))  # type: ignore[arg-type]  # the point: refused at run time
+    ws_session.session.release(result)

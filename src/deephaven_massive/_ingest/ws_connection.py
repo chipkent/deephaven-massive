@@ -61,7 +61,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
@@ -1035,7 +1035,7 @@ class Connection:
             self.subscriptions.ended()
             self._taken(required_instance(detail, float, "a TAKEN state's next attempt"))
             return
-        if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
+        if state is WsState.RECONNECTING or state is WsState.WAITING_SLOT:
             self.subscriptions.ended()
             at = required_instance(detail, float, f"a {state.value} state's next attempt")
             self._next_reconnect_at = int(at * 1e9)
@@ -1046,6 +1046,10 @@ class Connection:
             self._failed(required_instance(detail, WireError, "a FAILED state's error"))
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
+        elif state is WsState.CONNECTING:
+            pass  # only the row shows it: the socket is not yet open
+        else:
+            assert_never(state)  # a new state needs its rule here
         self._state = ConnectionState(state.value)
         self._write_row()
         if state in {WsState.CLOSED, WsState.FAILED}:
