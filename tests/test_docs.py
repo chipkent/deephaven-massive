@@ -753,11 +753,10 @@ def failure_text() -> Iterator[Callable[[Table], _Failure]]:
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
+def test_the_news_example_lists_the_newest_first(
     *,
     readme_server: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    failure_text: Callable[[Table], _Failure],
     tmp_path: Path,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
@@ -769,19 +768,58 @@ def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
     published = [r["PublishedUtc"] for r in rows]
     assert published == sorted(published, reverse=True)
     assert {r["Symbol"] for r in rows} == {"AAPL", "NVDA", "TSLA"}
-    failures = {name: failure_text(news[name]) for name in ("headlines", "latest")}
-    # Example 6, in the same console: the session closes, and the tables keep their rows.
-    stopped = console.run(section_blocks(README, "stop-live-tables"), "kept")
-    pace = threading.Event()  # never set; only paces the wait for the failures
+    news.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    failure_text: Callable[[Table], _Failure],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "MSFT")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    readme_server.reply("/v2/reference/news", Reply(envelope(_articles())))
+    start, release, stop = section_blocks(README, "stop-live-tables")
+    assert release.continues
+    assert stop.continues
+    # The example's first block runs in a fresh console: it needs no earlier example's names.
+    console = Console(tmp_path, console_command)
+    live = console.run([start], "closes", "headlines")
+    _wait_for_rows(live["closes"], lambda rows: len(rows) == 2, dh_to_pylist)
+    rows = _wait_for_rows(live["headlines"], lambda rows: len(rows) == 6, dh_to_pylist)
+    closed = failure_text(live["headlines"])
+    console.run([release])
+    # The released poll has no holder left, and the session keeps the other running.
+    streams = console.run([], "m")["m"].streams()
+    released = {"stocks.previous_day_bar": ("RELEASED", 0), "reference.news": ("RUNNING", 1)}
+    pace = threading.Event()  # never set; only paces the waits
+    states: dict[str, tuple[object, object]] = {}
     for _ in range(500):
-        if all(failure.text() is not None for failure in failures.values()):
+        states = {r["Dataset"]: (r["State"], r["HeldResults"]) for r in dh_to_pylist(streams)}
+        if states == released:
             break
         pace.wait(0.02)
-    for failure in failures.values():
-        assert "was closed; this table no longer updates; " + NEW_SESSION in str(failure.text())
-    assert dh_to_pylist(news["latest"]) == rows
+    assert states == released
+    del streams
+    stopped = console.run([stop], "kept", "m")
+    for _ in range(500):
+        if closed.text() is not None:
+            break
+        pace.wait(0.02)
+    # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
+    assert "was closed; this table no longer updates; " + NEW_SESSION in str(closed.text())
+    assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
-    news.clear()
+    assert stopped["m"]._core.closed
+    live.clear()
     stopped.clear()
     console.close()
 

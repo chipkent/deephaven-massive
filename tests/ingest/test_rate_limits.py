@@ -512,3 +512,8 @@ def test_the_pace_warning_counts_each_slot_for_61_seconds(
         PaceCheck("fits", 61.0).check(governor, {"stocks": 5})  # 5 per 61 s: just fits
         PaceCheck("late", 60.0).check(governor, {"stocks": 5})  # a minute is too short
     assert [record.getMessage().split(":")[0] for record in caplog.records] == ["late"]
+
+
+def test_every_shape_but_paged_says_how_it_counts() -> None:
+    # A paged read's notice adds nothing; a new shape must say how it counts, never say nothing.
+    assert set(rate_limits._SHAPE_WORDS) == set(ReadShape) - {ReadShape.PAGED}

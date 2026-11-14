@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
+from decimal import Decimal
 from types import NoneType
 
 import pytest
@@ -521,3 +522,27 @@ def test_items_fit_range_checks_long_items_only_when_asked() -> None:
     assert convert_module._items_fit(
         [[2**63 - 1, None]], frozenset({int, NoneType}), long_items=True
     )
+
+
+@pytest.mark.parametrize("value", [Decimal("1.5"), True, "1.5"], ids=["decimal", "bool", "text"])
+def test_a_double_column_reader_refuses_a_type_its_caller_never_passes(value: object) -> None:
+    # The column reader admits only integers, floats, and nulls; anything else is a defect that
+    # must raise, never become a null.
+    with pytest.raises(TypeError, match=r"^a double column holds a \w+, which its reader does"):
+        convert_module._as_floats([1.5, None, value])
+
+
+@pytest.mark.parametrize("value", [(1, 2), "12", 7], ids=["tuple", "text", "int"])
+def test_a_list_column_reader_refuses_a_value_that_is_no_list(value: object) -> None:
+    # Only lists and nulls reach the item check; any other value must raise, never skip it.
+    with pytest.raises(TypeError, match=r"^a list column holds a \w+, which its reader does"):
+        convert_module._items_fit([[1], None, value], frozenset({int}), long_items=True)
+
+
+def test_the_null_path_of_a_number_or_text_column_refuses_another_type() -> None:
+    # A column with nulls reads its values one by one; a value of a type its caller never
+    # passes must raise, never be left out of the range check or the pattern test.
+    with pytest.raises(TypeError, match=r"^an integer column holds a bool, which its reader"):
+        convert_module._in_int64([1, None, True])
+    with pytest.raises(TypeError, match=r"^a decimal-text column holds a int, which its reader"):
+        convert_module._decimal_texts(["1.5", None, 2])

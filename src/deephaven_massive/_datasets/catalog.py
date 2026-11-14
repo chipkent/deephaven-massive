@@ -54,7 +54,7 @@ from deephaven_massive._enums import (
     Timespan,
     subscription_of,
 )
-from deephaven_massive._errors import required_instance
+from deephaven_massive._errors import BrokenGuaranteeError, library_bug, required_instance
 from deephaven_massive._massive import ParamKind, RestPath, Transport, WireType, sources
 
 if TYPE_CHECKING:
@@ -1103,13 +1103,18 @@ class Catalog:
             transport the dataset has no history source on.
 
         An unknown source raises the `KeyError` of `source`.
+
+        Raises:
+            BrokenGuaranteeError: If `transport` is one `history()` never reads from.
         """
         keys: list[tuple[Transport, str]]
         if transport is Transport.REST:
             paths = (spec.history_path, spec.grouped_daily_path)
             keys = [(transport, path) for path in paths if path is not None]
-        else:
+        elif transport is Transport.FLAT_FILES:
             keys = [(transport, prefix) for prefix in spec.flat_file_prefixes.values()]
+        else:
+            raise BrokenGuaranteeError(library_bug(f"history() never reads by {transport}"))
         return filled_columns(spec, keys, self.source)
 
     def check_sort(self, spec: DatasetSpec, sort: str, *, ordered: bool) -> None:

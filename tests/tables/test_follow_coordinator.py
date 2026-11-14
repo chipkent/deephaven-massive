@@ -34,7 +34,12 @@ from typing_extensions import override
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import NEW_SESSION, MassiveError, UnlistedPairError
+from deephaven_massive._errors import (
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    MassiveError,
+    UnlistedPairError,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
@@ -2044,3 +2049,16 @@ def test_a_bug_is_a_cause_of_its_own() -> None:
         "MassiveError user bug",
         "EntitlementError massive 403",
     ]
+
+
+def test_an_event_the_coordinator_has_no_rule_for_is_a_defect(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    # Every event kind has its rule; any other raises, never stops the result unseen.
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "rule test", _stopped_pool())
+    quiet = _QuietRead()
+    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    coordinator._handle([follow_coordinator._Follow(read, None)])
+    result = coordinator._results[id(read)]
+    with pytest.raises(BrokenGuaranteeError, match=r"^no rule applies 'text' to a result\."):
+        coordinator._apply(result, "text")  # type: ignore[arg-type]  # the point: refused at run time

@@ -166,32 +166,33 @@ _FIELD = {
 
 
 def test_the_schemas_load_without_the_refresh_package() -> None:
-    # An installed wheel has no `refresh/`: block it and load the schemas in a fresh process,
-    # which starts its own Deephaven server first, since importing the library needs one, and
-    # leaves through `os._exit`, as every process that starts a server does. The server prints
-    # to stdout, so each count line is marked. The script is a literal; `-P` keeps the working
-    # directory off `sys.path`.
+    # An installed wheel has no `refresh/`: block it and load the schemas in a fresh process.
+    # The wire package needs no Deephaven, so the process starts no JVM: it registers a bare
+    # `deephaven_massive` package in place of running the library's `__init__`, which imports
+    # Deephaven, then imports the wire package whole, as the library does. The script is a
+    # literal; `-P` keeps the working directory off `sys.path`.
     result = subprocess.run(
         [
             sys.executable,
             "-P",
             "-c",
             (
-                "import os, sys\n"
-                "from deephaven_server import Server\n"
-                "Server(port=0, jvm_args=['-Xmx512m']).start()\n"
+                "import importlib.util, sys, types\n"
                 "class Block:\n"
                 "    def find_spec(self, name, path=None, target=None):\n"
                 "        if name.startswith('deephaven_massive._massive.refresh'):\n"
                 "            raise ImportError(name)\n"
                 "sys.meta_path.insert(0, Block())\n"
+                "found = importlib.util.find_spec('deephaven_massive')\n"
+                "package = types.ModuleType('deephaven_massive')\n"
+                "package.__path__ = list(found.submodule_search_locations)\n"
+                "sys.modules['deephaven_massive'] = package\n"
+                "import deephaven_massive._massive\n"
                 "from deephaven_massive._massive import spec\n"
                 "from deephaven_massive._massive.spec.types import Transport\n"
                 "for transport in Transport:\n"
                 "    found = spec.sources(transport).values()\n"
                 "    print('counts', len(found), sum(len(s.memberships) for s in found))\n"
-                "sys.stdout.flush()\n"
-                "os._exit(0)\n"
             ),
         ],
         capture_output=True,
@@ -202,8 +203,7 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
         f"counts {len(found)} {sum(len(s.memberships) for s in found)}"
         for found in (spec.sources(transport).values() for transport in Transport)
     ]
-    shown = [line for line in result.stdout.splitlines() if line.startswith("counts ")]
-    assert shown == expected
+    assert result.stdout.splitlines() == expected
     # Every channel and prefix belongs to a kind, so memberships are read where they matter.
     assert all(count.split()[2] != "0" for count in expected)
 

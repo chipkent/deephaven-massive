@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_zdt
 
+from deephaven_massive._datasets import dates as dates_module
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
     DAY_ZONES,
@@ -667,3 +668,9 @@ def test_a_day_reaches_now_in_its_class_zone() -> None:
 
 def test_date_like_alias() -> None:
     assert set(typing.get_args(DateLike)) == {str, date, datetime, np.datetime64}
+
+
+def test_every_unit_but_nanoseconds_has_its_step() -> None:
+    # A `.gt` or `.lte` bound steps back one unit; a new unit must name its step, never be
+    # refused as nanoseconds. No parameter counts in the field-only `MS_OR_NS`.
+    assert set(dates_module._UNIT_STEPS) == set(WireUnit) - {WireUnit.NS, WireUnit.MS_OR_NS}

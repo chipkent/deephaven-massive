@@ -277,7 +277,12 @@ def test_every_bars_call_builds_one_class(massive_session: dm.MassiveSession) ->
 def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> None:
     q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={FuturesVenue.CME})
     assert q._request.venues == (FuturesVenue.CME,)
-    assert build(massive_session, FUTURES_BARS, symbols="ESZ5")._request.venues is None
+    # Left out, every venue the plan allows, each refused one skipped with a warning.
+    every = build(massive_session, FUTURES_BARS, symbols="ESZ5")._request
+    assert (every.venues, every.refused_venues) == (tuple(FuturesVenue), dm.OnError.LOG)
+    # A dataset whose flat files are not per venue has none.
+    plain = build(massive_session, DIVIDENDS)._request
+    assert (plain.venues, plain.refused_venues) == (None, None)
     with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
         build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):

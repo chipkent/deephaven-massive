@@ -12,8 +12,8 @@ needs JDK 17 or later. Run everything from the repository root:
 ```bash
 uv sync --upgrade                          # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
-./scripts/check.sh                         # full gate: lint, format, types; tests + coverage only if the change can affect them
-./scripts/check.sh full --all              # the whole suite, even for a docs-only change
+./scripts/check.sh                         # lint, format, types, and the tests of the changed files (the pre-push hook)
+./scripts/check.sh full --all              # the whole suite with coverage, as CI runs it
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
 uv build                                   # sdist and wheel
 ```
@@ -25,8 +25,11 @@ environment.
 
 Every change lands through a pull request; only the owner merges. Branch names, commit and
 title wording, and the pull request description follow [`AGENTS.md`](AGENTS.md) and
-[`docs/dev/pull-requests.md`](docs/dev/pull-requests.md). The full check must pass, with 100%
-coverage of statements and branches.
+[`docs/dev/pull-requests.md`](docs/dev/pull-requests.md). CI runs the whole suite on every
+pull request, and it must pass with 100% coverage of statements and branches. The pre-push hook
+runs only lint, type checks, and the tests of the files you changed, so a push stays quick; run
+`./scripts/check.sh full --all` for the whole suite locally. The local check runs pytest on as
+many workers as the machine has room for, and `CHECK_WORKERS` sets the count outright.
 
 A release is one manual run of the Release workflow on `main`;
 [`docs/dev/releasing.md`](docs/dev/releasing.md) gives the steps.

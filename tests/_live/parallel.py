@@ -12,18 +12,26 @@ ids of the tests each worker selected, not their markers, so a live test is reco
 file: the `integration` marker is on exactly the tests of `*_integration.py` files, which
 `tests/conftest.py` checks on every collected test before any is deselected.
 
-Every function is pure; `tests/conftest.py` calls `refusal` once each worker has collected.
+The module is also the pytest plugin that applies the refusal: `tests/conftest.py` registers
+it, and its xdist hook calls `refusal` once each worker has collected. It imports neither the
+library nor Deephaven, so a pytest run can load it with `-p` and no JVM. Every other function
+is pure.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+import pytest
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
 INTEGRATION_FILE_SUFFIX: Final = "_integration.py"
 """How the name of a file of live tests ends, such as `test_stocks_integration.py`."""
+
+PLUGIN_NAME: Final = "live-parallel-refusal"
+"""The name `tests/conftest.py` registers this module under as a pytest plugin."""
 
 
 def is_live(nodeid: str) -> bool:
@@ -58,3 +66,25 @@ def refusal(nodeids: Iterable[str]) -> str | None:
         f"evidence log, and this run selects {len(live)} of them (the first is {live[0]}): "
         "drop -n, or pass -n 0"
     )
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(ids: Sequence[str]) -> None:
+    """End a parallel run that selected a live test, before any test starts.
+
+    pytest-xdist calls this in its controller each time a worker has collected, with the ids
+    of the tests that worker selected after `-m`, `-k`, and every other deselection. Each
+    worker's report is checked as it arrives, and the controller hands out no test until every
+    worker has reported, so a refusal always comes before any test is scheduled. The decision
+    rests on the selection, not on the `-m` expression, so no expression can slip a live test
+    past it. Without pytest-xdist, or with `-n 0`, the hook is never called.
+
+    A refused run ends through `pytest.exit` with pytest's usage-error status, 4, and a message
+    naming how many live tests the worker selected and the first of them.
+
+    Args:
+        ids: The ids of the tests the worker selected.
+    """
+    message = refusal(ids)
+    if message is not None:
+        pytest.exit(message, returncode=pytest.ExitCode.USAGE_ERROR)

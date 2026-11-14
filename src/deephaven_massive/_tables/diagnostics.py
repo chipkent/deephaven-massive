@@ -82,6 +82,7 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
+    BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
     library_bug,
@@ -1515,6 +1516,9 @@ class Diagnostics:
 
         Args:
             items: Rows, `wait_until_shown` events, and rate-limit markers, in queue order.
+
+        Raises:
+            BrokenGuaranteeError: If an item is none of those, rather than taking it for one.
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
@@ -1533,8 +1537,10 @@ class Diagnostics:
                 connections[item.transport, item.asset_class, item.family] = item
             elif isinstance(item, SymbolReadRow):
                 symbol_reads[item.stream_id, item.symbol] = item
-            else:
+            elif item is _RATE_LIMITS_CHANGED:
                 pull = True
+            else:
+                raise BrokenGuaranteeError(library_bug(f"the diagnostics queue holds {item!r}"))
         try:
             for table, rows in (
                 (self._streams, lambda: list(streams.values())),

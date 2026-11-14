@@ -64,7 +64,7 @@ adds one its own next numbers, in merge order.
 
 ## 5. Launch
 
-Run at most about seven coding agents at once: each pre-push hook runs the full suite, and
+Run at most about seven coding agents at once: each agent's tests start Deephaven JVMs, and
 sixteen at once overloaded the machine until nothing merged. Read-only agents don't count.
 Prioritize what blocks the current goal.
 

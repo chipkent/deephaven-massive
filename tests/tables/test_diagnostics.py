@@ -27,7 +27,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
@@ -1371,3 +1371,11 @@ def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
     # An interrupt ends the thread too, but is no bug of the library.
     interrupted = thread_died("MassiveSession #1", "reaper", KeyboardInterrupt())
     assert (interrupted.source, interrupted.is_bug) == (dm.ErrorSource.USER, False)
+
+
+def test_an_item_the_writer_has_no_rule_for_is_a_defect(dh_exec_ctx: ExecutionContext) -> None:
+    # Only rows, events, and the rate-limit marker are queued; anything else raises, never pulls.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    with pytest.raises(BrokenGuaranteeError, match=r"^the diagnostics queue holds 'text'"):
+        diagnostics._apply(["text"])
+    diagnostics.release()

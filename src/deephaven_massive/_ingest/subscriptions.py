@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
@@ -437,6 +437,10 @@ class Subscriptions:
             self._acknowledge(status.topics)
         elif status.kind is StatusKind.REFUSED:
             self._refuse_status(status)
+        elif status.kind is StatusKind.MAX_CONNECTIONS or status.kind is StatusKind.OTHER:
+            pass  # the client turns a lost slot into its TAKEN state; any other answers no topic
+        else:
+            assert_never(status.kind)  # a new kind needs its rule here
         self.reconcile()
 
     def _acknowledge(self, topics: tuple[str, ...]) -> None:
