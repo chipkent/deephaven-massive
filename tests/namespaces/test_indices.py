@@ -33,7 +33,7 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
 from deephaven_massive.namespaces import _indices as indices
 from deephaven_massive.namespaces._namespace import Namespace
-from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
 from deephaven_massive.queries._choice import query_class
 
 # The reply and envelope builders are plain functions of the fake, which no fixture hands over.
@@ -480,14 +480,14 @@ def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     "name", ["values", "bars", "previous_day_bar", "snapshots", "daily_open_close"]
 )
 def test_index_symbols_are_sent_as_written(m: dm.MassiveSession, name: str) -> None:
-    method = cast("Callable[..., object]", getattr(m.indices, name))
+    method = cast("Callable[..., Query]", getattr(m.indices, name))
     extras: dict[str, tuple[object, ...]] = {
         "daily_open_close": ("2025-06-02",),
         "bars": (dm.Timespan.MINUTE,),
     }
     extra = extras.get(name, ())
     for text in ("X:BTCUSD", "SPX"):  # Massive answers them
-        method(text, *extra)
+        assert method(text, *extra)._request.symbols == (text,)
     with pytest.raises(ValueError, match="no symbols"):
         method([], *extra)
 
