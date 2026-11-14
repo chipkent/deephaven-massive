@@ -79,8 +79,8 @@ are the same: a column it returns holds exactly what the converter gives for eac
 unless a caller that builds Arrow arrays leaves the numbers for Arrow to check and convert.
 
 The functions are pure and safe from any thread. This module imports only the standard
-library, `spec.types`, and the wire package's `LIBRARY_BUG_REPORT`, which ends the message of a
-column reader given a value its caller never passes (a `TypeError`, a defect of the library).
+library and `spec.types`. A column reader given a value its caller never passes raises
+`TypeError`, a defect of the library, never a null or a skipped check.
 """
 
 from __future__ import annotations
@@ -95,7 +95,6 @@ from types import MappingProxyType, NoneType
 from typing import TYPE_CHECKING, Final, TypeGuard, TypeVar
 from zoneinfo import ZoneInfo
 
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT
 from deephaven_massive._massive.spec.types import (
     NANOS_PER_SECOND,
     SECONDS_PER_DAY,
@@ -933,8 +932,8 @@ def _unexpected(column: str, values: list[object], admitted: frozenset[type]) ->
     """
     kind = next(type(v) for v in values if type(v) not in admitted)
     return (
-        f"{column} holds a {kind.__name__}, which its reader does not handle and would lose. "
-        f"{LIBRARY_BUG_REPORT}"
+        f"{column} holds a {kind.__name__}, which its reader does not handle and would lose; "
+        "this is a bug in deephaven-massive"
     )
 
 
