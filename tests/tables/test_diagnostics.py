@@ -62,7 +62,7 @@ from deephaven_massive._tables.diagnostics import (
 )
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, Publisher, blink_publisher
 from deephaven_massive._tables.symbol_read_rows import (
     SYMBOL_READ_KEYS,
     SYMBOL_READS,
@@ -402,16 +402,18 @@ def test_failed_writes_are_logged_and_the_writer_continues(
 
 class _BrokenPublisher:
     # A diagnostics table's publisher whose add fails.
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         raise RuntimeError("the streams table is broken")
+
+    def publish_failure(self, error: Exception) -> None:
+        raise AssertionError(error)  # the writer lives: nothing fails the table
 
 
 def test_a_failing_table_does_not_cost_the_other_its_rows(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
-    broken: BlinkPublisher = _BrokenPublisher()  # type: ignore[assignment]  # a fake whose add fails
-    diagnostics._streams.publisher = broken
+    diagnostics._streams.publisher = _BrokenPublisher()
     connection = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
@@ -427,7 +429,7 @@ def test_a_failing_table_does_not_cost_the_other_its_rows(
 class _CountingPublisher:
     # Wraps a publisher, records when each `add` began and ended, and holds the first one until
     # released, so rows queued meanwhile reach the writer as one batch.
-    def __init__(self, publisher: BlinkPublisher, *, hold: bool = True) -> None:
+    def __init__(self, publisher: Publisher, *, hold: bool = True) -> None:
         self.publisher = publisher
         self.adds: list[float] = []
         self.ends: list[float] = []
@@ -436,18 +438,20 @@ class _CountingPublisher:
         if not hold:
             self.gate.set()
 
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         self.adds.append(time.monotonic())
         self.entered.set()
         assert self.gate.wait(TIMEOUT)
-        self.publisher.add(rows)
+        self.publisher.add(table)
         self.ends.append(time.monotonic())
+
+    def publish_failure(self, error: Exception) -> None:
+        self.publisher.publish_failure(error)
 
 
 def _count_adds(diagnostics: Diagnostics, *, hold: bool = True) -> _CountingPublisher:
     counting = _CountingPublisher(diagnostics._streams.publisher, hold=hold)
-    publisher: BlinkPublisher = counting  # type: ignore[assignment]  # a fake that counts adds
-    diagnostics._streams.publisher = publisher
+    diagnostics._streams.publisher = counting
     return counting
 
 

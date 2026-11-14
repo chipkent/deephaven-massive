@@ -38,7 +38,6 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 if TYPE_CHECKING:
     from deephaven.table_listener import TableUpdate
 
-    from deephaven_massive._tables.session_core import SessionCore
 
 TIMEOUT = 30.0
 
@@ -1046,13 +1045,10 @@ def test_the_landing_listener_of_a_freed_session_records_nothing(
 ) -> None:
     # A close marks a published read DONE before its rows land; its session may then be freed
     # before the cycle that lands them. Called here, as on an update-graph thread.
-    class Gone:
-        pass
+    def gone() -> None:
+        return None  # the core was freed
 
-    gone = Gone()
-    core: weakref.ref[SessionCore] = weakref.ref(gone)  # type: ignore[arg-type]  # a dead core
-    landed = background_read._RowsLanded(core, 7)
-    del gone
+    landed = background_read._RowsLanded(gone, 7)
     added = SimpleNamespace(size=lambda: 3)
     update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
         j_table_update=SimpleNamespace(added=lambda: added)

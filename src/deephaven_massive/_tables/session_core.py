@@ -784,7 +784,9 @@ class SessionCore:
             live_set.sync(self)
 
     @staticmethod
-    def _thread_died(core_ref: weakref.ref[SessionCore], what: str, death: BaseException) -> None:
+    def _thread_died(
+        core_ref: Callable[[], SessionCore | None], what: str, death: BaseException
+    ) -> None:
         """The `on_death` of a session's reaper or diagnostics writer: fail its live tables.
 
         Runs on the dying thread. A thread that dies leaves the session's tables frozen (no
@@ -793,7 +795,8 @@ class SessionCore:
         until the process ends; only an interrupt raised inside the reaper kills it.
 
         Args:
-            core_ref: The session's core, weakly: the thread must not keep it alive.
+            core_ref: Returns the session's core, or None once it is freed: a weak reference,
+                since the thread must not keep it alive.
             what: The thread, as the message names it (`"reaper"`).
             death: What ended the thread.
         """
