@@ -14,8 +14,7 @@ import gc
 import logging
 import threading
 import weakref
-from collections import UserDict
-from collections.abc import Callable, Mapping, ValuesView
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import MethodType
@@ -40,7 +39,6 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
     StreamRow,
-    StreamUpdate,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
@@ -55,8 +53,11 @@ from deephaven_massive._tables.transports import (
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
 from tests._fakes.clock import FakeClock
+from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
+    from _collections_abc import dict_values
+
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
@@ -1859,50 +1860,6 @@ class _CountedSymbol(follow_coordinator._Symbol):
         return super().__getattribute__(name)
 
 
-class _QuietCore:
-    # The core a followed read reports to, reduced to the calls the coordinator makes.
-    closed = False
-    config = dm.MassiveConfig(api_key="k")
-
-    def __init__(self) -> None:
-        self.progress: list[int | None] = []
-        self.workers = self  # the worker-table registry's one call, `update_followed_read`
-
-    def write_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
-        del rows
-
-    def update_followed_read(self, call: int, update: StreamUpdate, *, loading: bool) -> None:
-        del call, loading
-        self.progress.append(update.loading)
-
-
-class _QuietRead:
-    # A followed read with no table: it only takes the coordinator's downloads.
-    call = 1
-    dataset = "test.trades"
-    reread = Reread.ALWAYS
-    built_step = 0
-    shut_down = False
-
-    def __init__(self) -> None:
-        self.core = _QuietCore()
-        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
-        self.stop_token = threading.Event()
-
-    @staticmethod
-    def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
-        raise AssertionError(names, stop)  # the pool has stopped: nothing is read
-
-    def fail_table(self, error: MassiveError) -> None:
-        self.failed = error
-
-    def publish(
-        self, name: str, seq: int, table: object, *, decided_at_step: int, parts_before: int
-    ) -> int:
-        del name, seq, table, decided_at_step
-        return parts_before
-
-
 def _stopped_pool() -> ReadPool:
     # A pool that refuses every read, so a coordinator driven by hand reads nothing.
     pool = ReadPool("stopped", 1)
@@ -1916,12 +1873,12 @@ class _TwoRows:
     size: int = 2
 
 
-class _CountedScans(UserDict[str, MassiveError | None]):
+class _CountedScans(dict[str, MassiveError | None]):
     # The call-time symbols' failures, counting each pass over them.
     scans = 0
 
     @override
-    def values(self) -> ValuesView[MassiveError | None]:
+    def values(self) -> dict_values[str, MassiveError | None]:
         _CountedScans.scans += 1
         return super().values()
 
@@ -1933,24 +1890,20 @@ def test_the_call_time_check_does_not_rescan_its_symbols(
     # dataset failing 20,000 symbols in name order cost 20,000 passes over a growing prefix.
     count = 2_000
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "scan test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     names = [f"S{i:04}" for i in range(count)]
     handle([follow_coordinator._Follow(read, None)])
     result = coordinator._results[id(read)]
     handle([follow_coordinator._Baseline(read, frozenset(names), 1)])
     assert result.call_time is not None
-    counted: dict[str, MassiveError | None] = _CountedScans(  # type: ignore[assignment]  # counts
-        result.call_time
-    )
-    result.call_time = counted
+    result.call_time = _CountedScans(result.call_time)
     monkeypatch.setattr(_CountedScans, "scans", 0)
     for name in names:
         outcome = refused(403, f"{name} not in the plan")
         handle([follow_coordinator._Began(read, {name: 1})])
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
-    assert str(quiet.failed) == "HTTP 403: S0000 not in the plan"
+    assert str(read.failed) == "HTTP 403: S0000 not in the plan"
     assert _CountedScans.scans <= 1
 
 
@@ -1962,8 +1915,7 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
     # 10,000. Now a batch looks at the symbols it changed, plus a constant few.
     count = 2_000
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "work test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     names = [f"S{i:04}" for i in range(count)]
     monkeypatch.setattr(follow_coordinator, "_Symbol", _CountedSymbol)
@@ -1978,13 +1930,13 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
         handle([follow_coordinator._Began(read, {name: 1})])
         outcome = failure if i % 10 == 0 else rows
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
-    assert quiet.core.progress[-1] == count // 10  # the retrying symbols still load
+    assert read.core.progress[-1] == count // 10  # the retrying symbols still load
     clock.advance(RETRY_DELAYS[0])
     coordinator._retry_due()  # the retries come due, and each is read and lands
     for name in names[::10]:
         handle([follow_coordinator._Began(read, {name: 1})])
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: rows}, 0, 0.0)])
-    assert quiet.core.progress[-1] == 0
+    assert read.core.progress[-1] == 0
     assert result.progress.rows == 2 * count
     # About 60 field reads per symbol; one pass over every symbol per batch made it 54 million.
     assert _CountedSymbol.looks < 100 * count
@@ -1999,7 +1951,7 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     coordinator = follow_coordinator.FollowCoordinator(
         dh_exec_ctx, "late start test", _stopped_pool()
     )
-    read: FollowedRead = _QuietRead()  # type: ignore[assignment]  # a fake that takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     handle([follow_coordinator._Follow(read, None)])
     symbols = coordinator._results[id(read)].symbols
@@ -2016,8 +1968,7 @@ def test_an_event_the_coordinator_has_no_rule_for_is_a_defect(
 ) -> None:
     # Every event kind has its rule; any other raises, never stops the result unseen.
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "rule test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     coordinator._handle([follow_coordinator._Follow(read, None)])
     result = coordinator._results[id(read)]
     with pytest.raises(BrokenGuaranteeError, match=r"^no rule applies 'text' to a result\."):

@@ -47,6 +47,7 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
+from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -661,10 +662,7 @@ def test_a_download_is_never_published_after_the_table_failed(
 def test_the_router_drops_a_report_for_a_collected_result(
     massive_session: dm.MassiveSession,
 ) -> None:
-    class Gone:
-        pass
-
-    gone: followed_read.FollowedRead = Gone()  # type: ignore[assignment]  # a read that dies
+    gone = QuietRead()
     router = followed_read._WatchRouter(massive_session._core.follows, gone, lambda: 1)
     router.finish(gone)
     del gone
@@ -900,14 +898,10 @@ class _Heard:
 
 def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> None:
     # The listener reports from an update-graph thread; here a plain thread stands in for it.
-    class Read:
-        pass
-
-    read: followed_read.FollowedRead = Read()  # type: ignore[assignment]  # only its identity
+    read = QuietRead()
     heard = _Heard()
-    coordinator: follow_coordinator.FollowCoordinator = heard  # type: ignore[assignment]  # records
     step = [7]  # the update cycle the update graph's clock shows
-    router = followed_read._WatchRouter(coordinator, read, lambda: step[0])
+    router = followed_read._WatchRouter(heard, read, lambda: step[0])
     router.on_change(frozenset({"AAPL", "MSFT"}), frozenset())  # the replay, on this thread
     step[0] = 8
 
@@ -933,7 +927,7 @@ def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> No
 def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSession) -> None:
     coordinator = massive_session._core.follows
     coordinator.stop()
-    read: followed_read.FollowedRead = object()  # type: ignore[assignment]  # never followed
+    read = QuietRead()  # never followed
     coordinator.follow(read, None)  # the session closed: nothing starts
     coordinator.changed(read, frozenset({"AAPL"}), frozenset(), step=1)
     coordinator.invalid(read, "a bad row")
@@ -1003,9 +997,9 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
     massive_session: dm.MassiveSession, drain: Callable[[], None]
 ) -> None:
     # Deephaven runs it on whichever thread shut the table down; here, on the test thread.
-    class Read:
+    class Read(QuietRead):
         def __init__(self) -> None:
-            self.stop_token = threading.Event()
+            super().__init__()
             self.shut_down_event = threading.Event()
             self.watch_stopped = threading.Event()
 
@@ -1013,11 +1007,10 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
             self.watch_stopped.set()
 
     read = Read()
-    fake: followed_read.FollowedRead = read  # type: ignore[assignment]  # records its shutdown
     core = massive_session._core
     followed_read._shut_down(
         weakref.ref(core),
-        weakref.ref(fake),
+        weakref.ref(read),
         worker_shut_down=core.workers.shutdown_callback(12_345, read.stop_token),
     )
     assert read.stop_token.is_set()
