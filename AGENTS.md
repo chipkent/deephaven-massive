@@ -53,6 +53,7 @@ Run everything from the repository root through `uv run` (a hook blocks bare `py
 
 ```bash
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy
+./scripts/check.sh full --all            # the whole suite with coverage, as CI runs it
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
 ```

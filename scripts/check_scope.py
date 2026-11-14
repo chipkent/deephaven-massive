@@ -1,29 +1,26 @@
-r"""Decide how much of the local full check a change needs, by CI's own path rules.
+r"""Choose the tests the pre-push hook runs: those of the files a change touches.
 
-`scripts/check.sh full`, which the pre-push hook runs, asks this script which scope to run. CI
-already skips its test jobs when a pull request changes only files the tests cannot read, such
-as the developer guides; the local check makes the same choice, so a push of such
-a change no longer waits minutes for the whole suite. The local check never runs fewer tests
-than CI's test jobs run for the same change, so a push the hook passes cannot fail one of those
-jobs on a test the hook skipped. CI also builds the package and tests other Python versions and
-the lowest dependency versions, which the local check does not.
+`scripts/check.sh full`, which the pre-push hook runs, asks this script which tests to run. The
+hook runs ruff and mypy on every push, and then only the tests of the changed files, without
+coverage; CI runs the whole suite with coverage on every pull request. So a push waits for the
+few tests its change is most likely to break, and CI catches the rest.
 
-The path rules are not copied here. The script reads them from the `Decide which jobs the
-change affects` step of `.github/workflows/ci.yml`, the shell variables `test`, `docs`,
-`unread`, and `workflows` (`lint` and `build` too, which a path must match or be unread), and
-applies them exactly as that step does, one changed path at a time:
+The tests of a change are, in order and without repeats:
 
-- A changed workflow or composite action runs everything.
-- A path that no rule covers runs everything, so a new kind of input fails closed.
-- A path the `test` pattern matches runs the whole suite.
-- A path the `docs` pattern matches (the user pages `README.md` and `docs/troubleshooting.md`,
-  any image under `docs/`, the tester guide, and its examples) runs the documentation tests,
-  `tests/test_docs.py` and `tests/live/tester/test_examples.py`, as CI's `docs` job does.
-  `docs/configuration.md` is a test input instead: `tests/test_config.py` compares its
-  generated settings reference with the code.
-- Otherwise CI runs no tests, and the local check runs ruff, format, and mypy. CI runs ruff
-  and mypy on every change it lints, and the local check runs them on every change, so it
-  never does less.
+- each changed test file (`tests/**/test_*.py`) that still exists;
+- the unit test that mirrors each changed module of the library (`src/deephaven_massive/`), of
+  `scripts/`, or of a helper package under `tests/`, when it exists. The mirror drops one
+  leading underscore from each path component and maps a dunder module to its bare name, as
+  `tests/test_layout.py` requires: `src/deephaven_massive/_massive/rest/client.py` has
+  `tests/massive/rest/test_client.py`, and `tests/_live/plans.py` has
+  `tests/live/test_plans.py`;
+- the documentation tests, `tests/test_docs.py` and `tests/live/tester/test_examples.py`, when
+  a user page, an image under `docs/`, the tester guide, or its examples changed: the paths
+  the `docs` pattern of CI's `Decide which jobs the change affects` step matches, read from
+  `.github/workflows/ci.yml`.
+
+Any other change (a conftest, a fake server, test data, generated files, the configuration)
+selects no test of its own; CI's whole suite covers it.
 
 The changed files are those `git diff --no-renames --name-only` lists between a base commit and
 the working tree (so staged and unstaged edits count), plus untracked files git does not ignore.
@@ -34,52 +31,56 @@ The base depends on how the script runs:
 - In the pre-push hook, pushing to a branch the remote already has, the base is that branch's
   remote tip. pre-commit names it in `PRE_COMMIT_FROM_REF` and the remote branch in
   `PRE_COMMIT_REMOTE_NAME` and `PRE_COMMIT_REMOTE_BRANCH`; the script uses it when it equals
-  the local remote-tracking branch. So a push that changes only a developer guide on a
-  long-lived PR branch runs no tests, even when earlier pushes changed code: CI already ran
-  the tests on those. A tree diff is used, not a merge base, so the files a merge of `main`
-  brings in count as changed.
+  the local remote-tracking branch. So a push runs the tests of its own commits only: CI
+  already ran the tests of earlier pushes. A tree diff is used, not a merge base, so the files
+  a merge of `main` brings in count as changed.
 - Otherwise (a new branch, a stale or missing remote-tracking branch, or a run by hand), the
   base is the merge base of `HEAD` with `origin/main`: the whole branch, as CI compares it.
 
-Like CI's list, a path git quotes (one holding a tab, a newline, or a non-ASCII character)
-matches no rule and runs everything. Without `origin/main` or a merge base, the script runs
-everything.
+Without `origin/main` or a merge base, the script selects no tests and says why.
 
-It prints the scope, one of `full`, `docs`, or `lint`, on standard output, and one line on
-standard error that says which scope it chose and why. It uses only the standard library.
+It prints one line on standard output, the scope and then the test files: `lint` when no test
+is selected, or `tests` followed by each file, separated by spaces (no path in the repository
+holds a space). It prints one line on standard error that says what it chose and why. It uses
+only the standard library.
 
     uv run python scripts/check_scope.py
 
 The examples below are doctests, which `check.sh full` runs before it asks for a scope:
 
->>> rules = PathRules(
-...     lint=r"^(src|tests|scripts)/|^pyproject\.toml$",
-...     test=r"^(src|tests|scripts|vendor)/|^docs/datasets/|^pyproject\.toml$",
-...     build=r"^(src|tests)/|^docs/datasets/|^README\.md$",
-...     docs=r"^README\.md$|^docs/troubleshooting\.md$|^docs/.+\.(png|webp)$",
-...     unread=r"^(docs/dev/|AGENTS\.md$|\.pre-commit-config\.yaml$)",
-...     workflows=r"^\.github/(workflows|actions)/",
-... )
->>> decide(["docs/dev/pull-requests.md", "AGENTS.md"], rules)
-Decision(scope='lint', reason='2 changed files, none of which the tests read')
->>> decide(["AGENTS.md", "README.md"], rules)
-Decision(scope='docs', reason='2 changed files; README.md is documentation')
->>> decide(["docs/dev/x.md", "docs/troubleshooting.md"], rules)
-Decision(scope='docs', reason='2 changed files; docs/troubleshooting.md is documentation')
->>> decide(["docs/images/hero.webp"], rules)
-Decision(scope='docs', reason='1 changed file; docs/images/hero.webp is documentation')
->>> decide(["AGENTS.md", "src/deephaven_massive/__init__.py", "tests/conftest.py"], rules)
-Decision(scope='full', reason='3 changed files; src/deephaven_massive/__init__.py is a test input')
->>> decide(["docs/dev/x.md", "docs/datasets/stocks.trades.md"], rules)
-Decision(scope='full', reason='2 changed files; docs/datasets/stocks.trades.md is a test input')
->>> decide(["docs/dev/x.md", ".github/workflows/ci.yml"], rules)
-Decision(scope='full', reason='2 changed files; .github/workflows/ci.yml is a workflow')
->>> decide(["docs/dev/x.md", "docs/tester-examples/x.py"], rules)
-Decision(scope='full', reason='2 changed files; no rule covers docs/tester-examples/x.py')
->>> decide(['"docs/dev/caf\\303\\251.md"'], rules)
-Decision(scope='full', reason='1 changed file; no rule covers "docs/dev/caf\\303\\251.md"')
->>> decide([], rules)
-Decision(scope='lint', reason='no changed files')
+>>> docs = r"^README\.md$|^docs/troubleshooting\.md$|^docs/.+\.(png|webp)$"
+>>> exists = {
+...     "tests/massive/rest/test_client.py",
+...     "tests/test_init.py",
+...     "tests/live/test_plans.py",
+...     "tests/test_layout.py",
+...     *DOCS_TESTS,
+... }.__contains__
+>>> decide(["docs/dev/pull-requests.md", "AGENTS.md"], docs, exists)
+Decision(scope='lint', tests=(), reason='2 changed files, none with a test')
+>>> decision = decide(["src/deephaven_massive/_massive/rest/client.py"], docs, exists)
+>>> decision.scope, decision.tests, decision.reason
+('tests', ('tests/massive/rest/test_client.py',), '1 changed file; 1 test file')
+>>> decide(["src/deephaven_massive/__init__.py", "tests/test_init.py"], docs, exists).tests
+('tests/test_init.py',)
+>>> decide(
+...     ["tests/_live/plans.py", "tests/test_layout.py", "tests/conftest.py"], docs, exists
+... ).tests
+('tests/live/test_plans.py', 'tests/test_layout.py')
+>>> decide(["src/deephaven_massive/_session.py", "tests/test_gone.py"], docs, exists)
+Decision(scope='lint', tests=(), reason='2 changed files, none with a test')
+>>> decide(["AGENTS.md", "README.md"], docs, exists).tests
+('tests/test_docs.py', 'tests/live/tester/test_examples.py')
+>>> decide([], docs, exists)
+Decision(scope='lint', tests=(), reason='no changed files')
+>>> mirror_of("src/deephaven_massive/_tables/__init__.py")
+'tests/tables/test_init.py'
+>>> mirror_of("scripts/check_scope.py")
+'tests/scripts/test_check_scope.py'
+>>> mirror_of("tests/_fakes/rest.py")
+'tests/fakes/test_rest.py'
+>>> mirror_of("docs/dev/x.md") is None
+True
 >>> pushed_branch(
 ...     {
 ...         "PRE_COMMIT_FROM_REF": "1f0c2e9",
@@ -98,10 +99,10 @@ True
 ...     }
 ... ) is None
 True
->>> read_rules("lint='x'\n")
+>>> read_docs_pattern("lint='x'\n")
 Traceback (most recent call last):
 ...
-ValueError: .github/workflows/ci.yml defines no test pattern for the changed-files decision
+ValueError: .github/workflows/ci.yml defines no docs pattern for the changed-files decision
 """
 
 from __future__ import annotations
@@ -115,26 +116,27 @@ import sys
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
-#: The workflow whose path rules the decision applies.
+#: The workflow whose `docs` pattern selects the documentation tests.
 WORKFLOW = pathlib.Path(".github/workflows/ci.yml")
 
 #: The branch CI compares a pull request with.
 BASE = "origin/main"
 
-_ASSIGNMENT = re.compile(r"^\s*(lint|test|build|docs|unread|workflows)='(.*)'\s*$", re.MULTILINE)
+#: The tests CI's `docs` job runs when a user page changes.
+DOCS_TESTS = ("tests/test_docs.py", "tests/live/tester/test_examples.py")
 
+#: The directories whose Python modules have a mirrored unit test, each with the prefix its
+#: mirror goes under. A module under `tests/` mirrors only from a helper package, whose name
+#: starts with an underscore.
+_MIRRORED = (
+    ("src/deephaven_massive/", "tests/"),
+    ("scripts/", "tests/scripts/"),
+    ("tests/_", "tests/"),
+)
 
-class PathRules(NamedTuple):
-    """The patterns of CI's changed-files decision, each an extended regular expression."""
-
-    lint: str
-    test: str
-    build: str
-    docs: str
-    unread: str
-    workflows: str
+_DOCS_ASSIGNMENT = re.compile(r"^\s*docs='(.*)'\s*$", re.MULTILINE)
 
 
 class Push(NamedTuple):
@@ -145,37 +147,76 @@ class Push(NamedTuple):
 
 
 class Decision(NamedTuple):
-    """The scope to run, and the reason the one-line summary gives for it."""
+    """The scope to run, the test files it runs, and the reason the summary line gives."""
 
     scope: str
+    tests: tuple[str, ...]
     reason: str
 
 
-def read_rules(workflow_text: str) -> PathRules:
-    """Return the path patterns that CI's decision step assigns, read from the workflow text.
+def read_docs_pattern(workflow_text: str) -> str:
+    """Return the `docs` path pattern that CI's decision step assigns, read from the workflow.
 
     Args:
         workflow_text: The contents of `.github/workflows/ci.yml`.
 
     Returns:
-        The six patterns, exactly as the step assigns them.
+        The pattern, an extended regular expression, exactly as the step assigns it.
 
     Raises:
-        ValueError: The text assigns one of the patterns not at all, or more than once, so the
-            rules cannot be read with certainty.
+        ValueError: The text assigns the pattern not at all, or more than once, so it cannot be
+            read with certainty.
     """
-    found: dict[str, list[str]] = {}
-    for match in _ASSIGNMENT.finditer(workflow_text):
-        found.setdefault(match[1], []).append(match[2])
-    patterns: dict[str, str] = {}
-    for name in PathRules._fields:
-        values = found.get(name, [])
-        if len(values) != 1:
-            problem = "no" if not values else "more than one"
-            message = f"{WORKFLOW} defines {problem} {name} pattern for the changed-files decision"
-            raise ValueError(message)
-        patterns[name] = values[0]
-    return PathRules(**patterns)
+    found: list[str] = [match[1] for match in _DOCS_ASSIGNMENT.finditer(workflow_text)]
+    if len(found) != 1:
+        problem = "no" if not found else "more than one"
+        raise ValueError(
+            f"{WORKFLOW} defines {problem} docs pattern for the changed-files decision"
+        )
+    return found[0]
+
+
+def _mirror_name(name: str) -> str:
+    """Return a path component's mirrored name: a dunder's bare name, else one underscore less."""
+    # `__` alone, or `____`, has no name between its underscores, so it is not a dunder.
+    bare = name[2:-2]
+    if bare and name.startswith("__") and name.endswith("__"):
+        return bare
+    return name.removeprefix("_")
+
+
+def mirror_of(path: str) -> str | None:
+    """Return the unit test that mirrors a Python module, whether or not that test exists.
+
+    Args:
+        path: A changed path, relative to the repository root.
+
+    Returns:
+        The mirrored test file's path; or `None` for a path that is not a module of the
+        library, of `scripts/`, or of a helper package under `tests/`.
+    """
+    if not path.endswith(".py"):
+        return None
+    for prefix, mirror in _MIRRORED:
+        if path.startswith(prefix):
+            module = pathlib.PurePosixPath(path.removeprefix(prefix))
+            directories = [_mirror_name(part) for part in module.parent.parts]
+            test = pathlib.PurePosixPath(*directories, f"test_{_mirror_name(module.stem)}.py")
+            return f"{mirror}{test}"
+    return None
+
+
+def _tests_of(path: str, docs: str) -> tuple[str, ...]:
+    """Return the test files one changed path selects, before any existence check."""
+    name = pathlib.PurePosixPath(path).name
+    if path.startswith("tests/") and name.startswith("test_") and name.endswith(".py"):
+        return (path,)
+    mirror = mirror_of(path)
+    if mirror is not None:
+        return (mirror,)
+    if re.search(docs, path):
+        return DOCS_TESTS
+    return ()
 
 
 def _plural(count: int) -> str:
@@ -183,36 +224,29 @@ def _plural(count: int) -> str:
     return f"{count} changed file{'' if count == 1 else 's'}"
 
 
-def decide(paths: list[str], rules: PathRules) -> Decision:
-    """Return the scope a change needs, by the rules CI's decision step applies.
+def decide(paths: list[str], docs: str, exists: Callable[[str], bool]) -> Decision:
+    """Return the tests a change selects: its changed tests, its mirrors, and the docs tests.
 
     Args:
         paths: The changed paths, relative to the repository root, as git lists them.
-        rules: CI's path patterns, from `read_rules`.
+        docs: CI's `docs` pattern, from `read_docs_pattern`.
+        exists: Whether a test file exists, given its path relative to the repository root.
 
     Returns:
-        `full` when a path is a workflow, matches no rule, or is a test input; else `docs`
-        when a path is documentation the tests read; else `lint`. The reason names the count
-        of changed files and the first path, in the given order, that forced the full run.
+        `tests` with the selected files that exist, in the order of the paths that selected
+        them and without repeats; or `lint` with none. The reason counts the changed files and
+        the selected test files.
     """
     if not paths:
-        return Decision("lint", "no changed files")
+        return Decision("lint", (), "no changed files")
+    selected = [test for path in paths for test in _tests_of(path, docs)]
+    tests = tuple(test for test in dict.fromkeys(selected) if exists(test))
     count = _plural(len(paths))
-    covered = f"{rules.lint}|{rules.test}|{rules.build}|{rules.docs}|{rules.unread}"
-    checks = (
-        (rules.workflows, True, "is a workflow"),
-        (covered, False, None),
-        (rules.test, True, "is a test input"),
+    if not tests:
+        return Decision("lint", (), f"{count}, none with a test")
+    return Decision(
+        "tests", tests, f"{count}; {len(tests)} test file{'' if len(tests) == 1 else 's'}"
     )
-    for pattern, forces_when_matched, what in checks:
-        for path in paths:
-            if bool(re.search(pattern, path)) == forces_when_matched:
-                reason = f"{path} {what}" if what else f"no rule covers {path}"
-                return Decision("full", f"{count}; {reason}")
-    for path in paths:
-        if re.search(rules.docs, path):
-            return Decision("docs", f"{count}; {path} is documentation")
-    return Decision("lint", f"{count}, none of which the tests read")
 
 
 def _git(*args: str) -> str | None:
@@ -292,19 +326,22 @@ def changed_paths() -> tuple[list[str], str] | str:
 
 
 def main() -> int:
-    """Print the scope on standard output and the summary line on standard error.
+    """Print the scope and its tests on standard output, and the summary line on standard error.
 
     Returns:
-        0 always: a failure to list the changes selects the full scope instead.
+        0 always: a failure to list the changes selects no tests, and says so.
     """
-    rules = read_rules(WORKFLOW.read_text(encoding="utf-8"))
+    docs = read_docs_pattern(WORKFLOW.read_text(encoding="utf-8"))
     found = changed_paths()
     if isinstance(found, str):
-        decision, against = Decision("full", found), ""
+        decision, against = Decision("lint", (), found), ""
     else:
         paths, base = found
-        decision, against = decide(paths, rules), f" ({base})"
-    sys.stdout.write(f"{decision.scope}\n")
+        decision, against = (
+            decide(paths, docs, lambda test: pathlib.Path(test).is_file()),
+            f" ({base})",
+        )
+    sys.stdout.write(" ".join((decision.scope, *decision.tests)) + "\n")
     sys.stderr.write(f"check.sh: scope {decision.scope}{against}: {decision.reason}\n")
     return 0
 

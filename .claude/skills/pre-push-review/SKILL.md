@@ -165,7 +165,8 @@ source after reading it.
 2. Push once, with the fixes, any merge of `main`, and the description
    (`gh pr edit <n> --body-file <file>`). Push once when the PR opens, then once per finished
    batch of fixes; never push work in progress or to see whether CI passes. The pre-push hook
-   runs `./scripts/check.sh`; don't run it first.
+   runs `./scripts/check.sh`: ruff, mypy, and the tests of the changed files, without
+   coverage; CI runs the whole suite. Don't run it first.
 3. Post each reply. After `git fetch`, confirm that each commit a reply names is on the remote
    branch and makes the claimed fix (`git branch -r --contains <sha>`, `git show <sha>`); a
    merge of `main` fixes nothing.
