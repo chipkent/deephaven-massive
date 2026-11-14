@@ -31,7 +31,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import PermanentError, RowDataError, UnmatchedFormError
+from deephaven_massive._errors import BrokenGuaranteeError, PermanentError, RowDataError
 from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
@@ -2902,22 +2902,14 @@ def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
     massive_session.release(table)
 
 
-def test_symbol_count_raises_a_library_defect_for_a_symbols_form_with_no_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
-    monkeypatch.setattr(poll, "AllSymbols", type("NoRule", (), {}))
-    with pytest.raises(UnmatchedFormError, match="symbol count has no rule for a value"):
-        poll._symbol_count(dm.ALL)
+def test_symbol_count_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="count has no rule for a value of type object"):
+        poll._symbol_count(object())  # type: ignore[arg-type]  # the point: refused at run time
 
 
-def test_logged_symbols_name_each_form_and_raise_for_a_form_with_no_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_logged_symbols_name_each_form_and_raise_for_a_form_with_no_rule() -> None:
     assert poll._logged_symbols(("AAPL", "MSFT")) == "2 [AAPL, MSFT]"
     assert poll._logged_symbols(dm.ALL) == "ALL"
     assert poll._logged_symbols(None) == "none"
-    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
-    monkeypatch.setattr(poll, "AllSymbols", type("NoRule", (), {}))
-    with pytest.raises(UnmatchedFormError, match="logged symbols has no rule for a value"):
-        poll._logged_symbols(dm.ALL)
+    with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
+        poll._logged_symbols(object())  # type: ignore[arg-type]  # the point: refused at run time

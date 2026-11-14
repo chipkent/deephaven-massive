@@ -25,7 +25,7 @@ from deephaven.table import Table
 
 from deephaven_massive._datasets.dates import parse_date_like
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._errors import BrokenGuaranteeError, library_bug
+from deephaven_massive._errors import BrokenGuaranteeError, unmatched_form
 from deephaven_massive.queries._query import shown_as
 
 if TYPE_CHECKING:
@@ -142,8 +142,7 @@ def _shown_symbols(symbols: object) -> str:
                 listed.append(f"… ({len(symbols) - SYMBOLS_SHOWN} more)")
             return "[" + ", ".join(listed) + "]"
         case _:
-            problem = f"a query's repr has no rule for symbols of type {type(symbols).__name__}"
-            raise BrokenGuaranteeError(library_bug(problem))
+            raise BrokenGuaranteeError(unmatched_form("a query's repr", symbols))
 
 
 @dataclass(frozen=True, slots=True)

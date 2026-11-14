@@ -166,10 +166,10 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     RowDataError,
-    UnmatchedFormError,
     from_wire,
     library_bug,
     required,
+    unmatched_form,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
 from deephaven_massive._ingest.stop_tokens import as_cancel
@@ -270,8 +270,8 @@ def _symbol_filter(file_class: AssetClass, symbols: NormalizedSymbols | None) ->
         dataset without instruments.
 
     Raises:
-        BrokenGuaranteeError: For a symbol table, which `history()` reads into a list first.
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a symbol table, which `history()` reads into a list first, or a
+            form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -282,7 +282,7 @@ def _symbol_filter(file_class: AssetClass, symbols: NormalizedSymbols | None) ->
         case SymbolTable():
             raise BrokenGuaranteeError(library_bug("a flat-file read got a symbol table"))
         case _:
-            raise UnmatchedFormError(symbols, "a flat-file read's symbol filter")
+            raise BrokenGuaranteeError(unmatched_form("a flat-file read's symbol filter", symbols))
 
 
 def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:

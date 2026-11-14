@@ -81,9 +81,9 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
 from deephaven_massive._errors import (
     BrokenGuaranteeError,
-    UnmatchedFormError,
     library_bug,
     required,
+    unmatched_form,
 )
 from deephaven_massive._massive import ParamKind, Transport, source
 
@@ -625,8 +625,7 @@ def _listed_count(symbols: NormalizedSymbols | None) -> int | None:
 
     Raises:
         BrokenGuaranteeError: For a symbol table, which `history()` reads into a list before it
-            chooses a source.
-        UnmatchedFormError: For a form of symbols with no rule here.
+            chooses a source, or a form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -637,7 +636,7 @@ def _listed_count(symbols: NormalizedSymbols | None) -> int | None:
             problem = "the history source choice got a symbol table, which history() reads first"
             raise BrokenGuaranteeError(library_bug(problem))
         case _:
-            raise UnmatchedFormError(symbols, "the history source choice")
+            raise BrokenGuaranteeError(unmatched_form("the history source choice", symbols))
 
 
 def warn_unfilled(

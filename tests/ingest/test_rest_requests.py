@@ -13,7 +13,7 @@ from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
-from deephaven_massive._errors import UnmatchedFormError
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
 
@@ -538,10 +538,6 @@ def test_a_forex_symbol_without_its_prefix_is_sent_whole() -> None:
     assert rest_requests._pair(spec, "EURUSD", split_pair) == ("EURUSD", "")
 
 
-def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
-    monkeypatch.setattr(rest_requests, "AllSymbols", type("NoRule", (), {}))
-    with pytest.raises(UnmatchedFormError, match="paths has no rule for a value"):
-        rest_requests.fetch_paths(MOVERS, dm.ALL)
+def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="paths has no rule for a value of type object"):
+        rest_requests.fetch_paths(MOVERS, object())  # type: ignore[arg-type]  # the point: refused at run time

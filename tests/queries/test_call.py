@@ -109,5 +109,5 @@ def test_a_namespace_method_logs_the_input_it_refuses(
 
 
 def test_shown_symbols_raise_a_library_defect_for_a_value_of_no_known_form() -> None:
-    with pytest.raises(BrokenGuaranteeError, match="repr has no rule for symbols of type object"):
+    with pytest.raises(BrokenGuaranteeError, match="repr has no rule for a value of type object"):
         _shown_symbols(object())

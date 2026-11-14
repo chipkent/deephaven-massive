@@ -37,7 +37,12 @@ from typing import TYPE_CHECKING, Final
 from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._errors import MassiveError, UnmatchedFormError, required
+from deephaven_massive._errors import (
+    BrokenGuaranteeError,
+    MassiveError,
+    required,
+    unmatched_form,
+)
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
@@ -84,18 +89,19 @@ def _shown_symbols(spec: DatasetSpec, symbols: NormalizedSymbols) -> tuple[int |
         topic, shows none, as a read without symbols does: `(None, "", "none")`.
 
     Raises:
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     if not spec.names_symbols:
         return None, "", "none"
-    count, text = describe_symbols(symbols)
     match symbols:
         case tuple():
+            count, text = describe_symbols(symbols)
             return count, text, bounded_list(symbols)
         case AllSymbols() | SymbolTable():
+            count, text = describe_symbols(symbols)
             return count, text, text
         case _:
-            raise UnmatchedFormError(symbols, "a stream's shown symbols")
+            raise BrokenGuaranteeError(unmatched_form("a stream's shown symbols", symbols))
 
 
 @dataclass(frozen=True, slots=True)

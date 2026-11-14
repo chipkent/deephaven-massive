@@ -45,7 +45,7 @@ from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
-from deephaven_massive._errors import BrokenGuaranteeError, UnmatchedFormError
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog
@@ -3667,13 +3667,9 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
         )
 
 
-def test_symbol_filter_raises_a_library_defect_for_a_symbols_form_with_no_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
-    monkeypatch.setattr(flatfiles, "AllSymbols", type("NoRule", (), {}))
-    with pytest.raises(UnmatchedFormError, match="symbol filter has no rule for a value"):
-        flatfiles._symbol_filter(AssetClass.STOCKS, dm.ALL)
+def test_symbol_filter_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="filter has no rule for a value of type object"):
+        flatfiles._symbol_filter(AssetClass.STOCKS, object())  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_symbol_filter_raises_a_library_defect_for_a_symbol_table() -> None:

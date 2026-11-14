@@ -23,7 +23,7 @@ from deephaven_massive._enums import (
     NotBars,
     Timespan,
 )
-from deephaven_massive._errors import UnmatchedFormError
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.transports import (
     FailureKind,
     SymbolFailure,
@@ -839,10 +839,6 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
     follows(rest_session)
 
 
-def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
-    monkeypatch.setattr(_history, "AllSymbols", type("NoRule", (), {}))
-    with pytest.raises(UnmatchedFormError, match="symbol classes has no rule for a value"):
-        _history._symbol_classes(dm.ALL)
+def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
+        _history._symbol_classes(object())  # type: ignore[arg-type]  # the point: refused at run time

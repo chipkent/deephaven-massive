@@ -136,15 +136,16 @@ from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
+    BrokenGuaranteeError,
     EntitlementError,
     ErrorCause,
     MassiveError,
     PermanentError,
     RowDataError,
-    UnmatchedFormError,
     cause_of,
     failure_text,
     required,
+    unmatched_form,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
@@ -1407,7 +1408,7 @@ def _symbol_count(symbols: tuple[str, ...] | AllSymbols | None) -> int | None:
         The length of a symbol list; None for `dm.ALL` and for a dataset without instruments.
 
     Raises:
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -1415,7 +1416,7 @@ def _symbol_count(symbols: tuple[str, ...] | AllSymbols | None) -> int | None:
         case AllSymbols() | None:
             return None
         case _:
-            raise UnmatchedFormError(symbols, "a poll cycle's symbol count")
+            raise BrokenGuaranteeError(unmatched_form("a poll cycle's symbol count", symbols))
 
 
 def _logged_symbols(symbols: NormalizedSymbols | None) -> str:
@@ -1429,7 +1430,7 @@ def _logged_symbols(symbols: NormalizedSymbols | None) -> str:
         (`describe_symbols`); `none` for a dataset without instruments.
 
     Raises:
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -1439,7 +1440,7 @@ def _logged_symbols(symbols: NormalizedSymbols | None) -> str:
         case None:
             return "none"
         case _:
-            raise UnmatchedFormError(symbols, "a poll stream's logged symbols")
+            raise BrokenGuaranteeError(unmatched_form("a poll stream's logged symbols", symbols))
 
 
 def _left_out_text(left_out: Sequence[str]) -> str | None:

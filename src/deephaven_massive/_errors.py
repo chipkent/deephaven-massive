@@ -24,13 +24,12 @@ Every `MassiveError` also says whose problem it is, through `cause`, an `ErrorCa
 
 The cause sets the level a failure is logged at: ERROR for a defect, so that a broad `except`
 never hides one, and below ERROR for an expected condition (`_log_limits.log_failure`).
-`library_bug` and `user_defect` build the two kinds of defect message, `cause_of` reads the
-cause of any exception, and `failure_text` is the text a log record gives it. `required` and
+`library_bug` and `user_defect` build the two kinds of defect message, and `unmatched_form`
+builds the library's for a value of a form that no case of a `match` covers. `cause_of` reads
+the cause of any exception, and `failure_text` is the text a log record gives it. `required` and
 `required_instance` return a value the library's design guarantees, such as a dataset's REST
 path or the session a caller holds, and raise `BrokenGuaranteeError`, a defect of the library,
-when it is missing or of another type. Its subclass `UnmatchedFormError` is raised by the
-last case of a `match` with a case for every form of a value, such as each form of a `symbols`
-argument.
+when it is missing or of another type.
 
 The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
 `WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
@@ -61,7 +60,7 @@ The public names are re-exported by `deephaven_massive/__init__.py`; this module
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, ClassVar, Final, Never, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
 from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
 
@@ -81,7 +80,6 @@ __all__ = [
     "PermanentError",
     "RowDataError",
     "UnlistedPairError",
-    "UnmatchedFormError",
     "cause_of",
     "failure_text",
     "from_wire",
@@ -89,6 +87,7 @@ __all__ = [
     "raises_through",
     "required",
     "required_instance",
+    "unmatched_form",
     "user_defect",
     "wire_cause",
 ]
@@ -367,6 +366,23 @@ def library_bug(message: str) -> str:
     return f"{message}{stop} {LIBRARY_BUG}"
 
 
+def unmatched_form(what: str, value: object) -> str:
+    """Return the library-defect message for a value of a form that no case of a `match` covers.
+
+    Raise it as a `BrokenGuaranteeError` from the last case, `case _:`, of a `match` with a case
+    for every form the value's type allows, such as each form of a `symbols` argument, so a
+    form added without a case of its own fails instead of taking another form's case.
+
+    Args:
+        what: What chooses by the value's form, such as `"a REST call's paths"`.
+        value: The value no case matched.
+
+    Returns:
+        `"<what> has no rule for a value of type <type>"`, followed by `LIBRARY_BUG`.
+    """
+    return library_bug(f"{what} has no rule for a value of type {type(value).__name__}")
+
+
 class BrokenGuaranteeError(Exception):
     """A guarantee of the library's own code that broke: a defect of the library.
 
@@ -375,28 +391,6 @@ class BrokenGuaranteeError(Exception):
     does any other exception that is not a `MassiveError`. Its message ends with `LIBRARY_BUG`.
     `required` and `required_instance` raise it.
     """
-
-
-class UnmatchedFormError(BrokenGuaranteeError):
-    """A value of a form that no case of a `match` covers: a defect of the library.
-
-    Raise it in the last case, `case _: raise UnmatchedFormError(value, ...)`, of a `match` with
-    a case for every form the value's type allows, such as each form of a `symbols` argument.
-    The type checker sees the value as `Never` there, so it flags the raise when a form is
-    added to the type without a case of its own; at run time, a value of no known form raises
-    instead of taking another form's case with no error.
-    """
-
-    def __init__(self, value: Never, what: str) -> None:
-        """Name what chose by the value's form, and the value's type.
-
-        Args:
-            value: The value no case matched.
-            what: What chooses by the value's form, for the message, such as `"a REST
-                request's symbol groups"`.
-        """
-        problem = f"{what} has no rule for a value of type {type(value).__name__}"
-        super().__init__(library_bug(problem))
 
 
 def required(value: _V | None, what: str) -> _V:

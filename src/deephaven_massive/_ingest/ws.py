@@ -86,14 +86,15 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     AuthenticationError,
+    BrokenGuaranteeError,
     EntitlementError,
     ErrorCause,
     MassiveError,
     PermanentError,
-    UnmatchedFormError,
     failure_text,
     library_bug,
     required,
+    unmatched_form,
 )
 from deephaven_massive._ingest.host_decision import real_time_note, require_real_time
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
@@ -234,7 +235,7 @@ def _kept(symbols: NormalizedSymbols, skipped: Mapping[str, object]) -> Normaliz
         A symbol list without the skipped pairs; `dm.ALL` or a reactive table unchanged.
 
     Raises:
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -242,7 +243,7 @@ def _kept(symbols: NormalizedSymbols, skipped: Mapping[str, object]) -> Normaliz
         case AllSymbols() | SymbolTable():
             return symbols
         case _:
-            raise UnmatchedFormError(symbols, "a stream's kept crypto pairs")
+            raise BrokenGuaranteeError(unmatched_form("a stream's kept crypto pairs", symbols))
 
 
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is

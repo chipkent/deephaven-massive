@@ -36,8 +36,9 @@ from deephaven_massive._enums import (
     _require_enum,
 )
 from deephaven_massive._errors import (
-    UnmatchedFormError,
+    BrokenGuaranteeError,
     raises_through,
+    unmatched_form,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import utc_text
@@ -80,7 +81,7 @@ def _symbol_classes(symbols: tuple[str, ...] | AllSymbols | None) -> Iterable[As
         without instruments.
 
     Raises:
-        UnmatchedFormError: For a form of symbols with no rule here.
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     match symbols:
         case tuple():
@@ -88,7 +89,7 @@ def _symbol_classes(symbols: tuple[str, ...] | AllSymbols | None) -> Iterable[As
         case AllSymbols() | None:
             return ()
         case _:
-            raise UnmatchedFormError(symbols, "history()'s symbol classes")
+            raise BrokenGuaranteeError(unmatched_form("history()'s symbol classes", symbols))
 
 
 def _window_text(first: date | datetime, last: date | datetime | None, now: datetime) -> str:
