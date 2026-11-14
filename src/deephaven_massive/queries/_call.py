@@ -24,7 +24,8 @@ import numpy as np
 from deephaven.table import Table
 
 from deephaven_massive._datasets.dates import parse_date_like
-from deephaven_massive._datasets.symbols import ALL
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
+from deephaven_massive._errors import BrokenGuaranteeError, library_bug
 from deephaven_massive.queries._query import shown_as
 
 if TYPE_CHECKING:
@@ -122,19 +123,27 @@ def _shown_symbols(symbols: object) -> str:
         One symbol as `'AAPL'`; several as a list of their first `SYMBOLS_SHOWN`, followed by
         `… (N more)` when there are more; `ALL` as `dm.ALL`, and a symbol table, static or
         refreshing, as `<symbol table>`.
+
+    Raises:
+        BrokenGuaranteeError: For a value of another type, which no dataset method stores.
     """
-    if symbols is ALL:
-        return "dm.ALL"
-    if isinstance(symbols, str):
-        return repr(symbols)
-    if not isinstance(symbols, tuple):
-        return "<symbol table>"
-    if len(symbols) == 1:
-        return repr(symbols[0])
-    listed = [repr(symbol) for symbol in symbols[:SYMBOLS_SHOWN]]
-    if len(symbols) > SYMBOLS_SHOWN:
-        listed.append(f"… ({len(symbols) - SYMBOLS_SHOWN} more)")
-    return "[" + ", ".join(listed) + "]"
+    match symbols:
+        case AllSymbols():
+            return "dm.ALL"
+        case str():
+            return repr(symbols)
+        case SymbolTable():
+            return "<symbol table>"
+        case tuple() if len(symbols) == 1:
+            return repr(symbols[0])
+        case tuple():
+            listed = [repr(symbol) for symbol in symbols[:SYMBOLS_SHOWN]]
+            if len(symbols) > SYMBOLS_SHOWN:
+                listed.append(f"… ({len(symbols) - SYMBOLS_SHOWN} more)")
+            return "[" + ", ".join(listed) + "]"
+        case _:
+            problem = f"a query's repr has no rule for symbols of type {type(symbols).__name__}"
+            raise BrokenGuaranteeError(library_bug(problem))
 
 
 @dataclass(frozen=True, slots=True)

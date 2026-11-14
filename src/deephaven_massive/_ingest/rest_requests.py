@@ -35,7 +35,7 @@ from deephaven_massive._datasets.history_source import session_date_param
 from deephaven_massive._datasets.symbols import AllSymbols, forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import required
+from deephaven_massive._errors import UnmatchedFormError, required
 from deephaven_massive._massive import ParamKind, Transport
 
 if TYPE_CHECKING:
@@ -608,10 +608,18 @@ def fetch_paths(
 
     Returns:
         `(path template, symbols)` pairs, in the order of each path's first symbol.
+
+    Raises:
+        UnmatchedFormError: For a form of symbols with no rule here.
     """
     default = required(spec.fetch_path, f"{spec.name}'s fetch path")
-    if not isinstance(symbols, tuple) or not symbols:
-        return [(default, symbols)]
+    match symbols:
+        case tuple() if symbols:
+            pass
+        case tuple() | AllSymbols() | None:
+            return [(default, symbols)]
+        case _:
+            raise UnmatchedFormError(symbols, "a REST call's paths")
     if spec.detail_path is not None:
         return [(spec.detail_path, symbols)]
     if not spec.fetch_paths_by_class:

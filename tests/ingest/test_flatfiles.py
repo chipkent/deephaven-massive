@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from typing_extensions import override
@@ -41,8 +43,9 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
-from deephaven_massive._datasets.symbols import NormalizedSymbols
+from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError, UnmatchedFormError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog
@@ -3661,4 +3664,21 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
         session._core.flat_file_transport().history(
             STOCK_TRADES, request, window, dates=[day], call=1, infer_holidays=True, stop=stop
+        )
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbols_form_with_no_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
+    monkeypatch.setattr(flatfiles, "AllSymbols", type("NoRule", (), {}))
+    with pytest.raises(UnmatchedFormError, match="symbol filter has no rule for a value"):
+        flatfiles._symbol_filter(AssetClass.STOCKS, dm.ALL)
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbol_table() -> None:
+    # history() reads a symbol table into a list before it reads flat files.
+    with pytest.raises(BrokenGuaranteeError, match="got a symbol table"):
+        flatfiles._symbol_filter(
+            AssetClass.STOCKS, SymbolTable(new_table([string_col("Symbol", [])]))
         )

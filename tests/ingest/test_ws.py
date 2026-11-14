@@ -36,7 +36,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency, SymbolConvention
-from deephaven_massive._errors import LIBRARY_BUG, RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, RowDataError, UnmatchedFormError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -3661,3 +3661,12 @@ def test_a_streams_row_and_description_name_its_recency(
     [row] = streams_of(custom_session, dh_to_pylist)
     assert (row["Host"], row["Recency"]) == (decision.host, decision.recency.value)
     custom_session.session.release(result)
+
+
+def test_kept_raises_a_library_defect_for_a_symbols_form_with_no_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
+    monkeypatch.setattr(ws, "AllSymbols", type("NoRule", (), {}))
+    with pytest.raises(UnmatchedFormError, match="kept crypto pairs has no rule for a value"):
+        ws._kept(dm.ALL, {})

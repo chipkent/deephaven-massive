@@ -90,6 +90,7 @@ from deephaven_massive._errors import (
     ErrorCause,
     MassiveError,
     PermanentError,
+    UnmatchedFormError,
     failure_text,
     library_bug,
     required,
@@ -231,10 +232,17 @@ def _kept(symbols: NormalizedSymbols, skipped: Mapping[str, object]) -> Normaliz
 
     Returns:
         A symbol list without the skipped pairs; `dm.ALL` or a reactive table unchanged.
+
+    Raises:
+        UnmatchedFormError: For a form of symbols with no rule here.
     """
-    if isinstance(symbols, tuple):
-        return tuple(symbol for symbol in symbols if symbol not in skipped)
-    return symbols
+    match symbols:
+        case tuple():
+            return tuple(symbol for symbol in symbols if symbol not in skipped)
+        case AllSymbols() | SymbolTable():
+            return symbols
+        case _:
+            raise UnmatchedFormError(symbols, "a stream's kept crypto pairs")
 
 
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is

@@ -131,7 +131,7 @@ from deephaven.stream import blink_to_append_only
 
 from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
-from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -141,6 +141,7 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
     RowDataError,
+    UnmatchedFormError,
     cause_of,
     failure_text,
     required,
@@ -172,7 +173,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._datasets.symbols import AllSymbols
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import DriftReport
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -1045,7 +1046,7 @@ class Poller:
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=read.requests,
-            symbol_count=len(symbols) if isinstance(symbols, tuple) else None,
+            symbol_count=_symbol_count(symbols),
             notes={
                 NotePart.POLL_CYCLE: None,
                 NotePart.LEFT_OUT: _left_out_text(read.left_out),
@@ -1396,6 +1397,51 @@ class Poller:
             return True
 
 
+def _symbol_count(symbols: tuple[str, ...] | AllSymbols | None) -> int | None:
+    """Count a cycle's symbols for its stream row's `SymbolCount`.
+
+    Args:
+        symbols: The cycle's static symbols.
+
+    Returns:
+        The length of a symbol list; None for `dm.ALL` and for a dataset without instruments.
+
+    Raises:
+        UnmatchedFormError: For a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            return len(symbols)
+        case AllSymbols() | None:
+            return None
+        case _:
+            raise UnmatchedFormError(symbols, "a poll cycle's symbol count")
+
+
+def _logged_symbols(symbols: NormalizedSymbols | None) -> str:
+    """Write a poll stream's symbols for the log line of its start.
+
+    Args:
+        symbols: The request's symbols.
+
+    Returns:
+        The first symbols of a list (`bounded_list`); `ALL` or `reactive table`
+        (`describe_symbols`); `none` for a dataset without instruments.
+
+    Raises:
+        UnmatchedFormError: For a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            return bounded_list(symbols)
+        case AllSymbols() | SymbolTable():
+            return describe_symbols(symbols)[1]
+        case None:
+            return "none"
+        case _:
+            raise UnmatchedFormError(symbols, "a poll stream's logged symbols")
+
+
 def _left_out_text(left_out: Sequence[str]) -> str | None:
     """Return the `Error` part that lists a cycle's symbols left out, or None for none.
 
@@ -1721,11 +1767,7 @@ def open_poll(
         shown_query(query),
         interval.total_seconds(),
         mode.name,
-        "none"
-        if symbols is None
-        else bounded_list(symbols)
-        if isinstance(symbols, tuple)
-        else describe_symbols(symbols)[1],
+        _logged_symbols(symbols),
     )
     poller.start()
     return result

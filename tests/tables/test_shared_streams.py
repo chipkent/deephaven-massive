@@ -34,6 +34,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
+from deephaven_massive._errors import UnmatchedFormError
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -1341,3 +1342,12 @@ def test_a_verb_that_races_close_never_returns_its_table(
             build=build_and_close,
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # failed by the close, then released
+
+
+def test_shown_symbols_raise_a_library_defect_for_a_symbols_form_with_no_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
+    monkeypatch.setattr(_streams, "AllSymbols", type("NoRule", (), {}))
+    with pytest.raises(UnmatchedFormError, match="shown symbols has no rule for a value"):
+        _streams._shown_symbols(SPEC, dm.ALL)

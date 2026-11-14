@@ -6,6 +6,8 @@ from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from deephaven import new_table
+from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
@@ -35,8 +37,9 @@ from deephaven_massive._datasets.row_times import (
     RowTimes,
     StartRule,
 )
-from deephaven_massive._datasets.symbols import NormalizedSymbols
+from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, HistorySource, NotBars, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError, UnmatchedFormError
 from deephaven_massive._massive import Transport
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -687,3 +690,18 @@ def test_the_current_partition_is_today_in_the_day_zone_or_the_current_session(
     assert current_partition(FUTURES_TRADES, now=evening) == date(2025, 3, 4)
     monkeypatch.setattr(history_source, "_now", lambda: evening)
     assert current_partition(STOCK_TRADES) == date(2025, 3, 3)
+
+
+def test_listed_count_raises_a_library_defect_for_a_symbols_form_with_no_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no rule for `AllSymbols`, `dm.ALL` stands for a form added without one.
+    monkeypatch.setattr(history_source, "AllSymbols", type("NoRule", (), {}))
+    with pytest.raises(UnmatchedFormError, match="history source choice has no rule for a value"):
+        history_source._listed_count(dm.ALL)
+
+
+def test_listed_count_raises_a_library_defect_for_a_symbol_table() -> None:
+    # history() reads a symbol table into a list before it chooses a source.
+    with pytest.raises(BrokenGuaranteeError, match="got a symbol table"):
+        history_source._listed_count(SymbolTable(new_table([string_col("Symbol", [])])))

@@ -147,7 +147,7 @@ from deephaven_massive._datasets.row_times import (
     within,
 )
 from deephaven_massive._datasets.source_columns import RoundedFields, rename, required_fields
-from deephaven_massive._datasets.symbols import option_roots
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import (
     first_failure,
     masked_instants,
@@ -161,11 +161,14 @@ from deephaven_massive._datasets.wire_symbols import (
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
     AuthenticationError,
+    BrokenGuaranteeError,
     EntitlementError,
     ErrorCause,
     MassiveError,
     RowDataError,
+    UnmatchedFormError,
     from_wire,
+    library_bug,
     required,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
@@ -200,6 +203,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import FlatFile, FlatFileClient
@@ -252,6 +256,33 @@ class _Key:
     key: str
     day: date
     venue: FuturesVenue | None
+
+
+def _symbol_filter(file_class: AssetClass, symbols: NormalizedSymbols | None) -> pa.Array | None:
+    """Return the spellings a flat-file read keeps the rows of, or None to keep every row.
+
+    Args:
+        file_class: The dataset's class.
+        symbols: The request's static symbols.
+
+    Returns:
+        Every spelling of each listed symbol (`wire_spellings`); None for `dm.ALL` and for a
+        dataset without instruments.
+
+    Raises:
+        BrokenGuaranteeError: For a symbol table, which `history()` reads into a list first.
+        UnmatchedFormError: For a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            spellings = [w for s in symbols for w in wire_spellings(file_class, s)]
+            return pa.array(spellings, pa.string())
+        case AllSymbols() | None:
+            return None
+        case SymbolTable():
+            raise BrokenGuaranteeError(library_bug("a flat-file read got a symbol table"))
+        case _:
+            raise UnmatchedFormError(symbols, "a flat-file read's symbol filter")
 
 
 def _window_ns(window: HistoryWindow) -> tuple[int, int] | None:
@@ -544,7 +575,6 @@ class _Transform:
         time_name = time_column(spec.times)
         time_unit = required(by_column[time_name].unit, f"{prefix} column {time_name}'s unit")
         to_ns = functools.partial(_time_nanos, f"{spec.name}.{time_name}", time_unit)
-        symbols = request.symbols
         plan = ReadPlan(
             columns=tuple(
                 ReadColumn(
@@ -556,14 +586,7 @@ class _Transform:
                 for c in renamed
             ),
             symbol_header=header["Symbol"],
-            symbols=(
-                pa.array(
-                    [w for s in symbols for w in wire_spellings(file_class, s)],
-                    pa.string(),
-                )
-                if isinstance(symbols, tuple)
-                else None
-            ),
+            symbols=_symbol_filter(file_class, request.symbols),
             time_header=header[time_name],
             window_ns=_window_ns(window),
             to_ns=to_ns,
