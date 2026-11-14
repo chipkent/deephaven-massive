@@ -31,7 +31,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import PermanentError, RowDataError
+from deephaven_massive._errors import BrokenGuaranteeError, PermanentError, RowDataError
 from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
@@ -58,6 +58,8 @@ if TYPE_CHECKING:
 
 R = Transport.REST
 TIMEOUT = 30.0
+# The modes a poller runs in: `poll()` resolves AUTO to the dataset's own mode first.
+POLLER_MODES = [PollMode.REPLACE, PollMode.UPSERT, PollMode.APPEND]
 LOGGER = "deephaven_massive._tables.poll"
 
 
@@ -352,7 +354,7 @@ def test_append_appends_only_keys_not_seen_before(
     assert all(wait <= 60 for wait in clock.waits)
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_every_mode_is_described_and_ticks(
     *,
     massive_session: dm.MassiveSession,
@@ -722,7 +724,7 @@ def _last_cycle_fails_the_table(clock: FakeClock, pollers: Pollers) -> None:
     assert not poller.thread.is_alive()
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     *,
     massive_session: dm.MassiveSession,
@@ -2622,7 +2624,7 @@ def test_append_identities_hold_a_list_poll_key(
     until(lambda: holdings(table, dh_to_pylist) == [("C1", ("A",), 1.0), ("C1", ("B",), 3.0)])
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_a_list_poll_key_is_order_sensitive(
     *,
     massive_session: dm.MassiveSession,
@@ -2900,3 +2902,25 @@ def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     assert blink_creations[before:] == [True]
     massive_session.release(table)
+
+
+def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    # AUTO is resolved before a poller starts; a mode with no publish rule must not be upserted.
+    unused: BlinkPublisher = None  # type: ignore[assignment]  # a fake: the poller never starts
+    refused = r"^stocks\.dividends poll\(\) has no rule for auto\."
+    with pytest.raises(BrokenGuaranteeError, match=refused):
+        poll.Poller(
+            massive_session._core,
+            spec=DIVIDENDS,
+            request=Request(),
+            interval=timedelta(seconds=1),
+            mode=PollMode.AUTO,
+            stream_id=99,
+            read=script,
+            pollers=pollers,
+            clock=poll.CLOCK,
+            publisher=unused,
+            stop=Cancel(),
+        )

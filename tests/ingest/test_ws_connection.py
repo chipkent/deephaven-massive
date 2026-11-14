@@ -1441,14 +1441,9 @@ def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
     custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
 
     def fired() -> bool:
-        return bool(
-            custom_session.on_loop(
-                connection,
-                lambda: (
-                    connection._episodes.down_since is not None and not connection._episodes.down
-                ),
-            )
-        )
+        # The stream stays expired until its table fails, which needs the flush below; the
+        # outage itself can end first, once the reconnect's subscription is acknowledged.
+        return bool(custom_session.on_loop(connection, lambda: connection._episodes.expired))
 
     wait_for(fired)  # the zero-second timer fires on the loop's next turn
     custom_session.flush()
@@ -2327,3 +2322,13 @@ def test_a_taken_connection_decides_to_close_once(
     closes = [r for r in caplog.records if "the connection closes" in r.getMessage()]
     assert len(closes) == 1
     del first, second
+
+
+def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
+    # Every state has its rule; a new one fails until it has, never only shows in the row.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with pytest.raises(AssertionError):
+        ws_session.on_loop(connection, lambda: connection._on_state("BOGUS", None))  # type: ignore[arg-type]  # the point: refused at run time
+    ws_session.session.release(result)

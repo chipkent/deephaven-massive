@@ -35,7 +35,7 @@ from deephaven_massive._datasets.history_source import session_date_param
 from deephaven_massive._datasets.symbols import AllSymbols, forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
-from deephaven_massive._errors import required
+from deephaven_massive._errors import required, required_instance
 from deephaven_massive._massive import ParamKind, Transport
 
 if TYPE_CHECKING:
@@ -274,7 +274,10 @@ def own_symbols(
     if symbol is not None:
         return (symbol,)
     chunk = own_query.get(spec.symbol_param) if spec.symbol_param is not None else None
-    return chunk if isinstance(chunk, tuple) else ()
+    if chunk is None:
+        return ()
+    # `_symbol_parts` puts a chunk in the query as a tuple; any other form is a defect.
+    return required_instance(chunk, tuple, f"{spec.name}'s chunk of symbols")
 
 
 def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[str]:

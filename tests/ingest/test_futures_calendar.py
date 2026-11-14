@@ -755,3 +755,16 @@ def test_the_worker_outlives_an_unexpected_error(
     correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     idle(calendar)
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_a_lookup_the_worker_has_no_rule_for_is_a_logged_defect(
+    *, calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Only contract and schedule lookups are queued; anything else is logged as a defect, never
+    # read as a schedule lookup, and the worker keeps serving.
+    with caplog.at_level(logging.ERROR):
+        calendar._put(("prices", frozenset({"ESM4"})))
+        idle(calendar)
+    assert "the futures lookup queue holds ('prices', frozenset({'ESM4'}))" in caplog.text
+    watched(calendar, "ESM4")
+    assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])

@@ -686,13 +686,14 @@ def test_context_manager_closes() -> None:
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
         massive_session.release("t")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(
-        ValueError, match=r"not a live result of this session: release\(\) takes"
-    ) as caught:
+    with pytest.raises(ValueError, match=r": release\(\) takes a live table") as caught:
         massive_session.release(new_table([string_col("Symbol", ["A"])]))
-    assert "a static fetch(wait=True) or history(..., wait=True) table" in str(caught.value)
-    assert "streams()" in str(caught.value)
-    assert "release the live table it came from" in str(caught.value)
+    assert str(caught.value) == (
+        f"{massive_session._core.label}: release() takes a live table that this session "
+        "returned, and this table is not one. For a table you made from a live table, release "
+        "the live table instead. A table of another session needs that session's release(). A "
+        "static table needs no release"
+    )
 
 
 def test_a_session_closed_while_a_stream_opens(

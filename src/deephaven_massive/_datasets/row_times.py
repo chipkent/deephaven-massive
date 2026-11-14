@@ -1291,7 +1291,8 @@ def stamp_rule(
         return StampRule(
             zone, known, what, timespan, request.multiplier, warnings, weekdays=_SUNDAY
         )
-    months = _PERIOD_MONTHS.get(timespan, frozenset())
+    # Only a day bar of several days has no months to land on; any other unit must be listed.
+    months = frozenset() if timespan is Timespan.DAY else _PERIOD_MONTHS[timespan]
     return StampRule(zone, known, what, timespan, request.multiplier, warnings, months=months)
 
 

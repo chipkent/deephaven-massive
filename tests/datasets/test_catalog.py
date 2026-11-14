@@ -1770,3 +1770,10 @@ def test_a_key_spec_accepts_a_role_it_fits(
     *, key: KeySpec, role: str, transport: Transport
 ) -> None:
     key.check(role, transport, where="d: rest p")
+
+
+def test_history_columns_refuse_a_transport_history_never_reads() -> None:
+    # Only REST and the flat files serve history; any other transport is a defect, never read
+    # as the flat files.
+    with pytest.raises(BrokenGuaranteeError, match=r"^history\(\) never reads by WS\."):
+        CATALOG.history_columns(CATALOG.by_name["stocks.trades"], Transport.WS)

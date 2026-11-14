@@ -221,8 +221,10 @@ class Reread(StrEnum):
 class FuturesVenue(StrEnum):
     """A futures exchange, which picks the flat files a futures `history()` reads.
 
-    A futures dataset's `venues` argument takes a set of members and reads every exchange by
-    default. It applies only to flat files: streams cover every exchange.
+    A futures dataset's `venues` argument takes a set of members. Left out, a read takes every
+    exchange the plan allows and skips each one Massive refuses with a warning; the
+    `refused_venues` argument says what happens when Massive refuses an exchange the call
+    names. Both apply only to flat files: streams cover every exchange.
 
     Example:
         ::
@@ -340,7 +342,7 @@ class Market(StrEnum):
     STOCKS = "stocks"
     OTC = "otc"
     INDICES = "indices"
-    FX = "fx"
+    FOREX = "fx"
     CRYPTO = "crypto"
 
 
@@ -474,9 +476,9 @@ class SymbolConvention(StrEnum):
 
 
 class OnError(StrEnum):
-    """What a bad symbol does: fail, or keep going with or without a log record.
+    """What a problem does: fail, or keep going with or without a log record.
 
-    One enum for every symbol problem, used in five places:
+    One enum for every problem a caller may choose to skip, used in these places:
 
     - `canonicalize_symbols(on_error=)`, for a value Massive would read as another
       instrument, such as Yahoo's `VOD.L`. The default there is `LOG`.
@@ -491,6 +493,11 @@ class OnError(StrEnum):
       cannot read. The default is `LOG`.
     - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
       `history()`, or `poll()`, or one a `poll()` table cannot read. The default is `LOG`.
+    - `MassiveConfig.malformed_rows`, for a line of a flat file that is not a readable row. The
+      default is `LOG`.
+    - The `refused_venues` argument of the futures `trades`, `quotes`, and `bars`, and
+      `MassiveConfig.refused_venues` for a call that leaves it out, for a futures exchange the
+      call names in `venues` whose flat files Massive refuses. The default is `RAISE`.
 
     The members:
 
@@ -501,6 +508,7 @@ class OnError(StrEnum):
       Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
       bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
       unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
+      A refused futures exchange's files are skipped, with one WARNING per call naming them.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Example:

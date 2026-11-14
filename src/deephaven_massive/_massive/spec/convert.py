@@ -79,7 +79,8 @@ are the same: a column it returns holds exactly what the converter gives for eac
 unless a caller that builds Arrow arrays leaves the numbers for Arrow to check and convert.
 
 The functions are pure and safe from any thread. This module imports only the standard
-library and `spec.types`.
+library and `spec.types`. A column reader given a value its caller never passes raises
+`TypeError`, a defect of the library, never a null or a skipped check.
 """
 
 from __future__ import annotations
@@ -618,6 +619,30 @@ def _only(values: Sequence[object], kind: type[_T]) -> TypeGuard[list[_T]]:
     return set(map(type, values)) <= {kind}
 
 
+def _present(values: list[object], kind: type[_T], column: str) -> list[_T]:
+    """Return a column's non-null values, which its caller has checked are all of one type.
+
+    The per-value path of a column that holds nulls; a column with none takes `_only`'s path.
+
+    Args:
+        values: The column: values of `kind` exactly, and `None`s, which are left out.
+        kind: The one type.
+        column: The kind of column, for the message, such as `"an integer column"`.
+
+    Returns:
+        The values that are not `None`, in order.
+
+    Raises:
+        TypeError: A defect of the library, if a value is of another type (a `bool` in an
+            integer column, say): the caller admits only `kind` and nulls, and any other value
+            would otherwise be left out unseen.
+    """
+    present = [v for v in values if v is not None]
+    if not _only(present, kind):
+        raise TypeError(_unexpected(column, present, frozenset({kind})))
+    return present
+
+
 def _in_int64(values: list[object]) -> bool:
     """Return whether every integer of a list of integers and nulls is in the signed 64-bit range.
 
@@ -627,11 +652,11 @@ def _in_int64(values: list[object]) -> bool:
     Returns:
         True when every integer is in range, or there is none.
     """
-    numbers = values if _only(values, int) else [v for v in values if type(v) is int]
+    numbers = values if _only(values, int) else _present(values, int, "an integer column")
     return not numbers or (_INT64[0] <= min(numbers) and max(numbers) <= _INT64[1])
 
 
-_NUMBERS: Final = frozenset({int, float, NoneType})
+_NUMBERS: Final[frozenset[type]] = frozenset({int, float, NoneType})
 """The JSON value types of a `double` column that `float` converts as its converter does."""
 
 _WHOLE_NUMBERS: Final = frozenset({int, float})
@@ -650,6 +675,18 @@ def _numbers_only(values: Sequence[object]) -> TypeGuard[list[int | float]]:
     return set(map(type, values)) <= _WHOLE_NUMBERS
 
 
+def _numbers_or_nulls(values: Sequence[object]) -> TypeGuard[list[int | float | None]]:
+    """Tell whether a column holds integers, floats, and nulls only, by one pass of `type`.
+
+    Args:
+        values: The column.
+
+    Returns:
+        True when every value's exact type is `int`, `float`, or `NoneType`.
+    """
+    return set(map(type, values)) <= _NUMBERS
+
+
 def _as_floats(values: list[object]) -> list[object] | None:
     """Return a column of integers, floats, and nulls as floats, as the `double` converter gives.
 
@@ -663,13 +700,20 @@ def _as_floats(values: list[object]) -> list[object] | None:
     Returns:
         A new list of floats (and `None`s); or None when an integer is too large for a double,
         which the converter refuses.
+
+    Raises:
+        TypeError: A defect of the library, if a value is neither null, an `int`, nor a `float`:
+            the caller admits only those, and any other type would otherwise be lost.
     """
     try:
         if _numbers_only(values):
             return list(map(float, values))
-        return [float(v) if isinstance(v, int | float) else None for v in values]
+        if not _numbers_or_nulls(values):
+            raise TypeError(_unexpected("a double column", values, _NUMBERS))
+        floats: list[object] = [None if v is None else float(v) for v in values]
     except OverflowError:
         return None
+    return floats
 
 
 _TEXTS: Final = frozenset({str, NoneType})
@@ -690,7 +734,7 @@ def _decimal_texts(values: list[object]) -> list[object] | None:
         A new list of floats (and `None`s); or None when some text is not a plain decimal, or
         spells a number too large for a finite double, which the converter refuses.
     """
-    texts = values if _only(values, str) else [v for v in values if type(v) is str]
+    texts = values if _only(values, str) else _present(values, str, "a decimal-text column")
     joined = "\n".join(texts)
     # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
     # the column passes only when the joining newlines are the only ones.
@@ -797,7 +841,8 @@ def column_converter(
     return functools.partial(
         _as_sent_column,
         as_sent=as_sent,
-        items_as_sent=_ITEMS_AS_SENT.get(field.wire_type),
+        # A list field's items are always checked: a list type missing here is a KeyError.
+        items_as_sent=_ITEMS_AS_SENT[field.wire_type] if list in as_sent else None,
         converted=converted,
         double_values=field.wire_type is WireType.DOUBLE,
         long_values=not arrow_checks_numbers and field.wire_type in {WireType.LONG, WireType.EPOCH},
@@ -861,9 +906,35 @@ def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_ite
     Returns:
         True when every item's type is in `items_as_sent` and, under `long_items`, every item
         fits in a signed 64-bit integer.
+
+    Raises:
+        TypeError: A defect of the library, if a value is neither null nor a list: the caller
+            admits only those, and any other form would otherwise skip the check.
     """
-    items: list[object] = list(chain.from_iterable(v for v in values if isinstance(v, list)))
+    lists = [v for v in values if v is not None]
+    if not _only(lists, list):
+        raise TypeError(_unexpected("a list column", lists, frozenset({list})))
+    items: list[object] = list(chain.from_iterable(lists))
     return set(map(type, items)) <= items_as_sent and (not long_items or _in_int64(items))
+
+
+def _unexpected(column: str, values: list[object], admitted: frozenset[type]) -> str:
+    """Return the message of a value a column reader's caller should never have passed it.
+
+    Args:
+        column: The kind of column, such as `"a double column"`.
+        values: The column's values, at least one of a type not in `admitted`.
+        admitted: The value types the reader handles.
+
+    Returns:
+        The message, which names the first such value's type and says the defect is the
+        library's.
+    """
+    kind = next(type(v) for v in values if type(v) not in admitted)
+    return (
+        f"{column} holds a {kind.__name__}, which its reader does not handle and would lose; "
+        "this is a bug in deephaven-massive"
+    )
 
 
 def unconvertible_message(field: Field, value: object) -> str:

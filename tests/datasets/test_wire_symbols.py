@@ -278,3 +278,9 @@ def test_a_symbol_without_its_class_prefix_goes_on_the_wire_as_written(
     assert wire_spellings(asset_class, symbol) == (symbol,)
     if asset_class is not CRY:  # a crypto topic takes its split from Massive's list alone
         assert ws_symbol(asset_class, symbol, {}) == symbol
+
+
+def test_a_class_with_no_spellings_is_a_defect() -> None:
+    # Every class names its file spellings; a new one fails until it does, never reads as stocks.
+    with pytest.raises(AssertionError):
+        wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
