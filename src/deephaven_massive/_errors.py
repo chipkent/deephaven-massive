@@ -300,13 +300,13 @@ class MassiveError(Exception):
         - HTTP 404 on a later page of one symbol's REST read;
         - S3's `RequestTimeout` on a flat file;
         - a flat file Massive hasn't published yet;
-        - pages of one read that disagree on `adjusted`.
+        - a page Massive answered with another `adjusted` than the call asked for.
 
         A `fetch()` or `history()` of a watchlist whose every symbol failed is retryable only
         when every symbol's error is. False for any other HTTP status, an `AuthenticationError`,
         an `EntitlementError`, a `SessionClosedError`, or a bug.
 
-        Before it raises, the library has retried a server failure or a lost connection a few
+        Before it raises, the library has retried a server failure or a failed connection a few
         times. It raises a rate limit as soon as the read would spend more than 10 minutes in
         all waiting out rate limits, or 90 seconds for a console command with `wait=True`. Wait
         before you call again.
@@ -330,15 +330,17 @@ class AuthenticationError(MassiveError):
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
     `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
-    401). When Massive's flat-file server rejects the S3 keys, `history()` reads REST instead
-    and logs a warning; under `source=dm.HistorySource.FLAT_FILES`, or when REST can't serve
-    the read, it raises this error, whose message names `s3_access_key_id` and
-    `s3_secret_access_key`. Without `wait=True`, the table fails with it instead. A live table
-    fails with it when Massive's streaming server rejects the key, and so does every other
-    stream on that connection.
-    Massive may give the same answer to a plan without streams of the asset class, so the
-    message says that too. Its `source` is `ErrorSource.USER` when the key is missing, and
-    `ErrorSource.MASSIVE` when Massive refused it.
+    401); without `wait=True`, the table fails with it instead. A live table fails with it when
+    Massive's streaming server rejects the key, and so does every other stream on that
+    connection. Massive may give the same answer to a plan without streams of the asset class,
+    so the message says that too.
+
+    If S3 rejects your flat-file keys, `history()` reads REST instead and logs a warning. It
+    raises this error only under `source=dm.HistorySource.FLAT_FILES`, or when REST can't serve
+    the read. The message names `s3_access_key_id` and `s3_secret_access_key`.
+
+    Its `source` is `ErrorSource.USER` when the key is missing, and `ErrorSource.MASSIVE` when
+    Massive refused it.
 
     Example:
         ::
