@@ -274,10 +274,25 @@ def test_a_symbol_without_its_class_prefix_goes_on_the_wire_as_written(
     asset_class: AssetClass, symbol: str
 ) -> None:
     # No spelling is derived from text that lacks Massive's prefix: `BTCUSD` is never cut into
-    # `X:CUSD`, nor `EURUSD` read as `C:EURUSD`. Massive answers the text as written.
-    assert wire_spellings(asset_class, symbol) == (symbol,)
+    # `X:CUSD`, nor `EURUSD` read as `C:EURUSD`. A file filter keeps no row for it, since the
+    # files' rows of that text are read as another ticker (or none).
+    assert wire_spellings(asset_class, symbol) == ()
     if asset_class is not CRY:  # a crypto topic takes its split from Massive's list alone
         assert ws_symbol(asset_class, symbol, {}) == symbol
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "symbol"),
+    [(FX, "C:EUR-USD"), (FX, "C:eurusd"), (CRY, "X:BTC-USD"), (CRY, "X:BTC/USD")],
+)
+def test_a_file_filter_keeps_no_spelling_read_as_another_ticker(
+    asset_class: AssetClass, symbol: str
+) -> None:
+    # The files write EUR/USD as `X:EUR-USD` and BTC/USD as `X:BTC-USD`; a request for the
+    # text `C:EUR-USD` must not read those rows, which the library names `C:EURUSD`.
+    for spelling in wire_spellings(asset_class, symbol):
+        assert canonical_from_wire(asset_class, spelling) == symbol
+    assert "X:EUR-USD" not in wire_spellings(asset_class, symbol)
 
 
 def test_a_class_with_no_spellings_is_a_defect() -> None:

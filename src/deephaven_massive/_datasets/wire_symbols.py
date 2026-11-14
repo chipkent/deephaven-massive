@@ -110,9 +110,28 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
         symbol: A symbol of the class.
 
     Returns:
-        The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
-        `symbol`; only the symbol itself for one without its class's prefix (`BTCUSD` on the
-        crypto class), which goes on the wire as written.
+        The spellings that `canonical_from_wire(asset_class, spelling)` reads back as exactly
+        `symbol`, so a row the filter keeps is never read as another ticker. None for text
+        whose rows would be read as another ticker, such as `C:EUR-USD` (read as `C:EURUSD`)
+        or `SPX` on the indices class (read as `I:SPX`): no file row is that symbol.
+    """
+    return tuple(
+        spelling
+        for spelling in _candidate_spellings(asset_class, symbol)
+        if canonical_from_wire(asset_class, spelling) == symbol
+    )
+
+
+def _candidate_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
+    """Return every way a flat file may write a symbol, before `wire_spellings` checks each.
+
+    Args:
+        asset_class: The dataset's class.
+        symbol: A symbol of the class.
+
+    Returns:
+        The spellings, the symbol itself first: a forex pair split by position, a crypto pair
+        cut at every point, an index with and without `I:`, and any other symbol alone.
     """
     if asset_class is AssetClass.FOREX:
         codes = forex_codes(symbol)
