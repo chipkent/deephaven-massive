@@ -96,6 +96,7 @@ text), so it is checked both against the real tree and against a synthetic tree 
 """
 
 import ast
+import functools
 import os
 import re
 import subprocess
@@ -105,6 +106,8 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 import pytest
+
+from tests._live import parallel
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
@@ -639,6 +642,39 @@ def _module_of(path: PurePosixPath) -> tuple[str, str]:
     return f"{package}.{path.stem}", package
 
 
+@functools.lru_cache(maxsize=4)
+def _nodes(tree: ast.Module) -> tuple[ast.AST, ...]:
+    """Return every node of a file's syntax tree, in the order of `ast.walk`.
+
+    Each file's checks read its tree many times; walking it once, and keeping the nodes of the
+    last few trees, makes the checks of the whole tree several times faster.
+
+    Args:
+        tree: The file's syntax tree.
+
+    Returns:
+        The nodes, the tree itself first.
+    """
+    return tuple(ast.walk(tree))
+
+
+def _dotted(node: ast.expr) -> str | None:
+    """Return the dotted name an expression spells, as `ast.unparse` would write it.
+
+    Args:
+        node: Any expression.
+
+    Returns:
+        `"a.b.c"` for a name or a chain of attributes on a name; None for any other
+        expression, whose text is never a dotted name.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute) and (base := _dotted(node.value)) is not None:
+        return f"{base}.{node.attr}"
+    return None
+
+
 def _absolute(package: str, level: int, name: str | None) -> str:
     """Resolve a relative import to an absolute module name.
 
@@ -672,7 +708,7 @@ def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
         `(line, name)` pairs in the order of the walk.
     """
     found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -683,7 +719,7 @@ def _imports(tree: ast.Module, package: str) -> list[tuple[int, str]]:
                 (node.lineno, base if alias.name == "*" else f"{base}.{alias.name}")
                 for alias in node.names
             )
-        elif isinstance(node, ast.Call) and ast.unparse(node.func) == "__import__" and node.args:
+        elif isinstance(node, ast.Call) and _dotted(node.func) == "__import__" and node.args:
             found.extend((node.lineno, name) for name in _fromlist_imports(node))
         elif isinstance(node, ast.Call) and (relative := _relative_import(node)) is not None:
             found.append((node.lineno, relative))
@@ -701,7 +737,9 @@ def _relative_import(call: ast.Call) -> str | None:
         attribute path, such as `importlib.import_module`) or its name or package is not a
         literal, or the name is not relative.
     """
-    if ast.unparse(call.func).split(".")[-1] != "import_module" or not call.args:
+    function = call.func
+    called = function.attr if isinstance(function, ast.Attribute) else _dotted(function)
+    if called != "import_module" or not call.args:
         return None
     name = call.args[0]
     package = next((k.value for k in call.keywords if k.arg == "package"), None)
@@ -757,7 +795,7 @@ def _docstrings(tree: ast.Module) -> set[int]:
     """
     return {
         id(node.value)
-        for node in ast.walk(tree)
+        for node in _nodes(tree)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
     }
 
@@ -780,7 +818,7 @@ def _module_strings(tree: ast.Module) -> list[tuple[int, str]]:
     """
     skipped = _docstrings(tree)
     found = []
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if (
             not isinstance(node, ast.Constant)
             or not isinstance(node.value, str)
@@ -810,7 +848,7 @@ def _wire_aliases(tree: ast.Module, package: str) -> set[str]:
     """
     aliases = {_WIRE}
     roots: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.Import):
             aliases.update(a.asname for a in node.names if a.name == _WIRE and a.asname)
             roots.update(a.asname or a.name for a in node.names if a.name == _PACKAGE)
@@ -833,8 +871,8 @@ def _wire_reads(tree: ast.Module, aliases: set[str]) -> list[tuple[int, str]]:
         `(line, attribute)` pairs.
     """
     found = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and ast.unparse(node.value) in aliases:
+    for node in _nodes(tree):
+        if isinstance(node, ast.Attribute) and _dotted(node.value) in aliases:
             found.append((node.lineno, node.attr))
         elif isinstance(node, ast.Call) and (name := _getattr_name(node, aliases)) is not None:
             found.append((node.lineno, name))
@@ -853,10 +891,10 @@ def _getattr_name(call: ast.Call, aliases: set[str]) -> str | None:
         literal name.
     """
     # getattr(object, name[, default])
-    if ast.unparse(call.func) != "getattr" or len(call.args) < 2:
+    if _dotted(call.func) != "getattr" or len(call.args) < 2:
         return None
     target, name = call.args[0], call.args[1]
-    if ast.unparse(target) not in aliases:
+    if _dotted(target) not in aliases:
         return None
     return name.value if isinstance(name, ast.Constant) and isinstance(name.value, str) else None
 
@@ -876,7 +914,7 @@ def _snapshot_names(tree: ast.Module) -> list[tuple[int, str]]:
     skipped = _docstrings(tree)
     return [
         (node.lineno, node.value)
-        for node in ast.walk(tree)
+        for node in _nodes(tree)
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
         and id(node) not in skipped
@@ -899,7 +937,7 @@ def _type_checking_lines(tree: ast.Module) -> set[int]:
     """
     return {
         statement.lineno
-        for node in ast.walk(tree)
+        for node in _nodes(tree)
         if isinstance(node, ast.If)
         and ast.unparse(node.test) in {"TYPE_CHECKING", "typing.TYPE_CHECKING"}
         for statement in node.body
@@ -1576,7 +1614,7 @@ def _import_functions(tree: ast.Module) -> set[str]:
         `il.import_module`) is recognized by `_is_import_call` without an alias.
     """
     names = {"__import__", "import_module"}
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "importlib":
             names.update(a.asname or a.name for a in node.names if a.name == "import_module")
     return names
@@ -1611,7 +1649,7 @@ def _dynamic_imports(tree: ast.Module) -> list[tuple[int, ast.expr | None]]:
     """
     functions = _import_functions(tree)
     found: list[tuple[int, ast.expr | None]] = []
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.Call) and _is_import_call(node, functions):
             keyword = next((k.value for k in node.keywords if k.arg == "name"), None)
             found.append((node.lineno, node.args[0] if node.args else keyword))
@@ -1686,7 +1724,7 @@ def _modules_lookups(tree: ast.Module) -> list[tuple[int, str]]:
         is not a string literal.
     """
     found = []
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.Subscript) and ast.unparse(node.value).endswith("sys.modules"):
             key: ast.expr = node.slice
         elif (
@@ -1739,7 +1777,7 @@ def _computed_imports(tree: ast.Module) -> list[tuple[int, str]]:
     functions = _import_functions(tree)
     found: list[tuple[int, str]] = []
     called: set[int] = set()
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.Call) and _is_import_call(node, functions):
             called.add(id(node.func))
             keyword = next((k.value for k in node.keywords if k.arg == "name"), None)
@@ -1747,7 +1785,7 @@ def _computed_imports(tree: ast.Module) -> list[tuple[int, str]]:
             if not _is_resolved_name(node, argument):
                 found.append((node.lineno, ast.unparse(node)))
     skipped = called | _docstrings(tree)
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if not isinstance(node, ast.expr) or id(node) in skipped:
             continue
         if _names_import_function(node, functions):
@@ -1768,13 +1806,13 @@ def _thread_reads(tree: ast.Module) -> list[tuple[int, str]]:
     """
     aliases = {
         alias.asname or alias.name
-        for node in ast.walk(tree)
+        for node in _nodes(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
         if alias.name == "threading"
     }
     found = []
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Name)
@@ -1820,16 +1858,16 @@ def _client_reads(
         for line, attribute in _wire_reads(tree, aliases)
         if attribute in _WIRE_CLIENTS
     )
-    for node in ast.walk(tree):
+    for node in _nodes(tree):
         if isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
             base = _absolute(package, node.level, node.module) if node.level else node.module
             if base == _WIRE:
                 found.append((node.lineno, "*"))
         elif (
             isinstance(node, ast.Call)
-            and ast.unparse(node.func) == "getattr"
+            and _dotted(node.func) == "getattr"
             and node.args
-            and ast.unparse(node.args[0]) in aliases
+            and _dotted(node.args[0]) in aliases
             and _getattr_name(node, aliases) is None
         ):
             found.append((node.lineno, ast.unparse(node)))
@@ -2311,27 +2349,49 @@ def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
         "-m ''",
     ],
 )
-def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: str) -> None:
+def test_parallel_workers_refuse_the_live_tests_the_run_selects(
+    marker_option: str, tmp_path: Path
+) -> None:
     # The refusal reads the tests a worker selected, whatever `-m` expression selected them,
-    # and ends the run before the controller hands out any test. `CI` and the missing key
+    # and ends the run before the controller hands out any test. The run loads the refusal's
+    # plugin with `-p`, as the conftest registers it in every run, and collects stand-ins of a
+    # unit file and a live one, so it needs neither the conftest nor a JVM; the live stand-in
+    # names the plans it needs, as `-m "integration and needs"` asks. `CI` and the missing key
     # are a second guard: a live test that did start would skip before reaching Massive. The
     # `-m` option goes through PYTEST_ADDOPTS, which pytest reads after the configured
-    # `addopts`, so it replaces the default expression as a command-line `-m` would.
+    # `addopts`, so it replaces any default expression as a command-line `-m` would.
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nmarkers =\n    integration: a live test\n    needs(*plans): its plans\n"
+    )
+    unit = tmp_path / "tests" / "live" / "test_streams.py"
+    live = tmp_path / "tests" / "datasets" / "test_timestamps_integration.py"
+    for path in (unit, live):
+        path.parent.mkdir(parents=True)
+    unit.write_text("def test_unit():\n    pass\n")
+    live.write_text(
+        "import pytest\n\npytestmark = pytest.mark.integration\n\n\n"
+        "@pytest.mark.needs('stocks:starter')\ndef test_live():\n    pass\n"
+    )
     env = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
-    env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option}
+    env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option, "PYTHONPATH": str(_ROOT)}
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-m",
             "pytest",
+            "--strict-markers",
+            "--import-mode=importlib",
             "-p",
             "no:cacheprovider",
+            "-p",
+            "tests._live.parallel",
             "-n",
             "1",
             "tests/live/test_streams.py",
             "tests/datasets/test_timestamps_integration.py",
         ],
-        cwd=_ROOT,
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,
@@ -2343,6 +2403,11 @@ def test_parallel_workers_refuse_the_live_tests_the_run_selects(marker_option: s
     assert "live tests run in one process" in output
     assert "tests/datasets/test_timestamps_integration.py::" in output
     assert "no tests ran" in output
+
+
+def test_every_run_registers_the_parallel_refusal(pytestconfig: pytest.Config) -> None:
+    # The refusal's run above loads the plugin by hand; a real run gets it from the conftest.
+    assert pytestconfig.pluginmanager.get_plugin(parallel.PLUGIN_NAME) is parallel
 
 
 _NETWORK_BLOCK = """

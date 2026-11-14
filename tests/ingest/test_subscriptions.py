@@ -10,6 +10,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import pytest
+
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest import subscriptions
@@ -24,8 +26,6 @@ from deephaven_massive._massive import Status, StatusKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-    import pytest
 
 
 # --- Subscriptions: the reconcile loop alone ---------------------------------------------------
@@ -851,3 +851,10 @@ def test_a_refused_contract_frees_its_place_under_the_cap() -> None:
     loop.subs.status(refusal("T.O:A"))
     assert loop.subs.admitted == {"T.O:B"}
     assert loop.sender.take() == [("subscribe", 1, ("T.O:B",))]
+
+
+def test_a_status_of_a_kind_with_no_rule_is_a_defect() -> None:
+    # Every kind has its rule; a new one fails until it has, never changes nothing unseen.
+    loop = make_loop()
+    with pytest.raises(AssertionError):
+        loop.subs.status(Status(kind="BOGUS", message="x"))  # type: ignore[arg-type]  # the point: refused at run time
