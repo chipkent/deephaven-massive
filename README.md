@@ -518,8 +518,8 @@ Next, how to stop live tables when you're done with them.
 
 ### Stopping live tables: release one table or close the session
 
-Stop live tables when you're done with them, on Stocks Basic. This example starts its own two
-polls:
+Stop the live tables you no longer need, on Stocks Basic. This example starts two polls of its
+own:
 
 ```python
 import deephaven_massive as dm
@@ -529,7 +529,7 @@ closes = m.stocks.previous_day_bar(["AAPL", "MSFT"]).poll(60)
 headlines = m.reference.news(["AAPL", "NVDA"], limit=5).poll(300)
 ```
 
-When you're done with one table, release it:
+To stop one table, release it:
 
 ```python continues
 m.release(closes)
@@ -548,7 +548,7 @@ m.close()
 Closing stops every live table of the session: `headlines` stops updating, shows an error
 saying the session was closed, and keeps its rows. `kept` is a static copy that you can filter
 and join like any table. A closed session reads nothing more. To read more data, open a new
-one with `m = dm.MassiveSession()`, or rerun any example.
+one with `m = dm.MassiveSession()`, or rerun any example, since each opens its own.
 
 <a id="configuration"></a>
 
