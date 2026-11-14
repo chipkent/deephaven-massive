@@ -39,7 +39,14 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, PollMode, Recency
+    from deephaven_massive._enums import (
+        AssetClass,
+        ChannelFamily,
+        FuturesVenue,
+        OnError,
+        PollMode,
+        Recency,
+    )
     from deephaven_massive._errors import MassiveError
 
 __all__ = [
@@ -611,6 +618,9 @@ class FlatFileRead:
             though a later day's file exists, which the read took for days without trading
             and skipped, oldest first; empty for none. The table's description names them,
             since the inference may be wrong and Massive's file may simply be missing.
+        refused: The futures venues whose files S3 refused and the read skipped, every file of
+            each over the whole range, in `FuturesVenue` order (`Request.refused_venues`);
+            empty for none. The table's description names them.
     """
 
     parts: tuple[tuple[date, Table], ...]
@@ -619,6 +629,7 @@ class FlatFileRead:
     uncertain: tuple[date, ...] = ()
     absent: tuple[date, ...] = ()
     skipped: tuple[date, ...] = ()
+    refused: tuple[FuturesVenue, ...] = ()
 
 
 class FlatFileTransport(Protocol):
@@ -660,7 +671,8 @@ class FlatFileTransport(Protocol):
             The static table; the description's source sentence when REST served any of it,
             which replaces the sentence of the source choice (None when only the flat files
             did); and the sentences the description adds on what the files may lack: the days
-            taken for holidays and the sessions that may be incomplete (None for neither).
+            taken for holidays, the sessions that may be incomplete, and the futures venues
+            skipped because S3 refused them (None for none).
 
         Raises:
             AuthenticationError: If S3 rejects the credentials and REST may not serve the call.
@@ -694,20 +706,24 @@ class FlatFileTransport(Protocol):
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
             infer_holidays: True when no other source can serve the call: a missing trading
-                day's file with a later day's file is a day without trading. False to return
-                every missing trading day as unread.
+                day's file with a later day's file is a day without trading, and a futures
+                venue S3 refuses is skipped when `request.refused_venues` is `LOG` or
+                `IGNORE`. False to return every missing trading day as unread and to raise
+                every refusal.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
 
         Returns:
             The read (`FlatFileRead`): the files' tables by day, an empty table with every
-            column, and the days the files could not serve.
+            column, the days the files could not serve, and the futures venues skipped.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
             EntitlementError: If the plan does not include the files (S3 answers 403); for
-                futures files the message names the venue and the `venue=` parameter.
+                futures files the message names the venue and the `venues=` and
+                `refused_venues=` parameters. A skipped venue raises nothing, unless S3
+                refused every venue of the call.
             MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is
                 returned and logs a WARNING; it raises nothing.

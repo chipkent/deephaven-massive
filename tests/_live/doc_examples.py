@@ -17,8 +17,8 @@ could drift from what a reader pastes:
 - `FREE_SECTIONS`, `PAID_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
   runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
-- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 8's
-  snapshot and Example 12's backfill.
+- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 7's
+  snapshot and Example 11's backfill.
 
 This module imports the library, so it is imported only once a Deephaven server runs.
 """

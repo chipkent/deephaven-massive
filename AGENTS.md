@@ -53,6 +53,7 @@ Run everything from the repository root through `uv run` (a hook blocks bare `py
 
 ```bash
 ./scripts/check.sh fast                  # ruff (fixing what it can) and mypy
+./scripts/check.sh full --all            # the whole suite with coverage, as CI runs it
 uv run pytest tests/test_layout.py -q    # one file, no coverage, debugger-friendly
 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q   # free-threaded
 ```
@@ -151,12 +152,17 @@ These protect the owner's repository, money, and secrets.
   the evidence and draft a report to Massive for the owner. Vendor descriptions are
   documentation, not data: a clearly wrong one gets a reasoned `DESCRIPTION_FIXES` entry
   (decision 51).
-- **One bad symbol or row never fails the table**: it is skipped or kept with a null, logged
-  once per distinct value, and listed in a live table's `m.streams()` `Error`. Each cause has
-  its own `dm.OnError` setting in `MassiveConfig` (`LOG` by default); a new cause gets a new
-  setting, never a hard-coded failure or a silent skip. Only a problem that affects every row
-  fails the table (authentication, a closed session, a plan without the dataset, a library
-  defect).
+- **Failure policy: per value in the config, per request on the call.** A problem with one value
+  in the data (a symbol, a row) is handled as its cause's `dm.OnError` setting in `MassiveConfig`
+  says, since the caller doesn't control which values arrive. `LOG`, the default, skips the value
+  or keeps it with a null, logs it once per distinct value, and lists it in a live table's
+  `m.streams()` `Error`; `IGNORE` does the same, logging only at DEBUG; `RAISE` fails the table. A
+  refusal of part of what a call explicitly asked for (a futures exchange the plan lacks) is
+  decided by a `dm.OnError` argument on that call, which defaults to a `MassiveConfig` setting
+  that is `RAISE` by default, because asking for data the plan lacks is a bug in the caller. Each
+  cause gets its own setting, never a hard-coded failure or a silent skip. A refusal of everything
+  a call asked for, and any problem that affects every row (authentication, a closed session, a
+  plan without the dataset, a library defect), fails the call whatever the setting.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the

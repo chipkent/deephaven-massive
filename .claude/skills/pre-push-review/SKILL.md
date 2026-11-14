@@ -102,7 +102,8 @@ same property. Then look for:
   is a finding against the rule as well as the code: raise it with the owner as `AGENTS.md`
   says for a conflict, naming the rule, what it cost here, and the edit you propose to it.
 - **The `AGENTS.md` rules reviews most often catch**: a `None` that selects a mode, a vendor
-  value filled or corrected, one bad symbol or row that fails a table or skips silently, a hand
+  value filled or corrected, a failure hard-coded or a silent skip where a `dm.OnError` setting
+  or argument should decide (one bad symbol or row, a partial refusal), a hand
   edit to generated files, a check loosened without the owner (a widened `tests/test_layout.py`
   rule, a raised lint limit, a rule turned off), a suppression without its reason or the owner's acceptance, a new dataset column that
   gives a field another dataset already names a second name, a secret
@@ -165,7 +166,8 @@ source after reading it.
 2. Push once, with the fixes, any merge of `main`, and the description
    (`gh pr edit <n> --body-file <file>`). Push once when the PR opens, then once per finished
    batch of fixes; never push work in progress or to see whether CI passes. The pre-push hook
-   runs `./scripts/check.sh`; don't run it first.
+   runs `./scripts/check.sh`: ruff, mypy, and the tests of the changed files, without
+   coverage; CI runs the whole suite. Don't run it first.
 3. Post each reply. After `git fetch`, confirm that each commit a reply names is on the remote
    branch and makes the claimed fix (`git branch -r --contains <sha>`, `git show <sha>`); a
    merge of `main` fixes nothing.

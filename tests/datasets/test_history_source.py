@@ -1,5 +1,6 @@
 """Tests for the `history()` source choice: partition dates, publication, REST, and AUTO."""
 
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -27,6 +28,7 @@ from deephaven_massive._datasets.history_source import (
     history_window,
     partition_dates,
     rest_history_problem,
+    warn_unfilled,
 )
 from deephaven_massive._datasets.request import ParamValue, Request
 from deephaven_massive._datasets.row_times import (
@@ -37,7 +39,10 @@ from deephaven_massive._datasets.row_times import (
 )
 from deephaven_massive._datasets.symbols import NormalizedSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, NotBars, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Transport
+from deephaven_massive._session import CATALOG
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -687,3 +692,11 @@ def test_the_current_partition_is_today_in_the_day_zone_or_the_current_session(
     assert current_partition(FUTURES_TRADES, now=evening) == date(2025, 3, 4)
     monkeypatch.setattr(history_source, "_now", lambda: evening)
     assert current_partition(STOCK_TRADES) == date(2025, 3, 3)
+
+
+def test_an_unfilled_warning_for_a_source_auto_never_chooses_is_a_defect() -> None:
+    # AUTO resolves to REST or the flat files; any other choice has no "other" source to name.
+    choice = SourceChoice(HistorySource.AUTO, "a defect", Alternative.AVAILABLE)
+    warnings = BoundedLog(logging.getLogger("tests.history_source"), limit=1, level=logging.INFO)
+    with pytest.raises(BrokenGuaranteeError, match=r"^stocks\.trades history\(\) chose "):
+        warn_unfilled(STOCK_TRADES, choice, catalog=CATALOG, warnings=warnings)

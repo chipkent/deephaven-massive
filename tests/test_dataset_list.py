@@ -127,7 +127,7 @@ def test_every_dataset_has_its_call() -> None:
     # The session's own dataset method, and defaults written as a user types them.
     assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")
     assert "timespan=dm.Timespan.DAY" in calls["indicators.sma"].signature
-    assert "venues=frozenset(dm.FuturesVenue)" in calls["futures.trades"].signature
+    assert "venues=None, refused_venues=None" in calls["futures.trades"].signature
 
 
 def test_arguments_named_apart_from_their_wire_parameter() -> None:
