@@ -301,8 +301,9 @@ settles it.
   answered HTTP 400 "Invalid ticker." and is now sent; the contracts list answered HTTP 200 with no
   rows and is still refused; recorded by `tests/namespaces/test_options_integration.py`.
 - **104.** What the contract overview answers to a stock ticker (`AAPL`). Settled 2026-11-12:
-  HTTP 404 "Option Ticker not found.", so `m.options.contracts("AAPL")` sends it, and the 404
-  gives no rows under `unavailable_symbols` (decision 104).
+  HTTP 404 "Option Ticker not found.". `m.options.contracts("AAPL")` still raises before any
+  request, for its missing `O:` prefix, the one ticker check the owner kept on 2026-11-14
+  (decision 104).
 - **105.** A range whose start is after its end. Settled 2026-11-12: the aggregates range answered
   HTTP 400, the dividends' `ex_dividend_date` HTTP 200 with no rows; still refused, since
   `history()` turns a range into the bars or days inside it and a reversed one has none to send;
