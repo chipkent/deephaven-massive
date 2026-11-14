@@ -204,10 +204,14 @@ def test_snapshot_rows_lead_with_their_symbol(spec: DatasetSpec) -> None:
 def test_conversion_keeps_the_vendor_symbol() -> None:
     columns = _schema(forex.CONVERSION)
     assert next(iter(columns)) == "Symbol"
-    assert {"Converted", "InitialAmount", "LastAskPrice", "LastBidPrice", "LastTimestamp"} <= set(
-        columns
-    )
-    assert columns["LastTimestamp"] is ColumnType.INSTANT
+    assert {
+        "Converted",
+        "InitialAmount",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
+    } <= set(columns)
+    assert columns["LastQuoteParticipantTimestamp"] is ColumnType.INSTANT
 
 
 # --- factories ------------------------------------------------------------------------------
@@ -777,9 +781,9 @@ def test_conversion_sends_the_pair_amount_and_precision(
         "Symbol",
         "Converted",
         "InitialAmount",
-        "LastAskPrice",
-        "LastBidPrice",
-        "LastTimestamp",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
     )
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
@@ -1184,7 +1188,7 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     assert revised == {
         "forex.snapshots": ("Updated",),
         "forex.movers": ("Updated",),
-        "forex.conversion": ("LastTimestamp",),
+        "forex.conversion": ("LastQuoteParticipantTimestamp",),
         "forex.last_quote": ("Timestamp",),
         "forex.previous_day_bar": ("TimestampStart",),
     }

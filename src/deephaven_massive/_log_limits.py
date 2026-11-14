@@ -1,4 +1,4 @@
-"""Log records kept bounded: once per process, per value up to a limit, per failure, or by length.
+"""Log records kept bounded: once per key, per value up to a limit, per failure, or by length.
 
 Some facts are worth logging once rather than on every event, some bad values can arrive
 without end, and some lists can hold thousands of items. The helpers here keep these records
@@ -6,8 +6,9 @@ from flooding the log:
 
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
   unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
-  one-second bar whose end from Massive is not its start plus one second. `first_seen` gives
-  the keys of several facts not yet seen, for one record that names them all.
+  one-second bar whose end from Massive is not its start plus one second.
+- `LoggedKeys` holds the facts one owner has logged, such as one `history()` call: a record
+  naming several facts logs only the new ones, and the keys go when the owner drops it.
 - `BoundedLog` logs a record at its level the first time each value is seen, for at most a
   fixed number of distinct values, so a stream of bad values that may never end (a watchlist
   row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
@@ -40,8 +41,8 @@ if TYPE_CHECKING:
 __all__ = [
     "LIST_LIMIT",
     "BoundedLog",
+    "LoggedKeys",
     "bounded_list",
-    "first_seen",
     "log_failure",
     "log_once",
     "mark_failure_logged",
@@ -51,8 +52,50 @@ LIST_LIMIT: Final = 20
 """How many items `bounded_list` shows before it only counts the rest."""
 
 
-_logged_lock = threading.Lock()
-_logged: set[str] = set()
+class LoggedKeys:
+    """The keys of the facts one owner has logged, so each is logged once while the owner lives.
+
+    For facts worth stating once per owner rather than once per process: a `history()` call
+    that reads its files again as symbols join keeps one, so each read logs only what no
+    earlier read of the call logged, and the keys go when the call's result is dropped.
+    Thread-safe: one leaf lock guards the keys and is never held while logging.
+
+    Example:
+        ::
+
+            import logging
+
+            from deephaven_massive._log_limits import LoggedKeys
+
+            logged = LoggedKeys()
+            for venue in logged.first_seen(["NYMEX", "CME", "NYMEX"]):
+                logging.getLogger("example").warning("skipping %s", venue)
+    """
+
+    __slots__ = ("_keys", "_lock")
+
+    def __init__(self) -> None:
+        """Start with no fact logged."""
+        self._lock = threading.Lock()
+        self._keys: set[str] = set()
+
+    def first_seen(self, keys: Iterable[str]) -> list[str]:
+        """Return the keys this owner has not seen before, and mark them seen.
+
+        Args:
+            keys: The facts' keys.
+
+        Returns:
+            The keys seen for the first time, in the order given, without repeats.
+        """
+        with self._lock:
+            new = [key for key in dict.fromkeys(keys) if key not in self._keys]
+            self._keys.update(new)
+        return new
+
+
+_logged: Final = LoggedKeys()
+"""The facts `log_once` has logged in the process."""
 
 
 def log_once(
@@ -71,29 +114,8 @@ def log_once(
         *args: The message's arguments.
         level: The logging level; INFO by default.
     """
-    with _logged_lock:
-        if key in _logged:
-            return
-        _logged.add(key)
-    log.log(level, message, *args)
-
-
-def first_seen(keys: Iterable[str]) -> list[str]:
-    """Return the keys not seen before in the process, and mark them seen.
-
-    The keys `log_once` uses: a record naming several facts logs only the new ones, and a
-    later `log_once` of a returned key logs nothing.
-
-    Args:
-        keys: The facts' keys.
-
-    Returns:
-        The keys seen for the first time, in the order given, without repeats.
-    """
-    with _logged_lock:
-        new = [key for key in dict.fromkeys(keys) if key not in _logged]
-        _logged.update(new)
-    return new
+    if _logged.first_seen((key,)):
+        log.log(level, message, *args)
 
 
 def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:

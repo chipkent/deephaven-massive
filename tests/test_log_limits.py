@@ -8,8 +8,8 @@ from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, MassiveError
 from deephaven_massive._log_limits import (
     LIST_LIMIT,
     BoundedLog,
+    LoggedKeys,
     bounded_list,
-    first_seen,
     log_failure,
     log_once,
     mark_failure_logged,
@@ -29,7 +29,7 @@ def test_bounded_list_shows_the_count_and_the_first_items() -> None:
 def test_log_once_logs_each_key_once(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     log = logging.getLogger("test.log_once")
     with caplog.at_level(logging.DEBUG, logger="test.log_once"):
         log_once(log, "a", "first %s", 1)
@@ -41,22 +41,24 @@ def test_log_once_logs_each_key_once(
     ]
 
 
-def test_first_seen_marks_new_keys_shared_with_log_once(
+def test_logged_keys_mark_new_keys_for_their_owner_only(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
-    assert first_seen(["a", "b", "a"]) == ["a", "b"]
-    assert first_seen(["b", "c"]) == ["c"]
-    log = logging.getLogger("test.first_seen")
-    with caplog.at_level(logging.INFO, logger="test.first_seen"):
-        log_once(log, "a", "already seen")
-    assert caplog.records == []
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
+    logged = LoggedKeys()
+    assert logged.first_seen(["a", "b", "a"]) == ["a", "b"]
+    assert logged.first_seen(["b", "c"]) == ["c"]
+    assert LoggedKeys().first_seen(["a"]) == ["a"]  # another owner has seen nothing
+    log = logging.getLogger("test.logged_keys")
+    with caplog.at_level(logging.INFO, logger="test.logged_keys"):
+        log_once(log, "a", "the process has not logged it")  # an owner's keys are its own
+    assert caplog.messages == ["the process has not logged it"]
 
 
 def test_log_once_is_once_across_threads(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     log = logging.getLogger("test.log_once.threads")
     start = threading.Barrier(16)
 

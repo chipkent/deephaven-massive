@@ -5,6 +5,7 @@ import pytest
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._ingest import refused_venues
 from deephaven_massive._ingest.refused_venues import RefusedVenues, refused_note, refused_source
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import WireEntitlementError
 
 
@@ -15,7 +16,7 @@ def _refusal(venue: str, request_id: str) -> WireEntitlementError:
 def test_a_venue_keeps_its_first_refusal_and_venues_come_in_enum_order(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    refused = RefusedVenues(OnError.LOG, call="MassiveSession #1 call-1")
+    refused = RefusedVenues(OnError.LOG, call="MassiveSession #1 call-1", logged=LoggedKeys())
     assert refused.venues() == ()
     assert None not in refused
     with caplog.at_level(logging.DEBUG, logger=refused_venues.__name__):
@@ -55,3 +56,30 @@ def test_a_source_names_the_skipped_venues() -> None:
     assert refused_source("flat files", (FuturesVenue.CME, FuturesVenue.COMEX)) == (
         "flat files without CME, COMEX (refused)"
     )
+
+
+def test_a_report_logs_each_venue_once_for_the_call_that_keeps_the_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The record of what a call logged is the call's own: a second read of the call logs only
+    # a venue new to it, and another call, with its own record, logs every venue again.
+    call = LoggedKeys()
+
+    def report(logged: LoggedKeys, *venues: FuturesVenue) -> None:
+        refused = RefusedVenues(OnError.IGNORE, call="MassiveSession #1 call-2", logged=logged)
+        for venue in venues:
+            refused.add(venue, _refusal(venue.name, "r"))
+        refused.report("futures.trades")
+
+    with caplog.at_level(logging.DEBUG, logger=refused_venues.__name__):
+        report(call, FuturesVenue.CME)
+        report(call, FuturesVenue.CME)
+        report(call, FuturesVenue.CME, FuturesVenue.NYMEX)
+        report(LoggedKeys(), FuturesVenue.CME)
+    skipped = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
+    assert [r.levelno for r in skipped] == [logging.DEBUG] * 3
+    assert [r.getMessage().split("S3 refused: ")[1] for r in skipped] == [
+        "CME: CME denied",
+        "NYMEX: NYMEX denied",
+        "CME: CME denied",
+    ]

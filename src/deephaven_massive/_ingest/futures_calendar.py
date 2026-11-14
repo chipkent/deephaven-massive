@@ -76,11 +76,9 @@ from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
     failure_text,
-    library_bug,
 )
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._ingest.rest_requests import largest_page
@@ -195,21 +193,20 @@ class ScheduledSession:
     closes: int
 
 
-def _lookup_keys(items: list[object]) -> tuple[set[str], set[str]]:
+def _lookup_keys(items: list[object]) -> tuple[set[str], set[str], list[object]]:
     """Sort queued lookups into the contracts and the products whose schedules to load.
 
     Args:
         items: What the worker took from its queue at once, `_STOP` excepted.
 
     Returns:
-        The contracts, and the products.
-
-    Raises:
-        BrokenGuaranteeError: If an item is not a lookup `FuturesCalendar._put` queues, rather
-            than taking it for one.
+        The contracts, the products, and every item that is not a lookup
+        `FuturesCalendar._put` queues. Such an item is a defect of the library: it is set
+        apart, never taken for a lookup, so the caller logs it and still loads the others.
     """
     contracts: set[str] = set()
     products: set[str] = set()
+    strays: list[object] = []
     for entry in items:
         match entry:
             case ("contracts", frozenset() as keys):
@@ -217,8 +214,8 @@ def _lookup_keys(items: list[object]) -> tuple[set[str], set[str]]:
             case ("schedules", frozenset() as keys):
                 products.update(keys)
             case _:
-                raise BrokenGuaranteeError(library_bug(f"the futures lookup queue holds {entry!r}"))
-    return contracts, products
+                strays.append(entry)
+    return contracts, products, strays
 
 
 class FuturesCalendar:
@@ -605,10 +602,16 @@ class FuturesCalendar:
                     break
             if any(entry is _STOP for entry in items):
                 return
-            contracts: set[str] = set()
-            products: set[str] = set()
+            contracts, products, strays = _lookup_keys(items)
+            for stray in strays:
+                logger.error(
+                    "%s: futures schedules: the lookup queue holds %r, which is no lookup; the "
+                    "worker skips it and loads the others. %s",
+                    self._label,
+                    stray,
+                    LIBRARY_BUG,
+                )
             try:
-                contracts, products = _lookup_keys(items)
                 if contracts:
                     products |= self._load_contracts(contracts)
                 if products:
