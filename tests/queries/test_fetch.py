@@ -6,7 +6,7 @@ import re
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from deephaven import arrow as dh_arrow
@@ -121,7 +121,7 @@ def test_poll_interval_values(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
     with pytest.raises(ValueError, match=r"interval must be (positive|a positive, finite)"):
-        feed(massive_session).poll(cast("float", interval))
+        feed(massive_session).poll(interval)  # type: ignore[arg-type]  # the point: refused at run time
     assert rest.calls == []
 
 
@@ -156,14 +156,17 @@ def test_poll_interval_types(
     massive_session: dm.MassiveSession, rest: Recorder, interval: object
 ) -> None:
     with pytest.raises(TypeError, match="interval must be a number"):
-        feed(massive_session).poll(cast("float", interval))
+        feed(massive_session).poll(interval)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_poll_mode_is_an_enum(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(
         TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.UPSERT$"
     ):
-        feed(massive_session).poll(30, mode=cast("PollMode", "upsert"))
+        feed(massive_session).poll(
+            30,
+            mode="upsert",  # type: ignore[arg-type]  # the point: refused at run time
+        )
 
 
 def test_a_one_row_fetch_passes_its_symbols(
@@ -221,7 +224,7 @@ def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
 
 def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     drain: Callable[[], None],
@@ -241,16 +244,16 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
         "Follows its symbol table: each symbol's rows are Massive's answer as of its read."
     )
     rest.outcomes["MSFT"] = rows_of(massive_session, LAST_TRADE_SPEC, 2)
-    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.add(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(dh_to_pylist(result)) == 3)
     assert " read_" in rest.fetched[1][2]
     until(lambda: symbol_reads(massive_session, drain, dh_to_pylist)["MSFT"]["State"] == "DONE")
     reads = symbol_reads(massive_session, drain, dh_to_pylist)
     # Each symbol's rows are Massive's answer as of its own read.
     assert reads["MSFT"]["ReadAt"] > reads["AAPL"]["ReadAt"]
-    cast("Any", wl).delete(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.delete(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(dh_to_pylist(result)) == 1)
-    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.add(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(rest.fetched) == 3)  # read again, with no reread option
     until(lambda: len(dh_to_pylist(result)) == 3)
     massive_session.release(result)
@@ -259,7 +262,7 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
 
 def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -276,10 +279,10 @@ def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
     q = make(massive_session, LAST_TRADE_SPEC, symbols=wl)
     assert isinstance(q, FetchQuery)
     result = q.fetch(wait=True)
-    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.add(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(rest.fetched) == 1)
-    cast("Any", wl).delete(new_table([string_col("Symbol", ["MSFT"])]))
-    cast("Any", wl).add(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.delete(new_table([string_col("Symbol", ["MSFT"])]))
+    wl.add(new_table([string_col("Symbol", ["MSFT"])]))
     gate.set()
     until(lambda: len(rest.fetched) == 2)
     until(lambda: len(dh_to_pylist(result)) == 1)
@@ -288,7 +291,7 @@ def test_a_late_outcome_of_a_re_added_symbol_is_dropped(
 
 
 def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
-    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+    *, live: Callable[..., InputTable], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, FetchQuery)
@@ -303,7 +306,7 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
 
 def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
@@ -332,7 +335,7 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
 
 def test_a_followed_fetch_s_unlisted_pair_raises_under_raise(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
@@ -358,7 +361,7 @@ def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> No
 
 def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_rows(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -377,7 +380,7 @@ def test_a_followed_snapshot_reads_its_symbols_in_one_request_and_splits_the_row
 
 
 def test_a_followed_fetch_sends_its_limit_on_its_request(
-    *, live: Callable[..., Table], rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, live: Callable[..., InputTable], rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # `limit` is Massive's own cap on a request's rows, sent as the caller gave it.
     fake_rest.reply("/v3/snapshot", Reply(envelope([{"ticker": "AAPL", "type": "stocks"}])))
@@ -390,7 +393,7 @@ def test_a_followed_fetch_sends_its_limit_on_its_request(
 
 def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -403,7 +406,7 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     assert result.is_refreshing
     assert result.size == 0
     assert (rest.fetched, rest.checks) == ([], [])  # the first read checks the parameters
-    cast("Any", wl).add(new_table([string_col("Symbol", ["AAPL"])]))
+    wl.add(new_table([string_col("Symbol", ["AAPL"])]))
     until(lambda: len(dh_to_pylist(result)) == 1)
     massive_session.release(result)
     follows(massive_session)
@@ -411,7 +414,7 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
 
 def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     *,
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[Any]],
@@ -433,14 +436,14 @@ def test_a_followed_fetch_lists_an_article_under_each_symbol_it_answers(
     result = rest_session.reference.news(symbols=wl).fetch(wait=True)
     assert [r["Id"] for r in dh_to_pylist(result)] == ["both", "both"]
     assert sorted(query["ticker"][0] for _, query in fake_rest.get_queries()) == ["AAPL", "MSFT"]
-    cast("Any", wl).delete(new_table([string_col("Symbol", ["AAPL"])]))
+    wl.delete(new_table([string_col("Symbol", ["AAPL"])]))
     until(lambda: [r["Id"] for r in dh_to_pylist(result)] == ["both"])
     rest_session.release(result)
     follows(rest_session)
 
 
 def test_a_followed_read_s_patience_starts_when_its_read_does(
-    live: Callable[..., Table], *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., InputTable], *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # One read thread: MSFT waits in the queue while AAPL is read. Its patience for rate
     # limits begins only when its own read begins, so the time it queued never counts.
@@ -471,7 +474,7 @@ def test_a_followed_read_s_patience_starts_when_its_read_does(
 
 
 def test_a_followed_range_no_row_can_lie_in_checks_nothing(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
     result = trades(massive_session, live("AAPL")).history(
@@ -483,10 +486,10 @@ def test_a_followed_range_no_row_can_lie_in_checks_nothing(
 
 
 @pytest.fixture
-def live_codes(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+def live_codes(dh_input_table: Callable[..., InputTable]) -> Callable[..., InputTable]:
     # Makes a refreshing, keyed table of futures product codes, as `m.futures.products()` rows
     # carry them.
-    def make(*codes: str) -> Table:
+    def make(*codes: str) -> InputTable:
         table = dh_input_table({"ProductCode": dtypes.string}, key_cols=["ProductCode"])
         if codes:
             table.add(new_table([string_col("ProductCode", list(codes))]))
@@ -554,7 +557,7 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
 
 def test_fetch_follows_a_refreshing_table_of_product_codes(
     *,
-    live_codes: Callable[..., Table],
+    live_codes: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     drain: Callable[[], None],
@@ -570,19 +573,19 @@ def test_fetch_follows_a_refreshing_table_of_product_codes(
         "its read."
     )
     rest.outcomes["NQ"] = rows_of(massive_session, futures.PRODUCTS, 2)
-    cast("Any", codes).add(new_table([string_col("ProductCode", ["NQ"])]))
+    codes.add(new_table([string_col("ProductCode", ["NQ"])]))
     until(lambda: len(dh_to_pylist(result)) == 3)
     assert [values for values, _, _ in rest.valued] == [("ES",), ("NQ",)]
     assert " read_" in rest.valued[1][2]
     assert set(symbol_reads(massive_session, drain, dh_to_pylist)) == {"ES", "NQ"}
-    cast("Any", codes).delete(new_table([string_col("ProductCode", ["ES"])]))
+    codes.delete(new_table([string_col("ProductCode", ["ES"])]))
     until(lambda: len(dh_to_pylist(result)) == 2)
     massive_session.release(result)
     follows(massive_session)
 
 
 def test_fetch_follows_a_refreshing_table_of_underlyings_with_wait_false(
-    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+    *, live: Callable[..., InputTable], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = massive_session.options.chain(live()).fetch(wait=False)
     assert result.is_refreshing
@@ -600,8 +603,8 @@ def test_fetch_follows_a_refreshing_table_of_underlyings_with_wait_false(
 
 def test_fetch_follows_one_refreshing_table_at_a_time(
     *,
-    live: Callable[..., Table],
-    live_codes: Callable[..., Table],
+    live: Callable[..., InputTable],
+    live_codes: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
 ) -> None:
@@ -625,7 +628,7 @@ def test_fetch_follows_one_refreshing_table_at_a_time(
 
 
 def test_poll_reads_a_table_of_values_at_its_call(
-    *, live_codes: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+    *, live_codes: Callable[..., InputTable], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     codes = live_codes("ES")
     massive_session.futures.market_status(product_code=codes).poll(5)

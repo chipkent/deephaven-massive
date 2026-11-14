@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
 from deephaven_massive._datasets.column_reference import page_url
@@ -421,7 +421,7 @@ def require_real_time(
     """
     if not spec.real_time_only:
         return resolve()
-    asset_class = cast("AssetClass", spec.asset_class)
+    asset_class = spec.single_class
     subscription = subscription_of(asset_class)
     try:
         decision = resolve()

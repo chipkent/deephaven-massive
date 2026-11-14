@@ -7,7 +7,7 @@ currencies join to their ticker or do not.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from tests._live import ticker_lists
 
@@ -25,7 +25,9 @@ def _json(load_fixture: Callable[[str, str], bytes], name: str) -> dict[str, lis
     Returns:
         The decoded JSON.
     """
-    return cast("dict[str, list[dict[str, Any]]]", json.loads(load_fixture(_OWNER, name)))
+    payload = json.loads(load_fixture(_OWNER, name))
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_the_crypto_report_writes_every_row_the_library_cannot_split(

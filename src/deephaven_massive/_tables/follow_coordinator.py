@@ -78,7 +78,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import Reread
@@ -89,6 +89,7 @@ from deephaven_massive._errors import (
     UnlistedPairError,
     failure_text,
     library_bug,
+    required,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
 from deephaven_massive._tables import poll
@@ -893,7 +894,7 @@ class FollowCoordinator:
                 "no request",
                 result.read.call,
                 name,
-                _ns_text(cast("int", symbol.read_at)),  # a kept download has begun
+                _ns_text(required(symbol.read_at, f"{name}'s kept download's start")),
             )
             return
         symbol.state = SymbolReadState.QUEUED
@@ -1139,14 +1140,14 @@ class FollowCoordinator:
             return
         # Every call-time symbol still in the table has failed.
         result.call_time = None
-        first = next(iter(pending.values()))
+        first = next(error for error in pending.values() if error is not None)
         logger.debug(
             "call %d follow: all %d call-time symbols failed; the table fails, as a call "
             "that waits raises",
             result.read.call,
             len(pending),
         )
-        self._fail(result, cast("MassiveError", first))
+        self._fail(result, first)
 
     def _retry_due(self, touched: dict[int, _Result] | None = None) -> None:
         """Queue every retry whose time has come, taking each off the heap of retries.

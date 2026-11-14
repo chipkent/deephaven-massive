@@ -4,7 +4,6 @@ import csv
 import io
 import logging
 from collections.abc import Callable
-from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -47,8 +46,10 @@ STK, OPT, FUT, IDX, FX, CRY = (
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
-    split = cast("tuple[str, str]", tuple(expected.split("-")))
-    pairs = {symbol: split} if asset_class is CRY else {}
+    pairs: dict[str, tuple[str, str]] = {}
+    if asset_class is CRY:
+        base, quote = expected.split("-")
+        pairs = {symbol: (base, quote)}
     assert ws_symbol(asset_class, symbol, pairs) == expected
 
 
@@ -135,7 +136,8 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
     for row in rows:
         ticker, websocket = row["ticker"], row["websocket"]
         assert canonical_symbol_crypto(ticker) == ticker
-        split = cast("tuple[str, str]", tuple(websocket.split("-")))
+        base, quote = websocket.split("-")
+        split = (base, quote)
         assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
         assert canonical_from_wire(CRY, websocket) == ticker
 

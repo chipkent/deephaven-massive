@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import date
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -258,16 +258,19 @@ def test_every_example_has_its_code_and_no_code_lacks_an_example() -> None:
 def test_every_example_asks_through_the_public_verbs() -> None:
     for example in reply_examples.EXAMPLES:
         calls: list[str] = []
-        replies.CALLS[example.name](cast("MassiveSession", _Recorder(calls)), TODAY)
+        session: MassiveSession = _Recorder(calls)  # type: ignore[assignment]  # records the verbs
+        replies.CALLS[example.name](session, TODAY)
         verb = "append_only" if example.stream else ("history", "fetch")
         assert any(name in calls for name in ((verb,) if isinstance(verb, str) else verb))
     calls = []
-    replies.CALLS["daily-bars-last-year"](cast("MassiveSession", _Recorder(calls)), TODAY)
+    recorder: MassiveSession = _Recorder(calls)  # type: ignore[assignment]  # records the verbs
+    replies.CALLS["daily-bars-last-year"](recorder, TODAY)
     year = "datetime.date(2025, 11, 4), datetime.date(2026, 11, 3)"
     assert any(year in call and "HistorySource.REST" in call for call in calls)
 
 
 def test_the_default_hold_waits_its_seconds() -> None:
     started = time.monotonic()
-    replies.hold_for(0.01)(cast("MassiveSession", None))
+    unused: MassiveSession = None  # type: ignore[assignment]  # the hold never reads it
+    replies.hold_for(0.01)(unused)
     assert time.monotonic() - started >= 0.01

@@ -106,7 +106,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -132,6 +132,7 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_sessions,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
+from deephaven_massive._errors import required
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
@@ -298,8 +299,8 @@ def _offset_ns(zone: tzinfo, ns: int) -> int:
     Returns:
         The offset; negative west of Greenwich.
     """
-    # An aware datetime's zone always has an offset; utcoffset() is None only when naive.
-    offset = cast("timedelta", epoch_instant(ns).astimezone(zone).utcoffset())
+    offset = epoch_instant(ns).astimezone(zone).utcoffset()
+    assert offset is not None  # an aware datetime always has one; only a naive one has none
     return offset // timedelta(microseconds=1) * 1000
 
 
@@ -784,8 +785,7 @@ class TimeRule:
             _column(rows, "Symbol")[first].as_py(),
             labels[first].as_py(),
         )
-        # A daily rule always has its warnings (`__post_init__`).
-        cast("BoundedLog", self.warnings).log(
+        required(self.warnings, f"{self.dataset}'s daily rule's warnings").log(
             f"day summary not in UTC {self.dataset}",
             "%s: Massive sent the day summary of %s for %s with isUTC false, so its day is not "
             "the UTC day the other crypto tables use, and Massive does not say which zone's day "
@@ -815,7 +815,7 @@ class TimeRule:
         Returns:
             The batch with `Date`, `TimestampStart`, and `TimestampEnd`.
         """
-        timespan = cast("Timespan", self.timespan)  # a bar rule has one (`__post_init__`)
+        timespan = required(self.timespan, f"{self.dataset}'s bar timespan")
         if intraday(timespan):
             return self._intraday(rows, session_dates)
         if self._futures:
@@ -832,7 +832,7 @@ class TimeRule:
         Returns:
             The batch with `Date` and `TimestampEnd`.
         """
-        timespan = cast("Timespan", self.timespan)
+        timespan = required(self.timespan, f"{self.dataset}'s bar timespan")
         start = _to_int(rows.column(START))
         end = pc.add(start, unit_ns(timespan) * self.multiplier)
         if self._futures and timespan is Timespan.SECOND:

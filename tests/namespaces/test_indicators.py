@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import pytest
 from deephaven.table import Table
@@ -148,7 +148,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(ValueError, match="window must be positive"):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        i.rsi("AAPL", 14, adjusted=cast("bool", 1))
+        i.rsi("AAPL", 14, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="the library sets expand_underlying itself"):
         i.sma("AAPL", 20, filters={"expand_underlying": True})
     with pytest.raises(ValueError, match=r"^adjusted is set through its own argument, adjusted="):
@@ -167,13 +167,13 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
     with pytest.raises(
         TypeError, match=rf"^window must be an int, not Timespan\.MINUTE: {keyword}"
     ):
-        i.sma("AAPL", cast("int", dm.Timespan.MINUTE))
+        i.sma("AAPL", dm.Timespan.MINUTE)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=rf"^window must be an int, not 'hour': {keyword}"):
-        i.rsi("AAPL", cast("int", "hour"))
+        i.rsi("AAPL", "hour")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^short_window must be an int, not Timespan\.DAY: "):
-        i.macd("AAPL", short_window=cast("int", dm.Timespan.DAY))
+        i.macd("AAPL", short_window=dm.Timespan.DAY)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^window must be an int, not float$"):
-        i.ema("AAPL", cast("int", 2.5))
+        i.ema("AAPL", 2.5)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
@@ -212,7 +212,7 @@ def test_the_vendor_samples_decode_without_drift(
     # The rows are `results.values`; `results.underlying` holds the bars and is not decoded.
     name, kind = fixture.split("_")
     payload = json.loads(load_fixture(OWNER, f"{fixture}.json"))
-    rest_path = cast("RestPath", source(R, f"/v1/indicators/{name}/{{{kind}Ticker}}"))
+    rest_path = CATALOG.rest_path(f"/v1/indicators/{name}/{{{kind}Ticker}}")
     spec = CATALOG.by_name[f"indicators.{name}"]
     required = [f.column for f in required_fields(spec, rest_path)]
     assert required == ["Timestamp"]
@@ -427,7 +427,8 @@ wire."""
 @pytest.mark.parametrize("name", NAMES)
 def test_every_signature_default_is_the_default_massive_documents(name: str) -> None:
     spec = CATALOG.by_name[f"indicators.{name}"]
-    path = source(R, cast("str", spec.fetch_path))
+    assert spec.fetch_path is not None
+    path = source(R, spec.fetch_path)
     assert isinstance(path, RestPath)
     documented = {p.name: p.default for p in path.params}
     signature = inspect.signature(getattr(indicators.IndicatorsNamespace, name)).parameters

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 from deephaven.table import Table
 
@@ -28,10 +28,6 @@ ROW = SymbolReadRow(
     added_at=1_000,
     updated_at=2_000,
 )
-
-
-def _row(symbol: str = "AAPL", **changes: object) -> SymbolReadRow:
-    return dataclasses.replace(ROW, symbol=symbol, **cast("dict[str, Any]", changes))
 
 
 def test_the_columns_and_the_states() -> None:
@@ -63,9 +59,11 @@ def test_the_columns_and_the_states() -> None:
 
 
 def test_a_row_maps_its_fields_to_the_columns() -> None:
-    values = symbol_read_values(_row(state=SymbolReadState.DONE, transport=Transport.FLAT_FILES))
+    values = symbol_read_values(
+        dataclasses.replace(ROW, state=SymbolReadState.DONE, transport=Transport.FLAT_FILES)
+    )
     assert list(values) == list(SYMBOL_READS.column_names)
     assert (values["State"], values["Transport"]) == ("DONE", "flat files")
-    assert symbol_read_values(_row(transport="flat files and REST"))["Transport"] == (
-        "flat files and REST"
-    )
+    assert symbol_read_values(dataclasses.replace(ROW, transport="flat files and REST"))[
+        "Transport"
+    ] == ("flat files and REST")

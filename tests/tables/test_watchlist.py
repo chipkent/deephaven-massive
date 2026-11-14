@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
+import jpy
 import pytest
 from deephaven import dtypes, empty_table, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
@@ -52,12 +52,19 @@ Change = tuple[frozenset[str], frozenset[str]]
 PRICES = {"Symbol": dtypes.string, "Price": dtypes.int32}
 STAMPED = {**PRICES, "TimestampInsert": dtypes.Instant}
 EXCHANGED = {**STAMPED, "Exchange": dtypes.int32}
-_JPY = cast("Any", importlib.import_module("jpy"))
-_JAVA_BOOLEAN = _JPY.get_type("java.lang.Boolean")
+_JAVA_BOOLEAN = jpy.get_type("java.lang.Boolean")
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
     return [row[0] for row in table.iter_tuple(cols=column)]
+
+
+def texts(table: Table, column: str = "Symbol") -> list[str]:
+    found: list[str] = []
+    for value in values(table, column):
+        assert isinstance(value, str)
+        found.append(value)
+    return found
 
 
 def wait_for(condition: Callable[[], bool]) -> None:
@@ -467,12 +474,13 @@ class _Update:
         return {cols[0]: self._columns.get("removed", [])}
 
 
-_UPDATES = [
+_FAKE_UPDATES = [
     _Update(added=["A", "A", "B", "b,c"]),
     _Update(removed=["A", "b,c"]),  # one of A's two rows remains; the bad row leaves
     _Update(modified=["C"], modified_prev=["A"]),  # A's last row now holds C
     _Update(modified=["x,btc"], modified_prev=["C"]),  # C's row now holds a bad symbol
 ]
+_UPDATES: list[TableUpdate] = _FAKE_UPDATES  # type: ignore[assignment]  # the parts it reads
 
 
 def test_the_counter_reports_set_changes_of_updates() -> None:
@@ -487,7 +495,7 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
         on_skipped=skipped.append,
     )
     for update in _UPDATES:
-        counter.on_update(cast("TableUpdate", update), is_replay=False)
+        counter.on_update(update, is_replay=False)
     assert seen == [
         (frozenset({"A", "B"}), frozenset()),
         (frozenset({"C"}), frozenset({"A"})),
@@ -512,7 +520,7 @@ def test_the_counter_reports_skipped_values_of_updates() -> None:
         on_skipped=skipped.append,
     )
     for update in _UPDATES:
-        counter.on_update(cast("TableUpdate", update), is_replay=False)
+        counter.on_update(update, is_replay=False)
     assert seen == [
         (frozenset({"A", "B"}), frozenset()),
         (frozenset({"C"}), frozenset({"A"})),
@@ -538,12 +546,12 @@ def test_watched_rows_keeps_the_watched_symbols_and_follows_the_watchlist(
         watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
         watchlist.add(new_table([string_col("Symbol", ["A", "B"])]))
         kept = watched_rows(prices, watchlist)
-    wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "B"])
+    wait_for(lambda: sorted(texts(kept)) == ["A", "B"])
     assert kept.column_names == ["Symbol", "Price"]  # the hidden mark is dropped
     watchlist.delete(new_table([string_col("Symbol", ["B"])]))
     wait_for(lambda: values(kept) == ["A"])
     watchlist.add(new_table([string_col("Symbol", ["C"])]))
-    wait_for(lambda: sorted(cast("list[str]", values(kept))) == ["A", "C"])
+    wait_for(lambda: sorted(texts(kept)) == ["A", "C"])
     release_scope(dh_exec_ctx, scope)
 
 
@@ -597,9 +605,13 @@ class Latest:
     def shown(
         self, dh_to_pylist: Callable[[Table], list[dict[str, object]]]
     ) -> list[tuple[str, int]]:
-        return sorted(
-            (cast("str", r["Symbol"]), cast("int", r["Price"])) for r in dh_to_pylist(self.kept)
-        )
+        found: list[tuple[str, int]] = []
+        for row in dh_to_pylist(self.kept):
+            symbol, price = row["Symbol"], row["Price"]
+            assert isinstance(symbol, str)
+            assert isinstance(price, int)
+            found.append((symbol, price))
+        return sorted(found)
 
     def release(self, dh_exec_ctx: ExecutionContext) -> None:
         release_scope(dh_exec_ctx, self.scope)
@@ -774,8 +786,8 @@ def parallel_updates() -> Iterator[None]:
         ]
     )
     assert opened.j_table.getColumnSource("Opened").getBoolean(0)
-    field = _JPY.cast(
-        opened.j_table.getColumnSource("Field").get(0), _JPY.get_type("java.lang.reflect.Field")
+    field = jpy.cast(
+        opened.j_table.getColumnSource("Field").get(0), jpy.get_type("java.lang.reflect.Field")
     )
     before = field.getBoolean(None)
     field.set(None, _JAVA_BOOLEAN.TRUE)
@@ -808,7 +820,9 @@ def test_latest_rows_since_added_stamps_the_cycle_on_parallel_update_threads(
     (joined,) = dh_to_pylist(added)
     (row,) = dh_to_pylist(rows)
     assert joined["Step"] == built > 0
-    assert cast("int", row["Step"]) > built
+    step = row["Step"]
+    assert isinstance(step, int)
+    assert step > built
     release_scope(dh_exec_ctx, scope)
     for pin in pins:
         release_scope(dh_exec_ctx, pin)

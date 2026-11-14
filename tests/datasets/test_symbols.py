@@ -5,7 +5,6 @@ import json
 import re
 import typing
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 import pytest
@@ -32,9 +31,6 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
 from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -286,12 +282,12 @@ def test_the_massive_convention_is_the_default_for_every_class() -> None:
 
 def test_converter_enums_reject_text() -> None:
     with pytest.raises(TypeError, match=r"^asset_class must be dm\.AssetClass"):
-        dm.canonical_symbol("AAPL", cast("AssetClass", "stocks"))
+        dm.canonical_symbol("AAPL", "stocks")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
-        dm.canonical_symbol("BRK-B", STK, convention=cast("SymbolConvention", "yahoo"))
+        dm.canonical_symbol("BRK-B", STK, convention="yahoo")  # type: ignore[arg-type]  # the point: refused at run time
     # No convention is not a default: SymbolConvention.MASSIVE names Massive's own spelling.
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
-        dm.canonical_symbol("AAPL", STK, convention=cast("SymbolConvention", None))
+        dm.canonical_symbol("AAPL", STK, convention=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize(
@@ -350,14 +346,14 @@ def test_check_symbols_sorts_and_deduplicates() -> None:
 
 
 def test_check_symbols_materializes_generators() -> None:
-    assert check_symbols(cast("Iterable[str]", (s for s in ["B", "A"]))) == ("A", "B")
+    assert check_symbols(s for s in ["B", "A"]) == ("A", "B")
 
 
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
-        check_symbols(cast("Iterable[str]", items))
+        check_symbols(items)
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         check_symbols([])
 
@@ -368,9 +364,9 @@ def test_check_symbols_all_passes_through() -> None:
 
 def test_check_symbols_rejects_non_iterables_and_non_strings() -> None:
     with pytest.raises(TypeError, match="symbols must be"):
-        check_symbols(cast("Iterable[str]", 5))
+        check_symbols(5)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="must be a str"):
-        check_symbols(cast("Iterable[str]", ["AAPL", 5]))
+        check_symbols(["AAPL", 5])  # type: ignore[list-item]  # the point: refused at run time
 
 
 def test_symbol_tables_compare_by_wrapper(dh_exec_ctx: object) -> None:

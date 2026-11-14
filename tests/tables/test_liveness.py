@@ -11,7 +11,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from deephaven import empty_table, time_table
@@ -115,12 +115,14 @@ def test_an_owner_callback_runs_the_method_and_holds_its_owner_weakly() -> None:
 def test_release_scope_holds_the_update_graph_lock(dh_exec_ctx: ExecutionContext) -> None:
     # A release can destroy a refreshing table; under the lock, no update cycle runs meanwhile.
     scope = _RecordingScope(dh_exec_ctx)
-    release_scope(dh_exec_ctx, cast("LivenessScope", scope))
+    recorded: LivenessScope = scope  # type: ignore[assignment]  # a fake that records the lock
+    release_scope(dh_exec_ctx, recorded)
     assert scope.locked == [True]
     assert not holds_update_graph_lock(dh_exec_ctx)  # let go after the release
     failing = _RecordingScope(dh_exec_ctx, fail=True)
+    broken: LivenessScope = failing  # type: ignore[assignment]  # a fake whose release fails
     with pytest.raises(RuntimeError, match=r"^released twice$"):  # its own error, not wrapped
-        release_scope(dh_exec_ctx, cast("LivenessScope", failing))
+        release_scope(dh_exec_ctx, broken)
     assert failing.locked == [True]
     assert not holds_update_graph_lock(dh_exec_ctx)  # let go after a failed release too
 
@@ -138,7 +140,8 @@ def test_release_scope_in_a_console_command_takes_the_lock_again(
 ) -> None:
     # A console command holds the exclusive lock; it takes the shared lock again at once.
     scope = _RecordingScope(dh_exec_ctx)
-    console_command(lambda: release_scope(dh_exec_ctx, cast("LivenessScope", scope)))
+    recorded: LivenessScope = scope  # type: ignore[assignment]  # a fake that records the lock
+    console_command(lambda: release_scope(dh_exec_ctx, recorded))
     assert scope.locked == [True]
 
 
@@ -555,9 +558,11 @@ def test_a_failing_scope_release_still_notifies_the_owner(dh_exec_ctx: Execution
             raise RuntimeError("cannot release")
 
     notified: list[str] = []
-    record = ResultRecord(cast("LivenessScope", BrokenScope()), lambda: notified.append("released"))
+    broken: LivenessScope = BrokenScope()  # type: ignore[assignment]  # a fake whose release fails
+    record = ResultRecord(broken, lambda: notified.append("released"))
+    unused: Reaper = None  # type: ignore[assignment]  # the reap under test never uses it
     with pytest.raises(RuntimeError, match="cannot release"):
-        ResultRegistry(threading.RLock(), cast("Reaper", None), dh_exec_ctx)._reap(record)
+        ResultRegistry(threading.RLock(), unused, dh_exec_ctx)._reap(record)
     assert notified == ["released"]
 
 

@@ -60,13 +60,14 @@ import contextlib
 import csv
 import functools
 import gzip
+import io
 import threading
 import zlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, Self, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Protocol, Self, TypeAlias, TypeVar
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -154,6 +155,19 @@ class _Watched:
         except OSError:
             self._failed.set()
             raise
+
+    def seek(self, offset: int, /) -> int:
+        """Refuse to seek: a response body reads forward only.
+
+        gzip seeks its file object only to rewind, which reading a file once never does.
+
+        Args:
+            offset: The position asked for.
+
+        Raises:
+            io.UnsupportedOperation: Always, naming the position.
+        """
+        raise io.UnsupportedOperation(f"a response body cannot seek (to {offset})")
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,10 +390,8 @@ class FlatFile:
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
-            # gzip only reads its file object; its stub also asks for `seek`, which a response
-            # body has no use for.
             body = _Watched(self._body, self._dropped)
-            text = gzip.GzipFile(fileobj=cast("BinaryIO", body), mode="rb")
+            text = gzip.GzipFile(fileobj=body, mode="rb")
             names = self._header(text, plan)
             headers = DriftReport(
                 extra=frozenset(names).difference(read_types),
@@ -835,18 +847,18 @@ def _in_order(
         Exception: The `deferred` failure of reading `items`, once every result before it has
             been yielded.
     """
-    end = object()
     pending: deque[Future[_R]] = deque()
     failed: Exception | None = None
     try:
         while True:
             try:
-                item = next(items, end)
-            except deferred as error:
-                failed, item = error, end
-            if item is end:
+                item = next(items)
+            except StopIteration:
                 break
-            pending.append(pool.submit(work, cast("_T", item)))
+            except deferred as error:
+                failed = error
+                break
+            pending.append(pool.submit(work, item))
             if len(pending) > ahead:
                 yield pending.popleft().result()
         while pending:

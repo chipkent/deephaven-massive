@@ -2,15 +2,16 @@
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
@@ -233,9 +234,19 @@ def test_history_with_no_possible_source_raises_before_any_transport(
 def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recorder) -> None:
     q = trades(massive_session)
     with pytest.raises(TypeError, match=r"source must be dm\.HistorySource"):
-        q.history("2025-03-03", "2025-03-03", source=cast("HistorySource", "rest"), wait=True)
+        q.history(
+            "2025-03-03",
+            "2025-03-03",
+            source="rest",  # type: ignore[arg-type]  # the point: refused at run time
+            wait=True,
+        )
     with pytest.raises(TypeError, match=r"reread must be dm\.Reread"):
-        q.history("2025-03-03", "2025-03-03", reread=cast("dm.Reread", "never"), wait=True)
+        q.history(
+            "2025-03-03",
+            "2025-03-03",
+            reread="never",  # type: ignore[arg-type]  # the point: refused at run time
+            wait=True,
+        )
     with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
         q.history("2025-03-03T09:30", "2025-03-04", wait=True)
     with pytest.raises(ValueError, match="must not be after end"):
@@ -258,9 +269,15 @@ def test_history_reads_a_static_symbol_table_once_for_every_source(
     iterate = Table.iter_tuple
     expected = massive_session._core.exec_ctx.j_exec_ctx
 
-    def recorded(table: Table, *args: object, **kwargs: object) -> object:
+    def recorded(
+        table: Table,
+        cols: str | Sequence[str] | None = None,
+        *,
+        tuple_name: str = "Deephaven",
+        chunk_size: int = 2048,
+    ) -> Iterator[tuple[object, ...]]:
         reads.append(get_exec_ctx().j_exec_ctx.equals(expected))
-        return cast("Any", iterate)(table, *args, **kwargs)
+        return iterate(table, cols, tuple_name=tuple_name, chunk_size=chunk_size)
 
     monkeypatch.setattr(Table, "iter_tuple", recorded)
     q = trades(massive_session, watchlist)
@@ -533,7 +550,10 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
 
 
 def test_history_follows_a_refreshing_table_from_rest_under_auto(
-    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., InputTable],
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rest, flat = Recorder(s3_session._core.catalog), Recorder(s3_session._core.catalog)
     monkeypatch.setattr(s3_session._core, "rest_transport", lambda: rest)
@@ -561,7 +581,10 @@ def test_history_follows_a_refreshing_table_from_rest_under_auto(
 
 
 def test_history_follows_from_flat_files_when_rest_cannot_serve(
-    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., InputTable],
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flat = Recorder(s3_session._core.catalog)
     monkeypatch.setattr(
@@ -580,7 +603,10 @@ def test_history_follows_from_flat_files_when_rest_cannot_serve(
 
 
 def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
-    live: Callable[..., Table], *, s3_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+    live: Callable[..., InputTable],
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     flat = Recorder(s3_session._core.catalog)
     monkeypatch.setattr(
@@ -599,7 +625,7 @@ def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
 
 
 def test_history_forced_to_rest_follows_from_rest(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live("AAPL")).history(
         "2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True
@@ -614,13 +640,13 @@ def test_history_forced_to_rest_follows_from_rest(
 
 
 def test_an_added_symbol_is_read_over_the_call_s_window(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     watchlist = live("AAPL")
     result = trades(massive_session, watchlist).history(
         "2025-03-03", wait=True
     )  # through the call instant
-    cast("Any", watchlist).add(new_table([string_col("Symbol", ["MSFT"])]))
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(rest.by_symbol) == 2)
     (first, window, caller), (added, later, reader) = rest.by_symbol
     assert (first, added) == (("AAPL",), ("MSFT",))
@@ -634,7 +660,7 @@ def test_an_added_symbol_is_read_over_the_call_s_window(
 
 
 def test_an_instant_range_prints_its_instants(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     start = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
     end = datetime(2025, 3, 3, 15, tzinfo=UTC)
@@ -648,7 +674,7 @@ def test_an_instant_range_prints_its_instants(
 
 
 def test_wait_false_returns_at_once_and_reads_in_the_background(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live("AAPL")).history("2025-03-03", "2025-03-03", wait=False)
     assert result.is_refreshing
@@ -659,7 +685,7 @@ def test_wait_false_returns_at_once_and_reads_in_the_background(
 
 
 def test_an_empty_refreshing_table_returns_an_empty_following_result(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     result = trades(massive_session, live()).history("2025-03-03", "2025-03-03", wait=True)
     assert result.is_refreshing
@@ -671,7 +697,7 @@ def test_an_empty_refreshing_table_returns_an_empty_following_result(
 
 
 def test_wait_true_raises_when_every_call_time_symbol_fails(
-    live: Callable[..., Table], *, massive_session: dm.MassiveSession, rest: Recorder
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {
@@ -689,7 +715,7 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
 
 
 def test_wait_true_warns_once_when_some_call_time_symbols_fail(
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -745,7 +771,7 @@ def test_a_call_that_waits_names_wait_true_in_its_start(
 
 
 def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -763,7 +789,7 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
 
 
 def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
-    live: Callable[..., Table],
+    live: Callable[..., InputTable],
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,

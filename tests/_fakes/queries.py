@@ -2,9 +2,10 @@
 
 import dataclasses
 import threading
+import types
 from collections.abc import Callable, Sequence
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol
 
 import pytest
 from deephaven import arrow as dh_arrow
@@ -12,8 +13,10 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.dates import DateLike
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.symbols import SymbolsLike
 from deephaven_massive._enums import (
     AssetClass,
     NotBars,
@@ -22,7 +25,9 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._ingest import history_reads
+from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.publisher import BlinkPublisher
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
@@ -36,10 +41,6 @@ from deephaven_massive.queries import (
     Query,
     StreamHistoryQuery,
 )
-
-if TYPE_CHECKING:
-    from deephaven_massive._ingest.flatfiles import FlatFileHistory
-
 
 TIMEOUT = 30.0
 
@@ -302,6 +303,11 @@ class FlatFiles:
             spec, request, window, symbols=symbols, call=call, stop=stop
         )
 
+    def _as_files(self) -> FlatFileHistory:
+        """Return this recorder as the flat-file transport `read_history` reads from."""
+        files: FlatFileHistory = self  # type: ignore[assignment]  # a fake with its read methods
+        return files
+
     def read_history(
         self,
         spec: DatasetSpec,
@@ -318,7 +324,7 @@ class FlatFiles:
             request,
             window,
             core=self.core,
-            files=cast("FlatFileHistory", self),
+            files=self._as_files(),
             dates=dates,
             call=call,
             forced=forced,
@@ -326,11 +332,31 @@ class FlatFiles:
         )
 
 
-def make(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> Query:
-    return build_query(session._core, spec, query_type=Query, **cast("dict[str, Any]", kwargs))
+def make(
+    session: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    symbols: SymbolsLike | None = None,
+    timespan: Timespan | None = None,
+    multiplier: int = 1,
+    start: DateLike | None = None,
+    end: DateLike | None = None,
+    limit: int | None = None,
+) -> Query:
+    return build_query(
+        session._core,
+        spec,
+        query_type=Query,
+        symbols=symbols,
+        timespan=timespan,
+        multiplier=multiplier,
+        start=start,
+        end=end,
+        limit=limit,
+    )
 
 
-def trades(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> StreamHistoryQuery:
+def trades(session: dm.MassiveSession, symbols: SymbolsLike = ("AAPL",)) -> StreamHistoryQuery:
     q = make(session, TRADES_SPEC, symbols=symbols)
     assert isinstance(q, StreamHistoryQuery)
     return q
@@ -342,8 +368,10 @@ def last_trade(session: dm.MassiveSession) -> FetchQuery:
     return q
 
 
-def news(session: dm.MassiveSession, **kwargs: object) -> FetchQuery:
-    q = make(session, NEWS_SPEC, **kwargs)
+def news(
+    session: dm.MassiveSession, *, start: DateLike | None = None, limit: int | None = None
+) -> FetchQuery:
+    q = make(session, NEWS_SPEC, start=start, limit=limit)
     assert isinstance(q, FetchQuery)
     return q
 
@@ -362,7 +390,10 @@ def strict(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> None:
 def join_reads(session: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end, then for its row to be written.
     for state in list(session._core.workers._workers.values()):
-        cast("Any", state.fail).__self__.join(TIMEOUT)
+        assert isinstance(state.fail, types.MethodType)
+        read = state.fail.__self__
+        assert isinstance(read, BackgroundRead)
+        read.join(TIMEOUT)
 
 
 def released(session: dm.MassiveSession, *tables: Table) -> None:

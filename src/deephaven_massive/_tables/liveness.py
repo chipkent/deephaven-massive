@@ -51,11 +51,11 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Generic, TypeVar
 
 from deephaven.liveness_scope import LivenessScope
 
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, required
 from deephaven_massive._tables.execution_context import entered
 
 if TYPE_CHECKING:
@@ -390,7 +390,7 @@ class QueueWorker(Generic[_T]):
             item = self._queue.get(timeout=None if wait is None else max(wait, 0.0))
         except queue.Empty:
             try:
-                cast("Callable[[], None]", self._on_timeout)()
+                required(self._on_timeout, f"{self.thread.name}'s on_timeout")()
             except Exception:
                 logger.exception(
                     "%s failed on a timed wake-up; continuing. %s", self.thread.name, LIBRARY_BUG

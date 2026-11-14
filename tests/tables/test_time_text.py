@@ -93,4 +93,4 @@ def test_iso_text_refused_for_another_reason_keeps_its_error() -> None:
 @pytest.mark.parametrize("value", [date(2025, 3, 3), 20250303])
 def test_other_values_pass_through(value: object) -> None:
     # Integers stay refused by the parser, never read here.
-    assert deephaven_time_text(value, "start") is value  # type: ignore[arg-type]  # any value passes
+    assert deephaven_time_text(value, "start") is value

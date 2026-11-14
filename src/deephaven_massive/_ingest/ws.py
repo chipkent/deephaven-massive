@@ -79,7 +79,7 @@ import logging
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
@@ -92,6 +92,7 @@ from deephaven_massive._errors import (
     PermanentError,
     failure_text,
     library_bug,
+    required,
 )
 from deephaven_massive._ingest.host_decision import real_time_note, require_real_time
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
@@ -364,8 +365,8 @@ class WsConnections:
         # The futures schedule calendar reads the paths of the futures reference datasets.
         by_name = core.catalog.by_name
         self._calendar_paths: Final = (
-            cast("str", by_name["futures.contracts"].fetch_path),
-            cast("str", by_name["futures.schedules"].fetch_path),
+            required(by_name["futures.contracts"].fetch_path, "futures.contracts's fetch path"),
+            required(by_name["futures.schedules"].fetch_path, "futures.schedules's fetch path"),
         )
         self.group: Final = ConnectionGroup.attach(
             self, config=core.config, exec_ctx=core.exec_ctx, client_factory=client_factory
@@ -432,8 +433,8 @@ class WsConnections:
         lists it in its `Error` (`_listed_pairs`), or, for a reactive table, its watch does.
         """
         # The calling verb runs on the core, which is alive while the verb runs.
-        core = cast("SessionCore", self._core())
-        asset_class = cast("AssetClass", spec.asset_class)
+        core = required(self._core(), "the session")
+        asset_class = spec.single_class
         plan = self._plan(core, spec, channel)
         symbols = request.symbol_key()
         skipped = (
@@ -601,7 +602,7 @@ class WsConnections:
         and a closed session the `MassiveError` of `_check_open`.
         """
         group = self.group
-        asset_class = cast("AssetClass", spec.asset_class)
+        asset_class = spec.single_class
         url = f"wss://{decision.host}/{asset_class.value}"
         candidate: Connection | None = None
         try:
@@ -610,10 +611,11 @@ class WsConnections:
                     self._check_open()
                     connection = group.connections.get(url)
                     self._check_cap(spec, connection, topics)
-                    created = connection is None and candidate is not None
-                    if created:
-                        connection = group.connections[url] = cast("Connection", candidate)
+                    created = False
+                    if connection is None and candidate is not None:
+                        connection = group.connections[url] = candidate
                         candidate = None
+                        created = True
                     if connection is not None:
                         connection.families.add(spec.channel_family)
                         self._row_owners[asset_class, spec.channel_family] = connection
@@ -766,7 +768,7 @@ class WsConnections:
             stream_id: The stream.
         """
         try:
-            cast("SessionCore", self._core()).streams.shut_down(stream_id)
+            required(self._core(), "the session").streams.shut_down(stream_id)
             with self._lock:
                 connection = self._forget(stream_id)
             if connection is not None:
@@ -1293,7 +1295,7 @@ class WsConnections:
             the users of every other connection, and stays a user of those it closes.
         """
         group = self.group
-        mine = [(s, cast("Connection", self._forget(s))) for s in sorted(self._mine)]
+        mine = [(s, required(self._forget(s), f"stream {s}'s lease")) for s in sorted(self._mine)]
         closing = []
         for connection in {*group.connections.values(), *(c for _, c in mine)}:
             if self not in connection.users:

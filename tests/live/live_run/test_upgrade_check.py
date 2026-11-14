@@ -11,7 +11,7 @@ import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -257,5 +257,6 @@ def test_each_call_s_effect_is_shown_before_its_row_is_read(
     monkeypatch.setitem(upgrade_check.CALLS, "stocks", call)
     monkeypatch.setattr(upgrade_check, "wait_for_diagnostics", wait)
     monkeypatch.setattr(upgrade_check, "_row", row)
-    assert upgrade_check.learn_limit(cast("MassiveSession", None), "stocks") == 2
+    unused: MassiveSession = None  # type: ignore[assignment]  # the patched calls never read it
+    assert upgrade_check.learn_limit(unused, "stocks") == 2
     assert steps == ["call", "wait", "read"] * 2

@@ -87,7 +87,7 @@ import time
 import weakref
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeVar
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -110,7 +110,7 @@ from deephaven_massive._datasets.timestamps import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
 from deephaven_massive._enums import NotBars, OnError
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
+from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug, required
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
@@ -416,7 +416,7 @@ class SharedBatch:
         """
         if self._partition is None:
             self._partition = self.table.partition_by(_SYMBOL)
-        return cast("Table", self._partition.get_constituent(symbol))
+        return required(self._partition.get_constituent(symbol), f"the batch's rows of {symbol}")
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -499,7 +499,7 @@ class ChannelPlan:
         An unknown source raises the `KeyError` of `Catalog.source`, and a bad key declaration
         the `ValueError` of `source_columns.rename`.
         """
-        asset_class = cast("AssetClass", spec.asset_class)
+        asset_class = spec.single_class
         key = f"{asset_class.value}/{channel}"
         source = catalog.source(Transport.WS, key)
         renamed = rename(spec, source)
@@ -941,7 +941,7 @@ class StreamSink:
         if version != self._filter_version:
             self._filter = new_table([string_col(_SYMBOL, sorted(symbols))])
             self._filter_version = version
-        return batch.table.where_in(cast("Table", self._filter), _SYMBOL)
+        return batch.table.where_in(required(self._filter, "the stream's symbol filter"), _SYMBOL)
 
     def fail(self, error: MassiveError) -> bool:
         """Fail the stream's table and record the failure, once.
@@ -2082,8 +2082,7 @@ def open_stream_tables(
             if isinstance(symbols, AllSymbols):
                 received = None
             else:
-                reactive = isinstance(symbols, SymbolTable)
-                received = frozenset() if reactive else frozenset(cast("tuple[str, ...]", symbols))
+                received = frozenset() if isinstance(symbols, SymbolTable) else frozenset(symbols)
             sink = StreamSink(
                 stream_id, core=core, plan=plan, publisher=publisher, symbols=received
             )

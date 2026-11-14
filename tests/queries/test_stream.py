@@ -4,7 +4,7 @@ import dataclasses
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias
 
 import pytest
 from deephaven import arrow as dh_arrow
@@ -51,7 +51,7 @@ def test_ring_bounds(massive_session: dm.MassiveSession, capacity: int) -> None:
 @pytest.mark.parametrize("capacity", [1.5, True, "10"])
 def test_ring_types(massive_session: dm.MassiveSession, capacity: object) -> None:
     with pytest.raises(TypeError, match="capacity must be an int"):
-        trades(massive_session).ring(cast("int", capacity))
+        trades(massive_session).ring(capacity)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_last_by_takes_its_keys_positionally(
@@ -94,7 +94,7 @@ def test_last_by_keys(
 ) -> None:
     error, message = expected
     with pytest.raises(error, match=message):
-        trades(massive_session).last_by(by=cast("str", by))
+        trades(massive_session).last_by(by=by)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_stream_verbs_build_results(

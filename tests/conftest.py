@@ -47,7 +47,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Final, TypeAlias
 from zoneinfo import ZoneInfo
 
 import deephaven
@@ -168,7 +168,7 @@ def _record_unlocked_library_releases() -> None:
     real = liveness_scope.LivenessScope.release
 
     def release(scope: liveness_scope.LivenessScope) -> None:
-        caller = cast("types.FrameType", cast("types.FrameType", inspect.currentframe()).f_back)
+        caller = sys._getframe(1)
         locked = dh_update_graph.has_shared_lock(
             update_graph
         ) or dh_update_graph.has_exclusive_lock(update_graph)
@@ -1107,8 +1107,8 @@ def _held_by_cycles(garbage: list[object], *, follow: Callable[[object], bool]) 
             referents = []
         elif id(item) in owners:
             owner = owners[id(item)]
-            attributes = cast("dict[str, object]", item).items()
-            referents = [v for k, v in attributes if not _restored_method(owner, k, v)]
+            assert isinstance(item, dict)
+            referents = [v for k, v in item.items() if not _restored_method(owner, k, v)]
         else:
             referents = gc.get_referents(item)
         holds[id(item)] = [id(each) for each in referents if id(each) in ids]
