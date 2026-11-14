@@ -1679,12 +1679,9 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
 
 def test_a_java_held_callback_of_a_freed_session_does_nothing() -> None:
     # The JVM may run a publisher's shutdown callback after the session's connections are gone.
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the session's connections were freed
 
-    freed: ws.WsConnections = _Gone()  # type: ignore[assignment]  # a fake: a session, freed below
-    gone = weakref.ref(freed)
-    del freed
     ws._weakly(gone, "_shut_down", 1)
 
 
