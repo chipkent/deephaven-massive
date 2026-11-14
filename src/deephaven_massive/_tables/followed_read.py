@@ -426,8 +426,19 @@ class FollowedRead:
         self.core.workers.release(self.call)
 
     def stop_watch(self) -> None:
-        """Stop the watch's listener: a Deephaven call, so the reaper runs it."""
-        required(self._watch, f"call {self.call}'s symbol watch").stop()
+        """Stop the watch's listener: a Deephaven call, so the reaper runs it.
+
+        A result whose build was undone after its blink table was made (an exception, even a
+        `KeyboardInterrupt`, in `open_followed_read` before `attach`) shuts down with no watch:
+        there is nothing to stop, and that is logged at DEBUG.
+        """
+        if self._watch is None:
+            logger.debug(
+                "call %d follow: the result shut down before its watch was made; no watch to stop",
+                self.call,
+            )
+            return
+        self._watch.stop()
 
 
 class _WatchRouter:
