@@ -805,6 +805,8 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # Massive's outage may be over by the next call, as the latest error says.
     assert [e.is_retryable for e in published_failures] == [True]
+    # Chained to the latest error, so a bug's traceback reaches the failure's log record.
+    assert [str(e.__cause__) for e in published_failures] == [str(error)]
 
 
 @pytest.mark.parametrize(

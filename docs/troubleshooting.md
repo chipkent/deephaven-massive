@@ -107,9 +107,9 @@ has already retried, so wait before you call again.
 `fetch()` and every other query method raise `dm.SessionClosedError` once you call
 `m.close()`, and so does `m.streams()`. Create a new session to read again.
 
-A `fetch()` or `history()` of a watchlist fails only when every symbol on the watchlist at the
-call failed. When only some fail, such as when Massive refuses one symbol's request, the log
-reports them and `m.symbol_reads()` shows each one's error.
+A `fetch()` or `history()` of a watchlist fails when Massive rejects the API key, or when every
+symbol on the watchlist at the call failed. When only some fail, such as when Massive refuses one
+symbol's request, the log reports them and `m.symbol_reads()` shows each one's error.
 
 <a id="diagnostics"></a>
 

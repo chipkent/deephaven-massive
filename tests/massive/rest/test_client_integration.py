@@ -21,6 +21,7 @@ import json
 import threading
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import pytest
 import urllib3
@@ -286,8 +287,11 @@ def test_why_a_later_page_answers_404(live_config: MassiveConfig, evidence: Evid
     """
     pool = urllib3.PoolManager(ssl_context=new_ssl_context(), retries=False)
     headers = {"Authorization": f"Bearer {live_config.api_key}"}
+    origin = urlsplit(live_config.rest_base_url)[:2]
 
     def get(url: str) -> tuple[int, dict[str, object]]:
+        if urlsplit(url)[:2] != origin:  # the key goes only where the client would send it
+            pytest.fail(f"refusing to send the API key to {url!r}: not the REST base URL's origin")
         response = pool.request("GET", url, headers=headers)
         try:
             body = json.loads(response.data)

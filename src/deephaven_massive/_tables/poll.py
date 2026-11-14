@@ -1204,7 +1204,8 @@ class Poller:
             down: Seconds since the run of failing cycles began.
 
         Returns:
-            The error, naming the last good cycle, the limit, and what to do.
+            The error, naming the last good cycle, the limit, and what to do, and chained to
+            the latest error, so a bug's traceback reaches the log.
         """
         logger.debug(
             "%s poll() stream %d: cycles have failed for %.0f s, max_outage is %g s; failing it",
@@ -1213,7 +1214,7 @@ class Poller:
             down,
             self._max_outage,
         )
-        return MassiveError(
+        failure = MassiveError(
             f"{self._spec.name} poll(): {self._good_text()}; every cycle since "
             f"{utc_text(self._failing_at)} has failed, for {down:.0f} s, longer than "
             f"MassiveConfig.max_outage ({self._max_outage:g} s); the rows since then may be "
@@ -1223,6 +1224,8 @@ class Poller:
             is_retryable=isinstance(error, MassiveError) and error.is_retryable,
             is_bug=is_bug_of(error),
         )
+        failure.__cause__ = error  # its log record carries the latest error's traceback too
+        return failure
 
     def _publish(self, table: pa.Table) -> int:
         """Publish one cycle's rows as the mode shapes them.
