@@ -1440,14 +1440,9 @@ def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
     custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
 
     def fired() -> bool:
-        return bool(
-            custom_session.on_loop(
-                connection,
-                lambda: (
-                    connection._episodes.down_since is not None and not connection._episodes.down
-                ),
-            )
-        )
+        # The stream stays expired until its table fails, which needs the flush below; the
+        # outage itself can end first, once the reconnect's subscription is acknowledged.
+        return bool(custom_session.on_loop(connection, lambda: connection._episodes.expired))
 
     wait_for(fired)  # the zero-second timer fires on the loop's next turn
     custom_session.flush()
