@@ -327,10 +327,11 @@ def test_forex_currencies_are_three_letters() -> None:
 def test_forex_codes_split_a_forex_ticker_by_position() -> None:
     assert forex_codes("C:EURUSD") == ("EUR", "USD")
     assert forex_codes("C:USDJPY") == ("USD", "JPY")
-    # Text with the prefix splits the same way, with no check: Massive answers what is sent.
-    assert forex_codes("C:EURO") == ("EUR", "O")
-    # Text without it has no codes the library can derive: it goes on the wire as written.
-    assert forex_codes("EURUSD") is None
+    assert forex_codes("C:eurusd") == ("eur", "usd")  # case is never folded or judged
+    # Any other text has no codes the library can derive: it goes on the wire as written,
+    # never as `EUR-/USD` or `EUR-O`, and Massive answers it.
+    for text in ("EURUSD", "C:EUR/USD", "C:EUR-USD", "C:EURO", "C:EURUSDX", "C:EUR1SD"):
+        assert forex_codes(text) is None
 
 
 def test_option_roots() -> None:

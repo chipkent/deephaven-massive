@@ -299,3 +299,9 @@ def test_a_class_with_no_spellings_is_a_defect() -> None:
     # Every class names its file spellings; a new one fails until it does, never reads as stocks.
     with pytest.raises(AssertionError):
         wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
+
+
+@pytest.mark.parametrize("symbol", ["C:EUR/USD", "C:EUR-USD", "C:EURO"])
+def test_a_forex_ticker_that_is_no_joined_pair_goes_on_the_wire_as_written(symbol: str) -> None:
+    # Only `C:` and six letters split by position; `C:EUR/USD` is never sent as `EUR-/USD`.
+    assert ws_symbol(FX, symbol, {}) == symbol

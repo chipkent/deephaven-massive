@@ -910,19 +910,20 @@ def forex_codes(symbol: str) -> tuple[str, str] | None:
     """Split a forex ticker into its two ISO 4217 codes, by position.
 
     A forex ticker is `C:` and two three-letter codes joined, so, unlike a crypto pair, it
-    splits by position, with no lookup and no guess: `C:EURUSD` is `("EUR", "USD")`. Only text
-    with Massive's `C:` prefix is split; any other text has no codes the library can derive,
-    and goes on the wire as written.
+    splits by position, with no lookup and no guess: `C:EURUSD` is `("EUR", "USD")`. Only that
+    form is split: `C:` and six letters. Any other text, such as `C:EUR/USD`, has no codes the
+    library can derive, and goes on the wire as written.
 
     Args:
         symbol: A forex ticker, such as `C:EURUSD`.
 
     Returns:
-        `(base, quote)`, such as `("EUR", "USD")`; None for text without the `C:` prefix.
+        `(base, quote)`, such as `("EUR", "USD")`; None for text that is not `C:` and six
+        letters.
     """
-    if not symbol.startswith(_FOREX_PREFIX):
-        return None
     body = symbol.removeprefix(_FOREX_PREFIX)
+    if body == symbol or len(body) != 2 * _CURRENCY_CODE_LENGTH or not body.isalpha():
+        return None
     return body[:_CURRENCY_CODE_LENGTH], body[_CURRENCY_CODE_LENGTH:]
 
 
