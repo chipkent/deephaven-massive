@@ -11,7 +11,7 @@ import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pytest
 import urllib3
@@ -56,6 +56,8 @@ _TRADES = RestPath(
     ),
 )
 _AAPL = {"stockTicker": "AAPL"}
+_CONNECTION = urllib3.connection.HTTPConnection("api.massive.com")
+"""The connection a refused connection names; never opened."""
 
 
 def _governor(clock: FakeClock | None = None) -> RequestGovernor:
@@ -1643,7 +1645,7 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
         (
             urllib3.exceptions.ProxyError(
                 "Unable to connect to proxy",
-                urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+                urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"),
             ),
             0,
         ),
@@ -1653,8 +1655,8 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
             ),
             0,
         ),
-        (urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"), 0),
-        (_caused_by(urllib3.exceptions.NewConnectionError(cast("Any", None), "refused")), 0),
+        (urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"), 0),
+        (_caused_by(urllib3.exceptions.NewConnectionError(_CONNECTION, "refused")), 0),
         # Without a proxy a TLS error may come after the request left: each of its four
         # attempts (it is retried as a transient failure) keeps its slot.
         (urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")), 4),

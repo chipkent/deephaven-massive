@@ -54,7 +54,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
-from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -206,6 +206,15 @@ _WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
 """The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""
 
 
+@runtime_checkable
+class _NanosecondTime(Protocol):
+    """A `datetime` that also holds nanoseconds, as a `pandas.Timestamp` does."""
+
+    def to_datetime64(self) -> np.datetime64:
+        """Return the time as a `numpy.datetime64` in UTC, in its own unit."""
+        ...
+
+
 class TimeTextError(ValueError):
     """Text that is not ISO-8601, raised by `parse_date_like`.
 
@@ -249,8 +258,8 @@ def parse_date_like(value: object, name: str, *, upper: bool = False) -> date | 
     years 1 to 9999.
     """
     if isinstance(value, datetime):
-        if hasattr(value, "to_datetime64"):  # a pandas.Timestamp, which can hold nanoseconds
-            return _pandas_bound(value, name, upper=upper)
+        if isinstance(value, _NanosecondTime):  # a pandas.Timestamp
+            return _pandas_bound(value, value.to_datetime64(), name, upper=upper)
         parsed = value
     elif isinstance(value, date):
         return value
@@ -279,11 +288,12 @@ def parse_date_like(value: object, name: str, *, upper: bool = False) -> date | 
     return parsed
 
 
-def _pandas_bound(value: datetime, name: str, *, upper: bool) -> datetime:
+def _pandas_bound(value: datetime, utc: np.datetime64, name: str, *, upper: bool) -> datetime:
     """Parse a `pandas.Timestamp` bound, keeping the nanoseconds a `datetime` would drop.
 
     Args:
-        value: The timestamp, a `datetime` subclass with a `to_datetime64` method.
+        value: The timestamp, a `datetime` subclass.
+        utc: The timestamp's `to_datetime64()`: in UTC, in its own unit.
         name: The parameter's name, for messages.
         upper: True for an upper bound, rounded up; False for any other, rounded down.
 
@@ -295,7 +305,6 @@ def _pandas_bound(value: datetime, name: str, *, upper: bool) -> datetime:
 
     A time outside years 1 to 9999 raises the `ValueError` of `_rounded`.
     """
-    utc = cast("np.datetime64", cast("Any", value).to_datetime64())  # in UTC, in its own unit
     if np.isnat(utc):
         raise ValueError(f"{name}={value!r} is NaT, not a time")
     require_aware(name, value, value)
@@ -497,6 +506,13 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
     instants are an empty range, which is allowed. Datetimes are compared in UTC, so the
     repeated hour of a daylight-saving fall-back is ordered correctly.
 
+    A reversed range is refused for two reasons. Massive answers it with no error where it is
+    sent as filters: the dividends, sent `ex_dividend_date.gte` a month ago and `.lte` a year
+    ago, answered HTTP 200 with no rows. And `history()` cannot send it at all: it turns the
+    range into the bars or days that fit inside it (`bar_periods.bar_starts`, the flat files'
+    days), a reversed range fits none, and so nothing would be requested, although the
+    aggregates range answers a reversed `{from}` and `{to}` with HTTP 400.
+
     Args:
         start: The parsed lower bound.
         end: The parsed upper bound.
@@ -665,6 +681,8 @@ def bounds(
         check_order(first, last)
     except ValueError:
         if end is None:  # `last` is now, in `first`'s kind, so only the order can fail
+            # Refused because Massive answers it with no error: AAPL's day bars from 10 to 20
+            # days ahead answered HTTP 200 with no rows, which would read as no trading.
             raise ValueError(
                 f"start ({first!r}) must not be after now ({last!r}); end=None reads through now"
             ) from None
@@ -802,7 +820,7 @@ def day_class(
     return shared.pop()
 
 
-def calendar_day(spec: DatasetSpec, value: DateLike, name: str, *, given: object = None) -> date:
+def calendar_day(spec: DatasetSpec, value: object, name: str, *, given: object = None) -> date:
     """Turn the single day a dataset's path or parameter takes into a calendar date.
 
     Endpoints such as the daily open-close summary take one calendar day (the day of the

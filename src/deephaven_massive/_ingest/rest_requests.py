@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
 from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
@@ -35,16 +35,16 @@ from deephaven_massive._datasets.history_source import session_date_param
 from deephaven_massive._datasets.symbols import AllSymbols, forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
+from deephaven_massive._errors import required
 from deephaven_massive._massive import ParamKind, Transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._datasets.dates import DaySpan, TimeRange
+    from deephaven_massive._datasets.dates import TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import RestPath
 
 __all__ = [
@@ -66,14 +66,16 @@ _FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
     Timespan.SECOND: "sec",
     Timespan.MINUTE: "min",
     Timespan.HOUR: "hour",
+    Timespan.DAY: "day",
     Timespan.SESSION: "session",
     Timespan.WEEK: "week",
     Timespan.MONTH: "month",
     Timespan.QUARTER: "quarter",
     Timespan.YEAR: "year",
 }
-"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan; the
-endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
+"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan.
+Massive's documentation lists no `day` unit, but it serves `1day` bars in the shape of
+`1session` bars."""
 
 _ONE_DAY: Final = timedelta(days=1)
 
@@ -311,7 +313,7 @@ class _Spread(Enum):
 def _symbol_parts(
     spec: DatasetSpec,
     rest_path: RestPath,
-    symbols: NormalizedSymbols | None,
+    symbols: tuple[str, ...] | AllSymbols | None,
     *,
     slot: str | None,
     pair: bool = False,
@@ -363,15 +365,14 @@ def _symbol_parts(
         if spread is _Spread.PATH:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
         return [(None, {}, {})]
-    explicit = cast("tuple[str, ...]", symbols)
+    explicit = symbols
     if not explicit:
         return []
     if spread is _Spread.NONE:
         return [(None, {}, {})]
     if spread is _Spread.LIST:
         size = spec.symbols_per_request or len(explicit)
-        # Only a path with the symbol parameter spreads as a list.
-        listed = cast("str", param)
+        listed = required(param, f"{rest_path.template}'s list parameter")
         return [(None, {}, {listed: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     return [
@@ -454,10 +455,8 @@ def _caller_params(
     folded = "order" in typed and "order" not in params
     unknown = [name for name in typed if name not in params and not (folded and name == "order")]
     for name, value in typed.items():
-        bare = name == BARE_INDEX_PARAM and isinstance(value, str)
         if name in params:
-            sent = contracts_underlying(cast("str", value)) if bare else value
-            (path if params[name].in_path else query)[name] = sent
+            (path if params[name].in_path else query)[name] = _sent_value(name, value)
     if folded and "sort" in query:
         query["sort"] = f"{typed['sort']}.{typed['order']}"
     elif folded:
@@ -518,6 +517,21 @@ def largest_page(rest_path: RestPath) -> int:
     raise ValueError(f"{rest_path.template} documents no maximum page size (`limit`)")
 
 
+def _sent_value(name: str, value: object) -> object:
+    """Return a typed parameter's value as sent: an index underlying bare, every other as is.
+
+    Args:
+        name: The wire parameter's name.
+        value: Its value.
+
+    Returns:
+        `contracts_underlying(value)` for the options contracts' underlying; `value` otherwise.
+    """
+    if name == BARE_INDEX_PARAM and isinstance(value, str):
+        return contracts_underlying(value)
+    return value
+
+
 def shared_params(
     spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -574,8 +588,8 @@ def shared_params(
 
 
 def fetch_paths(
-    spec: DatasetSpec, symbols: NormalizedSymbols | None
-) -> list[tuple[str, NormalizedSymbols | None]]:
+    spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols | None
+) -> list[tuple[str, tuple[str, ...] | AllSymbols | None]]:
     """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
 
     A dataset with a per-symbol detail path (`DatasetSpec.detail_path`, such as one option
@@ -591,7 +605,7 @@ def fetch_paths(
     Returns:
         `(path template, symbols)` pairs, in the order of each path's first symbol.
     """
-    default = cast("str", spec.fetch_path)
+    default = required(spec.fetch_path, f"{spec.name}'s fetch path")
     if not isinstance(symbols, tuple) or not symbols:
         return [(default, symbols)]
     if spec.detail_path is not None:
@@ -610,7 +624,7 @@ def plan_calls(
     rest_path: RestPath,
     request: Request,
     *,
-    symbols: NormalizedSymbols | None,
+    symbols: tuple[str, ...] | AllSymbols | None,
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
     extra: Mapping[str, object] | None = None,
@@ -764,7 +778,7 @@ def history_calls(
     order = _ascending(spec, rest_path, request)
     requested = window.requested
     if requested is None:
-        sessions = cast("DaySpan", window.sessions)
+        sessions = required(window.sessions, f"{spec.name}'s history sessions")
         session = session_date_param(spec)
         return [
             call
@@ -774,7 +788,7 @@ def history_calls(
                 spec,
                 rest_path,
                 request,
-                symbols=request.symbols,
+                symbols=request.static_symbols,
                 extra={**order, session: day},
                 split=split,
             )
@@ -786,7 +800,7 @@ def history_calls(
         spec,
         rest_path,
         request,
-        symbols=request.symbols,
+        symbols=request.static_symbols,
         fixed=_range_segments(requested) if ranged else {},
         dates=(requested.start, requested.end),
         extra=order,

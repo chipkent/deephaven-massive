@@ -281,6 +281,11 @@ explicit_package_bases = true
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# jpy, Deephaven's bridge to Java, is a compiled module with no type information.
+module = ["jpy"]
+ignore_missing_imports = true
+
 
 # ---------------------------------------------------------------------------------------------
 # Pyright (non-gating second checker)

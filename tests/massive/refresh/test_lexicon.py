@@ -1,6 +1,5 @@
 import json
 import os
-from typing import cast
 
 import pytest
 
@@ -93,7 +92,7 @@ def test_a_lexicon_copies_and_freezes_its_entries() -> None:
     source["p"] = lexicon.LongName(long_name="changed", source="test")
     assert lex.entries == {"p": price}
     with pytest.raises(TypeError):
-        cast("dict[str, lexicon.LongName]", lex.entries)["s"] = price
+        lex.entries["s"] = price  # type: ignore[index]  # the point: read-only
 
 
 def test_every_websocket_channel_has_one_message_shape() -> None:

@@ -1,15 +1,15 @@
-"""What Massive answers to a value the library refuses before sending: the requests and verdicts.
+"""What Massive answers to a value the library could refuse before sending: requests and verdicts.
 
-The library refuses some argument values itself, before any request, although Massive could
-judge them: a conversion `precision` of 5, a `sort` field the path does not list, a start after
-the end. Such a check earns its place only when Massive, sent the value, returns wrong or empty
-data with no error. `bad_requests` builds, for each check, the smallest requests that carry the
-refused value straight to Massive's REST endpoint through the wire client, past the library's
-check. `ask` sends one, records through `evidence` Massive's status, message, and row count, and
-ends with one verdict line:
+A library check of an argument value earns its place only when Massive, sent the value, returns
+wrong or empty data with no error; a value Massive refuses or serves correctly is sent. These
+checks record which is which: a conversion `precision` of 5, a `sort` field the path does not
+list, a start after the end, and more. `bad_requests` builds, for each check, the smallest
+requests that carry the value straight to Massive's REST endpoint through the wire client, past
+any library check. `ask` sends one, records through `evidence` Massive's status, message, and
+row count, and ends with one verdict line:
 
 - `ERROR`: Massive refused the request; the line gives its HTTP status and message.
-- `EMPTY`: HTTP 200 with no rows.
+- `EMPTY`: HTTP 200 with no rows, or with an empty body.
 - `DATA`: HTTP 200 with rows; the line says how many of them answer the request as sent, where
   a row can be compared with it, and otherwise says to read the rows recorded above it.
 
@@ -20,7 +20,6 @@ rather than on the owner's live run.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -29,11 +28,11 @@ from typing import TYPE_CHECKING, Any, Final, TypeGuard
 from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive import (
-    ParamKind,
     Transport,
     WireAuthError,
     WireEntitlementError,
     WireError,
+    set_reply_capture,
     source,
 )
 from tests._live.contracts import front_contract
@@ -41,7 +40,7 @@ from tests._live.contracts import front_contract
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from deephaven_massive._massive import RestClient, RestPath
+    from deephaven_massive._massive import CapturedReply, RestClient
 
 __all__ = [
     "AMOUNT",
@@ -50,8 +49,10 @@ __all__ = [
     "CURRENCY_CODE",
     "ENUM_FILTER",
     "ENUM_SORT",
+    "FILTER_EMPTY_ITEM",
     "FILTER_WHITESPACE",
     "FUTURES_DAY",
+    "FUTURES_MULTIPLIER",
     "INDICATOR_TIMESPAN",
     "LIMIT",
     "MULTIPLIER",
@@ -63,7 +64,9 @@ __all__ = [
     "START_AFTER_NOW",
     "TRAILING_BALANCE_SHEET",
     "UNDERLYING_CHAIN",
+    "UNDERLYING_CHAIN_CONTRACT",
     "UNDERLYING_CONTRACTS",
+    "UNDERLYING_CONTRACTS_CONTRACT",
     "WINDOW",
     "Answer",
     "BadRequest",
@@ -84,12 +87,16 @@ SORT_WHITESPACE: Final = "sort part with surrounding whitespace"
 LIMIT: Final = "limit below 1"
 ENUM_FILTER: Final = "enum filter value the parameter does not list"
 FILTER_WHITESPACE: Final = "filter list item with surrounding whitespace"
+FILTER_EMPTY_ITEM: Final = "filter list with an empty item"
 TRAILING_BALANCE_SHEET: Final = "balance sheets for the trailing twelve months"
 FUTURES_DAY: Final = "futures bars of a day resolution"
+FUTURES_MULTIPLIER: Final = "futures bars of a multiplier below 1"
 SESSION_OUTSIDE_FUTURES: Final = "session bars outside futures"
 MULTIPLIER: Final = "bar multiplier below 1"
 UNDERLYING_CHAIN: Final = "option chain of a currency or crypto pair"
+UNDERLYING_CHAIN_CONTRACT: Final = "option chain of an option contract"
 UNDERLYING_CONTRACTS: Final = "option contracts of a currency or crypto pair"
+UNDERLYING_CONTRACTS_CONTRACT: Final = "option contracts of an option contract"
 CONTRACT_SYMBOL: Final = "option contract details of a stock ticker"
 START_AFTER_END: Final = "start after end"
 START_AFTER_NOW: Final = "start after now"
@@ -101,6 +108,9 @@ _CONVERSION: Final = "/v1/conversion/{from}/{to}"
 _SMA: Final = "/v1/indicators/sma/{stockTicker}"
 _DIVIDENDS: Final = "/stocks/v1/dividends"
 _CONDITIONS: Final = "/v3/reference/conditions"
+_CONTRACT: Final = "O:AAPL250117C00150000"
+"""An option contract, sent where the chain takes its underlying."""
+
 _PAIRS: Final = ("C:EURUSD", "X:BTCUSD")
 """A forex and a crypto pair: underlyings the library refuses, as it does an option contract."""
 
@@ -141,8 +151,6 @@ class BadRequest:
         query: The query parameters, by wire name, each in the form its parameter takes: a
             sequence of text for a list parameter such as `ticker.any_of`.
         bucket: The rate bucket of the data's class (`"other"` for reference data).
-        as_text: The enum parameters sent as free text, so a value outside the enum reaches
-            Massive instead of being refused by the wire client.
         match: Tells whether a row answers the request as sent; None when no row can be
             compared with it.
         matching: What a matching row is, for the verdict line, such as `"of asset_class
@@ -156,7 +164,6 @@ class BadRequest:
     names: Mapping[str, object]
     query: Mapping[str, object]
     bucket: str
-    as_text: frozenset[str] = frozenset()
     match: Callable[[Row], bool] | None = None
     matching: str = ""
     note: Callable[[Row], str] | None = None
@@ -212,21 +219,31 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
     Returns:
         The answer.
 
+    An HTTP 200 with an empty body is Massive's answer too, though the client cannot read it
+    as a page: it is recorded as `EMPTY` (HTTP 200, empty body).
+
     Raises:
         WireError: If the request got no answer about its value: no HTTP response (a
             transport failure after retries, or a closed client), a server failure (5xx)
             after retries, a rate limit (429) the governor gave up waiting out, a refusal
             of the key or the plan (401, 403, or a `NOT_AUTHORIZED` envelope), or a 200
-            whose body the client cannot read. It records the last two first.
+            whose body is not empty and that the client cannot read. It records the last
+            two first.
     """
-    rest_path = _text_path(source(Transport.REST, request.path), request.as_text)
+    rest_path = source(Transport.REST, request.path)
     names, query = _shown(request.names), _shown(request.query)
     evidence(f"{request.label}: GET {request.path} path={names} query={query}")
+    replies: list[CapturedReply] = []
+    # The live tests' process installs no other sink, so this one replaces none.
+    set_reply_capture(replies.append)
     try:
         page = client.get(rest_path, request.names, request.query, bucket=request.bucket)
     except WireError as error:
         if error.status is None or error.status in _NO_JUDGMENT:
             raise
+        if error.unreadable and replies and replies[-1].status == 200 and not replies[-1].text:
+            evidence(f"{request.label}: verdict EMPTY (HTTP 200, empty body)")
+            return Answer("EMPTY", 200, 0, None)
         if error.unreadable or isinstance(error, WireAuthError | WireEntitlementError):
             # A reply that judges the key or the plan, or cannot be read: recorded for the
             # owner, but no refusal of the value. The live fixtures turn a plan refusal into
@@ -235,6 +252,8 @@ def ask(client: RestClient, request: BadRequest, evidence: Callable[[str], None]
             raise
         evidence(f"{request.label}: verdict ERROR (HTTP {error.status}: {error.message})")
         return Answer("ERROR", error.status, 0, None)
+    finally:
+        set_reply_capture(None)
     rows = page.rows
     # The body's own fields beside the rows (status, count, a message), without the next page.
     body = page.body if isinstance(page.body, dict) else {}
@@ -281,25 +300,6 @@ def ask_all(
     """
     day = datetime.now(_NEW_YORK).date() if today is None else today
     return tuple(ask(client, request, evidence) for request in bad_requests(day)[check])
-
-
-def _text_path(rest_path: RestPath, names: frozenset[str]) -> RestPath:
-    """Return a REST path whose named enum parameters take any text.
-
-    Args:
-        rest_path: The path, from the spec.
-        names: The parameters to loosen.
-
-    Returns:
-        A copy of the path in which each named parameter is a `STRING`.
-    """
-    params = tuple(
-        dataclasses.replace(param, kind=ParamKind.STRING, values=())
-        if param.name in names
-        else param
-        for param in rest_path.params
-    )
-    return dataclasses.replace(rest_path, params=params)
 
 
 def _shown(query: Mapping[str, object]) -> dict[str, object]:
@@ -450,6 +450,18 @@ def _field_is(key: str, wanted: object, row: Row) -> bool:
     return found == wanted
 
 
+def _listed_ticker(row: Row) -> bool:
+    """Tell whether a dividend row is of AAPL or MSFT, the tickers beside the empty item.
+
+    Args:
+        row: The row.
+
+    Returns:
+        True when its `ticker` is `AAPL` or `MSFT`.
+    """
+    return row.get("ticker") in ("AAPL", "MSFT")
+
+
 def _never(_row: Row) -> bool:
     """Match no row, for a request whose range holds no time.
 
@@ -477,7 +489,6 @@ def _conversion_requests() -> dict[str, tuple[BadRequest, ...]]:
                 names=aud_usd,
                 query={"amount": _PRECISION_AMOUNT, "precision": str(_PRECISION_SENT)},
                 bucket="currencies",
-                as_text=frozenset({"precision"}),
                 match=partial(_rounded_to, _PRECISION_SENT),
                 matching=(
                     f"with `converted` the amount times `last.bid` or `last.ask` rounded to "
@@ -526,7 +537,6 @@ def _indicator_requests() -> dict[str, tuple[BadRequest, ...]]:
                 names={"stockTicker": "AAPL"},
                 query={"timespan": "second", "limit": 5},
                 bucket="stocks",
-                as_text=frozenset({"timespan"}),
             ),
         ),
         WINDOW: (
@@ -560,7 +570,6 @@ def _reference_requests() -> dict[str, tuple[BadRequest, ...]]:
                 names={},
                 query={"asset_class": value},
                 bucket="other",
-                as_text=frozenset({"asset_class"}),
                 match=partial(_field_is, "asset_class", value),
                 matching=f"of asset_class {value}",
             )
@@ -586,7 +595,6 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 names={},
                 query={"sort": "exchange", "limit": 5},
                 bucket="other",
-                as_text=frozenset({"sort"}),
             ),
         ),
         SORT_FIELD: (
@@ -623,7 +631,6 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 names={},
                 query={"market": "equities", "limit": 5},
                 bucket="other",
-                as_text=frozenset({"market"}),
                 match=partial(_field_is, "market", "equities"),
                 matching="of market equities",
             ),
@@ -645,6 +652,21 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 matching="of MSFT, the item sent with a space",
             ),
         ),
+        FILTER_EMPTY_ITEM: (
+            BadRequest(
+                label="dividends ticker.any_of=['AAPL', '', 'MSFT']",
+                path=_DIVIDENDS,
+                names={},
+                query={
+                    "ticker.any_of": ["AAPL", "", "MSFT"],
+                    "ex_dividend_date.gte": today - timedelta(days=365),
+                    "limit": 50,
+                },
+                bucket="stocks",
+                match=_listed_ticker,
+                matching="of AAPL or MSFT, the tickers sent",
+            ),
+        ),
         TRAILING_BALANCE_SHEET: (
             BadRequest(
                 label="balance sheets timeframe=trailing_twelve_months",
@@ -660,7 +682,7 @@ def _list_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
 
 
 def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
-    """Return the options requests: a pair as the underlying, and a stock as a contract.
+    """Return the options requests: a pair or a contract as the underlying, a stock as a contract.
 
     Returns:
         The requests by check.
@@ -678,6 +700,17 @@ def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
             )
             for pair in _PAIRS
         ),
+        UNDERLYING_CHAIN_CONTRACT: (
+            BadRequest(
+                label=f"chain of {_CONTRACT}",
+                path="/v3/snapshot/options/{underlyingAsset}",
+                names={"underlyingAsset": _CONTRACT},
+                query={"limit": 5},
+                bucket="options",
+                match=partial(_field_is, "underlying_asset.ticker", _CONTRACT),
+                matching=f"with underlying_asset.ticker {_CONTRACT}",
+            ),
+        ),
         UNDERLYING_CONTRACTS: tuple(
             BadRequest(
                 label=f"contracts underlying_ticker={pair}",
@@ -689,6 +722,17 @@ def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
                 matching=f"with underlying_ticker {pair}",
             )
             for pair in _PAIRS
+        ),
+        UNDERLYING_CONTRACTS_CONTRACT: (
+            BadRequest(
+                label=f"contracts underlying_ticker={_CONTRACT}",
+                path="/v3/reference/options/contracts",
+                names={},
+                query={"underlying_ticker": _CONTRACT, "limit": 5},
+                bucket="options",
+                match=partial(_field_is, "underlying_ticker", _CONTRACT),
+                matching=f"with underlying_ticker {_CONTRACT}",
+            ),
         ),
         CONTRACT_SYMBOL: (
             BadRequest(
@@ -722,6 +766,15 @@ def _bar_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
                 path="/futures/v1/aggs/{ticker}",
                 names={"ticker": front_contract("ES", today)},
                 query={"resolution": "1day", "window_start.gte": two_weeks_ago, "limit": 5},
+                bucket="futures",
+            ),
+        ),
+        FUTURES_MULTIPLIER: (
+            BadRequest(
+                label="futures resolution=0session",
+                path="/futures/v1/aggs/{ticker}",
+                names={"ticker": front_contract("ES", today)},
+                query={"resolution": "0session", "window_start.gte": two_weeks_ago, "limit": 5},
                 bucket="futures",
             ),
         ),
@@ -800,7 +853,6 @@ def _stock_bars(
         },
         query={"limit": 5},
         bucket="stocks",
-        as_text=frozenset({"timespan"}),
         match=_never if empty else None,
         matching=empty,
     )

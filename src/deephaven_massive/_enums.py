@@ -102,8 +102,9 @@ class Timespan(StrEnum):
 
     For `bars()`, the timespan also decides whether the bars stream: one-second and one-minute bars
     (`SECOND` and `MINUTE` with `multiplier=1`) stream, and every other bar is history only.
-    `SESSION` is for futures alone, whose bars have a trading-session unit and no `DAY`. The
-    previous day's bar is a dataset of its own, `previous_day_bar()`.
+    `SESSION` is a futures trading session, and Massive serves it only for futures bars. A
+    futures `DAY` bar also spans one session. The previous day's bar is a dataset of its own,
+    `previous_day_bar()`.
 
     Example:
         ::

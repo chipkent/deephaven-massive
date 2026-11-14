@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests._live.live_run.server import PARENT_HEAP
+from tests._live.live_run.server import PROBE_HEAP
 from tests._live.tester import server
 
 
@@ -14,4 +14,4 @@ def test_examples_gets_the_heap_its_tables_need() -> None:
 
 @pytest.mark.parametrize("argv", [[], ["check"], ["bug-report", "--folder", "x"]])
 def test_every_other_command_gets_the_small_heap(argv: list[str]) -> None:
-    assert server.jvm_args(argv) == [f"-Xmx{PARENT_HEAP >> 20}m"]
+    assert server.jvm_args(argv) == [f"-Xmx{PROBE_HEAP >> 20}m"]

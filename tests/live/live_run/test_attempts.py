@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from tests._live.live_run.machine_checks import Item
-    from tests._live.live_run.run_probe import ProbeResult
+    from tests._live.live_run.probe_result import ProbeResult
 
 ROOT = Path(__file__).resolve().parents[3]
 

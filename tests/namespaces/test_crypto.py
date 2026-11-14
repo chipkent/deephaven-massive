@@ -20,7 +20,7 @@ import string
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -375,12 +375,13 @@ def test_bars_default_to_streamed_minutes(massive_session: dm.MassiveSession) ->
 
 def test_bar_arguments_are_checked(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.crypto.bars
-    with pytest.raises(ValueError, match=r"Timespan\.SESSION exists only for futures"):
-        bars("X:BTCUSD", dm.Timespan.SESSION)
+    # Massive judges these values itself, so the query is built and they are sent.
+    assert bars("X:BTCUSD", dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
+    assert bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)._request.multiplier == 0
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
         bars("X:BTCUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
-    with pytest.raises(ValueError, match="multiplier"):
-        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier=0)
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bars("X:BTCUSD", dm.Timespan.HOUR, multiplier="2")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted"):
         bars("X:BTCUSD", adjusted=True)  # type: ignore[call-arg]  # crypto bars have none
 
@@ -531,7 +532,12 @@ def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSes
 
 def rest_rows(body: dict[str, object], path: RestPath) -> list[dict[str, object]]:
     rows = body if path.result_key is None else body[path.result_key]
-    return [rows] if isinstance(rows, dict) else cast("list[dict[str, object]]", rows)
+    if isinstance(rows, dict):
+        return [rows]
+    assert isinstance(rows, list)
+    found = [row for row in rows if isinstance(row, dict)]
+    assert len(found) == len(rows)
+    return found
 
 
 @pytest.mark.parametrize(
@@ -947,11 +953,12 @@ def test_a_documented_frame_lands_in_blink(
     symbol = str(dm.canonical_symbol_crypto(topic.split(".", 1)[1]))
     namespace = ws_session.session.crypto
     if dataset == "bars_second":
-        query = cast("SymbolStreamQuery", namespace.bars(symbol, dm.Timespan.SECOND))
+        query = namespace.bars(symbol, dm.Timespan.SECOND)
     elif dataset == "bars":
-        query = cast("SymbolStreamQuery", namespace.bars(symbol, dm.Timespan.MINUTE))
+        query = namespace.bars(symbol, dm.Timespan.MINUTE)
     else:
         query = getattr(namespace, dataset)(symbol)
+    assert isinstance(query, SymbolStreamQuery)
     blink = query.blink()
     seen, stop = landed(blink)
     ws_session.subscribed(topic)
@@ -1089,8 +1096,8 @@ def test_a_flat_file_that_dashes_its_pairs_is_read(
     fake_s3.put("global_crypto/trades_v1/2023/03/2023-03-28.csv.gz", make_csv_gz(text))
     flat = dm.HistorySource.FLAT_FILES
 
-    def symbols(symbols: object) -> list[tuple[str, float]]:
-        q = s3_session.crypto.trades(cast("Any", symbols))
+    def symbols(symbols: dm.SymbolsLike) -> list[tuple[str, float]]:
+        q = s3_session.crypto.trades(symbols)
         table = q.history("2023-03-28", "2023-03-28", source=flat, wait=True)
         return [(r["Symbol"], r["Price"]) for r in rows(table)]
 

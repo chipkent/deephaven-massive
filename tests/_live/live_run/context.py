@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from tests._live.live_run.machine_checks import Item
-    from tests._live.live_run.run_probe import ProbeResult
+    from tests._live.live_run.probe_result import ProbeResult
     from tests._live.live_run.secret_scrub import SecretFilter
 
 
@@ -61,7 +61,7 @@ class RunContext:
         environ: The environment, secrets included; never written.
         secrets: The filter applied to everything printed and written.
         commit: The checkout's commit, which a resumed run must match.
-        probe: Probes the key now (`run_probe.probe_key`).
+        probe: Probes the key now (`probe_result.probe_in_child`).
         machine: Runs the machine checks for a folder, given the probe's clock offset
             (`machine_checks.check_machine`).
         keep_awake: Starts keeping the machine awake, and returns the function that stops it.

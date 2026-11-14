@@ -10,7 +10,7 @@ from __future__ import annotations
 import csv
 import json
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -169,7 +169,7 @@ def test_each_stream_reads_its_own_class_history() -> None:
     }
     for stream, check in expected.items():
         calls: list[str] = []
-        session = cast("MassiveSession", _Session(calls))
+        session: MassiveSession = _Session(calls)  # type: ignore[assignment]  # records the verbs
         reconcile._history(session, stream, symbols=["X"], first=DAY, last=DAY)
         assert check(calls), (stream, calls)
         assert calls[-2] == "history"

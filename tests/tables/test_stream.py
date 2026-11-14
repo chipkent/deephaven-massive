@@ -15,7 +15,7 @@ import time
 import types
 import weakref
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -1696,7 +1696,8 @@ def test_a_dying_flush_thread_fails_its_streams(
     core = massive_session._core
     healthy, _ = make_sink(core, ALL)
     f = _DyingFlusher(core.exec_ctx)
-    f.routes.add("T", cast("StreamSink", _Stubborn()))
+    stubborn: StreamSink = _Stubborn()  # type: ignore[assignment]  # a sink whose failure raises
+    f.routes.add("T", stubborn)
     f.routes.add("T", healthy)
     with caplog.at_level(logging.ERROR):
         f.start()
@@ -1743,8 +1744,10 @@ def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     shown = blink_to_append_only(healthy_blink)
     recording = _Recording(3)
     flusher.routes.add("T", healthy)
-    flusher.routes.add("Q", cast("StreamSink", _Stubborn()))
-    flusher.routes.add("Q", cast("StreamSink", recording))
+    stubborn: StreamSink = _Stubborn()  # type: ignore[assignment]  # a sink whose failure raises
+    recorded: StreamSink = recording  # type: ignore[assignment]  # a sink that records failures
+    flusher.routes.add("Q", stubborn)
+    flusher.routes.add("Q", recorded)
     flusher.fail([2], MassiveError("refused"))
     flusher.fail([3], MassiveError("also refused"))
     flusher.rows("T", frame([trade("AAPL")]), generation=1)
@@ -1949,8 +1952,8 @@ def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
     class _Gone:
         pass
 
-    gone = weakref.ref(_Gone())
-    stream._fail_later(cast("weakref.ref[StreamSink]", gone), "late")
+    gone: weakref.ref[StreamSink] = weakref.ref(_Gone())  # type: ignore[arg-type]  # a dead sink
+    stream._fail_later(gone, "late")
 
 
 def test_skipped_watchlist_rows_reach_the_streams_error(
@@ -1974,8 +1977,8 @@ def test_skipped_watchlist_rows_of_a_finished_stream_do_nothing() -> None:
     class _Gone:
         pass
 
-    gone = weakref.ref(_Gone())
-    stream._show_skipped(cast("weakref.ref[StreamSink]", gone), ("msft",))
+    gone: weakref.ref[StreamSink] = weakref.ref(_Gone())  # type: ignore[arg-type]  # a dead sink
+    stream._show_skipped(gone, ("msft",))
 
 
 def test_streamed_rows_of_one_day_share_one_stored_date(

@@ -5,11 +5,12 @@ generated sources (the catalog gates, the schema each spec yields, the fixtures 
 vendor's samples) and each factory's validation and the request it builds.
 """
 
+import functools
 import inspect
 import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import new_table
@@ -22,7 +23,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, sources
+from deephaven_massive._massive import Transport, sources
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _partners as partners
 from deephaven_massive.namespaces._namespace import Namespace
@@ -101,10 +102,19 @@ def spec_of(name: str) -> DatasetSpec:
 
 def factory(session: dm.MassiveSession, name: str) -> Callable[..., FetchQuery]:
     # "partners.benzinga.ratings" is reached as session.partners.benzinga.ratings.
-    target: Any = session
+    target: object = session
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., FetchQuery]", target)
+    assert callable(target)
+    method = target
+
+    @functools.wraps(method)
+    def make(*args: object, **kwargs: object) -> FetchQuery:
+        query = method(*args, **kwargs)
+        assert isinstance(query, FetchQuery)
+        return query
+
+    return make
 
 
 def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[dict[str, Any]]:
@@ -320,7 +330,7 @@ def test_every_poll_key_tells_fixture_rows_apart(
 def a_sort_field(spec: DatasetSpec) -> str:
     # A `sort` every REST path of the dataset takes: one of the listed fields where the spec
     # lists them, else a field of the rows of the first path.
-    paths = [cast("RestPath", CATALOG.source(Transport.REST, p)) for p in spec.rest_paths]
+    paths = [CATALOG.rest_path(p) for p in spec.rest_paths]
     sorts = [p for path in paths for p in path.params if p.name == "sort"]
     listed = [p.values for p in sorts if p.values]
     if listed:
@@ -556,17 +566,17 @@ def test_bad_filters_are_refused(
 @pytest.mark.parametrize("name", LIST_DATASETS)
 def test_order_is_an_enum(massive_session: dm.MassiveSession, name: str) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        factory(massive_session, name)(sort="date", order=cast("Order", "desc"))
+        factory(massive_session, name)(sort="date", order="desc")
 
 
 def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
     ratings = massive_session.partners.benzinga.ratings
     with pytest.raises(TypeError, match="sort must be a str"):
-        ratings(sort=cast("str", 1))
+        ratings(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="limit must be positive"):
         ratings(limit=0)
     with pytest.raises(TypeError, match="filters must be a mapping"):
-        ratings(filters=cast("dict[str, str]", [("date", "2025-01-01")]))
+        ratings(filters=[("date", "2025-01-01")])  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # The docstrings: a summary, then a link to the dataset's generated page.
@@ -590,9 +600,11 @@ def test_each_factory_links_its_dataset_page(name: str) -> None:
 def expected_value(value: object, column_type: ColumnType) -> object:
     # A wire value as the result table holds it; a date stays its ISO text.
     if column_type is ColumnType.INSTANT:
-        return datetime.fromisoformat(cast("str", value))
+        assert isinstance(value, str)
+        return datetime.fromisoformat(value)
     if column_type is ColumnType.DOUBLE:
-        return float(cast("float", value))
+        assert isinstance(value, int | float)
+        return float(value)
     if column_type is ColumnType.STRING and not isinstance(value, str):
         return value  # JSON text: compared parsed
     return value

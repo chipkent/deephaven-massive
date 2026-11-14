@@ -1,7 +1,7 @@
 """Live checks of the indicators' argument values against Massive.
 
-Each test sends a value the library refuses before any request straight to Massive's REST
-endpoint through the wire client, and records Massive's status, message, and row count
+Each test sends a value the library could refuse before any request straight to Massive's
+REST endpoint through the wire client, and records Massive's status, message, and row count
 (`evidence`), ending with a verdict line: ERROR, EMPTY, or DATA (`tests/_live/bad_values.py`).
 The tests are marked `settles`: they assert only that Massive answered, and the owner reads
 the verdict. ERROR means Massive judges the value itself; EMPTY, or DATA that does not answer
@@ -51,7 +51,8 @@ def test_massive_answers_an_indicator_window_of_0(
 ) -> None:
     """What Massive answers to AAPL's simple moving average with `window=0`.
 
-    The library refuses a window below 1. DATA cannot be compared with the request: read
-    the values.
+    The library refuses a window below 1. Massive answered it with HTTP 200 and an empty
+    body, which `ask` records as EMPTY. DATA cannot be compared with the request: read the
+    values.
     """
     assert bad_values.ask_all(live_rest, bad_values.WINDOW, evidence)

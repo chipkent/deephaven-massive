@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from tests._live.calendar import NEW_YORK
-from tests._live.live_run import reconcile, replies, stream_capture, stream_night, upgrade_check
+from tests._live.live_run import (
+    reconcile,
+    replies,
+    reply_examples,
+    stream_capture,
+    stream_night,
+    upgrade_check,
+)
 from tests._live.live_run.outcomes import append_line
 from tests._live.plans import LivePlans
 
@@ -61,7 +68,7 @@ def run_group(
     today = datetime.now(UTC).astimezone(NEW_YORK).date()
     if group == "responses":
         plans = LivePlans(tiers=tiers, s3=False, flat_files=(), source="probed")
-        examples = [e for e in replies.EXAMPLES if e.name in due]
+        examples = [e for e in reply_examples.EXAMPLES if e.name in due]
         replies.run_responses(
             examples,
             plans=plans,

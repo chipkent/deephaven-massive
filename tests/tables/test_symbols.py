@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
+import jpy
 import pytest
 from deephaven import dtypes, new_table
 from deephaven.column import int_col, string_col
@@ -134,23 +134,37 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
 def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD"]), int_col("Size", [1])])
     with pytest.raises(TypeError, match=r"^table must be a Deephaven Table, not list$"):
-        dm.canonicalize_symbols(cast("Table", []), AssetClass.FOREX)
+        dm.canonicalize_symbols([], AssetClass.FOREX)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^asset_class must be dm\.AssetClass"):
-        dm.canonicalize_symbols(table, cast("AssetClass", "forex"))
+        dm.canonicalize_symbols(table, "forex")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
         dm.canonicalize_symbols(
-            table, AssetClass.STOCKS, convention=cast("SymbolConvention", "yahoo")
+            table,
+            AssetClass.STOCKS,
+            convention="yahoo",  # type: ignore[arg-type]  # the point: refused at run time
         )
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
-        dm.canonicalize_symbols(table, AssetClass.FOREX, convention=cast("SymbolConvention", None))
+        dm.canonicalize_symbols(
+            table,
+            AssetClass.FOREX,
+            convention=None,  # type: ignore[arg-type]  # the point: refused at run time
+        )
     with pytest.raises(TypeError, match=r"^on_error must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"):
-        dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=cast("OnError", "log"))
+        dm.canonicalize_symbols(
+            table,
+            AssetClass.FOREX,
+            on_error="log",  # type: ignore[arg-type]  # the point: refused at run time
+        )
     with pytest.raises(
         ValueError, match=r"^the YAHOO convention applies to stocks only, not forex$"
     ):
         dm.canonicalize_symbols(table, AssetClass.FOREX, convention=SymbolConvention.YAHOO)
     with pytest.raises(TypeError, match=r"^column must be a str, not int$"):
-        dm.canonicalize_symbols(table, AssetClass.FOREX, column=cast("str", 1))
+        dm.canonicalize_symbols(
+            table,
+            AssetClass.FOREX,
+            column=1,  # type: ignore[arg-type]  # the point: refused at run time
+        )
     with pytest.raises(ValueError, match=r"^column 'Size' must be a String column of the table$"):
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Size")
     with pytest.raises(
@@ -197,7 +211,6 @@ def _listeners(table: Table) -> int:
     # commons-lang3 (shipped with Deephaven) through jpy, which ships no type stubs. The read
     # runs in Java because JDK 17's setAccessible fails when called over JNI with no Java
     # caller frame.
-    jpy = cast("Any", importlib.import_module("jpy"))
     fields = jpy.get_type("org.apache.commons.lang3.reflect.FieldUtils")
     force_access = True  # Java takes it positionally: readField(target, name, forceAccess)
     references = fields.readField(table.j_table, "childListenerReferences", force_access)
