@@ -4,25 +4,28 @@ The races between a maker and its waiters, through real reads and the rate gover
 tested where the lookups are made, in `tests/ingest/test_rest.py`.
 """
 
+import math
 from concurrent.futures import Future
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
+from deephaven_massive._errors import from_wire
 from deephaven_massive._ingest import shared_lookup
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 
 
 def _lookup() -> SharedLookup[str, object]:
-    # No test here waits, so no governor is needed.
-    return SharedLookup("MassiveSession #1", cast("Any", None))
+    # No test here waits, so the governor is never asked.
+    return SharedLookup("MassiveSession #1", _massive.RequestGovernor(["other"]))
 
 
 def test_a_claim_is_made_once_and_its_value_is_known_after() -> None:
     lookup = _lookup()
     claim = lookup.claim_or_wait(
-        "k", bucket="other", patience=cast("Any", None), what="k", public=cast("Any", None)
+        "k", bucket="other", patience=_massive.Patience(math.inf), what="k", public=from_wire
     )
     assert isinstance(claim, Claim)
     assert lookup.known("k") is None  # being made

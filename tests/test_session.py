@@ -9,7 +9,7 @@ import pkgutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._tables.diagnostics import Diagnostics
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import StreamHandle
@@ -81,10 +82,8 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-    )
+def stream_query(session: dm.MassiveSession, symbols: SymbolsLike = ("AAPL",)) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def one_row(session: dm.MassiveSession) -> Table:
@@ -222,7 +221,7 @@ def test_the_logged_configuration_never_shows_a_url_s_password(
 
 def test_config_must_be_a_massive_config() -> None:
     with pytest.raises(TypeError, match=r"config must be a dm\.MassiveConfig"):
-        dm.MassiveSession(cast("dm.MassiveConfig", {"api_key": "k"}))
+        dm.MassiveSession({"api_key": "k"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
@@ -387,7 +386,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
         massive_session.snapshots(dm.ALL)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        massive_session.snapshots(["AAPL"], order=cast("dm.Order", "asc"))
+        massive_session.snapshots(["AAPL"], order="asc")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="limit must be positive"):
         massive_session.snapshots(["AAPL"], limit=0)
     with pytest.raises(ValueError, match=r"^snapshots takes no type filter: Massive refuses type"):
@@ -686,7 +685,7 @@ def test_context_manager_closes() -> None:
 
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
-        massive_session.release(cast("Table", "t"))
+        massive_session.release("t")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         ValueError, match=r"not a live result of this session: release\(\) takes"
     ) as caught:
@@ -809,10 +808,11 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
             "BCC,248274,61.68,61.99,62.565,61.41,1680033600000000000,4073\n"
         ),
     )
-    # The fake S3's test credentials, passed as a mapping as the flat-file tests do.
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="fake-secret",  # noqa: S106  # fake credential
     )
     made: dict[str, Table] = {}
     sessions: list[dm.MassiveSession] = []

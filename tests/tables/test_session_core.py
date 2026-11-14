@@ -7,13 +7,14 @@ threads, and the close.
 
 from __future__ import annotations
 
+import functools
 import gc
 import importlib
 import logging
 import re
 import threading
 import weakref
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import time_table
@@ -50,7 +51,6 @@ from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
-    import functools
     from collections.abc import Callable
 
     from deephaven.execution_context import ExecutionContext
@@ -74,10 +74,10 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=cast("list[str]", symbols)
-    )
+def stream_query(
+    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
+) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -386,7 +386,8 @@ def test_an_unused_session_is_freed_without_the_cyclic_collector() -> None:
         result = stream_query(m).append_only()
         with core.registry_lock:
             record = next(iter(core.results._results.values()))
-        callback = cast("functools.partial[None]", record.on_released)
+        callback = record.on_released
+        assert isinstance(callback, functools.partial)
         assert isinstance(callback.args[0], weakref.ref)  # it holds the registry weakly
         alive = weakref.ref(core)
         reaper = core._reaper.thread
@@ -472,9 +473,10 @@ def test_a_failure_after_the_stream_left_the_registry_is_logged(
 # --- The ingest ports and the catalog --------------------------------------------------------
 
 
-_REST = cast("_transports.RestTransport", object())
-_STREAMS = cast("_transports.StreamTransport", object())
-_FLAT_FILES = cast("_transports.FlatFileTransport", object())
+# Stand-ins compared by identity only.
+_REST: _transports.RestTransport = object()  # type: ignore[assignment]  # compared by identity
+_STREAMS: _transports.StreamTransport = object()  # type: ignore[assignment]  # by identity
+_FLAT_FILES: _transports.FlatFileTransport = object()  # type: ignore[assignment]  # by identity
 
 
 class _Ports:
@@ -733,7 +735,8 @@ def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     core = massive_session._core
     writer = core.diagnostics.thread
     publisher = _FatalPublisher()
-    core.diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
+    core.diagnostics._streams.publisher = fatal
     result = stream_query(massive_session).append_only()  # its row waits for `go`
     publisher.go.set()  # the row kills the writer only now, after the call returned
     writer.join(TIMEOUT)
@@ -758,7 +761,8 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     writer = core.diagnostics.thread
     publisher = _FatalPublisher()
     publisher.go.set()
-    core.diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
+    core.diagnostics._streams.publisher = fatal
     require_unfailed = core.streams._require_unfailed
 
     def after_the_death(spec: DatasetSpec, stream_id: int) -> None:
@@ -792,7 +796,8 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     diagnostics = core.diagnostics
     writer = diagnostics.thread
     publisher = _FatalPublisher()
-    diagnostics._streams.publisher = cast("BlinkPublisher", publisher)
+    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
+    diagnostics._streams.publisher = fatal
     handed: list[LivenessScope] = []
     hand = diagnostics._release_later
 
@@ -857,7 +862,8 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
         release_later=handed.append,
         on_death=deaths.append,
     )
-    diagnostics._connections.publisher = cast("BlinkPublisher", _UnfailablePublisher())
+    unfailable: BlinkPublisher = _UnfailablePublisher()  # type: ignore[assignment]  # cannot fail
+    diagnostics._connections.publisher = unfailable
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.release()
     assert [type(death) for death in deaths] == [_Fatal]
@@ -907,8 +913,8 @@ def test_a_thread_of_a_freed_session_dies_quietly() -> None:
     class _Gone:
         pass
 
-    ref = weakref.ref(_Gone())  # already dead
-    _core.SessionCore._thread_died(cast("weakref.ref[SessionCore]", ref), "reaper", _Fatal())
+    ref: weakref.ref[SessionCore] = weakref.ref(_Gone())  # type: ignore[arg-type]  # already dead
+    _core.SessionCore._thread_died(ref, "reaper", _Fatal())
 
 
 def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(

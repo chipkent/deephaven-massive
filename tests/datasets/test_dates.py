@@ -5,8 +5,9 @@ import logging
 import re
 import typing
 from datetime import UTC, date, datetime, timedelta
-from typing import TypeVar, cast
+from typing import TypeVar
 
+import jpy
 import numpy as np
 import pytest
 from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_zdt
@@ -88,7 +89,7 @@ def test_unparseable_and_wrong_types() -> None:
     with pytest.raises(ValueError, match="ISO-8601"):
         parse_date_like("2025-13-45", "end")
     with pytest.raises(TypeError, match=r"^end must be a str, date, datetime, Java Instant, "):
-        parse_date_like(cast("str", 20250303), "end")
+        parse_date_like(20250303, "end")
 
 
 def test_day_zones() -> None:
@@ -199,9 +200,9 @@ def test_equal_dates_are_one_day_and_equal_datetimes_an_empty_range() -> None:
     ],
 )
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.FUTURES])
-def test_mixed_bounds_are_refused(start: object, end: object, asset_class: AssetClass) -> None:
+def test_mixed_bounds_are_refused(start: DateLike, end: DateLike, asset_class: AssetClass) -> None:
     with pytest.raises(ValueError, match=f"^{re.escape(MIXED_BOUNDS)}; got start="):
-        bounds(_spec(asset_class), cast("str", start), cast("str", end), now=NOW)
+        bounds(_spec(asset_class), start, end, now=NOW)
 
 
 def test_reversed_ranges_are_refused() -> None:
@@ -455,7 +456,8 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
     assert parse_date_like(instant, "start") == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     moment = parse_date_like(zoned, "end")
     assert moment == datetime(2025, 3, 3, 14, 30, 0, 500000, tzinfo=UTC)
-    assert cast("datetime", moment).utcoffset() == timedelta(hours=-5)
+    assert isinstance(moment, datetime)
+    assert moment.utcoffset() == timedelta(hours=-5)
 
 
 @pytest.mark.parametrize(
@@ -472,8 +474,10 @@ def test_java_instants_round_outward_to_the_microsecond(
     # still includes the row it came from; an end rounds up, so the range loses no row.
     caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
-    start = cast("datetime", parse_date_like(java, "start"))
-    end = cast("datetime", parse_date_like(java, "end", upper=True))
+    start = parse_date_like(java, "start")
+    end = parse_date_like(java, "end", upper=True)
+    assert isinstance(start, datetime)
+    assert isinstance(end, datetime)
     assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
     assert caplog.messages == [
@@ -512,7 +516,6 @@ def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
 ) -> None:
     # Rounding up cannot pass the largest datetime, which no row reaches; a start still rounds
     # down to it.
-    jpy = importlib.import_module("jpy")  # untyped: a Java instant past numpy's range
     java = jpy.get_type("java.time.Instant").parse("9999-12-31T23:59:59.999999500Z")
     largest = datetime.max.replace(tzinfo=UTC)
     caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
@@ -526,7 +529,6 @@ def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
 
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
-    jpy = importlib.import_module("jpy")  # untyped: Java's own extreme values
     for java in (jpy.get_type("java.time.Instant").MAX, jpy.get_type("java.time.LocalDate").MAX):
         with pytest.raises(ValueError, match=r"^start=.* is not a time from year 1 to 9999"):
             parse_date_like(java, "start")
