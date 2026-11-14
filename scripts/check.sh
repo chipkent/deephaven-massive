@@ -4,7 +4,7 @@
 # Usage: scripts/check.sh [fast|full] [--all] [--no-fix]
 #
 #   fast      uv sync --upgrade (newest versions), ruff check --fix, ruff format, mypy
-#   full      fast, then the tests the branch's changes need, by CI's path rules (the default)
+#   full      fast, then the tests of the files the branch changes, without coverage (the default)
 #   --all     with full: run the whole suite with coverage, whatever changed
 #   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
 #
@@ -12,10 +12,15 @@
 # origin/main; in the pre-push hook to a branch the remote already has, since that branch's
 # remote tip, so a push runs only the tests its own commits need. Staged and untracked files
 # count; pre-commit hides unstaged edits to tracked files while the hook runs.
-# When CI would run the tests for the change, full runs pytest with coverage on up to 4
-# workers; when CI would not, full runs only the documentation tests if a user page, an image
-# under docs/, or the tester guide changed, and no tests otherwise. It prints the scope it
-# chose and why.
+# It runs each changed test file, the unit test that mirrors each changed module, and the
+# documentation tests when a user page, an image under docs/, or the tester guide changed;
+# a change with none of these runs no tests. CI runs the whole suite with coverage on every
+# pull request. It prints the tests it chose and why.
+#
+# pytest runs on as many workers as the machine has room for (scripts/worker_count.py): two
+# fewer than its CPUs, and one per 3 GiB of available memory, since each worker starts its own
+# JVM. CHECK_WORKERS overrides the count. A targeted run uses no more workers than it has
+# test files, and one worker runs in pytest's own process.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
 # failing step and exits non-zero.
@@ -82,17 +87,29 @@ fi
 step "mypy" uv run mypy src tests scripts
 
 if [[ "$tier" == "full" ]]; then
-    scope=full
+    step "check_scope.py doctests" uv run python -m doctest scripts/check_scope.py
+    step "worker_count.py doctests" uv run python -m doctest scripts/worker_count.py
+    workers=$(uv run python scripts/worker_count.py)
+    tests=()
     if ((all)); then
+        scope=full
         echo "check.sh: scope full: --all runs the whole suite"
     else
-        step "check_scope.py doctests" uv run python -m doctest scripts/check_scope.py
-        scope=$(uv run python scripts/check_scope.py)
+        read -r scope tests_line <<< "$(uv run python scripts/check_scope.py)"
+        read -r -a tests <<< "${tests_line:-}"
+        if ((${#tests[@]} < workers)); then
+            workers=${#tests[@]}
+            echo "check.sh: $workers test workers, one per test file"
+        fi
+    fi
+    # One worker runs in pytest's own process (-n 0): xdist would start a second JVM for it.
+    if ((workers == 1)); then
+        workers=0
     fi
     case "$scope" in
         # -n stays out of addopts, so a plain `uv run pytest` runs in one process for debuggers.
-        full) step "pytest with coverage" uv run pytest -n auto --maxprocesses=4 --cov --cov-report=term-missing:skip-covered ;;
-        docs) step "pytest of the documentation" uv run pytest tests/test_docs.py tests/live/tester/test_examples.py ;;
+        full) step "pytest with coverage" uv run pytest -n "$workers" --cov --cov-report=term-missing:skip-covered ;;
+        tests) step "pytest of the changed files" uv run pytest -n "$workers" "${tests[@]}" ;;
         lint) ;;
         *)
             echo "check.sh: unknown scope '$scope' from scripts/check_scope.py" >&2
