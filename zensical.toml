@@ -90,3 +90,6 @@ show_bases = false
 separate_signature = true
 show_signature_annotations = true
 merge_init_into_class = true
+# A class shows the methods it inherits too, such as StreamHistoryQuery's history() and
+# last_by(), which it gets from its base classes.
+inherited_members = true
