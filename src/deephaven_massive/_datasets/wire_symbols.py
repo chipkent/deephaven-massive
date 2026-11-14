@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -140,8 +140,14 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
         return (*joined, *dashed)
     elif asset_class is AssetClass.INDICES:
         return symbol, symbol[2:]
+    elif (
+        asset_class is AssetClass.STOCKS
+        or asset_class is AssetClass.OPTIONS
+        or asset_class is AssetClass.FUTURES
+    ):
+        return (symbol,)  # the files write these classes' canonical text
     else:
-        return (symbol,)
+        assert_never(asset_class)  # a new class needs its spellings here
     return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
 
 

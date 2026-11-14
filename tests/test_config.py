@@ -1420,3 +1420,9 @@ def test_only_the_generated_part_of_the_page_is_rewritten() -> None:
 def test_a_page_without_both_markers_is_refused(page: str) -> None:
     with pytest.raises(ValueError, match="SETTINGS_REFERENCE_START and SETTINGS_REFERENCE_END"):
         _config.with_settings_reference(page)
+
+
+def test_every_url_setting_is_shown_without_its_credentials() -> None:
+    # A URL may hold a user and password; a new URL setting must say how it is shown.
+    urls = {f.name for f in dataclasses.fields(MassiveConfig) if f.name.endswith("_url")}
+    assert urls == set(_config._URL_SETTINGS)

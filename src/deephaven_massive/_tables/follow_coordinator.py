@@ -84,6 +84,7 @@ from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError, Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    BrokenGuaranteeError,
     ErrorCause,
     MassiveError,
     UnlistedPairError,
@@ -739,6 +740,9 @@ class FollowCoordinator:
         Args:
             result: The result's state.
             message: The event.
+
+        Raises:
+            BrokenGuaranteeError: If the event is of a kind this method has no rule for.
         """
         if isinstance(message, (_Baseline, _Changed)):
             self._membership(result, message)
@@ -763,8 +767,10 @@ class FollowCoordinator:
                     result.dirty.add(name)
         elif isinstance(message, _Outcome):
             self._landed(result, message)
-        else:  # _Stop
+        elif isinstance(message, _Stop):
             self._stopped(result)
+        else:
+            raise BrokenGuaranteeError(library_bug(f"no rule applies {message!r} to a result"))
 
     def _defect(self, result: _Result, step: str, error: Exception) -> None:
         """Fail a result one of whose steps raised: its state may no longer be whole.

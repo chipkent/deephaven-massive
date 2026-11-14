@@ -619,7 +619,8 @@ def announce(
     rate = _massive.BASIC_REQUESTS_PER_MINUTE
     for bucket, count in Counter(buckets).items():
         seconds = governor.estimate(bucket, count)
-        words = _SHAPE_WORDS.get(shape)
+        # A paged read says nothing; every other shape must say how it counts its requests.
+        words = None if shape is ReadShape.PAGED else _SHAPE_WORDS[shape]
         what = f"{count} requests" if words is None else f"{count} requests, {words}"
         if seconds is not None:
             if seconds >= _MINUTE and pauses_live_tables:

@@ -264,3 +264,9 @@ def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
         None,
         "SPX",  # a futures code, not an option's
     ]
+
+
+def test_a_class_with_no_spellings_is_a_defect() -> None:
+    # Every class names its file spellings; a new one fails until it does, never reads as stocks.
+    with pytest.raises(AssertionError):
+        wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time

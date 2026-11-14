@@ -27,6 +27,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
@@ -1356,4 +1357,12 @@ def test_the_tables_are_created_under_the_update_graphs_shared_lock(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     assert blink_creations == [True, True, True, True]
+    diagnostics.release()
+
+
+def test_an_item_the_writer_has_no_rule_for_is_a_defect(dh_exec_ctx: ExecutionContext) -> None:
+    # Only rows, events, and the rate-limit marker are queued; anything else raises, never pulls.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    with pytest.raises(BrokenGuaranteeError, match=r"^the diagnostics queue holds 'text'"):
+        diagnostics._apply(["text"])
     diagnostics.release()

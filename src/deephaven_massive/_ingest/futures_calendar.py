@@ -74,7 +74,14 @@ from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, failure_text
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    BrokenGuaranteeError,
+    ErrorCause,
+    MassiveError,
+    failure_text,
+    library_bug,
+)
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._ingest.rest_requests import largest_page
 from deephaven_massive._massive import Cancel, Transport, source
@@ -186,6 +193,32 @@ class ScheduledSession:
     day: date
     opens: int
     closes: int
+
+
+def _lookup_keys(items: list[object]) -> tuple[set[str], set[str]]:
+    """Sort queued lookups into the contracts and the products whose schedules to load.
+
+    Args:
+        items: What the worker took from its queue at once, `_STOP` excepted.
+
+    Returns:
+        The contracts, and the products.
+
+    Raises:
+        BrokenGuaranteeError: If an item is not a lookup `FuturesCalendar._put` queues, rather
+            than taking it for one.
+    """
+    contracts: set[str] = set()
+    products: set[str] = set()
+    for entry in items:
+        match entry:
+            case ("contracts", frozenset() as keys):
+                contracts.update(keys)
+            case ("schedules", frozenset() as keys):
+                products.update(keys)
+            case _:
+                raise BrokenGuaranteeError(library_bug(f"the futures lookup queue holds {entry!r}"))
+    return contracts, products
 
 
 class FuturesCalendar:
@@ -574,9 +607,8 @@ class FuturesCalendar:
                 return
             contracts: set[str] = set()
             products: set[str] = set()
-            for kind, keys in (entry for entry in items if isinstance(entry, tuple)):
-                (contracts if kind == "contracts" else products).update(keys)
             try:
+                contracts, products = _lookup_keys(items)
                 if contracts:
                     products |= self._load_contracts(contracts)
                 if products:
