@@ -77,16 +77,9 @@ never on its message:
 | Attribute | What it says |
 |---|---|
 | `is_retryable` | `True` when the same call may succeed later, such as after a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection to Massive that kept failing, or a flat file Massive has not published yet. `False` when it can't, such as for a plan that lacks the data, a refused key, a closed session, or a bug. |
-| `is_bug` | `True` when a bug in the library or in your code caused the error. A library bug's message says how to report it, and yours names the fix. |
+| `is_bug` | `True` for a defect to fix, not wait out: a bug in the library, whose message says how to report it, or a problem in your code that the library caught, such as a watchlist table that failed, whose message names the fix. |
 | `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came), `USER` (your code or settings, and the message names the fix), or `LIBRARY` (a bug in the library). Later versions may add sources, so handle values you don't know. |
 | `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
-
-After `m.close()`, a method of a query such as `fetch()` raises `dm.SessionClosedError`, and
-so does `m.streams()`. Create a new session to read again.
-
-A `fetch()` or `history()` of a watchlist fails only when every symbol on the watchlist at the
-call failed. When only some fail, such as when Massive refuses one symbol's request, the log
-reports them and `m.symbol_reads()` shows each one's error.
 
 This example reads Apple's dividends, up to three times, a minute apart:
 
@@ -102,14 +95,21 @@ for attempt in range(3):
         break
     except dm.MassiveError as e:
         if e.is_bug:
-            print(f"Please report or fix this: {e}")
+            print(f"Report or fix this: {e}")
         if not e.is_retryable or attempt == 2:
             raise
         time.sleep(60)
 ```
 
-The library has already retried before it raises, so a retry needs a pause.
-`help(dm.MassiveError.is_retryable)` says how long it waited.
+Before it raises a rate limit, a server failure, or a lost connection, the library has already
+retried, so wait before you call again.
+
+`fetch()` and every other query method raise `dm.SessionClosedError` once you call
+`m.close()`, and so does `m.streams()`. Create a new session to read again.
+
+A `fetch()` or `history()` of a watchlist fails only when every symbol on the watchlist at the
+call failed. When only some fail, such as when Massive refuses one symbol's request, the log
+reports them and `m.symbol_reads()` shows each one's error.
 
 <a id="diagnostics"></a>
 

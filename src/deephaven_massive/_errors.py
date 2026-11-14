@@ -144,8 +144,8 @@ class ErrorSource(StrEnum):
     Read it from an error's `source` to decide what to do. Massive's refusals and errors
     are `MASSIVE`, an answer that never came is `NETWORK`, a problem in your code or settings is
     `USER`, and a bug in the library is `LIBRARY`. Later versions may add members, so end a
-    `match` on it with `case _:`. The values are the library's
-    own names, not values Massive sends.
+    `match` on it with `case _:`. The values are the library's own names, not values Massive
+    sends.
 
     Example:
         Tell a library bug from a problem in your code or settings::
@@ -292,15 +292,19 @@ class MassiveError(Exception):
     def is_retryable(self) -> bool:
         """Whether the same call may succeed if you make it again later.
 
-        True for a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or
-        504), no answer (a `NETWORK` error), and two answers that mean try again: HTTP 404 on a
-        later page of one symbol's REST read, and S3's `RequestTimeout` (HTTP 400) on a flat
-        file.
-        True too for two failures the library finds itself: a flat file Massive hasn't
-        published yet, and pages of one read on which Massive answered with a different
-        `adjusted` than was asked. A `fetch()` or `history()` of a watchlist whose every symbol
-        failed is retryable only when every symbol's error is. False for any other HTTP status,
-        an `AuthenticationError`, an `EntitlementError`, a `SessionClosedError`, or a bug.
+        True for:
+
+        - a rate limit (HTTP 429);
+        - a failure on Massive's side (HTTP 500, 502, 503, or 504);
+        - no answer (`ErrorSource.NETWORK`);
+        - HTTP 404 on a later page of one symbol's REST read;
+        - S3's `RequestTimeout` on a flat file;
+        - a flat file Massive hasn't published yet;
+        - pages of one read that disagree on `adjusted`.
+
+        A `fetch()` or `history()` of a watchlist whose every symbol failed is retryable only
+        when every symbol's error is. False for any other HTTP status, an `AuthenticationError`,
+        an `EntitlementError`, a `SessionClosedError`, or a bug.
 
         Before it raises, the library has retried a server failure or a lost connection a few
         times. It raises a rate limit as soon as the read would spend more than 10 minutes in
@@ -316,8 +320,7 @@ class MassiveError(Exception):
         True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
         for a bug in your code that the library caught, such as a watchlist table that failed
         or an argument that one of the watchlist's symbols doesn't take; its message names the
-        fix. The library logs a bug at ERROR, and any other error below
-        ERROR.
+        fix. The library logs a bug at ERROR, and any other error below ERROR.
         """
         return self._is_bug
 
@@ -327,10 +330,12 @@ class AuthenticationError(MassiveError):
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
     `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
-    401). A `history(..., wait=True)` raises it when Massive's flat-file server rejects the S3
-    keys, and the message then names `s3_access_key_id` and `s3_secret_access_key`. Without
-    `wait=True`, the table fails with it instead. A live table fails with it when Massive's
-    streaming server rejects the key, and so does every other stream on that connection.
+    401). When Massive's flat-file server rejects the S3 keys, `history()` reads REST instead
+    and logs a warning; under `source=dm.HistorySource.FLAT_FILES`, or when REST can't serve
+    the read, it raises this error, whose message names `s3_access_key_id` and
+    `s3_secret_access_key`. Without `wait=True`, the table fails with it instead. A live table
+    fails with it when Massive's streaming server rejects the key, and so does every other
+    stream on that connection.
     Massive may give the same answer to a plan without streams of the asset class, so the
     message says that too. Its `source` is `ErrorSource.USER` when the key is missing, and
     `ErrorSource.MASSIVE` when Massive refused it.
@@ -352,8 +357,8 @@ class EntitlementError(MassiveError):
 
     Massive refused a REST request with HTTP 403, a flat file, or a stream subscription. A
     refused subscription fails only the table that asked, and other tables on the same
-    connection keep running. The library raises it too when Massive marks current data as
-    delayed and its subscription isn't in `MassiveConfig.delayed_subscriptions`. The message
+    connection keep running. The library raises it too when Massive marks the data delayed
+    and the data's subscription isn't in `MassiveConfig.delayed_subscriptions`. The message
     then names the setting to change. Its `source` is `ErrorSource.MASSIVE` when Massive
     refused, and `ErrorSource.USER` when `delayed_subscriptions` refused delayed data.
 
