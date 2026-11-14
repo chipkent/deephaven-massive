@@ -203,7 +203,7 @@ CONVERSION: Final = DatasetSpec(
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
     keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
     # The quote the conversion used: an explicit APPEND poll appends each new conversion.
-    revision_keys=("LastTimestamp",),
+    revision_keys=("LastQuoteParticipantTimestamp",),
 )
 """`m.forex.conversion`: one conversion between two currencies at the latest quote."""
 

@@ -208,7 +208,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
-    from deephaven_massive._log_limits import BoundedLog
+    from deephaven_massive._log_limits import BoundedLog, LoggedKeys
     from deephaven_massive._massive import FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
@@ -808,6 +808,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -836,6 +837,8 @@ class FlatFileHistory:
                 refuses is skipped when `request.refused_venues` is `LOG` or `IGNORE`. False to
                 report every missing trading day as unread, for the query to read from REST,
                 and to raise every refusal, for the query to read the call from REST.
+            logged: The facts the call has logged (`LoggedKeys`): the refused venues, each
+                logged once per call even when a followed table reads the files again.
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
                 None when only the session's close should stop the reads.
 
@@ -879,7 +882,7 @@ class FlatFileHistory:
         refusals = None
         policy = request.refused_venues
         if infer_holidays and policy is not None and policy is not OnError.RAISE:
-            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}")
+            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}", logged=logged)
         return self._read(
             spec,
             transform,
@@ -950,6 +953,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         """Read `history()` from the flat files for each symbol, each with its own outcome.
@@ -966,6 +970,7 @@ class FlatFileHistory:
             dates: The partition dates of the files the window needs.
             call: The call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
+            logged: The facts the call has logged, kept across its reads (`LoggedKeys`).
             stop: A read's stop token; None for a read only the session's close stops.
 
         Returns:
@@ -982,6 +987,7 @@ class FlatFileHistory:
             symbols=symbols,
             dates=dates,
             call=call,
+            logged=logged,
             stop=stop,
             forced=forced,
         )

@@ -277,12 +277,30 @@ _SESSIONS: list[pytest.Session] = []
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Remember the session so the exit handler can read its final exit status.
+    """Remember the session so the exit handler can read its final exit status, and warm up.
+
+    A process that runs tests also compiles its first formula here (`_warm_formula_compiler`);
+    the pytest-xdist controller runs none, so it skips that.
 
     Args:
         session: The pytest session that is starting.
     """
     _SESSIONS.append(session)
+    # pytest-xdist names each worker in this variable; a run with `-n` 1 or more has a `dist`.
+    worker = "PYTEST_XDIST_WORKER" in os.environ
+    if worker or session.config.getoption("dist", "no") == "no":
+        _warm_formula_compiler()
+
+
+def _warm_formula_compiler() -> None:
+    """Compile one formula, so no test pays for the process's first compile.
+
+    Deephaven compiles each new formula with the JDK's compiler, and a process's first compile
+    also loads and warms the compiler itself: several times as long as a later compile, and
+    over 10 seconds on a loaded machine. Paid before the first test, it falls outside every
+    test's time limit instead of inside the limit of whichever test happens to run first.
+    """
+    table_factory.empty_table(1).update("Warm = i")
 
 
 @pytest.hookimpl(wrapper=True, trylast=True)
@@ -1011,8 +1029,11 @@ def _collect_cycles(before: _Running) -> set[str]:
     """Collect garbage, and name the sessions the test started that only a cycle held.
 
     Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
-    to be inspected; then empties it, which frees it. A session in that garbage was reachable
-    only through a reference cycle, which reference counting never frees.
+    to be inspected; then empties it and collects again without the flag, which frees it.
+    Emptying the list alone frees nothing: the cycles still hold each other, so every later
+    look would find them again, and a worker's garbage, and the time to inspect it, would grow
+    with every test it runs. A session in that garbage was reachable only through a reference
+    cycle, which reference counting never frees.
 
     Args:
         before: What ran when the test started.
@@ -1037,7 +1058,10 @@ def _collect_cycles(before: _Running) -> set[str]:
     # cycle. That is how Python works, not a leak, so the references out of frames and
     # tracebacks are not followed, and only a session another cycle holds is named.
     cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
+    found = bool(garbage)
     del garbage
+    if found:
+        gc.collect()
     return {wanted[key] for key in cyclic}
 
 

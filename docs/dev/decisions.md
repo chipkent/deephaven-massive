@@ -610,6 +610,18 @@ ticker's exchange, since Massive can change its plans. A problem with one value 
 never fails a table: `RAISE` fails it when a user chooses it. `canonicalize_symbols` keeps its `LOG`
 default (decision 93); the `OnError` docstring that said `RAISE` was wrong.
 
+**108. The day's change is `TodaysChange` in every dataset, the conversion's quote is
+`LastQuote*`, and `updated` keeps `Updated`** (2026-11-13). Live reads settled the three pairs
+decision 101 left open (items 84 to 86). The option chain's `day.change` and
+`day.change_percent` are the v2 snapshots' and movers' `todaysChange` and `todaysChangePerc`,
+the latest price minus the previous close and that change in percent of it. The chain takes
+the v2 names, `TodaysChange` and `TodaysChangePerc`, because the stocks, forex, and crypto
+snapshots and movers are the most used feeds and keep their columns. The forex conversion's
+`last` object is the pair's last quote, so its columns take the forex snapshot's names:
+`LastQuoteBidPrice`, `LastQuoteAskPrice`, `LastQuoteExchange`, and
+`LastQuoteParticipantTimestamp`. Both renames are `SPELLINGS` entries. The v2 `updated` is not
+the unified snapshot's `last_updated`, so it stays `Updated`.
+
 **109. A value the type checker cannot prove is checked at run time, or marked where a test breaks it**
 
 A `cast` tells mypy a value has a type without checking it, so a wrong assumption fails later and

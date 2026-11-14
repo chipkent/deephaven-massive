@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         Recency,
     )
     from deephaven_massive._errors import MassiveError
+    from deephaven_massive._log_limits import LoggedKeys
 
 __all__ = [
     "FailureKind",
@@ -665,6 +666,7 @@ class FlatFileTransport(Protocol):
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
@@ -683,6 +685,8 @@ class FlatFileTransport(Protocol):
                 venue S3 refuses is skipped when `request.refused_venues` is `LOG` or
                 `IGNORE`. False to return every missing trading day as unread and to raise
                 every refusal.
+            logged: The facts the call has logged (`LoggedKeys`): each refused venue is
+                logged once per call, and the call drops the record when it ends.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
@@ -713,6 +717,7 @@ class FlatFileTransport(Protocol):
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
         """Read flat-file `history()` for each symbol, each with its own outcome.
@@ -733,6 +738,8 @@ class FlatFileTransport(Protocol):
             dates: The partition dates to read (`partition_dates`).
             call: The verb call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
+            logged: The facts the call has logged (`LoggedKeys`), which the followed table
+                keeps across its reads, so each refused venue is logged once per call.
             stop: A read's stop token, as `RestTransport.fetch_by_symbol` takes it.
 
         Returns:

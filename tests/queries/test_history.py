@@ -624,6 +624,32 @@ def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
     follows(s3_session)
 
 
+def test_a_followed_flat_file_history_keeps_one_record_of_what_it_logged_per_call(
+    live: Callable[..., InputTable],
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every read of a call shares the call's record, so a refused venue is logged once per
+    # call, and the next call starts its own; the result holds the record, not the process.
+    flat = Recorder(s3_session._core.catalog)
+    files = FlatFiles(flat, s3_session._core)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: files)
+    watchlist = live("AAPL")
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=watchlist)
+    assert isinstance(q, HistoryQuery)
+    first = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    until(lambda: len(files.logged) == 2)
+    second = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+    one, again, other = files.logged
+    assert one is again
+    assert other is not one
+    s3_session.release(first)
+    s3_session.release(second)
+    follows(s3_session)
+
+
 def test_history_forced_to_rest_follows_from_rest(
     live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
