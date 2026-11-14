@@ -160,10 +160,11 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04. Each example adds one idea, in dependency order: the call
-pattern, static tables, charts, polling, stopping, watchlists, settings, then streaming. Each
-title names the idea, then what the example does. Examples 1 to 7 run on Stocks Basic, the free
-plan, and 8 to 13 on Stocks Starter or higher.
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13. Each example adds
+one idea, in dependency order: the call pattern, static tables, charts, polling, watchlists,
+settings, streaming, then stopping. Each title names the idea, then what the example does.
+Examples 1 to 6 and 13 run on Stocks Basic, the free plan, and 7 to 12 on Stocks Starter or
+higher.
 
 | # | Title | Builds on | Plan |
 |---|---|---|---|
@@ -172,28 +173,32 @@ plan, and 8 to 13 on Stocks Starter or higher.
 | 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
 | 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
 | 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
-| 6 | Stopping live tables: stop the news feed and keep a snapshot | 5 | Stocks Basic |
-| 7 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5, 6 | Stocks Basic |
-| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
-| 9 | Streaming: stream minute bars for the stocks on your list | 7, 8 | Stocks Starter or higher |
-| 10 | Live calculations: track each stock's change since the previous close | 7, 9 | Stocks Starter or higher |
-| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 | Stocks Starter or higher |
-| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 | Stocks Starter or higher |
-| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 | Stocks Starter or higher |
+| 6 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5 | Stocks Basic |
+| 7 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
+| 8 | Streaming: stream minute bars for the stocks on your list | 6, 7 | Stocks Starter or higher |
+| 9 | Live calculations: track each stock's change since the previous close | 6, 8 | Stocks Starter or higher |
+| 10 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 8 | Stocks Starter or higher |
+| 11 | Backfill: start with today's minute bars, then continue live | 3, 10 | Stocks Starter or higher |
+| 12 | Dashboards: show a live chart and table together with deephaven.ui | 4, 9 | Stocks Starter or higher |
+| 13 | Stopping live tables: release one table or close the session | 5 | Stocks Basic |
 
 The owner's decisions behind it:
 
-- Example 7's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
+- Example 6's title is the owner's wording. Examples 3 and 10 say "price returns" and "table
   types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
-- Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
+- Example 7 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
   reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
   no path; never imply that a session reads it.
-- Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
+- Examples 4 and 12 use the Deephaven Express and deephaven.ui plugins, which
   `deephaven-server` doesn't include, so the install command adds them.
 - Stock streams carry data only while stocks trade, so the streaming examples say so and
   offer crypto, which trades around the clock. Free-plan examples stay under five requests a
   minute where they poll.
 - Install ends by starting the server and hands off to Example 1, without repeating its code.
+- Stopping comes last (owner, 2026-11-13: "Why not put the close example as the last one?
+  Simple fix."), so no earlier example closes a session a later one needs. It runs on its own,
+  making the live tables it stops, and says to open a new session after closing ("the close
+  example could have a note about needing to recreate the session to run other examples").
 
 <a id="accuracy"></a>
 

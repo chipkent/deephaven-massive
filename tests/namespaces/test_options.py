@@ -14,6 +14,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -397,9 +398,12 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
         assert type(q) is cls
         assert q._request.symbols == ("O:AAPL250117C00150000", "O:AAPL250117P00150000")
         assert factory(dm.ALL)._request.symbols is dm.ALL
-        # Massive answers any other text: the library judges no ticker's shape.
-        for text in ("AAPL250117C00150000", "AAPL", "X:BTCUSD", "O:BRK.B250117C00400000"):
+        # Massive answers any text with the O: prefix: the library judges no other part of it.
+        for text in ("O:AAPL", "O:BRK.B250117C00400000"):
             assert factory(text)._request.symbols == (text,)
+        for text in ("AAPL250117C00150000", "AAPL", "X:BTCUSD"):
+            with pytest.raises(ValueError, match=r"lacks the O: prefix of every options contract"):
+                factory(text)
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
@@ -585,10 +589,18 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
-def test_contracts_send_a_stock_ticker_as_written(massive_session: dm.MassiveSession) -> None:
-    # Massive answers it (HTTP 404 "Option Ticker not found."), so the library sends it.
-    for text in ("AAPL", "I:SPX", "aapl"):
-        assert massive_session.options.contracts(text)._request.symbols == (text,)
+def test_contracts_refuse_a_ticker_without_the_options_prefix(
+    massive_session: dm.MassiveSession,
+) -> None:
+    for text in ("AAPL", "I:SPX", "o:AAPL250117C00150000"):
+        with pytest.raises(
+            ValueError,
+            match=rf"^options\.contracts: '{re.escape(text)}' lacks the O: prefix of every options "
+            r"contract ticker, such as 'O:AAPL250117C00150000'; pass Massive's ticker$",
+        ):
+            massive_session.options.contracts(text)
+    # Only the prefix is checked: Massive answers the rest.
+    assert massive_session.options.contracts("O:AAPL")._request.symbols == ("O:AAPL",)
 
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -1670,3 +1682,17 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     for name in ("LastTradePrice", "LastTradeExchange"):
         assert snapshots[name].description == chain[name].description
     assert "AAPL" not in snapshots["LastTradeId"].description
+
+
+def test_a_options_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default `unsendable_symbols`, a row without the O: prefix is skipped and
+    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
+    fake_rest.reply("/v3/snapshot", Reply({"status": "OK", "results": []}))
+    table = new_table([string_col("Symbol", ["AAPL", "O:NODATA260117C00100000"])])
+    out = rest_session.options.snapshots(table).fetch(wait=True)
+    assert out.size == 0
+    assert [query["ticker.any_of"] for _, query in fake_rest.get_queries()] == [
+        ["O:NODATA260117C00100000"]
+    ]

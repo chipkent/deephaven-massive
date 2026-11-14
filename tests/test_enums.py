@@ -330,6 +330,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.refused_venues": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
@@ -374,6 +375,9 @@ ENUM_PARAMETERS = {
     "FuturesNamespace.trades.venues": _FUTURES_ENUMS,
     "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.trades.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.quotes.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.refused_venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.timespan": (
         "namespaces/test_futures.py::test_bars_take_the_day_timespan"
     ),
@@ -500,3 +504,10 @@ def test_each_asset_class_has_one_subscription() -> None:
         dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
     }
     assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None
+
+
+def test_forex_has_one_spelling_in_the_enums() -> None:
+    # Massive's wire value is "fx"; the member is FOREX in both enums that name forex.
+    assert dm.Market.FOREX.value == "fx"
+    assert dm.AssetClass.FOREX.name == dm.Market.FOREX.name
+    assert "FX" not in dm.Market.__members__

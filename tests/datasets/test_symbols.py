@@ -24,6 +24,7 @@ from deephaven_massive._datasets.symbols import (
     forex_codes,
     is_forex_currency,
     is_sendable,
+    missing_prefix,
     option_roots,
     symbol_class,
     unsendable_reason,
@@ -461,3 +462,24 @@ def test_symbols_like_names_every_form_symbols_takes() -> None:
 
 def test_all_is_an_instance_of_the_symbols_like_member() -> None:
     assert isinstance(ALL, AllSymbols)
+
+
+def test_a_class_with_a_prefix_needs_it_and_others_need_none() -> None:
+    assert missing_prefix(OPT, "AAPL") == (
+        "lacks the O: prefix of every options contract ticker, such as 'O:AAPL250117C00150000'"
+    )
+    assert (
+        missing_prefix(IDX, "SPX") == "lacks the I: prefix of every index ticker, such as 'I:SPX'"
+    )
+    assert missing_prefix(FX, "X:EURUSD") == (
+        "lacks the C: prefix of every forex ticker, such as 'C:EURUSD'"
+    )
+    assert missing_prefix(CRY, "x:btcusd") == (
+        "lacks the X: prefix of every crypto ticker, such as 'X:BTCUSD'"
+    )
+    # Only the prefix is checked: any text after it passes.
+    for asset_class, symbol in ((OPT, "O:"), (IDX, "I:spx"), (FX, "C:EUR-USD"), (CRY, "X:?")):
+        assert missing_prefix(asset_class, symbol) is None
+    # Stocks, futures, a dataset of every class, and a table of underlyings need none.
+    for none_needed in (STK, FUT, ClassFromPrefix.ANY, None):
+        assert missing_prefix(none_needed, "AAPL") is None

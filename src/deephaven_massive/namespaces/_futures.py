@@ -19,8 +19,10 @@ Futures differ from the other asset classes in three ways that show here:
   it). WebSocket messages carry none: the WebSocket transport dates a streamed row by the 17:00
   Chicago rule, corrected by Massive's futures schedules.
 - **Venues.** Flat files are published per exchange (`us_futures_cme/...`), so `trades`,
-  `quotes`, and `bars` take `venues`, a set that picks the flat-file prefixes (all four by
-  default). Streams always use the `/futures` cluster path, whatever the venues.
+  `quotes`, and `bars` take `venues`, a set that picks the flat-file prefixes. Left out, a read
+  takes every venue the plan allows and skips each one S3 refuses with a warning. A venue the
+  call names follows `refused_venues` (`MassiveConfig.refused_venues` when left out) when S3
+  refuses it. Streams always use the `/futures` cluster path, whatever the venues.
 - **Bars.** The aggregates endpoint documents a `session` unit and no `day` unit, but Massive
   serves `1day` bars in the shape of one-session buckets, so `bars` sends `Timespan.DAY` as `day`
   and dates and keeps its bars as it does `Timespan.SESSION` bars.
@@ -42,7 +44,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from deephaven.table import Table
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, OnError, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
@@ -323,7 +325,11 @@ class FuturesNamespace(Namespace):
 
     @raises_through(build_query)
     def trades(
-        self, symbols: SymbolsLike, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+        self,
+        symbols: SymbolsLike,
+        *,
+        venues: AbstractSet[FuturesVenue] | None = None,
+        refused_venues: OnError | None = None,
     ) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
@@ -334,15 +340,18 @@ class FuturesNamespace(Namespace):
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL` for every
                 contract.
-            venues: The exchanges whose flat files `history()` reads.
+            venues: The exchanges whose flat files `history()` reads. Left out, it reads
+                every exchange your plan allows.
+            refused_venues: What `history()` does when Massive refuses an exchange named in
+                `venues`. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.trades.md.
 
         Raises:
-            TypeError: If `symbols` is of another type, or `venues` isn't a set of
-                `dm.FuturesVenue`.
+            TypeError: If `symbols` is of another type, `venues` isn't a set of
+                `dm.FuturesVenue`, or `refused_venues` isn't a `dm.OnError`.
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
@@ -355,12 +364,21 @@ class FuturesNamespace(Namespace):
                 past = m.futures.trades("ESZ5").history("2025-10-01", "2025-10-03")
         """
         return build_query(
-            self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols, venues=venues
+            self._core,
+            TRADES,
+            query_type=StreamHistoryQuery,
+            symbols=symbols,
+            venues=venues,
+            refused_venues=refused_venues,
         )
 
     @raises_through(build_query)
     def quotes(
-        self, symbols: SymbolsLike, *, venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue)
+        self,
+        symbols: SymbolsLike,
+        *,
+        venues: AbstractSet[FuturesVenue] | None = None,
+        refused_venues: OnError | None = None,
     ) -> StreamHistoryQuery:
         """Best bid and offer quotes of futures contracts, tick by tick.
 
@@ -372,15 +390,18 @@ class FuturesNamespace(Namespace):
         Args:
             symbols: Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL` for every
                 contract.
-            venues: The exchanges whose flat files `history()` reads.
+            venues: The exchanges whose flat files `history()` reads. Left out, it reads
+                every exchange your plan allows.
+            refused_venues: What `history()` does when Massive refuses an exchange named in
+                `venues`. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.quotes.md.
 
         Raises:
-            TypeError: If `symbols` is of another type, or `venues` isn't a set of
-                `dm.FuturesVenue`.
+            TypeError: If `symbols` is of another type, `venues` isn't a set of
+                `dm.FuturesVenue`, or `refused_venues` isn't a `dm.OnError`.
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
@@ -394,7 +415,12 @@ class FuturesNamespace(Namespace):
                 book = m.futures.quotes(active).last_by()
         """
         return build_query(
-            self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, venues=venues
+            self._core,
+            QUOTES,
+            query_type=StreamHistoryQuery,
+            symbols=symbols,
+            venues=venues,
+            refused_venues=refused_venues,
         )
 
     @raises_through(build_query)
@@ -404,7 +430,8 @@ class FuturesNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
-        venues: AbstractSet[FuturesVenue] = frozenset(FuturesVenue),
+        venues: AbstractSet[FuturesVenue] | None = None,
+        refused_venues: OnError | None = None,
     ) -> StreamHistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
@@ -423,7 +450,10 @@ class FuturesNamespace(Namespace):
             timespan: The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use
                 `SESSION`.
             multiplier: Units per bar.
-            venues: The exchanges whose flat files `history()` reads.
+            venues: The exchanges whose flat files `history()` reads. Left out, it reads
+                every exchange your plan allows.
+            refused_venues: What `history()` does when Massive refuses an exchange named in
+                `venues`. Left out, `MassiveConfig.refused_venues` applies.
 
         Returns:
             A query that reads history, and streams 1-second and 1-minute bars at
@@ -454,6 +484,7 @@ class FuturesNamespace(Namespace):
             timespan=timespan,
             multiplier=multiplier,
             venues=venues,
+            refused_venues=refused_venues,
         )
 
     @raises_through(build_query, list_params, _product_codes)

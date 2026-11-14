@@ -2,13 +2,16 @@
 
 Every symbol the library takes is sent to Massive as written, and Massive decides whether it
 names an instrument: a ticker Massive has no data for gives no rows, and `m.symbol_reads()`
-shows it. The library judges no ticker's shape; this module owns three things around that:
+shows it. The library judges no ticker's shape beyond its class's prefix; this module owns
+three things around that:
 
 - **The argument.** `check_symbols` reads a `symbols` argument other than a table (`dm.ALL`, one
   `str`, or a sequence of them) and `check_symbol` one value of it. A value of the wrong Python
   type raises `TypeError`, and a value the library cannot put in a request raises `ValueError`
   (`is_sendable`): empty text, or text holding `,` or `*`, each of which Massive's
-  requests read as a separator or a wildcard instead of a ticker.
+  requests read as a separator or a wildcard instead of a ticker. A dataset of a class whose
+  tickers carry a prefix (`O:`, `I:`, `C:`, `X:`) also refuses a symbol without it
+  (`missing_prefix`), the one part of a ticker's shape the library checks.
 - **The converters**, the public way to turn another spelling into Massive's:
   `canonical_symbol(text, asset_class, convention=)` for Python code, and one function per class
   that has another spelling (`canonical_symbol_option`, `canonical_symbol_index`,
@@ -57,7 +60,7 @@ import pyarrow.compute as pc
 from deephaven.table import Table
 from typing_extensions import override
 
-from deephaven_massive._enums import AssetClass, SymbolConvention, _require_enum
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
 from deephaven_massive._errors import raises_through
 
 if TYPE_CHECKING:
@@ -84,6 +87,7 @@ __all__ = [
     "forex_codes",
     "is_forex_currency",
     "is_sendable",
+    "missing_prefix",
     "option_roots",
     "read_crypto_pair",
     "read_forex_pair",
@@ -193,6 +197,15 @@ _CLASS_BY_PREFIX: Final[dict[str, AssetClass]] = {
     "X:": AssetClass.CRYPTO,
 }
 
+_PREFIXED: Final[dict[AssetClass, tuple[str, str, str]]] = {
+    AssetClass.OPTIONS: ("O:", "options contract", "O:AAPL250117C00150000"),
+    AssetClass.INDICES: ("I:", "index", "I:SPX"),
+    AssetClass.FOREX: ("C:", "forex", "C:EURUSD"),
+    AssetClass.CRYPTO: ("X:", "crypto", "X:BTCUSD"),
+}
+"""The classes whose every ticker carries a prefix: each prefix, the ticker's name for a message,
+and an example. Stocks and futures have none."""
+
 _UNSENDABLE: Final[dict[str, str]] = {
     ",": "Massive's list parameters and WebSocket subscriptions split on commas, so it would "
     "be sent as several tickers",
@@ -265,6 +278,31 @@ def is_sendable(text: str) -> bool:
         True for any non-empty text without `,` or `*`.
     """
     return unsendable_reason(text) is None
+
+
+def missing_prefix(asset_class: AssetClass | ClassFromPrefix | None, symbol: str) -> str | None:
+    """Say how a symbol lacks the prefix every ticker of its dataset's class carries, if it does.
+
+    The one check of a ticker's shape the library makes: an options, index, forex, or crypto
+    dataset refuses a symbol without `O:`, `I:`, `C:`, or `X:`, so `AAPL` passed to an options
+    dataset fails with the prefix to add instead of reading nothing.
+
+    Args:
+        asset_class: The dataset's class; `ClassFromPrefix.ANY` (a dataset of every class) or
+            None (a table of underlyings or product codes) checks nothing.
+        symbol: The symbol.
+
+    Returns:
+        None when the symbol has the prefix or the class has none (stocks, futures); otherwise
+        the reason, such as `lacks the O: prefix of every options contract ticker, such as
+        'O:AAPL250117C00150000'`.
+    """
+    if not isinstance(asset_class, AssetClass) or asset_class not in _PREFIXED:
+        return None
+    prefix, name, example = _PREFIXED[asset_class]
+    if symbol.startswith(prefix):
+        return None
+    return f"lacks the {prefix} prefix of every {name} ticker, such as {example!r}"
 
 
 def symbol_class(symbol: str) -> AssetClass:

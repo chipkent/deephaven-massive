@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -114,22 +114,33 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
         `symbol`; only the symbol itself for one without its class's prefix (`BTCUSD` on the
         crypto class), which goes on the wire as written.
     """
-    codes = forex_codes(symbol) if asset_class is AssetClass.FOREX else None
-    if codes is not None:
-        base, quote = codes
-        prefixes: tuple[str, ...] = ("C:", "X:", "")
-        return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
-    if asset_class is AssetClass.CRYPTO and symbol.startswith("X:"):
-        prefixes = ("X:", "")
-        # The joined ticker does not say where the pair splits, so the file may separate it at
-        # any point: every cut is looked for, and each reads back as this one symbol.
-        body = symbol[2:]
-        cuts = [(body[:i], body[i:]) for i in range(1, len(body))]
-        joined = tuple(f"{p}{body}" for p in prefixes)
-        dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
-        return (*joined, *dashed)
-    if asset_class is AssetClass.INDICES and symbol.startswith(_INDEX_PREFIX):
-        return symbol, symbol.removeprefix(_INDEX_PREFIX)
+    if asset_class is AssetClass.FOREX:
+        codes = forex_codes(symbol)
+        if codes is not None:
+            base, quote = codes
+            prefixes: tuple[str, ...] = ("C:", "X:", "")
+            return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
+    elif asset_class is AssetClass.CRYPTO:
+        if symbol.startswith("X:"):
+            prefixes = ("X:", "")
+            # The joined ticker does not say where the pair splits, so the file may separate it
+            # at any point: every cut is looked for, and each reads back as this one symbol.
+            body = symbol[2:]
+            cuts = [(body[:i], body[i:]) for i in range(1, len(body))]
+            joined = tuple(f"{p}{body}" for p in prefixes)
+            dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
+            return (*joined, *dashed)
+    elif asset_class is AssetClass.INDICES:
+        if symbol.startswith(_INDEX_PREFIX):
+            return symbol, symbol.removeprefix(_INDEX_PREFIX)
+    elif not (
+        asset_class is AssetClass.STOCKS
+        or asset_class is AssetClass.OPTIONS
+        or asset_class is AssetClass.FUTURES
+    ):
+        assert_never(asset_class)  # a new class needs its spellings here
+    # The files write a stock, option, or futures symbol as its canonical text, and a symbol
+    # without its class's prefix goes on the wire as written.
     return (symbol,)
 
 

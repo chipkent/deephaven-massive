@@ -1110,7 +1110,7 @@ def test_massive_answers_contract_details_of_a_stock_ticker(
 ) -> None:
     """What the contract overview answers for `AAPL`, a stock rather than a contract.
 
-    `m.options.contracts` sends it, and a 404 gives no rows under `unavailable_symbols`. DATA
-    counts the rows describing a contract named `AAPL`.
+    `m.options.contracts` refuses it for its missing `O:` prefix; this records Massive's own
+    answer to the bare ticker. DATA counts the rows describing a contract named `AAPL`.
     """
     assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)

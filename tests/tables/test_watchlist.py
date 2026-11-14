@@ -18,6 +18,7 @@ import deephaven_massive as dm
 import deephaven_massive.namespaces._crypto as crypto
 import deephaven_massive.namespaces._forex as forex
 import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indices as indices
 import deephaven_massive.namespaces._options as options
 from deephaven_massive._datasets.request import ValueTable
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
@@ -103,10 +104,44 @@ def test_read_symbols_returns_the_rows_sorted_without_nulls(dh_exec_ctx: object)
 
 
 def test_read_symbols_sends_any_row_a_request_can_carry(dh_exec_ctx: object) -> None:
-    # No ticker's shape is judged: Massive answers each row, so each is read as written.
+    # No ticker's shape is judged beyond its class's prefix: Massive answers each row, so each
+    # is read as written.
     table = new_table([string_col("Symbol", ["ERIC B", "7203", "eurusd", "X:BTCUSD"])])
-    got = read_symbols(rule(), table, stream_id=7)
+    got = read_symbols(spanning(), table, stream_id=7)
     assert got == CurrentSymbols(("7203", "ERIC B", "X:BTCUSD", "eurusd"))
+    forex_rows = new_table([string_col("Symbol", ["C:eurusd", "C:EUR-USD", "C:XYZ"])])
+    got = read_symbols(rule(), forex_rows, stream_id=7)
+    assert got == CurrentSymbols(("C:EUR-USD", "C:XYZ", "C:eurusd"))
+
+
+@pytest.mark.parametrize(
+    ("spec", "row", "prefix"),
+    [
+        (options.SNAPSHOTS, "AAPL", "O:"),
+        (indices.VALUES, "SPX", "I:"),
+        (FOREX, "EURUSD", "C:"),
+        (CRYPTO, "BTCUSD", "X:"),
+    ],
+)
+def test_a_row_without_its_class_prefix_is_skipped(
+    *,
+    dh_exec_ctx: object,
+    caplog: pytest.LogCaptureFixture,
+    spec: DatasetSpec,
+    row: str,
+    prefix: str,
+) -> None:
+    # Each class's tickers carry a prefix, so a row without it is skipped under LOG, the
+    # default, with a WARNING naming the prefix, and fails the read under RAISE; the table's
+    # other rows are kept. The rows are this test's own: each value is logged once per dataset.
+    table = new_table([string_col("Symbol", [f"{row}PFX", f"{prefix}PFX"])])
+    with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
+        got = read_symbols(rule(spec, OnError.LOG), table, stream_id=None)
+    assert got == CurrentSymbols((f"{prefix}PFX",), (f"{row}PFX",))
+    [record] = [r.getMessage() for r in caplog.records if f"'{row}PFX'" in r.getMessage()]
+    assert f"a symbol table holds '{row}PFX', which lacks the {prefix} prefix" in record
+    with pytest.raises(ValueError, match=rf"^{spec.name}: a symbol table holds '{row}PFX'"):
+        read_symbols(rule(spec), table, stream_id=None)
 
 
 @pytest.mark.parametrize("mode", list(OnError))
@@ -426,12 +461,13 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
         watch_table = dm.canonicalize_symbols(
             source, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
         )
-        watch, seen, refused, _ = watching(watch_table, OnError.IGNORE)
+        stocks = SymbolRowRule("stocks.trades", unsendable=OnError.IGNORE)
+        watch, seen, refused, _ = watching(watch_table, row_rule=stocks)
     watch.start()
     assert seen == [(frozenset({"BRK.B"}), frozenset())]
     source.add(new_table([string_col("Symbol", ["VOD.L"])]))
     wait_for(lambda: len(refused) == 1)
-    assert refused[0].startswith("the symbol table passed to forex.quotes failed upstream")
+    assert refused[0].startswith("the symbol table passed to stocks.trades failed upstream")
     scope.release()
 
 

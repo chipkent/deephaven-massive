@@ -144,6 +144,7 @@ from deephaven_massive._errors import (
     RowDataError,
     cause_of,
     failure_text,
+    library_bug,
     required,
     unmatched_form,
 )
@@ -223,6 +224,9 @@ class SymbolRowError(PermanentError):
 
     default_cause = ErrorCause.USER_DEFECT
 
+
+_PUBLISHED_MODES: Final = frozenset({PollMode.REPLACE, PollMode.UPSERT, PollMode.APPEND})
+"""The modes a cycle publishes by; `AUTO` is resolved to one of them before a poller starts."""
 
 _FATAL: Final = (AuthenticationError, EntitlementError, PermanentError)
 """The errors that fail a `poll()` table: retrying the next cycle cannot fix them."""
@@ -604,7 +608,13 @@ class Poller:
             stop: Set to stop the poller; the publisher's blink table sets it when it shuts
                 down. Each cycle's requests listen to it, so a stopped poller never waits for
                 a rate-limited slot.
+
+        Raises:
+            BrokenGuaranteeError: If `mode` is not one a cycle publishes by (`REPLACE`,
+                `UPSERT`, or `APPEND`): the caller resolves `AUTO`, and a new mode needs a rule.
         """
+        if mode not in _PUBLISHED_MODES:
+            raise BrokenGuaranteeError(library_bug(f"{spec.name} poll() has no rule for {mode}"))
         self._core = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
         # The poller thread's name; its fan-out pool's threads add " rest_<n>".
@@ -1219,6 +1229,7 @@ class Poller:
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
+        # UPSERT publishes every row as it came; `__init__` admits no other mode.
         if self._list_keys and self._mode is not PollMode.APPEND:
             table = table.append_column(LIST_KEY_COLUMN, _list_key_text(table, self._list_keys))
         # Converted before the publish lock, so the lock is held only for the add: converting a

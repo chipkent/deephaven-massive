@@ -360,14 +360,9 @@ def _default(value: object) -> str:
         value: The default.
 
     Returns:
-        `dm.<Enum>.<MEMBER>` for an enum member of the library, such as `dm.Order.ASC`;
-        `frozenset(dm.<Enum>)` for a set of every member of one, such as every futures venue;
-        and the `repr` of anything else, such as `None`, `True`, or `1`.
+        `dm.<Enum>.<MEMBER>` for an enum member of the library, such as `dm.Order.ASC`, and
+        the `repr` of anything else, such as `None`, `True`, or `1`.
     """
     if isinstance(value, enum.Enum):
         return f"dm.{type(value).__name__}.{value.name}"
-    if isinstance(value, frozenset) and value:
-        kind = type(next(iter(value)))
-        if issubclass(kind, enum.Enum) and value == frozenset(kind):
-            return f"frozenset(dm.{kind.__name__})"
     return repr(value)

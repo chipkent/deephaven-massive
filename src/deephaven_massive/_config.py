@@ -346,9 +346,10 @@ class MassiveConfig:
 
             Change it only with `s3_endpoint_url`.
         unsendable_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value the library refuses: an empty value, one with `,` or `*`, or, in a table of
-            `m.options.contracts()` underlyings, a currency or crypto pair, which Massive
-            answers there with no error and no rows. Defaults to `LOG`.
+            a value the library refuses: an empty value, one with `,` or `*`, an options,
+            index, forex, or crypto symbol without its class's prefix (`O:`, `I:`, `C:`, or
+            `X:`), or, in a table of `m.options.contracts()` underlyings, a currency or crypto
+            pair, which Massive answers there with no error and no rows. Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` to stop at the first such value. Every other value is sent
             as written.
@@ -435,6 +436,30 @@ class MassiveConfig:
 
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.
+        refused_venues: Decides what a futures `history()` does when Massive refuses the flat
+            files of an exchange the call names in `venues`, as it does for an exchange the
+            plan doesn't include. A call's own `refused_venues` argument overrides it. Defaults
+            to `RAISE`.
+
+            It applies only to exchanges a call names. A call that leaves `venues` out reads
+            every exchange the plan allows: where only flat files can serve it, it skips each
+            one Massive refuses with a warning, whatever this setting says. Set
+            `dm.OnError.LOG` when your calls name exchanges your plan may not cover and should
+            read the ones it does.
+
+            - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
+              exchange, `venues=`, and `refused_venues=`.
+            - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
+              logs one warning with Massive's status and text, and names the exchanges in the
+              table's description. For a watchlist, each symbol's `Transport` in
+              `m.symbol_reads()` names them instead.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
+              description or `m.symbol_reads()` name them.
+
+            It applies only when REST can't serve the call: `dm.ALL`, or
+            `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive
+            refuses the flat files. Under any setting, a call whose every exchange is refused
+            raises `EntitlementError`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -459,12 +484,13 @@ class MassiveConfig:
     unreadable_symbols: OnError = OnError.LOG
     unavailable_symbols: OnError = OnError.LOG
     malformed_rows: OnError = OnError.LOG
+    refused_venues: OnError = OnError.RAISE
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
-        A `unsendable_symbols`, `unlisted_symbols`, `unreadable_symbols`,
-        `unavailable_symbols`, or `malformed_rows` that is not a `dm.OnError`, a
+        An `unsendable_symbols`, `unlisted_symbols`, `unreadable_symbols`,
+        `unavailable_symbols`, `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
         `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
         not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
@@ -537,6 +563,7 @@ class MassiveConfig:
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
         _require_enum(self.malformed_rows, OnError, "malformed_rows")
+        _require_enum(self.refused_venues, OnError, "refused_venues")
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
         _check_url("rest_base_url", self.rest_base_url)
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
@@ -1227,7 +1254,7 @@ def _on_error(node: yaml.Node) -> OnError:
     """Convert the word of a setting of what to do on an error: `raise`, `log`, or `ignore`.
 
     The settings are `unsendable_symbols`, `unlisted_symbols`, `unreadable_symbols`,
-    `unavailable_symbols`, and `malformed_rows` (`_word`).
+    `unavailable_symbols`, `malformed_rows`, and `refused_venues` (`_word`).
 
     Args:
         node: The value's node.
@@ -1411,6 +1438,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "unreadable_symbols": _on_error,
     "unavailable_symbols": _on_error,
     "malformed_rows": _on_error,
+    "refused_venues": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""
@@ -1618,6 +1646,9 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "malformed_rows": _Example(
         OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
     ),
+    "refused_venues": _Example(
+        OnError.RAISE, "A futures exchange you name that the plan lacks: log, ignore, or raise."
+    ),
     "websocket_hosts": _Example(
         {AssetClass.INDICES: BUSINESS_HOST},
         "The WebSocket host per asset class: index values stream only from business.massive.com.",
@@ -1817,6 +1848,7 @@ def _value_forms() -> dict[str, str]:
         "unreadable_symbols": error_words,
         "unavailable_symbols": error_words,
         "malformed_rows": error_words,
+        "refused_venues": error_words,
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "

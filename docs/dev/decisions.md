@@ -557,13 +557,21 @@ list sends an empty item (item 118); each live check records Massive's answer.
 
 **104. A ticker is sent as written, and Massive judges it** (2026-11-11). The owner, on
 2026-11-11: "I agree on not erroring on missing symbols. That should be a significant
-simplification." The library judges no ticker's shape: no prefix, character class, or option
-symbol pattern refuses or rewrites a value Massive could answer. A ticker Massive has no data
-for is no error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it
-in `m.symbol_reads()`. The library refuses only a value of the wrong Python type, and one no
-request can carry: an empty symbol, or one holding `,` (Massive's list parameters and WebSocket
-subscriptions split on it) or `*` (the WebSocket's every-ticker wildcard). Such a value raises
-`ValueError` in code, and a table's row follows `MassiveConfig.unsendable_symbols`, which replaces
+simplification." The library judges no ticker's shape but its class's prefix: no character
+class or option symbol pattern refuses or rewrites a value Massive could answer. The prefix
+stays because the owner chose, on 2026-11-14, to "Restore only the asset-class prefix check.
+Each namespace requires its documented prefix (`O:` for options, `X:` for crypto, `C:` for
+forex, `I:` for indices), and the error names the expected prefix. Nothing else about a
+ticker's shape is checked. A ticker with the right prefix that Massive has no data for still
+gives no rows instead of an error." An options, index, forex, or crypto dataset refuses a symbol
+without its prefix, naming the prefix and an example; stocks and futures have none, and a
+dataset of every class routes by the prefix instead. A ticker Massive has no data for is no
+error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it in
+`m.symbol_reads()`. The library refuses only a value of the wrong Python type, a symbol without
+its class's prefix, and one no request can carry: an empty symbol, or one holding `,`
+(Massive's list parameters and WebSocket subscriptions split on it) or `*` (the WebSocket's
+every-ticker wildcard). Such a value raises `ValueError` in code, and a table's row follows
+`MassiveConfig.unsendable_symbols`, which replaces
 `noncanonical_symbols`. A `/` is sent, percent-encoded so it stays in its path segment, and
 Massive answers it (verification item 115). A row's
 ticker is kept as Massive writes it, except the spellings a transport writes differently from
@@ -582,6 +590,25 @@ setting. A wire spelling is derived only from a symbol with Massive's prefix (`C
 `I:`); other text goes on the wire as written. The futures schedule calendar looks every ticker
 up in Massive's contracts list, combos included, instead of telling a contract by its shape.
 Supersedes 58's refusal and 66's `noncanonical_symbols`.
+
+**107. Futures `history()` reads every exchange the plan allows; a named one follows
+`refused_venues`** (2026-11-13). Massive publishes futures flat files per exchange, and a plan may
+include only some. The futures `trades`, `quotes`, and `bars` take `venues:
+AbstractSet[FuturesVenue] | None = None`, so a read of `dm.ALL` or a long range can download less.
+Left out, a read takes every exchange the plan allows: a `history()` that REST cannot serve
+(`dm.ALL`, or `source=FLAT_FILES`) skips every file of an exchange S3 refuses, over the whole range,
+so the table has no holes, logs one WARNING naming the skipped exchanges with Massive's answer, and
+names them in the table's description (or, for a table that follows a live symbol table, in each
+symbol's `Transport` in `m.symbol_reads()`). An exchange the call names follows `refused_venues:
+dm.OnError | None = None`, whose `None` means the argument was left out and
+`MassiveConfig.refused_venues` (`RAISE` by default) applies, because naming an exchange the plan
+lacks is a bug in the caller. A call whose every exchange is refused raises either way, and a list
+of tickers REST can serve still reads REST when S3 refuses its files. The library learns which
+exchanges a plan includes only from Massive's refusals: it encodes no plan tier and never guesses a
+ticker's exchange, since Massive can change its plans. A problem with one value in the data stays a
+`MassiveConfig` setting, `LOG` by default. This supersedes decision 93's wording that one bad row
+never fails a table: `RAISE` fails it when a user chooses it. `canonicalize_symbols` keeps its `LOG`
+default (decision 93); the `OnError` docstring that said `RAISE` was wrong.
 
 **109. A value the type checker cannot prove is checked at run time, or marked where a test breaks it**
 

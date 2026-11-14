@@ -454,7 +454,7 @@ jobs:
         # uv.lock is not committed, so this resolves the newest versions.
         run: uv sync --python 3.14
       - name: Run the documentation tests
-        # The same tests `scripts/check.sh full` runs in its docs scope; --capture=sys leaves
+        # The same tests `scripts/check.sh full` runs when a user page changes; --capture=sys leaves
         # file descriptor 2 alone, so a JVM fatal error's message shows in the job log.
         run: uv run pytest --capture=sys tests/test_docs.py tests/live/tester/test_examples.py
       - name: Upload JVM crash logs

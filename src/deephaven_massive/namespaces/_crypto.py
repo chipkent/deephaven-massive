@@ -288,7 +288,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -320,7 +320,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -356,7 +356,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -398,7 +398,7 @@ class CryptoNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`.
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`.
 
         Example:
             ::
@@ -435,7 +435,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -475,7 +475,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -505,7 +505,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column.
 
         Example:
@@ -566,7 +566,7 @@ class CryptoNamespace(Namespace):
             TypeError: If `date` isn't a date or a time, or `symbols` has another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, holds `,` or `*`, or lacks `X:`;
                 - a table has no `Symbol` column;
                 - `date` is a time, or text that isn't a date.
 

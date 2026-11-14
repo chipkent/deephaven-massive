@@ -9,6 +9,7 @@ from deephaven_massive._log_limits import (
     LIST_LIMIT,
     BoundedLog,
     bounded_list,
+    first_seen,
     log_failure,
     log_once,
     mark_failure_logged,
@@ -38,6 +39,18 @@ def test_log_once_logs_each_key_once(
         (logging.INFO, "first 1"),
         (logging.WARNING, "other"),
     ]
+
+
+def test_first_seen_marks_new_keys_shared_with_log_once(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_log_limits, "_logged", set())
+    assert first_seen(["a", "b", "a"]) == ["a", "b"]
+    assert first_seen(["b", "c"]) == ["c"]
+    log = logging.getLogger("test.first_seen")
+    with caplog.at_level(logging.INFO, logger="test.first_seen"):
+        log_once(log, "a", "already seen")
+    assert caplog.records == []
 
 
 def test_log_once_is_once_across_threads(

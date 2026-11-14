@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -22,6 +23,8 @@ from urllib.parse import quote
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
@@ -487,10 +490,17 @@ def test_index_symbols_are_sent_as_written(m: dm.MassiveSession, name: str) -> N
         "bars": (dm.Timespan.MINUTE,),
     }
     extra = extras.get(name, ())
-    for text in ("X:BTCUSD", "SPX"):  # Massive answers them
+    for text in ("I:SPX", "I:spx"):  # Massive answers any text with the I: prefix
         query = method(text, *extra)
         assert isinstance(query, Query)
         assert query._request.symbols == (text,)
+    for text in ("SPX", "X:BTCUSD", "i:SPX"):
+        with pytest.raises(
+            ValueError,
+            match=rf"^indices\.{name}: '{re.escape(text)}' lacks the I: prefix of every index "
+            r"ticker, such as 'I:SPX'; pass Massive's ticker$",
+        ):
+            method(text, *extra)
     with pytest.raises(ValueError, match="no symbols"):
         method([], *extra)
 
@@ -1026,3 +1036,15 @@ def test_the_current_state_datasets_revise_on_their_update_time() -> None:
         "indices.snapshots": ("LastUpdated",),
     }
     assert "LastUpdated" in CATALOG.dataset_schema(indices.SNAPSHOTS).column_names
+
+
+def test_a_index_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default `unsendable_symbols`, a row without the I: prefix is skipped and
+    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
+    fake_rest.reply("/v3/snapshot/indices", Reply({"status": "OK", "results": []}))
+    table = new_table([string_col("Symbol", ["SPX", "I:NODATA"])])
+    out = rest_session.indices.snapshots(table).fetch(wait=True)
+    assert out.size == 0
+    assert [query["ticker.any_of"] for _, query in fake_rest.get_queries()] == [["I:NODATA"]]

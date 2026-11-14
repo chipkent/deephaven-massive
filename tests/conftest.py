@@ -121,18 +121,23 @@ jpy = importlib.import_module("jpy")
 _DATA_DIR = Path(__file__).parent / "data"
 
 
-def pytest_configure() -> None:
+def pytest_configure(config: pytest.Config) -> None:
     """Check the embedded Deephaven server before collection, and set up the run's records.
 
     The `-p` plugin `tests/embedded_server.py` has already started the server, in every
-    process of the run. This checks that the update graph runs the cycle the tests are written
-    for, then records Deephaven's fatal errors (`_record_jvm_fatal_errors`) and the library's
-    liveness-scope releases made without the update graph's lock
-    (`_record_unlocked_library_releases`).
+    process of the run. This registers `tests/_live/parallel.py` as a plugin, whose hook
+    refuses a parallel run that selects a live test, then checks that the update graph runs
+    the cycle the tests are written for, then records Deephaven's fatal errors
+    (`_record_jvm_fatal_errors`) and the library's liveness-scope releases made without the
+    update graph's lock (`_record_unlocked_library_releases`).
+
+    Args:
+        config: The pytest configuration, whose plugin manager takes the refusal's plugin.
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
+    config.pluginmanager.register(parallel, parallel.PLUGIN_NAME)
     atexit.register(_final_jvm_exit)
     periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
     j_update_graph = dh_execution_context.get_exec_ctx().update_graph.j_update_graph
@@ -246,28 +251,6 @@ def _write_all(fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
         view = view[os.write(fd, view) :]
-
-
-@pytest.hookimpl(optionalhook=True)
-def pytest_xdist_node_collection_finished(ids: Sequence[str]) -> None:
-    """End a parallel run that selected a live test, before any test starts.
-
-    pytest-xdist calls this in its controller each time a worker has collected, with the ids
-    of the tests that worker selected after `-m`, `-k`, and every other deselection. Each
-    worker's report is checked as it arrives, and the controller hands out no test until every
-    worker has reported, so a refusal always comes before any test is scheduled. The decision
-    rests on the selection, not on the `-m` expression, so no expression can slip a live test
-    past it. Without pytest-xdist, or with `-n 0`, the hook is never called.
-
-    A refused run ends through `pytest.exit` with pytest's usage-error status, 4, and a message
-    naming how many live tests the worker selected and the first of them.
-
-    Args:
-        ids: The ids of the tests the worker selected.
-    """
-    message = parallel.refusal(ids)
-    if message is not None:
-        pytest.exit(message, returncode=pytest.ExitCode.USAGE_ERROR)
 
 
 # --- JVM shutdown workaround -------------------------------------------------------------------

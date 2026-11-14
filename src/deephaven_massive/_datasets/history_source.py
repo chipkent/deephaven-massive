@@ -658,10 +658,19 @@ def warn_unfilled(
         choice: The `AUTO` choice.
         catalog: The session's catalog, which knows the columns each source fills.
         warnings: The session's once-per-session warnings (`SessionCore.warnings`).
+
+    Raises:
+        BrokenGuaranteeError: If the choice is neither `REST` nor `FLAT_FILES`, which `AUTO`
+            resolves to.
     """
     if choice.alternative is Alternative.UNAVAILABLE:
         return  # the result cannot change, and the caller cannot pick the other source
-    other = HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
+    if choice.source is HistorySource.REST:
+        other = HistorySource.FLAT_FILES
+    elif choice.source is HistorySource.FLAT_FILES:
+        other = HistorySource.REST
+    else:
+        raise BrokenGuaranteeError(library_bug(f"{spec.name} history() chose {choice.source}"))
     missing = catalog.history_columns(spec, HISTORY_TRANSPORTS[other]) - (
         catalog.history_columns(spec, HISTORY_TRANSPORTS[choice.source])
     )
