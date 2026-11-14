@@ -97,9 +97,9 @@ if [[ "$tier" == "full" ]]; then
     else
         read -r scope tests_line <<< "$(uv run python scripts/check_scope.py)"
         read -r -a tests <<< "${tests_line:-}"
-        if ((${#tests[@]} < workers)); then
+        if ((${#tests[@]} > 0 && ${#tests[@]} < workers)); then
             workers=${#tests[@]}
-            echo "check.sh: $workers test workers, one per test file"
+            echo "check.sh: one test worker per test file: $workers"
         fi
     fi
     # One worker runs in pytest's own process (-n 0): xdist would start a second JVM for it.
@@ -109,7 +109,15 @@ if [[ "$tier" == "full" ]]; then
     case "$scope" in
         # -n stays out of addopts, so a plain `uv run pytest` runs in one process for debuggers.
         full) step "pytest with coverage" uv run pytest -n "$workers" --cov --cov-report=term-missing:skip-covered ;;
-        tests) step "pytest of the changed files" uv run pytest -n "$workers" "${tests[@]}" ;;
+        # pytest exits 5 when the files hold no test the default run selects, such as live
+        # tests only; that is no failure.
+        tests) step "pytest of the changed files" uv run pytest -n "$workers" "${tests[@]}" || {
+            status=$?
+            if ((status != 5)); then
+                exit "$status"
+            fi
+            echo "check.sh: the changed test files hold no test the default run selects"
+        } ;;
         lint) ;;
         *)
             echo "check.sh: unknown scope '$scope' from scripts/check_scope.py" >&2

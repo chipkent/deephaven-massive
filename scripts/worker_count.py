@@ -147,7 +147,8 @@ def main() -> int:
         sys.stderr.write(f"check.sh: {error}\n")
         return 2
     sys.stdout.write(f"{choice.workers}\n")
-    sys.stderr.write(f"check.sh: {choice.workers} test workers ({choice.reason})\n")
+    plural = "" if choice.workers == 1 else "s"
+    sys.stderr.write(f"check.sh: {choice.workers} test worker{plural} ({choice.reason})\n")
     return 0
 
 
