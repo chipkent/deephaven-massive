@@ -319,6 +319,37 @@ At the next poll, Nvidia's row arrives and Microsoft's leaves, and the table kee
 Wherever a dataset takes symbols, it also takes a table with a `Symbol` column, and it follows a
 live one as it changes.
 
+<a id="convert-symbols"></a>
+
+#### Symbols from another source: convert a table of Yahoo tickers
+
+Read the previous closes of the stocks in a table of Yahoo Finance tickers, with Stocks Basic. Yahoo writes a
+share class as `BRK-B` and a preferred as `BAC-PL`, where Massive writes `BRK.B` and `BACpL`, so
+convert the table first and name Yahoo with `convention=`:
+
+```python
+import deephaven_massive as dm
+from deephaven import new_table
+
+m = dm.MassiveSession()
+yahoo = new_table({"Symbol": ["AAPL", "BRK-B", "BAC-PL", "^GSPC"]})
+stocks = dm.canonicalize_symbols(
+    yahoo.update("Yahoo = Symbol"), dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+)
+yahoo_closes = m.stocks.previous_day_bar(stocks).fetch()
+```
+
+`yahoo_closes` has a row each for `AAPL`, `BRK.B`, and `BACpL`, with its previous trading day's
+bar. `stocks` keeps all four rows: `Symbol` holds Massive's tickers, and `Yahoo` the text you
+started with.
+
+`^GSPC` isn't a Yahoo stock ticker, so its row gets a null `Symbol`, which every dataset skips.
+The log names the values that didn't convert, and `stocks.where("isNull(Symbol)")` lists their
+rows. To fail instead, pass `on_error=dm.OnError.RAISE`.
+
+A table from `read_csv` converts the same way, and a live input table converts each row as you
+add it. To convert one value in code, use `dm.canonical_symbol`.
+
 Next, settings for the paid plans.
 
 <a id="what-your-plan-allows"></a>
