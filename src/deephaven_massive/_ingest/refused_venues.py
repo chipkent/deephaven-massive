@@ -126,7 +126,7 @@ class RefusedVenues:
         if not new:
             return
         logger.log(
-            effect_of(self.policy).level,
+            effect_of(self.policy).level,  # never RAISE: no RefusedVenues is made under it
             "%s history (%s): skipping the flat files of %s for the whole range, since Massive "
             "refused them; name only the exchanges the plan includes in venues= to request "
             "none of them. S3 refused: %s",

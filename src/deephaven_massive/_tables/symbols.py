@@ -128,6 +128,7 @@ def canonicalize_symbols(
         table, asset_class=asset_class, column=column, convention=convention, on_error=on_error
     )
     effect = effect_of(mode)
+    # Under RAISE nothing logs to `bad`: a bad value raises below or fails the formula.
     bad = BoundedLog(logger, limit=_LOGGED_VALUES, level=effect.level)
 
     def convert(text: str) -> str | None:

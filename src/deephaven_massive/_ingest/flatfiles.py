@@ -1619,7 +1619,7 @@ def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
         setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
     """
     logger.log(
-        effect_of(setting).level,
+        effect_of(setting).level,  # never RAISE here: that read failed at the line
         "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",
         dataset,
         file.malformed_lines,
