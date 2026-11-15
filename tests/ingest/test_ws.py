@@ -3701,3 +3701,12 @@ def test_a_streams_row_and_description_name_its_recency(
     [row] = streams_of(custom_session, dh_to_pylist)
     assert (row["Host"], row["Recency"]) == (decision.host, decision.recency.value)
     custom_session.session.release(result)
+
+
+def test_a_stream_keeps_only_a_symbol_list_s_unskipped_pairs() -> None:
+    skipped = {"X:DOTUSD": object()}
+    assert ws._kept(("X:BTCUSD", "X:DOTUSD"), skipped) == ("X:BTCUSD",)
+    assert ws._kept(dm.ALL, skipped) is dm.ALL
+    # A form of symbols no case names fails loudly, never passes unfiltered.
+    with pytest.raises(AssertionError):
+        ws._kept(["X:DOTUSD"], skipped)  # type: ignore[arg-type]  # the point: refused at run time

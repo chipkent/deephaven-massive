@@ -79,7 +79,7 @@ import logging
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
@@ -239,7 +239,9 @@ def _kept(symbols: NormalizedSymbols, skipped: Mapping[str, object]) -> Normaliz
     """
     if isinstance(symbols, tuple):
         return tuple(symbol for symbol in symbols if symbol not in skipped)
-    return symbols
+    if isinstance(symbols, AllSymbols | SymbolTable):
+        return symbols  # neither names a pair to skip at the call
+    assert_never(symbols)  # a new form of symbols needs its skipped pairs decided here
 
 
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is
