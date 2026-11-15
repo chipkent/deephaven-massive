@@ -6,7 +6,8 @@ through descriptions in one week: a change listed as a choice "for the owner to 
 merged unconfirmed; an approval claimed in the author's own words ("owner-approved", "the
 owner decided on 2026-11-09") that no owner message contains; and a rule in `AGENTS.md`
 rewritten with no record of the decisions it replaced. This script fails on each shape
-(`AGENTS.md`, an approval is a quote; the `pre-push-review` skill, section 4):
+(`AGENTS.md`, an approval is a decision file or the owner's answer to a question; the
+`pre-push-review` skill, section 4):
 
 - **An item that asks the owner anything**, from the `**Check before merging` heading to the
   next `## ` heading: a `?` outside quotes, code, and links, or "open:", "to confirm",
@@ -15,15 +16,17 @@ rewritten with no record of the decisions it replaced. This script fails on each
   (`writing-to-the-owner`), and the pull request opens after the answer.
 - **An approval claimed without its source**: a bullet, table row, or paragraph saying the
   owner approved, accepted, decided, agreed, confirmed, wants, said, or told something also
-  holds a `YYYY-MM-DD` date and a quotation of at least fifteen characters (`"..."` or a `>`
-  line), so a bare "ok" is quoted with the question it answered, or names a decision
-  (`decision N`) whose file is in `docs/dev/decisions/` and that this pull request does not
-  itself add.
+  names a decision (`decision N`) whose file is in `docs/dev/decisions/` and that this pull
+  request does not itself add, or holds the question and the owner's dated answer: a
+  `YYYY-MM-DD` date, a quotation of at least fifteen characters holding a `?` (the question),
+  and the quotation right after it (the answer), each `"..."` or a `>` line. A question alone,
+  or an answer without its question before it, approves nothing.
 - **A rule change without its record**: a pull request touching `AGENTS.md` or
-  `.claude/skills/` holds a dated quote; one whose diff removes or rewrites a line of either
-  also holds a `Decisions touched:` line naming decision numbers or `none`.
+  `.claude/skills/` holds the question and the owner's dated answer; one whose diff removes
+  or rewrites a line of either also holds a `Decisions touched:` line naming decision
+  numbers or `none`.
 
-It checks the shape, not the substance: whether a quoted sentence covers the change is for
+It checks the shape, not the substance: whether the answer covers the change is for
 the reader (`plan-parallel-prs`, section 6). Three ways to run it, each with only the
 standard library:
 
@@ -46,6 +49,7 @@ workflow posts as a comment on the pull request.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import pathlib
@@ -78,8 +82,8 @@ DECISION_REFERENCE: Final = re.compile(r"\bdecision (\d+)\b", re.IGNORECASE)
 DATE: Final = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 #: Paired quotation marks, straight or curly, and a blockquote line: each a quotation.
 QUOTATIONS: Final = re.compile(r'"([^"]*)"|“([^”]*)”|^\s*>\s*(\S.*)$', re.MULTILINE)
-#: Fifteen characters or more: a one-word answer ("ok", "a.") is quoted with its question.
-QUOTE_LENGTH: Final = 15
+#: A question of fifteen characters or more, so a stray "?" in a short quotation is not one.
+QUESTION_LENGTH: Final = 15
 #: Where the decisions live, relative to the repository root the script runs from.
 DECISIONS_DIR: Final = pathlib.Path("docs/dev/decisions")
 #: Quotations, blockquote lines, code spans, and links may hold a `?` that asks nothing.
@@ -175,19 +179,25 @@ def units(body: str) -> list[str]:
     return result
 
 
-def is_dated_quote(text: str) -> bool:
-    """Whether the text holds both a date and a quotation.
+def is_answered_question(text: str) -> bool:
+    """Whether the text holds a question, the owner's answer to it, and a date.
 
     Args:
         text: A unit of the body, or the whole body.
 
     Returns:
-        True when the text holds a `DATE` and a paired quotation or blockquote line of
-        `QUOTE_LENGTH` characters or more. Quotation marks are paired in order, so the prose
-        between two short quotations never counts as one.
+        True when the text holds a `DATE`, a quotation of `QUESTION_LENGTH` characters or more
+        that holds a `?` (the question), and a quotation right after it (the answer).
+        Quotations are paired quotation marks or blockquote lines, paired in order, so the
+        prose between two quotations never counts as one. A question alone approves nothing,
+        and neither does an answer whose question is not shown before it.
     """
-    quotations = ("".join(groups) for groups in QUOTATIONS.findall(text))
-    return bool(DATE.search(text)) and any(len(q) >= QUOTE_LENGTH for q in quotations)
+    quotations = ["".join(groups).strip() for groups in QUOTATIONS.findall(text)]
+    answered = any(
+        "?" in question and len(question) >= QUESTION_LENGTH and answer
+        for question, answer in itertools.pairwise(quotations)
+    )
+    return bool(DATE.search(text)) and answered
 
 
 def added_paths(diff: str) -> set[str]:
@@ -252,9 +262,8 @@ def check_claims(body: str, diff: str, decisions: Collection[str]) -> list[str]:
 
     Returns:
         One line per bullet, row, or paragraph whose own words (outside quotations and code)
-        match `APPROVAL_CLAIM` while the unit holds neither a dated quotation of fifteen
-        characters or more nor a reference to an existing decision this pull request does not
-        add.
+        match `APPROVAL_CLAIM` while the unit holds neither a reference to an existing
+        decision this pull request does not add nor a question with the owner's dated answer.
     """
     problems = []
     added = added_paths(diff)
@@ -262,12 +271,14 @@ def check_claims(body: str, diff: str, decisions: Collection[str]) -> list[str]:
         # The claim is matched on the author's own words, flattened, so a wrapped line and a
         # quoted hypothetical count the same as on one line; the quote is sought in the whole.
         hit = APPROVAL_CLAIM.search(" ".join(QUOTED_OR_CODE.sub("", unit).split()))
-        if hit and not (is_dated_quote(unit) or cites_existing_decision(unit, added, decisions)):
+        if hit and not (
+            is_answered_question(unit) or cites_existing_decision(unit, added, decisions)
+        ):
             problems.append(
-                f"An approval is claimed ({hit.group(0)!r}) without the owner's words quoted "
-                f"with their date, or the decision that records them, in the same bullet, "
-                f"row, or paragraph: {unit.strip()[:100]!r} (AGENTS.md, an approval is a "
-                f"quote)."
+                f"An approval is claimed ({hit.group(0)!r}) without the decision that records "
+                f"it, or the question and the owner's dated answer, in the same bullet, row, "
+                f"or paragraph: {unit.strip()[:100]!r} (AGENTS.md, an approval is a decision "
+                f"file or the owner's answer to a question)."
             )
     return problems
 
@@ -301,7 +312,8 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
         diff: Its unified diff.
 
     Returns:
-        A line when a rule file changes and the body holds no dated quote, and a line when
+        A line when a rule file changes and the body holds no question with the owner's
+        dated answer, and a line when
         a rule file loses a line and the body holds no `Decisions touched:` line. Empty when
         no rule file changes.
     """
@@ -309,10 +321,11 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
     if not rule_files:
         return []
     problems = []
-    if not is_dated_quote(body):
+    if not is_answered_question(body):
         problems.append(
-            f"The pull request changes a rule ({', '.join(rule_files)}) without the owner's "
-            f"words quoted with their date (AGENTS.md, an approval is a quote)."
+            f"The pull request changes a rule ({', '.join(rule_files)}) without the question "
+            f"and the owner's dated answer that approve it (AGENTS.md, an approval is a "
+            f"decision file or the owner's answer to a question)."
         )
     if rule_deletions(diff) and not DECISIONS_TOUCHED.search(body):
         problems.append(

@@ -51,6 +51,12 @@ A crypto pair Massive's list does not hold gives no rows.
 The owner asked "why does it raise?" on 2026-11-11; see https://example.com/why?x=1.
 """
 
+#: The owner's answer with the question it answers and its date: what approves a rule change.
+ANSWERED = (
+    '## Summary\n\nAsked "May the rules say this instead?", the owner answered on 2026-11-15: '
+    '"I approve the principles, as written."\n'
+)
+
 AGENTS_DIFF = """diff --git a/AGENTS.md b/AGENTS.md
 --- a/AGENTS.md
 +++ b/AGENTS.md
@@ -121,20 +127,30 @@ def test_a_question_outside_the_section_is_not_the_section_s(check: ModuleType) 
         "| The two `noqa` comments are owner-approved | Both classes are facades. |",
         "The owner decided on 2026-11-09 to ship it before 0.1.0.",
         '- The owner approved this form on 2026-11-12: "ok".',
+        '- The owner approved the split on 2026-11-11: "I\'m certainly fine with splitting."',
+        '- The owner decided on 2026-11-11, asked "May the split go ahead as proposed?"',
+        '- The owner approved, asked "May the split go ahead as proposed?": "Yes, go ahead."',
+        '- The owner approved "Yes." on 2026-11-15, the answer to "May the split go ahead?"',
     ],
 )
-def test_an_approval_claimed_without_a_dated_quote_fails(check: ModuleType, claim: str) -> None:
+def test_an_approval_claimed_without_its_source_fails(check: ModuleType, claim: str) -> None:
     problems = check.find_problems(f"## Decisions\n\n{claim}\n", [], "")
     assert len(problems) == 1
     assert "An approval is claimed" in problems[0]
 
 
-def test_an_approval_with_the_owner_s_dated_words_passes(check: ModuleType) -> None:
+def test_an_approval_with_its_question_and_the_owner_s_dated_answer_passes(
+    check: ModuleType,
+) -> None:
     body = (
         "## Decisions\n\n"
-        '- The owner approved the split on 2026-11-11: "I\'m certainly fine with splitting."\n'
-        "- The owner decided on 2026-11-12, answering whether tests may use noqa:\n"
+        '- The owner approved the split on 2026-11-11. Asked "May the split go ahead?": '
+        '"I\'m certainly fine with splitting."\n'
+        "- The owner decided on 2026-11-12:\n"
+        "  > May tests use noqa for fake credentials?\n"
         "  > Yes, tests can use noqa for fake credentials\n"
+        '- The owner approved on 2026-11-12, asked "Should this ship before 0.1.0?": "ok"\n'
+        '- The owner agreed on 2026-11-13, asked "Is the guard still needed?": "Yes, why not?"\n'
     )
     assert check.find_problems(body, [], "") == []
 
@@ -203,7 +219,7 @@ def test_a_decision_whose_status_this_pull_request_updates_still_counts(
 
 def test_indented_sibling_bullets_never_share_a_quotation(check: ModuleType) -> None:
     body = (
-        '  - The owner approved the split on 2026-11-15: "Keep the proposed split exactly."\n'
+        '  - The owner approved the split on 2026-11-15, asked "Is the split right?": "Yes."\n'
         "  - The owner approved removing the guard.\n"
     )
     assert len(check.units(body)) == 2
@@ -215,9 +231,9 @@ def test_a_claim_wrapped_across_lines_is_still_a_claim(check: ModuleType) -> Non
     assert len(check.find_problems(body, [], "")) == 1
 
 
-def test_prose_between_two_short_quotations_is_not_a_quotation(check: ModuleType) -> None:
+def test_prose_between_two_quotations_is_not_a_question(check: ModuleType) -> None:
     body = (
-        '- The owner approved on 2026-11-15: "ok"; the setting is called "retry_limit".\n'
+        '- The owner approved on 2026-11-15: "ok"; was the setting renamed? it is "retry_limit".\n'
         '- The owner approved on 2026-11-15: "ok", then later repeated "ok".\n'
     )
     assert len(check.find_problems(body, [], "")) == 2
@@ -227,7 +243,8 @@ def test_a_blank_line_before_an_indented_blockquote_keeps_the_item_whole(
     check: ModuleType,
 ) -> None:
     body = (
-        "- The owner approved on 2026-11-15:\n\n  > Keep this guard exactly as written.\n\n"
+        "- The owner approved on 2026-11-15:\n\n  > Should this guard stay as it is?\n"
+        "  > Keep this guard exactly as written.\n\n"
         "- A second item.\n"
     )
     assert check.find_problems(body, [], "") == []
@@ -246,22 +263,32 @@ def test_a_hypothetical_inside_a_quotation_is_not_a_claim(check: ModuleType) -> 
 
 def test_a_claim_s_quote_in_another_paragraph_does_not_count(check: ModuleType) -> None:
     body = (
-        '## Decisions\n\nThe owner, 2026-11-12: "Yes, tests can use noqa for fake credentials."\n\n'
+        '## Decisions\n\nAsked "May tests use noqa?", the owner, 2026-11-12: '
+        '"Yes, for fake credentials."\n\n'
         "| Tests: a fake | The form the owner approved |\n"
     )
     assert len(check.find_problems(body, [], "")) == 1
 
 
-def test_a_rule_change_needs_a_dated_quote(check: ModuleType) -> None:
-    problems = check.find_problems(
-        "## Summary\n\nRewords a skill.\n", [".claude/skills/x/SKILL.md"], ""
-    )
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Summary\n\nRewords a skill.\n",
+        '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n',
+        '## Summary\n\nOn 2026-11-15 the owner was asked "May the rules say this instead?"\n',
+    ],
+)
+def test_a_rule_change_needs_its_question_and_the_owner_s_dated_answer(
+    check: ModuleType, body: str
+) -> None:
+    problems = check.find_problems(body, [".claude/skills/x/SKILL.md"], "")
     assert len(problems) == 1
-    assert "without the owner's words quoted" in problems[0]
+    assert "without the question and the owner's dated answer" in problems[0]
+    assert check.find_problems(ANSWERED, [".claude/skills/x/SKILL.md"], "") == []
 
 
 def test_an_agents_md_rewrite_needs_its_decisions_touched_line(check: ModuleType) -> None:
-    body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
+    body = ANSWERED
     problems = check.find_problems(body, ["AGENTS.md"], AGENTS_DIFF)
     assert len(problems) == 1
     assert "Decisions touched" in problems[0]
@@ -271,14 +298,14 @@ def test_an_agents_md_rewrite_needs_its_decisions_touched_line(check: ModuleType
     assert check.find_problems(with_none, ["AGENTS.md"], AGENTS_DIFF) == []
 
 
-def test_an_agents_md_addition_needs_only_the_quote(check: ModuleType) -> None:
-    body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
+def test_an_agents_md_addition_needs_only_the_answer(check: ModuleType) -> None:
+    body = ANSWERED
     assert check.find_problems(body, ["AGENTS.md"], AGENTS_ADDITION) == []
 
 
 def test_a_skill_rewrite_needs_its_decisions_touched_line_too(check: ModuleType) -> None:
     diff = AGENTS_DIFF.replace("AGENTS.md", ".claude/skills/pre-push-review/SKILL.md")
-    body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
+    body = ANSWERED
     problems = check.find_problems(body, [".claude/skills/pre-push-review/SKILL.md"], diff)
     assert len(problems) == 1
     assert "Decisions touched" in problems[0]
@@ -295,7 +322,7 @@ def test_a_git_quoted_path_in_a_diff_header_is_read(check: ModuleType) -> None:
 
 def test_a_deletion_in_another_file_is_not_a_rule_rewrite(check: ModuleType) -> None:
     diff = AGENTS_DIFF.replace("AGENTS.md", "README.md")
-    body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
+    body = ANSWERED
     assert check.find_problems(body, ["AGENTS.md", "README.md"], diff) == []
 
 
