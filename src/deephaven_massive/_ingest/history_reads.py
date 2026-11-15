@@ -16,7 +16,8 @@ and decides what the call returns when they cannot serve all of it:
   and so do the days at the range's end that have no file a week or more later. The table's
   description names each day taken for a holiday, since Massive's file for a trading day may
   simply be missing, and the library never fills or hides a gap in Massive's data. A refusal
-  names REST when REST could serve the read.
+  names REST when REST could serve the read. A futures venue the request's `refused_venues`
+  skips instead is named in the table's description.
 - A futures read by dates whose files held rows of other sessions warns that the range's
   first or last session may be incomplete, and says so on the table.
 - A read by symbol (`read_history_by_symbol`, for a table that follows a live symbol table)
@@ -24,7 +25,7 @@ and decides what the call returns when they cannot serve all of it:
   (`RestTransport.history_by_symbol`), so one symbol's REST failure fails only that symbol. A
   failure of the files themselves, which serve every symbol at once, is every symbol's.
 
-Runs on the calling thread (a background read's own thread for `wait=False`); the REST reads go
+Runs on the calling thread (a read pool thread for a background read); the REST reads go
 through the session's REST transport (`SessionCore.rest_transport`).
 """
 
@@ -33,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
@@ -48,9 +49,15 @@ from deephaven_massive._datasets.history_source import (
     rest_history_problem,
 )
 from deephaven_massive._datasets.row_times import time_column
-from deephaven_massive._errors import AuthenticationError, EntitlementError, MassiveError
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    MassiveError,
+    required_instance,
+)
+from deephaven_massive._ingest.refused_venues import refused_note, refused_source
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
-from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._log_limits import LoggedKeys, bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
@@ -65,15 +72,48 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._ingest.flatfiles import FlatFileHistory
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import FlatFileRead, SymbolOutcome
 
-__all__ = ["read_history", "read_history_by_symbol"]
+__all__ = ["FlatFileScan", "read_history", "read_history_by_symbol"]
 
 logger = logging.getLogger(__name__)
 
 _ONE_DAY: Final = timedelta(days=1)
+
+
+class FlatFileScan(Protocol):
+    """The call's flat-file transport, as these reads scan it: a `FlatFileHistory`."""
+
+    def history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        /,
+        *,
+        dates: Sequence[date],
+        call: int,
+        infer_holidays: bool,
+        logged: LoggedKeys,
+        stop: threading.Event | None,
+    ) -> FlatFileRead:
+        """Return the rows of `window` from the dataset's flat files, and the days they lack.
+
+        Args:
+            spec: The dataset.
+            request: The request.
+            window: The call's window.
+            dates: The partition dates of the files the window needs.
+            call: The call id.
+            infer_holidays: True to take a missing weekday file for a holiday.
+            logged: The facts the call has logged, each logged once per call.
+            stop: A read's stop token, or None.
+
+        Returns:
+            The files' read (`FlatFileHistory.history`).
+        """
+        ...
 
 
 def read_history(
@@ -82,7 +122,7 @@ def read_history(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     dates: Sequence[date],
     call: int,
     stop: threading.Event | None,
@@ -107,7 +147,8 @@ def read_history(
         The static table; the description's source sentence when REST served any of it,
         which replaces the sentence of the source choice (None when only the flat files did);
         and the sentences the description adds on what the files may lack (`_files_lack_note`:
-        the days taken for holidays, the sessions that may be incomplete), or None.
+        the days taken for holidays, the sessions that may be incomplete, the futures venues
+        skipped because S3 refused them), or None.
 
     Raises:
         AuthenticationError: When S3 rejects the S3 credentials under `FLAT_FILES` or when
@@ -129,6 +170,7 @@ def read_history(
         files=files,
         dates=dates,
         call=call,
+        logged=LoggedKeys(),  # a one-time call reads once, so the read keeps what it logged
         stop=stop,
         problem=problem,
         forced=forced,
@@ -161,9 +203,10 @@ def _scan(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     dates: Sequence[date],
     call: int,
+    logged: LoggedKeys,
     stop: threading.Event | None,
     problem: str | None,
     forced: bool,
@@ -171,7 +214,8 @@ def _scan(
     """Read the flat files of a call, or learn that REST must serve all of it instead.
 
     Under `FLAT_FILES`, or when REST cannot serve the request (`problem`), holidays are
-    inferred and a refusal raises; otherwise a refusal of the files logs the WARNING of
+    inferred and a refusal raises, unless the request's `refused_venues` skips a refused
+    futures venue (`FlatFileHistory.history`); otherwise a refusal of the files logs the WARNING of
     `_warn_rest_served` and the whole call is read from REST.
 
     Args:
@@ -182,6 +226,7 @@ def _scan(
         files: The call's flat-file transport.
         dates: The partition dates of the files the window needs.
         call: The call id.
+        logged: The facts the call has logged (`FlatFileHistory.history`).
         stop: A read's stop token, or None.
         problem: Why REST cannot serve the request (`rest_history_problem`), or None.
         forced: True for `source=FLAT_FILES`.
@@ -199,7 +244,14 @@ def _scan(
     infer = forced or problem is not None
     try:
         return files.history(
-            spec, request, window, dates=dates, call=call, infer_holidays=infer, stop=stop
+            spec,
+            request,
+            window,
+            dates=dates,
+            call=call,
+            infer_holidays=infer,
+            logged=logged,
+            stop=stop,
         )
     except (EntitlementError, AuthenticationError) as error:
         if infer:
@@ -247,7 +299,8 @@ def _check_published(
         )
         raise MassiveError(
             f"{spec.name}: the flat file for {first} is not published yet. "
-            f"{PUBLICATION_NOTE}. {remedy}"
+            f"{PUBLICATION_NOTE}. {remedy}",
+            is_retryable=True,
         )
 
 
@@ -259,11 +312,16 @@ def _files_lack_note(spec: DatasetSpec, read: FlatFileRead) -> str | None:
         read: The flat-file read.
 
     Returns:
-        The sentence on the days taken for holidays (`_skipped_days`), then the one on the
-        sessions that may be incomplete (`_uncertain_sessions`), joined by a space; None when
-        neither applies.
+        The sentence on the days taken for holidays (`_skipped_days`), the one on the sessions
+        that may be incomplete (`_uncertain_sessions`), then the one on the futures venues
+        skipped because S3 refused them (`refused_venues.refused_note`), joined by spaces;
+        None when none applies.
     """
-    notes = [_skipped_days(read.skipped), _uncertain_sessions(spec, read.uncertain)]
+    notes = [
+        _skipped_days(read.skipped),
+        _uncertain_sessions(spec, read.uncertain),
+        refused_note(read.refused),
+    ]
     return " ".join(note for note in notes if note is not None) or None
 
 
@@ -360,8 +418,12 @@ def _rest_day_reads(
         if not isinstance(window.span, DaySpan):
             opens = day_start(spec.asset_class, day)
             closes = day_start(spec.asset_class, day + _ONE_DAY)
-            start = max(cast("datetime", request.start), opens)
-            end = closes if request.end is None else min(cast("datetime", request.end), closes)
+            first = required_instance(request.start, datetime, f"{spec.name}'s history start")
+            start = max(first, opens)
+            if request.end is not None:
+                end = min(required_instance(request.end, datetime, f"{spec.name}'s end"), closes)
+            else:
+                end = closes
         one = replace(request, start=start, end=end)
         reads.append((one, history_window(spec, one, start=start, end=end, now=window.now), None))
     return reads
@@ -413,10 +475,11 @@ def read_history_by_symbol(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     symbols: Sequence[str],
     dates: Sequence[date],
     call: int,
+    logged: LoggedKeys,
     stop: threading.Event | None,
     forced: bool,
 ) -> dict[str, SymbolOutcome]:
@@ -429,7 +492,9 @@ def read_history_by_symbol(
     history_by_symbol`, over day windows built for the call's instant), so a symbol fails
     alone when its own REST read fails, and a symbol that failed is not read for later days.
     When S3 refuses the files and REST may serve the call, the whole call is read from REST by
-    symbol. An empty window reads nothing.
+    symbol. When the request's `refused_venues` skips a refused futures venue instead, each
+    symbol's source names it (`refused_venues.refused_source`), since the followed table's
+    description was fixed before the read. An empty window reads nothing.
 
     Args:
         spec: The dataset.
@@ -440,6 +505,8 @@ def read_history_by_symbol(
         symbols: The canonical symbols; a repeated one is read once.
         dates: The partition dates of the files the window needs.
         call: The call id.
+        logged: The facts the call has logged, kept across its reads, so a refused futures
+            venue is logged once per call (`refused_venues.RefusedVenues.report`).
         stop: A read's stop token, or None.
         forced: True for `source=FLAT_FILES`, which never reads REST.
 
@@ -470,6 +537,7 @@ def read_history_by_symbol(
             files=files,
             dates=dates,
             call=call,
+            logged=logged,
             stop=stop,
             problem=problem,
             forced=forced,
@@ -491,6 +559,9 @@ def read_history_by_symbol(
         logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
     with entered(core.exec_ctx):
         files_rows = merge([read.empty, *(part for _, part in read.parts)])
+    # A followed table's description is fixed before its reads, so each symbol's transport in
+    # `m.symbol_reads()` names the venues the read skipped.
+    flat = refused_source(flat, read.refused)
     tables = split_by_symbol(core, spec, files_rows, symbols=ordered, source=flat)
     if not read.unread:
         return symbol_outcomes(

@@ -1,9 +1,10 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
+import copy
 import json
 import re
-from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+import typing
+from collections.abc import Callable, Sequence
 
 import pyarrow as pa
 import pytest
@@ -14,6 +15,9 @@ from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.symbols import (
+    ALL,
+    AllSymbols,
+    SymbolsLike,
     SymbolTable,
     check_symbol,
     check_symbols,
@@ -26,9 +30,6 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
 from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -366,12 +367,12 @@ def test_the_massive_convention_is_the_default_for_every_class() -> None:
 
 def test_converter_enums_reject_text() -> None:
     with pytest.raises(TypeError, match=r"^asset_class must be dm\.AssetClass"):
-        dm.canonical_symbol("AAPL", cast("AssetClass", "stocks"))
+        dm.canonical_symbol("AAPL", "stocks")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
-        dm.canonical_symbol("BRK-B", STK, convention=cast("SymbolConvention", "yahoo"))
+        dm.canonical_symbol("BRK-B", STK, convention="yahoo")  # type: ignore[arg-type]  # the point: refused at run time
     # No convention is not a default: SymbolConvention.MASSIVE names Massive's own spelling.
     with pytest.raises(TypeError, match=r"^convention must be dm\.SymbolConvention"):
-        dm.canonical_symbol("AAPL", STK, convention=cast("SymbolConvention", None))
+        dm.canonical_symbol("AAPL", STK, convention=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize(
@@ -594,14 +595,14 @@ def test_check_symbols_refuses_what_is_not_canonical(
 
 
 def test_check_symbols_materializes_generators() -> None:
-    assert check_symbols(STK, cast("Iterable[str]", (s for s in ["B", "A"]))) == ("A", "B")
+    assert check_symbols(STK, (s for s in ["B", "A"])) == ("A", "B")
 
 
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
-        check_symbols(STK, cast("Iterable[str]", items))
+        check_symbols(STK, items)
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         check_symbols(STK, [])
 
@@ -612,9 +613,9 @@ def test_check_symbols_all_passes_through() -> None:
 
 def test_check_symbols_rejects_non_iterables_and_non_strings() -> None:
     with pytest.raises(TypeError, match="symbols must be"):
-        check_symbols(STK, cast("Iterable[str]", 5))
+        check_symbols(STK, 5)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="must be a str"):
-        check_symbols(STK, cast("Iterable[str]", ["AAPL", 5]))
+        check_symbols(STK, ["AAPL", 5])  # type: ignore[list-item]  # the point: refused at run time
 
 
 def test_symbol_tables_compare_by_wrapper(dh_exec_ctx: object) -> None:
@@ -720,3 +721,26 @@ def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
         dm.canonical_symbol_forex("EURUSD=X")
     with pytest.raises(ValueError, match="Yahoo Finance"):
         dm.canonical_symbol_forex("eurusd=x")
+
+
+def test_all_is_the_exported_singleton() -> None:
+    assert dm.ALL is ALL
+    assert dm.AllSymbols is AllSymbols
+    assert AllSymbols("ALL") is AllSymbols.ALL is ALL
+    assert copy.copy(ALL) is ALL
+    assert copy.deepcopy(ALL) is ALL
+    assert not isinstance(ALL, str)
+
+
+def test_all_shows_its_public_name() -> None:
+    assert repr(ALL) == "dm.ALL"
+    assert str(ALL) == "ALL"
+    assert f"{ALL}" == "ALL"
+
+
+def test_symbols_like_names_every_form_symbols_takes() -> None:
+    assert set(typing.get_args(SymbolsLike)) == {str, Sequence[str], Table, AllSymbols}
+
+
+def test_all_is_an_instance_of_the_symbols_like_member() -> None:
+    assert isinstance(ALL, AllSymbols)

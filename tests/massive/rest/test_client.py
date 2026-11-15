@@ -11,11 +11,13 @@ import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pytest
 import urllib3
+from typing_extensions import override
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net import USER_AGENT, http
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import (
@@ -33,7 +35,6 @@ from deephaven_massive._massive.rest.governor import (
     RequestGovernor,
 )
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -56,6 +57,8 @@ _TRADES = RestPath(
     ),
 )
 _AAPL = {"stockTicker": "AAPL"}
+_CONNECTION = urllib3.connection.HTTPConnection("api.massive.com")
+"""The connection a refused connection names; never opened."""
 
 
 def _governor(clock: FakeClock | None = None) -> RequestGovernor:
@@ -368,7 +371,7 @@ def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
     with pytest.raises(WireError, match="does not decompress") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 200
-    assert caught.value.unreadable  # the body arrived whole but cannot be read
+    assert caught.value.kind is WireFailure.UNREADABLE  # the body arrived whole but cannot be read
     assert "not gzip" not in caught.value.message  # the body itself is never quoted
     # The call that raises is what the user sees, so the client records the reply at DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -540,6 +543,7 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
         "127.0.0.1); check the user and password in HTTPS_PROXY"
     )
     assert (caught.value.status, caught.value.path) == (407, "/v3/trades/AAPL")
+    assert caught.value.kind is WireFailure.LOCAL  # the proxy setting on this machine is the fix
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tunnelled.requests, clock.waits) == ([], [])
 
@@ -609,6 +613,7 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert "SSL_CERT_FILE" in caught.value.message
     assert (caught.value.status, caught.value.path) == (None, "/v3/trades/AAPL")
+    assert caught.value.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert clock.waits == []
     assert tls_server.requests == []
 
@@ -763,6 +768,7 @@ def test_a_persistent_connection_failure_names_the_host_and_cause(
     with pytest.raises(WireError, match=r"^GET /v3/trades/AAPL on 127\.0\.0\.1 failed: ") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert (caught.value.status, caught.value.host) == (None, "127.0.0.1")
+    assert caught.value.kind is WireFailure.NO_ANSWER  # no answer, so a later request may get one
     assert len(fake_rest.requests) == 4
     assert len(clock.waits) == 3
 
@@ -1304,8 +1310,9 @@ def test_a_closed_client_refuses_requests(fake_rest: FakeRestServer) -> None:
     rest = _client(fake_rest)
     rest.close()
     rest.close()
-    with pytest.raises(WireError, match="the REST client is closed"):
+    with pytest.raises(WireError, match="the REST client is closed") as closed:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert closed.value.kind is WireFailure.STOPPED  # no answer was asked for
     assert fake_rest.requests == []
 
 
@@ -1408,6 +1415,7 @@ def test_the_callers_cancel_ends_a_slot_wait(fake_rest: FakeRestServer) -> None:
     call.join()
     assert call.error is not None
     assert call.error.message == "GET /v3/trades/AAPL: cancelled"
+    assert call.error.kind is WireFailure.STOPPED
     assert (call.error.status, call.error.path) == (None, "/v3/trades/AAPL")
     assert len(fake_rest.requests) == 5
     assert rest.governor.snapshot()[0].waiting == 0
@@ -1643,7 +1651,7 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
         (
             urllib3.exceptions.ProxyError(
                 "Unable to connect to proxy",
-                urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+                urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"),
             ),
             0,
         ),
@@ -1653,8 +1661,8 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
             ),
             0,
         ),
-        (urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"), 0),
-        (_caused_by(urllib3.exceptions.NewConnectionError(cast("Any", None), "refused")), 0),
+        (urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"), 0),
+        (_caused_by(urllib3.exceptions.NewConnectionError(_CONNECTION, "refused")), 0),
         # Without a proxy a TLS error may come after the request left: each of its four
         # attempts (it is retried as a transient failure) keeps its slot.
         (urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")), 4),

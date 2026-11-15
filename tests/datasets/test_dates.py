@@ -3,18 +3,22 @@
 import importlib
 import logging
 import re
+import typing
 from datetime import UTC, date, datetime, timedelta
-from typing import TypeVar, cast
+from typing import TypeVar
 
+import jpy
 import numpy as np
 import pytest
 from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_zdt
 
+from deephaven_massive._datasets import dates as dates_module
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
     DAY_ZONES,
     MIXED_BOUNDS,
     NEW_YORK,
+    DateLike,
     DaySpan,
     TimeRange,
     bounds,
@@ -35,6 +39,7 @@ from deephaven_massive._datasets.futures_sessions import (
     futures_session_open,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import WireUnit
 
 T = TypeVar("T")
@@ -86,7 +91,7 @@ def test_unparseable_and_wrong_types() -> None:
     with pytest.raises(ValueError, match="ISO-8601"):
         parse_date_like("2025-13-45", "end")
     with pytest.raises(TypeError, match=r"^end must be a str, date, datetime, Java Instant, "):
-        parse_date_like(cast("str", 20250303), "end")
+        parse_date_like(20250303, "end")
 
 
 def test_day_zones() -> None:
@@ -197,9 +202,9 @@ def test_equal_dates_are_one_day_and_equal_datetimes_an_empty_range() -> None:
     ],
 )
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.FUTURES])
-def test_mixed_bounds_are_refused(start: object, end: object, asset_class: AssetClass) -> None:
+def test_mixed_bounds_are_refused(start: DateLike, end: DateLike, asset_class: AssetClass) -> None:
     with pytest.raises(ValueError, match=f"^{re.escape(MIXED_BOUNDS)}; got start="):
-        bounds(_spec(asset_class), cast("str", start), cast("str", end), now=NOW)
+        bounds(_spec(asset_class), start, end, now=NOW)
 
 
 def test_reversed_ranges_are_refused() -> None:
@@ -414,6 +419,14 @@ def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
         instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=None, upper=True)
 
 
+def test_an_instant_bound_in_the_field_only_unit_is_a_defect() -> None:
+    # `MS_OR_NS` tells units apart by a value's size, so it has no step: a parameter given it
+    # is a defect of the spec refresh, named as one, never a bare KeyError.
+    day = date(2025, 3, 3)
+    with pytest.raises(BrokenGuaranteeError, match=r"^the parameter t\.lte counts in ms\|ns, "):
+        instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=WireUnit.MS_OR_NS, upper=True)
+
+
 def test_a_trading_day_is_a_weekday_a_forex_sunday_or_any_crypto_day() -> None:
     saturday, sunday, monday = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
     for asset_class in (AssetClass.STOCKS, AssetClass.FUTURES, ClassFromPrefix.ANY):
@@ -453,7 +466,8 @@ def test_deephaven_java_dates_and_instants_are_bounds() -> None:
     assert parse_date_like(instant, "start") == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     moment = parse_date_like(zoned, "end")
     assert moment == datetime(2025, 3, 3, 14, 30, 0, 500000, tzinfo=UTC)
-    assert cast("datetime", moment).utcoffset() == timedelta(hours=-5)
+    assert isinstance(moment, datetime)
+    assert moment.utcoffset() == timedelta(hours=-5)
 
 
 @pytest.mark.parametrize(
@@ -470,8 +484,10 @@ def test_java_instants_round_outward_to_the_microsecond(
     # still includes the row it came from; an end rounds up, so the range loses no row.
     caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
     java = _present(to_j_zdt(value) if " " in value else to_j_instant(value))
-    start = cast("datetime", parse_date_like(java, "start"))
-    end = cast("datetime", parse_date_like(java, "end", upper=True))
+    start = parse_date_like(java, "start")
+    end = parse_date_like(java, "end", upper=True)
+    assert isinstance(start, datetime)
+    assert isinstance(end, datetime)
     assert start.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123456, tzinfo=UTC)
     assert end.astimezone(UTC) == datetime(2025, 3, 3, 14, 30, 0, 123457, tzinfo=UTC)
     assert caplog.messages == [
@@ -510,7 +526,6 @@ def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
 ) -> None:
     # Rounding up cannot pass the largest datetime, which no row reaches; a start still rounds
     # down to it.
-    jpy = importlib.import_module("jpy")  # untyped: a Java instant past numpy's range
     java = jpy.get_type("java.time.Instant").parse("9999-12-31T23:59:59.999999500Z")
     largest = datetime.max.replace(tzinfo=UTC)
     caplog.set_level(logging.DEBUG, logger=_DATES_LOG)
@@ -524,7 +539,6 @@ def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
 
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
-    jpy = importlib.import_module("jpy")  # untyped: Java's own extreme values
     for java in (jpy.get_type("java.time.Instant").MAX, jpy.get_type("java.time.LocalDate").MAX):
         with pytest.raises(ValueError, match=r"^start=.* is not a time from year 1 to 9999"):
             parse_date_like(java, "start")
@@ -659,3 +673,13 @@ def test_a_day_reaches_now_in_its_class_zone() -> None:
     late = datetime(2025, 6, 19, 1, tzinfo=UTC)
     assert reaches_now(date(2025, 6, 18), AssetClass.STOCKS, now=late)
     assert not reaches_now(date(2025, 6, 18), AssetClass.CRYPTO, now=late)
+
+
+def test_date_like_alias() -> None:
+    assert set(typing.get_args(DateLike)) == {str, date, datetime, np.datetime64}
+
+
+def test_every_unit_but_nanoseconds_has_its_step() -> None:
+    # A `.gt` or `.lte` bound steps back one unit; a new unit must name its step, never be
+    # refused as nanoseconds. A parameter in the field-only `MS_OR_NS` is a defect.
+    assert set(dates_module._UNIT_STEPS) == set(WireUnit) - {WireUnit.NS, WireUnit.MS_OR_NS}

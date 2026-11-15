@@ -1,7 +1,8 @@
 """The live run's `responses` group: Massive's real replies to the documentation's examples.
 
-Each example is a small piece of user code run through the library's public API, such as NVDA's
-daily bars around its June 2024 split. While it runs, the wire package's reply-capture hook
+Each example (`reply_examples.EXAMPLES`) is a small piece of user code run through the library's
+public API, such as NVDA's daily bars around its June 2024 split; its code is here, in `CALLS`,
+by the example's name. While it runs, the wire package's reply-capture hook
 (`set_reply_capture`) hands every REST body and WebSocket frame the library receives to a sink;
 the sink puts it on a queue, and a writer thread writes one `CapturedReply` per line to
 `<name>.jsonl` in the attempt's folder. The replies are already cleaned of the key by the
@@ -10,10 +11,9 @@ reply of one example lands in another's file, and every `history()` reads REST
 (`source=dm.HistorySource.REST`): the group's child runs without the S3 pair, since the hook
 does not see flat files.
 
-An example is skipped, with what it needs, when the key's subscriptions lack it
-(`skip_reason`): a tier, or history further back than the tier keeps. `index.json` lists every
-example with its outcome, its exception if any, and the entitlement it ran under; each result
-also goes to the attempt's results file, which the program reads (`live_run`).
+An example the key's subscriptions lack is skipped (`reply_examples.skip_reason`). `index.json`
+lists every example with its outcome, its exception if any, and the entitlement it ran under;
+each result also goes to the attempt's results file, which the program reads (`live_run`).
 
 An example passes when its expected replies were captured: data (no error, and at least one
 reply), a refusal (Massive refused it, which the example exists to record), or any reply.
@@ -26,15 +26,14 @@ import json
 import logging
 import queue
 import threading
-from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Final
 
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
 from tests._live.calendar import trading_day_before
+from tests._live.live_run.reply_examples import DATA, REFUSAL, Example, skip_reason
 from tests._live.live_run.stream_capture import diagnostics_rows
-from tests._live.plans import TIERS, LivePlans, history_start, plan_text, unmet
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,13 +43,9 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
     from deephaven_massive._massive import CapturedReply
+    from tests._live.plans import LivePlans
 
 logger = logging.getLogger(__name__)
-
-DATA: Final = "data"
-REFUSAL: Final = "refusal"
-REPLY: Final = "reply"
-"""What an example expects: data, Massive's refusal, or any reply at all."""
 
 STREAM_SECONDS: Final = 180.0
 """How long a stream example is held."""
@@ -84,30 +79,6 @@ _REFUSAL_MARKS: Final = (
 fair-market-value (FMV) topic, which only a Business plan serves."""
 
 
-@dataclass(frozen=True)
-class Example:
-    """One documentation example: user code whose replies are recorded.
-
-    Attributes:
-        name: The file name of its replies, such as `"nvda-daily-2024-06-adjusted"`.
-        run: Runs it on a session and the run's New York date; returns its table, or None.
-        needs: The subscriptions it needs, in the live tests' `needs` grammar.
-        history: The class and the earliest day it reads, when it reads a fixed past day.
-        expects: `DATA`, `REFUSAL`, or `REPLY`.
-        stream: Whether it is a stream, held for `STREAM_SECONDS` (left out by `--any-time`).
-        only_tier: A class and tier the key must hold exactly: the examples that record a
-            refusal of the next tier up.
-    """
-
-    name: str
-    run: Callable[[MassiveSession, date], Table | None]
-    needs: tuple[str, ...] = ()
-    history: tuple[str, date] | None = None
-    expects: str = DATA
-    stream: bool = False
-    only_tier: tuple[str, str] | None = None
-
-
 _COMPANIES: Final = ["AAPL", "MSFT", "NVDA", "JPM", "XOM"]
 _REST = dm.HistorySource.REST
 
@@ -117,182 +88,55 @@ def _last_year(today: date) -> tuple[date, date]:
     return today - timedelta(days=365), today - timedelta(days=1)
 
 
-EXAMPLES: Final = (
-    Example(
-        "nvda-daily-2024-06-adjusted",
-        lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY).history(
-            "2024-06-03", "2024-06-14", source=_REST
-        ),
-        history=("stocks", date(2024, 6, 3)),
+CALLS: Final[dict[str, Callable[[MassiveSession, date], Table | None]]] = {
+    "nvda-daily-2024-06-adjusted": lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY).history(
+        "2024-06-03", "2024-06-14", source=_REST, wait=True
     ),
-    Example(
-        "nvda-daily-2024-06-as-traded",
-        lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY, adjusted=False).history(
-            "2024-06-03", "2024-06-14", source=_REST
-        ),
-        history=("stocks", date(2024, 6, 3)),
+    "nvda-daily-2024-06-as-traded": lambda m, _: m.stocks.bars(
+        "NVDA", dm.Timespan.DAY, adjusted=False
+    ).history("2024-06-03", "2024-06-14", source=_REST, wait=True),
+    "nvda-splits": lambda m, _: m.stocks.splits("NVDA").fetch(wait=True),
+    "market-status": lambda m, _: m.reference.market_status().fetch(wait=True),
+    "market-holidays": lambda m, _: m.reference.market_holidays().fetch(wait=True),
+    "ticker-details": lambda m, _: m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch(
+        wait=True
     ),
-    Example("nvda-splits", lambda m, _: m.stocks.splits("NVDA").fetch()),
-    Example("market-status", lambda m, _: m.reference.market_status().fetch()),
-    Example("market-holidays", lambda m, _: m.reference.market_holidays().fetch()),
-    Example(
-        "ticker-details", lambda m, _: m.reference.ticker_details(["AAPL", "MSFT", "NVDA"]).fetch()
+    "daily-bars-last-year": lambda m, today: m.stocks.bars(_COMPANIES, dm.Timespan.DAY).history(
+        *_last_year(today), source=_REST, wait=True
     ),
-    Example(
-        "daily-bars-last-year",
-        lambda m, today: m.stocks.bars(_COMPANIES, dm.Timespan.DAY).history(
-            *_last_year(today), source=_REST
-        ),
+    "dividends-last-year": lambda m, today: m.stocks.dividends(
+        _COMPANIES, start=_last_year(today)[0], end=_last_year(today)[1]
+    ).fetch(wait=True),
+    "nvda-minute-bars-last-trading-day": lambda m, today: m.stocks.bars(
+        "NVDA", dm.Timespan.MINUTE
+    ).history(trading_day_before(today), trading_day_before(today), source=_REST, wait=True),
+    "nvda-previous-day-bar": lambda m, _: m.stocks.previous_day_bar("NVDA").fetch(wait=True),
+    "treasury-yields-last-month": lambda m, today: m.economy.treasury_yields(
+        start=today - timedelta(days=31)
+    ).fetch(wait=True),
+    "unknown-ticker-details": lambda m, _: m.reference.ticker_details("ZZZZZQ").fetch(wait=True),
+    "refusal-stocks-starter": lambda m, _: m.stocks.snapshots("AAPL").fetch(wait=True),
+    "refusal-stocks-developer": lambda m, _: m.stocks.last_trade("AAPL").fetch(wait=True),
+    "refusal-stocks-advanced": lambda m, _: m.stocks.last_quote("AAPL").fetch(wait=True),
+    "refusal-options-starter": lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(
+        wait=True
     ),
-    Example(
-        "dividends-last-year",
-        lambda m, today: m.stocks.dividends(
-            _COMPANIES, start=_last_year(today)[0], end=_last_year(today)[1]
-        ).fetch(),
-    ),
-    Example(
-        "nvda-minute-bars-last-trading-day",
-        lambda m, today: m.stocks.bars("NVDA", dm.Timespan.MINUTE).history(
-            trading_day_before(today), trading_day_before(today), source=_REST
-        ),
-    ),
-    Example("nvda-previous-day-bar", lambda m, _: m.stocks.previous_day_bar("NVDA").fetch()),
-    Example(
-        "treasury-yields-last-month",
-        lambda m, today: m.economy.treasury_yields(start=today - timedelta(days=31)).fetch(),
-    ),
-    Example(
-        "unknown-ticker-details",
-        lambda m, _: m.reference.ticker_details("ZZZZZQ").fetch(),
-        expects=REPLY,
-    ),
-    Example(
-        "refusal-stocks-starter",
-        lambda m, _: m.stocks.snapshots("AAPL").fetch(),
-        expects=REFUSAL,
-        only_tier=("stocks", "basic"),
-    ),
-    Example(
-        "refusal-stocks-developer",
-        lambda m, _: m.stocks.last_trade("AAPL").fetch(),
-        expects=REFUSAL,
-        only_tier=("stocks", "starter"),
-    ),
-    Example(
-        "refusal-stocks-advanced",
-        lambda m, _: m.stocks.last_quote("AAPL").fetch(),
-        expects=REFUSAL,
-        only_tier=("stocks", "developer"),
-    ),
-    Example(
-        "refusal-options-starter",
-        lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(),
-        expects=REFUSAL,
-        only_tier=("options", "basic"),
-    ),
-    Example(
-        "refusal-indices-starter",
-        lambda m, _: m.indices.snapshots("I:SPX").fetch(),
-        expects=REFUSAL,
-        only_tier=("indices", "basic"),
-    ),
-    Example(
-        "refusal-currencies-starter",
-        lambda m, _: m.forex.last_quote("C:EURUSD").fetch(),
-        expects=REFUSAL,
-        only_tier=("currencies", "basic"),
-    ),
-    Example(
-        "refusal-currencies-business",
-        lambda m, _: m.crypto.fmv("X:BTCUSD").append_only(),
-        expects=REFUSAL,
-        stream=True,
-        only_tier=("currencies", "starter"),
-    ),
-    Example(
-        "refusal-futures-starter",
-        lambda m, _: m.futures.snapshots(dm.ALL, product_code="ES", limit=1).fetch(),
-        expects=REFUSAL,
-        only_tier=("futures", "basic"),
-    ),
-    Example(
-        "stream-stock-minute-bars",
-        lambda m, _: m.stocks.bars(["AAPL", "NVDA"], dm.Timespan.MINUTE).append_only(),
-        needs=("stocks:starter",),
-        stream=True,
-    ),
-    Example(
-        "stream-crypto-minute-bars",
-        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
-        needs=("currencies:starter",),
-        stream=True,
-    ),
-    Example(
-        "stream-forex-quotes",
-        lambda m, _: m.forex.quotes("C:EURUSD").append_only(),
-        needs=("currencies:starter",),
-        stream=True,
-    ),
-)
-"""Every example, in the order they run."""
-
-
-def history_need(name: str, day: date, today: date) -> str:
-    """Name the cheapest tier of a class whose history reaches a day.
-
-    Args:
-        name: The class.
-        day: The earliest day an example reads.
-        today: The run's New York date.
-
-    Returns:
-        Such as `"needs Stocks Starter ($29/month) (history back to 2024-06-03)"`; the last
-        tier of every class keeps all history, so one always reaches it.
-    """
-    tier = next(t for t in TIERS[name][1:] if _keeps(name, t, day=day, today=today))
-    return f"needs {plan_text(f'{name}:{tier}')} (history back to {day.isoformat()})"
-
-
-def _keeps(name: str, tier: str, *, day: date, today: date) -> bool:
-    """Tell whether a tier of a class keeps a day, by the documented history windows.
-
-    Args:
-        name: The class.
-        tier: The tier.
-        day: The day.
-        today: The run's New York date.
-
-    Returns:
-        True when the day is inside the tier's window.
-    """
-    first = history_start(LivePlans({name: tier}, s3=False, flat_files=(), source=""), name, today)
-    return first is None or day >= first
-
-
-def skip_reason(example: Example, plans: LivePlans, today: date) -> str | None:
-    """Decide whether the key can run an example.
-
-    Args:
-        example: The example.
-        plans: The key's tiers.
-        today: The run's New York date.
-
-    Returns:
-        Why it is skipped (starting `needs`, or `not this tier` for a refusal example of
-        another tier), or None when it runs.
-    """
-    if example.only_tier is not None:
-        name, tier = example.only_tier
-        if plans.tiers[name] != tier:
-            return f"not this tier: records the refusal on {name} {tier}"
-    missing = unmet(example.needs, plans)
-    if missing:
-        return "needs " + "; ".join(plan_text(r) for r in missing)
-    if example.history is not None:
-        name, day = example.history
-        if not _keeps(name, plans.tiers[name], day=day, today=today):
-            return history_need(name, day, today)
-    return None
+    "refusal-indices-starter": lambda m, _: m.indices.snapshots("I:SPX").fetch(wait=True),
+    "refusal-currencies-starter": lambda m, _: m.forex.last_quote("C:EURUSD").fetch(wait=True),
+    "refusal-currencies-business": lambda m, _: m.crypto.fmv("X:BTCUSD").append_only(),
+    "refusal-futures-starter": lambda m, _: m.futures.snapshots(
+        dm.ALL, product_code="ES", limit=1
+    ).fetch(wait=True),
+    "stream-stock-minute-bars": lambda m, _: m.stocks.bars(
+        ["AAPL", "NVDA"], dm.Timespan.MINUTE
+    ).append_only(),
+    "stream-crypto-minute-bars": lambda m, _: m.crypto.bars(
+        "X:BTCUSD", dm.Timespan.MINUTE
+    ).append_only(),
+    "stream-forex-quotes": lambda m, _: m.forex.quotes("C:EURUSD").append_only(),
+}
+"""Each example's code, by its name in `reply_examples.EXAMPLES`: it runs on a session and
+the run's New York date, and returns its table, or None."""
 
 
 class _Writer:
@@ -343,6 +187,7 @@ class _Writer:
 
 def run_example(
     example: Example,
+    call: Callable[[MassiveSession, date], Table | None],
     *,
     open_session: Callable[[], MassiveSession],
     folder: Path,
@@ -353,6 +198,7 @@ def run_example(
 
     Args:
         example: The example.
+        call: Its code (`CALLS`): runs it on a session and the run's New York date.
         open_session: Opens a fresh session on the key.
         folder: The attempt's folder; the replies go to `<name>.jsonl` there.
         today: The run's New York date.
@@ -367,7 +213,7 @@ def run_example(
     stream_error = ""
     session = open_session()
     try:
-        table = example.run(session, today)
+        table = call(session, today)
         if example.stream and table is not None:
             hold(session)
             failed = [
@@ -442,6 +288,7 @@ def run_responses(
         if reason is None:
             status, reason = run_example(
                 example,
+                CALLS[example.name],
                 open_session=open_session,
                 folder=folder,
                 today=today,

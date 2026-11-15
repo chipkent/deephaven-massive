@@ -60,28 +60,33 @@ form the grammar defines.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from deephaven.table import Table
+from typing_extensions import override
 
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
 from deephaven_massive._errors import raises_through
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from deephaven.table import Table
 
 __all__ = [
+    "ALL",
     "AS_WRITTEN",
     "CANONICAL_GRAMMARS",
     "UNDERLYING_CLASSES",
+    "AllSymbols",
     "NormalizedSymbols",
     "SymbolTable",
+    "SymbolsLike",
     "canonical_symbol",
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
@@ -104,6 +109,74 @@ __all__ = [
     "read_forex_pair",
     "symbol_class",
 ]
+
+
+class AllSymbols(Enum):
+    """The type of `dm.ALL`, the value that asks a dataset for every symbol.
+
+    Pass `dm.ALL` itself, as in `m.stocks.trades(dm.ALL)`; name `dm.AllSymbols` only in a type
+    hint, as `dm.SymbolsLike` does. `dm.ALL` is its one member, and an enum member stays itself
+    through a copy or an unpickle, so code tests for it with `symbols is dm.ALL`. It is not a
+    `str`, so it is never mistaken for a ticker.
+    """
+
+    ALL = "ALL"
+
+    @override
+    def __repr__(self) -> str:
+        """Show the public spelling, so the console prints `dm.ALL`, not `<AllSymbols.ALL: 'ALL'>`.
+
+        Returns:
+            `"dm.ALL"`.
+        """
+        return "dm.ALL"
+
+    @override
+    def __str__(self) -> str:
+        """Render as `ALL` in messages and logs, as a query's `repr` does.
+
+        Returns:
+            `"ALL"`.
+        """
+        return "ALL"
+
+
+ALL: Final = AllSymbols.ALL
+"""Every symbol: a stream of the whole market, a whole flat file, or a full-market snapshot.
+
+`ALL` is accepted by the stream methods, by every per-class `snapshots()`, and by `history()`
+when a flat file or a grouped-daily REST path exists. Everywhere else it raises `ValueError`
+naming the alternative.
+"""
+
+SymbolsLike: TypeAlias = str | Sequence[str] | Table | AllSymbols
+"""What a market-data dataset method takes as its `symbols`: the instruments it reads.
+
+Annotate your own code with it when you pass symbols through to a dataset method, such as a
+helper that takes either a list of tickers or a watchlist table. It is one of:
+
+- a `str`: one symbol, such as `"AAPL"`;
+- a sequence of `str`: several symbols, read when the query is built;
+- a Deephaven `Table` with a `Symbol` column: a static table is read when a query method runs,
+  and a live table works as a watchlist, which the query's methods follow as you add and
+  delete rows;
+- `dm.ALL`: every symbol, in the datasets that take it.
+
+Each symbol, and each row of a table, is Massive's exact ticker, such as `"C:EURUSD"`, not
+`"EUR/USD"`; `dm.canonical_symbol` and `dm.canonicalize_symbols` convert other spellings.
+
+Example:
+    ::
+
+        from deephaven.table import Table
+
+        import deephaven_massive as dm
+
+
+        def latest_quotes(m: dm.MassiveSession, symbols: dm.SymbolsLike) -> Table:
+            return m.stocks.quotes(symbols).last_by()
+"""
+
 
 UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
 """The classes whose tickers an option can be linked to: the ones an `underlying` takes."""
@@ -200,8 +273,8 @@ class SymbolTable:
         object.__setattr__(self, "table_id", id(self.table))
 
 
-NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
-"""A `Symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
+NormalizedSymbols: TypeAlias = tuple[str, ...] | AllSymbols | SymbolTable
+"""A `symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
 boxed symbol table."""
 
 
@@ -1210,10 +1283,10 @@ def check_symbol(
 
 def check_symbols(
     asset_class: AssetClass | ClassFromPrefix,
-    symbols: str | Iterable[str] | _All,
+    symbols: str | Iterable[str] | AllSymbols,
     *,
     as_written: bool = False,
-) -> tuple[str, ...] | _All:
+) -> tuple[str, ...] | AllSymbols:
     """Check a `Symbols` argument other than a table when a query is built.
 
     Rules: `dm.ALL` passes through; a `str` is one symbol; any other iterable of strings,
@@ -1238,7 +1311,7 @@ def check_symbols(
         ValueError: If no symbols remain (`ValueError("no symbols")`, for example from an
             exhausted generator), or a symbol is not canonical (`check_symbol`).
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return symbols
     if isinstance(symbols, str):
         items: tuple[object, ...] = (symbols,)

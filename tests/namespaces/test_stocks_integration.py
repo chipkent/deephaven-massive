@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._query import HistoryQuery
+    from deephaven_massive.queries import HistoryQuery
 
 pytestmark = pytest.mark.integration
 
@@ -209,7 +209,7 @@ def test_an_ipo_keeps_its_issuer_name(
     ticker, which the key keeps apart on purpose.
     """
     start, end = _year_before(recent_month)
-    rows = table_rows(live_session.stocks.ipos(start=start, end=end).fetch())
+    rows = table_rows(live_session.stocks.ipos(start=start, end=end).fetch(wait=True))
     names: dict[str, set[tuple[str, str]]] = {}
     for row in rows:
         names.setdefault(str(row["Symbol"]), set()).add(
@@ -254,7 +254,7 @@ def test_stock_week_bars_start_on_monday_or_sunday(
         evidence(line)
     first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.stocks.bars(_SYMBOL, dm.Timespan.WEEK).history(
-        first, last, source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST, wait=True
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
@@ -331,7 +331,7 @@ def _symbol_rows(query: HistoryQuery, day: date) -> Table:
     Returns:
         The rows, filtered in Deephaven (`_only_the_symbol`).
     """
-    return _only_the_symbol(query.history(day, day, source=dm.HistorySource.REST))
+    return _only_the_symbol(query.history(day, day, source=dm.HistorySource.REST, wait=True))
 
 
 def _only_the_symbol(table: Table) -> Table:
@@ -366,16 +366,20 @@ def _record_library_stock_stamps(
     day_bars = session.stocks.bars(_SYMBOL, dm.Timespan.DAY)
     every = session.stocks.bars(dm.ALL, dm.Timespan.DAY)
     evidence(
-        "library history(REST): " + library_stamps(partial(day_bars.history, *days, source=rest))
+        "library history(REST): "
+        + library_stamps(partial(day_bars.history, *days, source=rest, wait=True))
     )
     previous = session.stocks.previous_day_bar(_SYMBOL)
-    evidence(f"library previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
+    prev_stamps = library_stamps(partial(previous.fetch, wait=True))
+    evidence(f"library previous_day_bar fetch() (/prev): {prev_stamps}")
     for day in days:
         outcome = library_stamps(partial(_symbol_rows, every, day))
         evidence(f"library dm.ALL history(REST) {day} (grouped daily): {outcome}")
     for span in (dm.Timespan.WEEK, dm.Timespan.MONTH):
         query = session.stocks.bars(_SYMBOL, span)
-        outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
+        outcome = library_stamps(
+            partial(query.history, *stamp_days[span.value], source=rest, wait=True)
+        )
         evidence(f"library {span.value} history: {outcome}")
 
 
@@ -482,7 +486,9 @@ def test_stock_day_bar_stamps_of_the_day_file(
         evidence(f"{_MINUTE_FILE} {day}: {len(rows)} rows; first and last window_start {ends}")
     ranged = day_bar_report(_SYMBOL, days, {_DAY_FILE: files})
     as_traded = live_session.stocks.bars(_SYMBOL, dm.Timespan.DAY, adjusted=False)
-    outcome = library_stamps(partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES))
+    outcome = library_stamps(
+        partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES, wait=True)
+    )
     evidence(f"library history(FLAT_FILES): {outcome}")
     assert all(ranged.values()), f"a stamp day has no range bar: {ranged}"
     assert all(files.values()), f"the day file lacks a stamp day: {files}"
@@ -518,7 +524,7 @@ def _days(
         Each day's bar.
     """
     table = session.stocks.bars(symbol, dm.Timespan.DAY, adjusted=adjusted).history(
-        span[0], span[1], source=dm.HistorySource.REST
+        span[0], span[1], source=dm.HistorySource.REST, wait=True
     )
     return {str(row["Date"]): row for row in table_rows(table)}
 
@@ -660,7 +666,7 @@ def test_stock_dividend_events_and_the_adjustment(
             order=dm.Order.DESC,
             filters={"adjustment_type": "stock_dividend"},
             limit=_DIVIDEND_TRIES_BASIC if "stocks" in classes_on_basic else _DIVIDEND_TRIES,
-        ).fetch()
+        ).fetch(wait=True)
     )
     listed = [(e["Symbol"], e["ExecutionDate"], e["HistoricalAdjustmentFactor"]) for e in events]
     evidence(f"stock_dividend events (symbol, execution date, adjustment factor): {listed}")
@@ -724,7 +730,7 @@ def test_daily_indicator_stamps(
         evidence(f"{symbol} daily SMA stamps as sent: {sent}")
         q = live_session.indicators.sma(symbol, 5, start=start, end=end, timespan=dm.Timespan.DAY)
         try:
-            rows = table_rows(q.fetch())
+            rows = table_rows(q.fetch(wait=True))
         except dm.MassiveError as error:
             evidence(f"{symbol} daily SMA failed in the library: {error}")
             continue
@@ -1036,9 +1042,9 @@ def test_past_stock_data_is_served_with_the_default_config(
     config = dataclasses.replace(live_config, api_key=key, delayed_subscriptions=frozenset())
     session = dm.MassiveSession(config)
     try:
-        previous = session.stocks.previous_day_bar(_SYMBOL).fetch()
+        previous = session.stocks.previous_day_bar(_SYMBOL).fetch(wait=True)
         evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
-        day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch()
+        day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch(wait=True)
         evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
     finally:
         session.close()

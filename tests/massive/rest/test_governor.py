@@ -15,7 +15,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from typing_extensions import override
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.rest.governor import (
@@ -32,7 +34,6 @@ from deephaven_massive._massive.rest.governor import (
     _Waiter,
     is_basic_refusal,
 )
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
@@ -237,6 +238,7 @@ def test_a_cancelled_wait_gives_up_its_place_and_wakes_the_next() -> None:
     assert head.error is not None
     assert head.error.status is None
     assert str(head.error) == "stocks: the wait for a request slot was cancelled"
+    assert head.error.kind is WireFailure.STOPPED
     assert clock.wait_for_sleepers(1) == [61.0]  # the next became the head
     assert _state(governor).waiting == 1
     behind.cancel.set()

@@ -12,19 +12,23 @@ every rule about them:
 - `takes_instants`: whether a date parameter compares instants or calendar days, read from the
   generated field it is named after;
 - `check_filters`: the validation a query runs when it is built, which puts each value in the
-  form that is sent and checks it with the wire package's own encoder;
+  form that is sent, checks it with the wire package's own encoder, and refuses an enum value
+  the parameter does not list, which Massive answers with no rows rather than an error;
 - `filter_keys`: the keys a dataset accepts, which the generated dataset reference lists.
 
 The rules read the catalog's generated REST paths (`Catalog.rest_path`) and the dataset's
 declaration; they make no I/O, start no thread, and keep no state, so every function is safe on
 any thread. The REST transport sends the checked values (`_ingest/rest.py`), and the dataset
-factories reserve the typed parameters (`_namespaces/query_building.py`).
+factories reserve the typed parameters (`namespaces/_query_building.py`).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
+
+import numpy as np
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.source_columns import INSTANT_WIRE_TYPES
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath, WireUnit
 
 __all__ = [
+    "FilterValue",
     "check_filters",
     "filter_key",
     "filter_keys",
@@ -46,6 +51,30 @@ __all__ = [
     "symbol_family",
     "takes_instants",
 ]
+
+FilterValue: TypeAlias = (
+    str
+    | int
+    | float
+    | bool
+    | date
+    | datetime
+    | np.datetime64
+    | Sequence[str | int | float | date | np.datetime64]
+)
+"""A value in the `filters` mapping, which narrows a dataset by any of Massive's parameters.
+
+`filters` passes Massive's own query parameters that a dataset method has no argument for, keyed
+by the wire parameter name with its dots written as underscores, such as `strike_price_gte` or
+`ticker_any_of`. Annotate your own code with it, as `dm.FilterValue`, when you build such a
+mapping.
+
+A sequence is the value of an `_any_of` key: text items, numbers for a list of numbers
+(`strike_price_any_of`), or dates for a list of dates (`date_any_of`). A date or time takes
+every object `DateLike` names: a `date`, an aware `datetime` or `pandas.Timestamp`, a Java
+`LocalDate`, `Instant`, or `ZonedDateTime`, or a `numpy.datetime64`; a sequence of dates takes
+the day forms. Whether text is a date or a time depends on the parameter, so a filter reads
+only ISO-8601 text as one."""
 
 
 _LIBRARY_PARAMS: Final = frozenset({"limit", "sort", "order", "adjusted"})
@@ -147,6 +176,25 @@ def takes_instants(rest_path: RestPath, name: str, kind: ParamKind) -> bool:
     return any(f.wire_key == base and f.wire_type in INSTANT_WIRE_TYPES for f in rest_path.fields)
 
 
+def _date_text(item: date, kind: ParamKind | None, *, label: str) -> str:
+    """Write one `date` item of a list filter as its ISO-8601 day (`_list_items`).
+
+    Args:
+        item: The day.
+        kind: The kind of the list's base parameter, or None when the list has none.
+        label: The dataset and filter key, which start the message.
+
+    Returns:
+        The day, such as `"2026-10-30"`.
+
+    Raises:
+        ValueError: If the list is not of dates.
+    """
+    if kind is not ParamKind.DATE:
+        raise ValueError(f"{label} takes no dates, not {item!r}")
+    return item.isoformat()
+
+
 def _list_items(
     spec: DatasetSpec, key: str, value: ParamValue, *, rest_path: RestPath, name: str
 ) -> ParamValue:
@@ -154,8 +202,10 @@ def _list_items(
 
     The wire joins a list with commas, so a comma can never be part of one value: `"a,b"`,
     `("a,b",)`, and `("a", "b")` all send `a,b`. Splitting every item on commas makes them one
-    value, so equal filters give equal queries; an item is taken exactly as written, so one
-    with surrounding whitespace is refused rather than trimmed. On a list of dates
+    value, so equal filters give equal queries. An item is sent exactly as written, surrounding
+    whitespace and an empty item (`"a,,b"`) included, for Massive to read. A list whose every
+    item is empty (`""`) is refused: its wire text is empty, which, like the empty list the
+    encoder refuses, would ask Massive for no filter at all. On a list of dates
     (`date.any_of`), a `date` item is its ISO-8601 day; on a list of numbers
     (`strike_price.any_of`), an `int` or `float` item is written as the base parameter writes one
     number (`encode_value`), so `(150, 152.5)` sends `150,152.5`. A
@@ -175,10 +225,9 @@ def _list_items(
         The tuple of text items.
 
     Raises:
-        ValueError: If an item is empty (`"a,,b"` or `""`), which Massive would read as a
-            value of its own, holds surrounding whitespace (`"a, b"`, `" "`), or is of a kind
-            the base parameter does not take: a `date` for a list that is not of dates, a
-            number for a list that is not of numbers, or a `float` for a list of integers.
+        ValueError: If every item is empty (`""`), or an item is of a kind the base parameter
+            does not take: a `date` for a list that is not of dates, a number for a list that
+            is not of numbers, or a `float` for a list of integers.
     """
     if isinstance(value, str):
         value = (value,)
@@ -190,9 +239,7 @@ def _list_items(
     texts: list[str] = []
     for item in value:
         if isinstance(item, date) and not isinstance(item, datetime):
-            if kind is not ParamKind.DATE:
-                raise ValueError(f"{spec.name} filter {key!r} takes no dates, not {item!r}")
-            texts.append(item.isoformat())
+            texts.append(_date_text(item, kind, label=f"{spec.name} filter {key!r}"))
         elif isinstance(item, (int, float)) and not isinstance(item, bool):
             if base is None or kind not in _NUMBER_KINDS:
                 raise ValueError(f"{spec.name} filter {key!r} takes no numbers, not {item!r}")
@@ -201,19 +248,11 @@ def _list_items(
             except TypeError as error:
                 raise ValueError(str(error)) from None
         elif isinstance(item, str):
-            parts = item.split(",")
-            spaced = next((p for p in parts if p != p.strip()), None)
-            if spaced is not None and spaced.strip():
-                raise ValueError(
-                    f"{spec.name} filter {key!r} has the item {spaced!r} with surrounding "
-                    f"whitespace in {value!r}; write {spaced.strip()!r}, items joined by "
-                    "commas alone"
-                )
-            texts.extend(p.strip() for p in parts)  # a blank item becomes empty: refused below
+            texts.extend(item.split(","))
         else:
             return value  # the encoder names the item it cannot send
-    if "" in texts:
-        raise ValueError(f"{spec.name} filter {key!r} has an empty value in {value!r}")
+    if texts and not any(texts):  # an empty tuple is the encoder's to refuse
+        raise ValueError(f"{spec.name} filter {key!r} has no value in {value!r}")
     return tuple(texts)
 
 
@@ -351,6 +390,28 @@ def _declared(
     return params
 
 
+def _check_listed(kind: ParamKind, listed: tuple[str, ...], text: str, *, label: str) -> None:
+    """Refuse a filter value its enum parameter does not list.
+
+    Massive answers such a value with no error and no rows, which reads as data: the tickers
+    list sent `market=equities` (the parameter lists `stocks`) answered HTTP 200 with no
+    results. So this check sends nothing that would return wrong data with no error, unlike
+    the wire encoder, which sends any text and leaves the value to Massive.
+
+    Args:
+        kind: The filter parameter's kind.
+        listed: The parameter's values, for an `ENUM` (`Param.values`).
+        text: The value's wire text (`encode_value`).
+        label: How the message names the filter, such as `"reference.tickers filter 'market'"`.
+
+    Raises:
+        ValueError: If `kind` is `ENUM` and `text` is not one of `listed`; the message lists
+            them.
+    """
+    if kind is ParamKind.ENUM and text not in listed:
+        raise ValueError(f"{label} takes one of {list(listed)}, not {text!r}")
+
+
 def check_filters(
     catalog: Catalog,
     spec: DatasetSpec,
@@ -380,7 +441,7 @@ def check_filters(
     comma-separated items, so `"a,b"` and `("a", "b")` are one value. The parsed value is
     then checked by the wire package's own encoder (`encode_value`), the same function
     that writes it into the request, so a filter that passes here cannot fail to encode
-    later.
+    later. A value an enum parameter does not list is refused too (`_check_listed`).
 
     Args:
         catalog: The catalog, whose generated REST paths declare the filters.
@@ -433,11 +494,12 @@ def check_filters(
                 kind=param.kind,
                 unit=param.unit,
             )
+            where = f" (on {rest_path.template})" if len(found) > 1 else ""
             try:
-                encode_value(param, parsed, label=label)
+                text = encode_value(param, parsed, label=label)
             except (TypeError, ValueError) as error:
-                where = f" (on {rest_path.template})" if len(found) > 1 else ""
                 raise ValueError(f"{error}{where}") from None
+            _check_listed(param.kind, param.values, text, label=f"{label}{where}")
             forms.append(parsed)
         first = forms[0]
         if any(type(form) is not type(first) or form != first for form in forms):

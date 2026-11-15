@@ -37,7 +37,7 @@ from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import deephaven
@@ -50,7 +50,9 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Source, WsClient
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -192,7 +194,9 @@ def readme_server(
             crypto_pair=_crypto_pair,
             client_factory=client,
         )
-        cast("Any", made._core._ports)._streams = connections
+        clients = made._core._ports
+        assert isinstance(clients, SessionClients)
+        clients._streams = connections
         made._core.on_close(connections.close)
         opened.append(made)
         return made
@@ -203,10 +207,7 @@ def readme_server(
     yield fake_rest
     for made in opened:
         made.close()
-    # The package resolves `MassiveSession` lazily, so the name is not bound in the module;
-    # undoing the patch would bind it, so the binding is removed after the undo.
     monkeypatch.undo()
-    vars(dm).pop("MassiveSession", None)
 
 
 # --- Every example runs ------------------------------------------------------------------------
@@ -468,7 +469,9 @@ def test_the_backfill_example_merges_history_with_live_bars(
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     rows = _wait_for_rows(names["spy"], lambda rows: len(rows) == 2, dh_to_pylist)
-    # Today's minute from history, then the live minute after it, oldest first.
+    # Today's minute from history and the live minute after it. History reads in the
+    # background, so either may land first: the rows are compared oldest first.
+    rows.sort(key=lambda r: r["TimestampStart"])
     assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
@@ -498,9 +501,10 @@ def test_the_whole_market_example_ranks_the_day(
     [block] = section_blocks(README, "whole-market-day")
     [names] = run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
-    # One row per stock, ranked by dollars traded, largest first.
-    assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
-    busiest = dh_to_pylist(names["busiest"])
+    # One row per stock, ranked by dollars traded, largest first, once the background read lands.
+    day_rows = _wait_for_rows(names["day"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in day_rows} == {"UP", "BIG", "FLAT"}
+    busiest = _wait_for_rows(names["busiest"], lambda rows: len(rows) == 3, dh_to_pylist)
     assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
     assert [r["DollarVolume"] for r in busiest] == pytest.approx(
         [50_000_000, 20_000_000, 15_000_000]
@@ -749,11 +753,10 @@ def failure_text() -> Iterator[Callable[[Table], _Failure]]:
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
+def test_the_news_example_lists_the_newest_first(
     *,
     readme_server: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    failure_text: Callable[[Table], _Failure],
     tmp_path: Path,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
@@ -765,19 +768,58 @@ def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
     published = [r["PublishedUtc"] for r in rows]
     assert published == sorted(published, reverse=True)
     assert {r["Symbol"] for r in rows} == {"AAPL", "NVDA", "TSLA"}
-    failures = {name: failure_text(news[name]) for name in ("headlines", "latest")}
-    # Example 6, in the same console: the session closes, and the tables keep their rows.
-    stopped = console.run(section_blocks(README, "stop-live-tables"), "kept")
-    pace = threading.Event()  # never set; only paces the wait for the failures
+    news.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    failure_text: Callable[[Table], _Failure],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "MSFT")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    readme_server.reply("/v2/reference/news", Reply(envelope(_articles())))
+    start, release, stop = section_blocks(README, "stop-live-tables")
+    assert release.continues
+    assert stop.continues
+    # The example's first block runs in a fresh console: it needs no earlier example's names.
+    console = Console(tmp_path, console_command)
+    live = console.run([start], "closes", "headlines")
+    _wait_for_rows(live["closes"], lambda rows: len(rows) == 2, dh_to_pylist)
+    rows = _wait_for_rows(live["headlines"], lambda rows: len(rows) == 6, dh_to_pylist)
+    closed = failure_text(live["headlines"])
+    console.run([release])
+    # The released poll has no holder left, and the session keeps the other running.
+    streams = console.run([], "m")["m"].streams()
+    released = {"stocks.previous_day_bar": ("RELEASED", 0), "reference.news": ("RUNNING", 1)}
+    pace = threading.Event()  # never set; only paces the waits
+    states: dict[str, tuple[object, object]] = {}
     for _ in range(500):
-        if all(failure.text() is not None for failure in failures.values()):
+        states = {r["Dataset"]: (r["State"], r["HeldResults"]) for r in dh_to_pylist(streams)}
+        if states == released:
             break
         pace.wait(0.02)
-    for failure in failures.values():
-        assert "was closed; this table no longer updates" in str(failure.text())
-    assert dh_to_pylist(news["latest"]) == rows
+    assert states == released
+    del streams
+    stopped = console.run([stop], "kept", "m")
+    for _ in range(500):
+        if closed.text() is not None:
+            break
+        pace.wait(0.02)
+    # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
+    assert "was closed; this table no longer updates; " + NEW_SESSION in str(closed.text())
+    assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
-    news.clear()
+    assert stopped["m"]._core.closed
+    live.clear()
     stopped.clear()
     console.close()
 

@@ -83,30 +83,38 @@ its type, or an `Instant` other than the time column that fails the routine, is 
 logs one WARNING per (dataset, transport, header) through the session's `DriftRegistry`. A row
 whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
 fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
-WARNING per dataset with the running count). A line that does not split into the header's
-fields (too few or too many, or a quote that does not close) is skipped, and each file that
-had one logs one WARNING with the count and the first one's row number, never its text. A file
+WARNING per dataset with the running count). A malformed line, one that is not UTF-8 text or
+does not split into the header's fields (too few or too many, or a quote that does not close),
+follows `MassiveConfig.malformed_rows`: under `LOG`, the default, it is skipped and each file
+that had one logs one WARNING with the count and the first one's row number, never its text;
+under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with `RowDataError`. A file
 that lacks a key header fails the call with `MassiveError`, and so does a file whose every row
 is malformed or whose every row of the requested symbols was dropped, the sign of a change in
 the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
-the placeholder `{venue}`, `venues` (all four by default) picks the venues read, and HTTP 403 on any
-venue raises `EntitlementError` naming the venue and the `venues=` parameter; a 403 that rejects the
-S3 credentials themselves raises `AuthenticationError` for every class. Each futures row keeps its
-own session (`session_end_date`) in `Date`, whichever file it came from, since Massive's
-documentation does not state that a file holds only the session of its date; a call named by
-dates keeps the rows of the requested sessions, and a file that holds another session's rows logs
-one WARNING per dataset per session. A row is never labeled with a session it does not have. Every
-error of the wire package becomes its public counterpart, with its status and request id: a rejected
-credential or a refusal gains the remedy (the settings to check, the plan, the `venues=` parameter),
-and any other wire error goes through `_errors.from_wire`. An Arrow error while converting or
+the placeholder `{venue}`, `venues` (all four when the call left it out) picks the venues read,
+and HTTP 403 on any venue raises `EntitlementError` naming the venue, `venues=`, and
+`refused_venues=`. When no other source can serve the call and `Request.refused_venues` is `LOG`
+or `IGNORE` (always `LOG` when the call left `venues` out), a refused venue is skipped
+instead, every file of it over the whole range, and the read names it
+(`_ingest/refused_venues.py`); a call whose every venue is refused still raises. A 403 that
+rejects the S3 credentials themselves raises `AuthenticationError` for every class.
+
+Each futures row keeps its own session (`session_end_date`) in `Date`, whichever file it came
+from, since Massive's documentation does not state that a file holds only the session of its
+date; a call named by dates keeps the rows of the requested sessions, and a file that holds
+another session's rows logs one WARNING per dataset per session. A row is never labeled with a
+session it does not have. Every error of the wire package becomes its public counterpart, with
+its status and request id: a rejected credential or a refusal gains the remedy (the settings to
+check, the plan, the venue parameters), and any other wire error goes through
+`_errors.from_wire`. An Arrow error while converting or
 gathering a file's rows (out of memory, say) is a failed read of that file.
 
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
 next block, and reads not yet started are cancelled. After a close, no request starts once a
 reader has seen it; a request already in flight is discarded, and the call raises
-`MassiveError("MassiveSession #1 is closed")`.
+`SessionClosedError("MassiveSession #1 is closed; ...")`.
 
 The module is one subject although it runs past 1,000 lines: it is one transport, from the
 read plan of a call to its table, and every step shares the plan's columns and its failure
@@ -125,7 +133,7 @@ from concurrent.futures import FIRST_EXCEPTION, CancelledError, ThreadPoolExecut
 from dataclasses import dataclass, field
 from datetime import timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -158,13 +166,20 @@ from deephaven_massive._datasets.wire_symbols import (
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
+    NEW_SESSION,
+    READ_STOPPED,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    RowDataError,
+    SessionClosedError,
     from_wire,
+    required,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
+from deephaven_massive._ingest.refused_venues import RefusedVenues
+from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -196,8 +211,8 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
-    from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._massive import Field, FlatFile, FlatFileClient
+    from deephaven_massive._log_limits import BoundedLog, LoggedKeys
+    from deephaven_massive._massive import FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -389,7 +404,9 @@ class _OtherSessions:
     session's rows may also sit in the file after it, which a call by dates reads only up to
     its last session; when a file holds a row of a later session, they may sit in the file
     before it. The read cannot see those files, so it says which requested sessions may be
-    incomplete (`uncertain`). Shared by the read's reader threads; one leaf lock guards it.
+    incomplete (`uncertain`). Each venue's files are tracked apart, so the files of a venue
+    the read drops (one S3 refused) count for nothing. Shared by the read's reader threads; one
+    leaf lock guards it.
     """
 
     __slots__ = ("_earlier", "_later", "_lock")
@@ -397,40 +414,46 @@ class _OtherSessions:
     def __init__(self) -> None:
         """Start having seen no other session."""
         self._lock = threading.Lock()
-        self._earlier = False
-        self._later = False
+        self._earlier: set[FuturesVenue | None] = set()
+        self._later: set[FuturesVenue | None] = set()
 
-    def saw(self, others: pa.Array, day: date) -> None:
+    def saw(self, others: pa.Array, key: _Key) -> None:
         """Record a file's rows of other sessions.
 
         Args:
             others: The sessions, `date32`, of the file's rows whose session is not its day.
-            day: The file's day.
+            key: The file, for its day and venue.
         """
-        own = pa.scalar(day, pa.date32())
+        own = pa.scalar(key.day, pa.date32())
         earlier = bool(pc.any(pc.less(others, own)).as_py())
         later = bool(pc.any(pc.greater(others, own)).as_py())
         with self._lock:
-            self._earlier |= earlier
-            self._later |= later
+            if earlier:
+                self._earlier.add(key.venue)
+            if later:
+                self._later.add(key.venue)
 
-    def uncertain(self, sessions: DaySpan | None) -> tuple[date, ...]:
+    def uncertain(
+        self, sessions: DaySpan | None, *, dropped: tuple[FuturesVenue, ...] = ()
+    ) -> tuple[date, ...]:
         """Return the requested sessions whose rows may sit in a file the read did not read.
 
         Args:
             sessions: The sessions a call by dates requested, or None for a call by instants,
                 whose files cover its whole time range.
+            dropped: The venues whose files the read dropped (`FlatFileRead.refused`), whose
+                rows the table does not hold.
 
         Returns:
-            The first session when some file held a later session's rows, and the last when
-            some file held an earlier session's rows, oldest first, without repeats; empty
-            when no file held another session's rows.
+            The first session when some kept file held a later session's rows, and the last
+            when some kept file held an earlier session's rows, oldest first, without
+            repeats; empty when no kept file held another session's rows.
         """
         if sessions is None:
             return ()
         with self._lock:
-            found = {sessions.first} if self._later else set()
-            if self._earlier:
+            found = {sessions.first} if self._later.difference(dropped) else set()
+            if self._earlier.difference(dropped):
                 found.add(sessions.last)
         return tuple(sorted(found))
 
@@ -525,19 +548,20 @@ class _Transform:
         schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
-        file_class = cast("AssetClass", spec.asset_class)
+        file_class = spec.single_class
         source = catalog.source(Transport.FLAT_FILES, prefix)
         renamed = rename(spec, source)
         by_column = {c.column: c for c in renamed}
         # Every column of a flat-file source is a field: no key of one comes from the request.
-        header = {c.column: cast("Field", c.field).wire_key for c in renamed}
+        header = {
+            c.column: required(c.wire_key, f"{prefix} column {c.column}'s field") for c in renamed
+        }
         keys = spec.keys_for(Transport.FLAT_FILES, prefix)
         # The session key is renamed to `Date`; the files' own header holds it.
         session_header = None if keys.date is None else header[DATE]
         time_name = time_column(spec.times)
-        to_ns = functools.partial(
-            _time_nanos, f"{spec.name}.{time_name}", cast("TimeUnit", by_column[time_name].unit)
-        )
+        time_unit = required(by_column[time_name].unit, f"{prefix} column {time_name}'s unit")
+        to_ns = functools.partial(_time_nanos, f"{spec.name}.{time_name}", time_unit)
         symbols = request.symbols
         plan = ReadPlan(
             columns=tuple(
@@ -640,7 +664,7 @@ class _Transform:
                 if read.unreadable and not self.symbols.keeps:
                     raise MassiveError(
                         unreadable_symbol_message(self.dataset, read.unreadable),
-                        cause=ErrorCause.LIBRARY_DEFECT,  # a spelling the library cannot read
+                        source=ErrorSource.LIBRARY,  # a spelling the library cannot read
                     )
                 values, raw = read.symbols, read.raw
             else:
@@ -671,7 +695,7 @@ class _Transform:
         own = pa.scalar(key.day, pa.date32())
         others = pc.filter(sessions, pc.not_equal(sessions, own))
         if len(others):
-            self.seen.saw(others, key.day)
+            self.seen.saw(others, key)
             self.warnings.log(
                 f"{self.dataset}\0other sessions",
                 "%s: the flat file %s holds rows of session %s, not only of its own %s; each "
@@ -728,7 +752,9 @@ class _Transform:
             )
             first = first_failure(sent, failed)
             if first is not None:
-                odd[cast("Field", source.field).wire_key] = DriftSample(None, str(first))
+                odd[required(source.wire_key, f"column {name}'s field")] = DriftSample(
+                    None, str(first)
+                )
         return rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
 
 
@@ -787,6 +813,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -798,7 +825,7 @@ class FlatFileHistory:
         other read stops at its next block, reads that have not started are cancelled, and the
         failure of the earliest file is raised. Closing the session stops the reads the same
         way, and so does setting a background read's `stop` token, after which the call raises
-        `MassiveError("<dataset> history: the read was cancelled")` once the pool has drained.
+        `MassiveError("<dataset> history: the read was stopped ...")` once the pool has drained.
         Logs `source=S3 files=<n> skipped=<dates> unread=<dates>` at INFO.
 
         Args:
@@ -811,8 +838,12 @@ class FlatFileHistory:
                 (`"massive #1 call-9 files_0"`).
             infer_holidays: True when no other source can serve the call: a missing trading
                 day's file with a later day's file is skipped as a day without trading, and
-                only the first day with no later file is unread. False to report every missing
-                trading day as unread, for the query to read from REST.
+                only the first day with no later file is unread, and a futures venue S3
+                refuses is skipped when `request.refused_venues` is `LOG` or `IGNORE`. False to
+                report every missing trading day as unread, for the query to read from REST,
+                and to raise every refusal, for the query to read the call from REST.
+            logged: The facts the call has logged (`LoggedKeys`): the refused venues, each
+                logged once per call even when a followed table reads the files again.
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
                 None when only the session's close should stop the reads.
 
@@ -824,7 +855,9 @@ class FlatFileHistory:
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
-        the venue and the `venues=` parameter for futures; `MassiveError` when the S3 client
+        the venue and the `venues=` and `refused_venues=` parameters for futures, unless the
+        venue is skipped (`refused_venues.RefusedVenues`, when `infer_holidays` is set and
+        `Request.refused_venues` is `LOG` or `IGNORE`); `MassiveError` when the S3 client
         cannot be created, the bucket is unreachable, answers
         a 404 that is not S3's `NoSuchKey` (a wrong bucket or endpoint: `"cannot read
         s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
@@ -851,6 +884,10 @@ class FlatFileHistory:
         tiled = not infer_holidays and _tiles(spec, request, window)
         keys = _keys(prefix, request.venues, dates)
         threads = f"{self._core.thread_prefix} call-{call} files"
+        refusals = None
+        policy = request.refused_venues
+        if infer_holidays and policy is not None and policy is not OnError.RAISE:
+            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}", logged=logged)
         return self._read(
             spec,
             transform,
@@ -858,9 +895,10 @@ class FlatFileHistory:
             prefix=prefix,
             roll=_ends_at_an_instant(spec, window),
             infer_holidays=infer_holidays,
-            tile=cast("AssetClass", spec.asset_class) if tiled else None,
+            tile=spec.single_class if tiled else None,
             threads=threads,
-            stop=cast("Cancel | None", stop),
+            stop=as_cancel(stop),
+            refusals=refusals,
         )
 
     def read_history(
@@ -893,7 +931,8 @@ class FlatFileHistory:
             The static table; the description's source sentence when REST served any of it,
             which replaces the sentence of the source choice (None when only the flat files
             did); and the sentences the description adds on what the files may lack: the days
-            taken for holidays and the sessions that may be incomplete (None for neither).
+            taken for holidays, the sessions that may be incomplete, and the futures venues
+            skipped because S3 refused them (None for none).
 
         Errors are those of `history_reads.read_history`.
         """
@@ -919,6 +958,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         """Read `history()` from the flat files for each symbol, each with its own outcome.
@@ -935,6 +975,7 @@ class FlatFileHistory:
             dates: The partition dates of the files the window needs.
             call: The call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
+            logged: The facts the call has logged, kept across its reads (`LoggedKeys`).
             stop: A read's stop token; None for a read only the session's close stops.
 
         Returns:
@@ -951,6 +992,7 @@ class FlatFileHistory:
             symbols=symbols,
             dates=dates,
             call=call,
+            logged=logged,
             stop=stop,
             forced=forced,
         )
@@ -967,6 +1009,7 @@ class FlatFileHistory:
         tile: AssetClass | None = None,
         threads: str,
         stop: Cancel | None = None,
+        refusals: RefusedVenues | None = None,
     ) -> FlatFileRead:
         """Read files on a pool of reader threads, and say which days they could not serve.
 
@@ -974,7 +1017,7 @@ class FlatFileHistory:
         of this thread, it sets the call's cancel event, which stops the other reads at their
         next block, cancels the reads not yet started, and waits for the pool to drain; then it
         raises the failure of the earliest file (an interrupt is re-raised as is). If the
-        session was closed meanwhile, it raises `"MassiveSession #1 is closed"`, whatever the
+        session was closed meanwhile, it raises `"MassiveSession #1 is closed; ..."`, whatever the
         reads returned: a request in flight at the close may have been answered with any
         outcome. A missing file of a day without trading (`dates.is_trading_day`) is skipped
         silently. A missing trading day's file is judged by `infer_holidays`. When it is set
@@ -1002,18 +1045,27 @@ class FlatFileHistory:
             stop: A background read's stop token, which the call's cancel event follows; once
                 it is set, the call raises `MassiveError` naming the cancellation after the
                 pool has drained. None for none.
+            refusals: The call's record of refused futures venues, when a refused venue is
+                skipped (`refused_venues.RefusedVenues`): every file of a venue S3 refuses,
+                in the range or in a look past its end, is dropped, whatever its date, before
+                the missing files are judged. None when a refusal fails the call.
 
         Returns:
             The read: each kept file's tables with its day, the empty table in the schema, the
-            unread days, and the days skipped as days without trading.
+            unread days, the days skipped as days without trading, and the refused venues.
 
         Raises:
             MassiveError: If `stop` was set: the read was cancelled.
+            EntitlementError: If `refusals` is set and S3 refused every venue of the call
+                (`RefusedVenues.every_venue_refused`).
         """
         cancel = Cancel(*(() if stop is None else (stop,)))
         workers = min(self._core.config.max_concurrency, len(keys))
         with ThreadPoolExecutor(workers, threads) as pool:
-            futures = [pool.submit(self._read_key, transform, key, cancel=cancel) for key in keys]
+            futures = [
+                pool.submit(self._read_key, transform, key, cancel=cancel, refusals=refusals)
+                for key in keys
+            ]
             try:
                 wait(futures, return_when=FIRST_EXCEPTION)
             finally:
@@ -1024,14 +1076,16 @@ class FlatFileHistory:
         # any outcome (a row, a missing file, a refusal): report the close instead.
         self._check_open()
         if stop is not None and stop.is_set():  # the reads stopped early: report no result
-            raise MassiveError(f"{spec.name} history: the read was cancelled")
+            raise MassiveError(f"{spec.name} history: {READ_STOPPED}", source=ErrorSource.USER)
         parts = [_outcome(future) for future in futures]
+        if refusals is not None:
+            keys, parts = _without_refused(keys, parts, refusals=refusals)
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)
-        trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
         later: list[tuple[date, Table]] = []
         unread: tuple[date, ...]
         absent: tuple[date, ...] = ()
+        unpublished = None
         if infer_holidays:
             unpublished, absent, later = self._after_missing(
                 spec,
@@ -1041,7 +1095,15 @@ class FlatFileHistory:
                 prefix=prefix,
                 roll=roll,
                 stop=stop,
+                refusals=refusals,
             )
+        if refusals is not None:
+            # A look past the range's end may have met a refusal of a venue not refused before.
+            keys, parts = _without_refused(keys, parts, refusals=refusals)
+            missing = [key for key in missing if key.venue not in refusals]
+            refusals.report(spec.name)
+        trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
+        if infer_holidays:
             unread = () if unpublished is None else (unpublished,)
             holidays = [
                 day
@@ -1084,17 +1146,30 @@ class FlatFileHistory:
                 days=unread,
                 exec_ctx=self._core.exec_ctx,
             )
-        with entered(self._core.exec_ctx):
-            # Merging onto an empty table in the schema keeps every column when no row matched.
-            empty = dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
+        refused = () if refusals is None else refusals.venues()
         return FlatFileRead(
             tuple(kept),
-            empty,
+            self._empty(transform),
             unread,
-            transform.seen.uncertain(transform.sessions),
+            transform.seen.uncertain(transform.sessions, dropped=refused),
             absent,
             tuple(holidays),
+            refused,
         )
+
+    def _empty(self, transform: _Transform) -> Table:
+        """Return a static table in the read's schema with no row.
+
+        The read merges its files onto it, so a read without rows keeps every column.
+
+        Args:
+            transform: The request's block transform, for its schema.
+
+        Returns:
+            The empty table.
+        """
+        with entered(self._core.exec_ctx):
+            return dataset_table(transform.arrow_schema.empty_table(), transform.date_columns)
 
     def _after_missing(
         self,
@@ -1106,6 +1181,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool,
         stop: Cancel | None,
+        refusals: RefusedVenues | None = None,
     ) -> tuple[date | None, tuple[date, ...], list[tuple[date, Table]]]:
         """Tell the files missing at a range's end apart: no trading, not out yet, or none.
 
@@ -1129,7 +1205,7 @@ class FlatFileHistory:
         transform keeps only the rows inside the range. Otherwise the file is only opened and
         closed. The looks run on the caller thread, one at a time. Each checks the session
         before its request and after every block, as the pool's reads do, so a close stops it
-        with `"MassiveSession #1 is closed"`. The pool's cancel event is already set when this
+        with `"MassiveSession #1 is closed; ..."`. The pool's cancel event is already set when this
         runs, so these looks listen to the background read's stop token instead, if there is
         one.
 
@@ -1142,6 +1218,9 @@ class FlatFileHistory:
             roll: True to read the later file found (futures named by instants).
             stop: A background read's stop token, or None when only the session's close
                 should stop the reads.
+            refusals: The call's record of refused futures venues, or None when a refusal
+                fails the call. With it, a look that S3 refuses records the venue, which then
+                contributes nothing here, for the read to drop.
 
         Returns:
             The first unpublished day over all venues, or None; the missing trading days that
@@ -1149,7 +1228,7 @@ class FlatFileHistory:
             `roll`, each with its file's day, in venue order.
 
         Raises:
-            MassiveError: `"<dataset> history: the read was cancelled"` once `stop` is set. A
+            MassiveError: `"<dataset> history: the read was stopped ..."` once `stop` is set. A
                 failed request or read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
@@ -1178,7 +1257,10 @@ class FlatFileHistory:
                 prefix=prefix,
                 roll=roll,
                 cancel=cancel,
+                refusals=refusals,
             )
+            if refusals is not None and venue in refusals:
+                continue
             if later is not None:
                 tables.extend(later)
                 continue
@@ -1200,6 +1282,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool,
         cancel: Cancel,
+        refusals: RefusedVenues | None = None,
     ) -> list[tuple[date, Table]] | None:
         """Look for the first file after a range's missing last files; see `_after_missing`.
 
@@ -1214,13 +1297,16 @@ class FlatFileHistory:
             roll: True to read the file found; False to only open and close it.
             cancel: The event that stops a look: the background read's stop token, or a
                 private one when only the session's close should stop it.
+            refusals: The call's record of refused futures venues, or None when a refusal
+                fails the call. With it, a refused look records the venue and ends the looks.
 
         Returns:
             The file's tables, each with the file's day, when it is read (none when it is only
-            opened), or None when no later file exists in the looked-for days.
+            opened), or None when no later file exists in the looked-for days or S3 refused
+            one that `refusals` recorded.
 
         Raises:
-            MassiveError: `"<dataset> history: the read was cancelled"` once `cancel` is set;
+            MassiveError: `"<dataset> history: the read was stopped ..."` once `cancel` is set;
                 a failed request or read raises the public error `_read_key` raises.
         """
         name = None if first.venue is None else first.venue.value
@@ -1231,13 +1317,17 @@ class FlatFileHistory:
             key = _Key(object_key(prefix, day, name), day, first.venue)
             try:
                 found = (
-                    self._read_key(transform, key, cancel=cancel)
+                    self._read_key(transform, key, cancel=cancel, refusals=refusals)
                     if roll
-                    else self._opened(key, cancel=cancel)
+                    else self._opened(key, cancel=cancel, refusals=refusals)
                 )
             except _CancelledError:
                 logger.debug("%s history: stopped before reading %s", spec.name, key.key)
-                raise MassiveError(f"{spec.name} history: the read was cancelled") from None
+                raise MassiveError(
+                    f"{spec.name} history: {READ_STOPPED}", source=ErrorSource.USER
+                ) from None
+            if refusals is not None and first.venue in refusals:
+                return None
             if found is not None:
                 logger.info(
                     "%s: %s is missing and %s exists, so it was a day without trading%s",
@@ -1249,15 +1339,19 @@ class FlatFileHistory:
                 return [(day, table) for table in found]
         return None
 
-    def _opened(self, key: _Key, *, cancel: Cancel) -> list[Table] | None:
+    def _opened(
+        self, key: _Key, *, cancel: Cancel, refusals: RefusedVenues | None = None
+    ) -> list[Table] | None:
         """Tell whether a file exists by opening it and closing it unread.
 
         Args:
             key: The file.
             cancel: The call's cancel event, checked before the request.
+            refusals: The call's record of refused futures venues (`_read_key`), or None.
 
         Returns:
-            No tables when the file exists; None when it does not.
+            No tables when the file exists; None when it does not, or when S3 refused a
+            futures file and `refusals` recorded its venue.
 
         Raises:
             MassiveError: The public error of `_public` when the request fails, including
@@ -1268,6 +1362,8 @@ class FlatFileHistory:
         try:
             file = self._client.open(key.key, cancel=cancel)
         except WireError as error:
+            if _recorded(error, key, refusals):
+                return None
             public = _public(error, key)
             raise public from error
         if file is None:
@@ -1280,10 +1376,10 @@ class FlatFileHistory:
         """Reject further work once the session's flat-file client is closed.
 
         Raises:
-            MassiveError: `"MassiveSession #1 is closed"` once the session has closed.
+            SessionClosedError: `"MassiveSession #1 is closed; ..."` once the session has closed.
         """
         if self._client.closed:
-            raise MassiveError(f"{self._core.label} is closed")
+            raise SessionClosedError(f"{self._core.label} is closed; {NEW_SESSION}")
 
     def _check(self, cancel: threading.Event) -> None:
         """Stop a read if the session was closed or another read of the call failed.
@@ -1301,7 +1397,14 @@ class FlatFileHistory:
         if cancel.is_set():
             raise _CancelledError
 
-    def _read_key(self, transform: _Transform, key: _Key, *, cancel: Cancel) -> list[Table] | None:
+    def _read_key(
+        self,
+        transform: _Transform,
+        key: _Key,
+        *,
+        cancel: Cancel,
+        refusals: RefusedVenues | None = None,
+    ) -> list[Table] | None:
         """Stream one file into static Deephaven tables of its surviving rows.
 
         Runs on a reader thread, inside the session's execution context for the Deephaven
@@ -1323,6 +1426,9 @@ class FlatFileHistory:
             transform: The request's block transform.
             key: The file to read.
             cancel: The call's cancel event, checked before the request and after each block.
+            refusals: The call's record of refused futures venues, or None when a refusal fails
+                the call. With it, a file of a venue already refused is not requested, and a
+                refusal of a futures file is recorded rather than raised.
 
         Errors: `MassiveError` if converting or gathering the file's rows fails in Arrow (out of
         memory, say): `"cannot read <location>: <Arrow's message>"`. A failed request or read
@@ -1333,11 +1439,14 @@ class FlatFileHistory:
         `MassiveError` of `_check_open`, and a cancelled call `_CancelledError`.
 
         Returns:
-            The file's tables, or None if the file does not exist.
+            The file's tables, or None if the file does not exist or its venue was refused.
         """
+        if refusals is not None and key.venue in refusals:
+            logger.debug("skipping %s: S3 refused its venue earlier in the call", key.key)
+            return None
         retry = 0
         while True:
-            outcome = self._read_once(transform, key, cancel=cancel)
+            outcome = self._read_once(transform, key, cancel=cancel, refusals=refusals)
             if not isinstance(outcome, WireError):
                 return outcome
             # The body is closed by now, so no connection idles through the wait.
@@ -1356,7 +1465,12 @@ class FlatFileHistory:
             retry += 1
 
     def _read_once(
-        self, transform: _Transform, key: _Key, *, cancel: Cancel
+        self,
+        transform: _Transform,
+        key: _Key,
+        *,
+        cancel: Cancel,
+        refusals: RefusedVenues | None = None,
     ) -> list[Table] | WireError | None:
         """Request one file and read it from its start once; `_read_key` reads it again.
 
@@ -1365,9 +1479,11 @@ class FlatFileHistory:
             key: The file to read.
             cancel: The call's cancel event, checked before the request and after each block;
                 it also ends a wait for one of the session's connections.
+            refusals: The call's record of refused futures venues (`_read_key`), or None.
 
         Returns:
-            The file's tables; None if the file does not exist; or, when the connection dropped
+            The file's tables; None if the file does not exist, or if S3 refused a futures
+            file and `refusals` recorded its venue; or, when the connection dropped
             part-way through the body (`FlatFile.dropped`), the read's error, with the body
             closed and the frames its traceback holds cleared, so the tables gathered so far
             are freed before the wait and the next read.
@@ -1391,7 +1507,7 @@ class FlatFileHistory:
                     return self._gather(batches, transform, key=key, cancel=cancel, file=file)
                 except pa.ArrowException as error:
                     raise MassiveError(
-                        f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
+                        f"cannot read {file.location}: {error}", source=ErrorSource.LIBRARY
                     ) from error
         except WireError as error:
             if file is not None and file.dropped:
@@ -1400,6 +1516,8 @@ class FlatFileHistory:
                 # the frames it passed through; clearing those frames frees them now rather
                 # than after the next read.
                 return _released(error)
+            if _recorded(error, key, refusals):
+                return None
             public = _public(error, key)
             raise public from error
 
@@ -1418,12 +1536,13 @@ class FlatFileHistory:
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once. A file with lines that do not split into the header's
-        fields logs one WARNING with their count and the first one's row number and field
-        count (`FlatFile.malformed_reason`). Then logs one DEBUG line with the rows after each
-        step: read, of the requested symbols, kept by the window (and a readable key), and
-        kept as whole bars of the requested sessions, so an empty table can be traced to the
-        step that emptied it.
+        read again is counted once. A file with malformed lines (not UTF-8 text, or not the
+        header's fields) follows `MassiveConfig.malformed_rows` (`_log_malformed`): under `LOG`, it
+        logs one WARNING with their count and the first one's row number and fault
+        (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
+        one DEBUG line with the rows after each step: read, of the requested symbols, kept by
+        the window (and a readable key), and kept as whole bars of the requested sessions, so
+        an empty table can be traced to the step that emptied it.
 
         Args:
             batches: The file's batches, one per block, each with its drift.
@@ -1435,6 +1554,11 @@ class FlatFileHistory:
 
         Returns:
             The file's tables, in file order.
+
+        Raises:
+            RowDataError: Under `malformed_rows=RAISE`, at the first block handed on after the
+                file's first malformed line (`_malformed_message`); every chunk hands on one,
+                so a run of such lines fails the read before the file ends.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
@@ -1442,8 +1566,11 @@ class FlatFileHistory:
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
         served = 0
+        setting = self._core.config.malformed_rows
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
+                if file.malformed_lines and setting is OnError.RAISE:
+                    raise RowDataError(_malformed_message(transform.dataset, file))
                 rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
                 served += rows.num_rows
                 found = found.merge(drift).merge(odd)
@@ -1464,15 +1591,7 @@ class FlatFileHistory:
                 tables.append(_convert(pending, transform))
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
-            # The reason gives the row's number and field count, never the line's text.
-            logger.warning(
-                "%s: skipped %d malformed line(s) of %s that do not split into the header's "
-                "fields, the first: %s; the file's other rows are kept",
-                transform.dataset,
-                file.malformed_lines,
-                file.location,
-                file.malformed_reason,
-            )
+            _log_malformed(transform.dataset, file, setting)
         logger.debug(
             "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
             "whole bars",
@@ -1484,6 +1603,50 @@ class FlatFileHistory:
             served,
         )
         return tables
+
+
+def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
+    """Log the malformed lines of a file read to its end, under `malformed_rows` `LOG` or `IGNORE`.
+
+    The line gives the lines' count and the first one's row number and fault
+    (`FlatFile.malformed_reason`), never a line's text. Under `RAISE`, the read failed at the
+    first block after such a line, so no file with one is read to its end.
+
+    Args:
+        dataset: The dataset read, such as `stocks.trades`.
+        file: The file, with at least one malformed line.
+        setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
+    """
+    logger.log(
+        logging.WARNING if setting is OnError.LOG else logging.DEBUG,
+        "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",
+        dataset,
+        file.malformed_lines,
+        file.location,
+        file.malformed_reason,
+    )
+
+
+def _malformed_message(dataset: str, file: FlatFile) -> str:
+    """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
+
+    A `RowDataError` carries it (`ErrorSource.LIBRARY`: data from Massive the library
+    can't read), and a retry of the read would meet the same line.
+
+    Args:
+        dataset: The dataset read, such as `stocks.trades`.
+        file: The file, with at least one malformed line.
+
+    Returns:
+        The message: the dataset, the file, the first such line's row number and fault (never
+        its text), and the setting that skips such lines.
+    """
+    return (
+        f"{dataset}: {file.location} holds a malformed line, the first: "
+        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, pass "
+        "MassiveConfig(malformed_rows=dm.OnError.LOG), or write 'malformed_rows: log' in the "
+        "settings file"
+    )
 
 
 def _warn_if_none_exist(spec: DatasetSpec, keys: Sequence[_Key], missing: Sequence[_Key]) -> None:
@@ -1538,10 +1701,10 @@ def _public(error: WireError, key: _Key) -> MassiveError:
     """Return the public error for a wire error of one file, with the user's remedy.
 
     A rejected credential names the settings to check; a refusal names the plan and, for a
-    futures file, the venue and the `venues=` parameter; a 404 (a missing bucket, since a
-    missing file is no error) names the bucket and endpoint settings. Every other wire error
-    becomes its public counterpart through `_errors.from_wire`. Each keeps the wire error's
-    status and request id.
+    futures file, the venue and the `venues=` and `refused_venues=` parameters; a 404 (a missing
+    bucket, since a missing file is no error) names the bucket and endpoint settings. Every
+    other wire error becomes its public counterpart through `_errors.from_wire`. Each keeps the
+    wire error's status and request id.
 
     Args:
         error: The wire error.
@@ -1566,7 +1729,9 @@ def _public(error: WireError, key: _Key) -> MassiveError:
             )
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
-            "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes",
+            "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes, "
+            "or leave venues out or pass refused_venues=dm.OnError.LOG to skip the venues S3 "
+            "refuses",
             status=error.status,
             request_id=error.request_id,
         )
@@ -1597,6 +1762,55 @@ def _convert(batches: list[pa.RecordBatch], transform: _Transform) -> Table:
     return dataset_table(
         pa.Table.from_batches(batches, schema=transform.arrow_schema), transform.date_columns
     )
+
+
+def _recorded(error: WireError, key: _Key, refusals: RefusedVenues | None) -> bool:
+    """Record S3's refusal of a futures file when the call skips refused venues.
+
+    Args:
+        error: The request's error.
+        key: The file.
+        refusals: The call's record of refused venues, or None when a refusal fails the call.
+
+    Returns:
+        True when the error is a refusal (`WireEntitlementError`, never a rejected
+        credential) of a futures file and `refusals` recorded its venue; False to raise it.
+    """
+    venue = key.venue
+    if isinstance(error, WireEntitlementError) and refusals is not None and venue is not None:
+        refusals.add(venue, error)
+        return True
+    return False
+
+
+def _without_refused(
+    keys: Sequence[_Key],
+    parts: Sequence[list[Table] | None],
+    *,
+    refusals: RefusedVenues,
+) -> tuple[list[_Key], list[list[Table] | None]]:
+    """Drop every file of the venues S3 refused in a call.
+
+    A venue refused on any date is dropped on every date, so the table never holds a venue for
+    some days of the range and not others.
+
+    Args:
+        keys: The call's files, in result order.
+        parts: Each file's read, in the same order.
+        refusals: The call's record of refused venues.
+
+    Returns:
+        The files of the venues S3 did not refuse, and their reads.
+
+    Raises:
+        EntitlementError: If S3 refused every venue of the call
+            (`RefusedVenues.every_venue_refused`).
+    """
+    refused = refusals.venues()
+    if refused and {key.venue for key in keys} <= set(refused):
+        raise refusals.every_venue_refused()
+    kept = [(key, part) for key, part in zip(keys, parts, strict=True) if key.venue not in refused]
+    return [key for key, _ in kept], [part for _, part in kept]
 
 
 def _outcome(future: Future[list[Table] | None]) -> list[Table] | None:

@@ -34,7 +34,7 @@ pool of a `max_concurrency` of 64 up front would cost about a second and 48 MB.
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
 up at DEBUG: the call that fails raises the error, which the library logs at the level its
-cause gives, so a failure shows once in the console. Nothing logs a header.
+`is_bug` gives, so a failure shows once in the console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -46,7 +46,7 @@ import random
 import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 from urllib.parse import urlsplit
 
 import urllib3
@@ -58,6 +58,7 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
+    WireFailure,
     is_proxy_auth_failure,
     is_tls_failure,
     linked_errors,
@@ -221,9 +222,17 @@ class _Job:
     patience: Patience
 
 
-_REFUSED: Final = object()
-"""The outcome of an attempt Massive refused with HTTP 429: try again, once the governor lets
-the request start, without counting a retry."""
+class _Refused:
+    """An attempt Massive refused with HTTP 429.
+
+    Try again, once the governor lets the request start, without counting a retry.
+    """
+
+    __slots__ = ()
+
+
+_REFUSED: Final = _Refused()
+"""The outcome of every refused attempt."""
 
 
 class RestClient:
@@ -498,7 +507,9 @@ class RestClient:
                 following = next_target(next_url, self._origin)
             except ValueError as error:
                 raise WireError(
-                    f"{job.rest_path.template}: refusing to follow {error}", host=self._host
+                    f"{job.rest_path.template}: refusing to follow {error}",
+                    host=self._host,
+                    kind=WireFailure.REFUSED,
                 ) from error
             if following in fetched:
                 raise WireError(
@@ -506,6 +517,7 @@ class RestClient:
                     "pagination already fetched; refusing to loop",
                     host=self._host,
                     path=following,
+                    kind=WireFailure.REFUSED,
                 )
             fetched.add(following)
             target = following
@@ -530,10 +542,10 @@ class RestClient:
             retry = 0
             while True:
                 outcome = self._attempt(job, request, stop)
-                if outcome is _REFUSED:
+                if isinstance(outcome, _Refused):
                     continue
                 if not isinstance(outcome, _Retryable):
-                    return cast("Page", outcome)
+                    return outcome
                 if retry == MAX_RETRIES:
                     _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
                     raise outcome.error
@@ -546,7 +558,7 @@ class RestClient:
 
     def _attempt(
         self, job: _Job, request: RequestTarget, stop: Cancel
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send one attempt of a request, once the governor admits it.
 
         Args:
@@ -619,7 +631,7 @@ class RestClient:
         *,
         pool: urllib3.PoolManager,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send an admitted attempt and report its end to the governor.
 
         Args:
@@ -699,7 +711,7 @@ class RestClient:
         body: bytearray,
         elapsed: float,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
         The body is cleaned of the key once, here, before anything reads it, so no row, error,
@@ -849,7 +861,7 @@ class RestClient:
             status=response.status,
             host=self._host,
             path=request.target,
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
@@ -878,7 +890,7 @@ class RestClient:
         try:
             return admission.acquire(stop)
         except WireError as error:
-            if error.status is None:  # the wait was cancelled
+            if error.kind is WireFailure.STOPPED:  # the wait was cancelled
                 raise self._stopped(request) from None
             raise WireError(
                 error.message,
@@ -886,6 +898,7 @@ class RestClient:
                 host=self._host,
                 path=request.target,
                 request_id=error.request_id,
+                kind=error.kind,
             ) from None
 
     def _stopped(self, request: RequestTarget) -> WireError:
@@ -895,10 +908,15 @@ class RestClient:
             request: The request.
 
         Returns:
-            A `WireError` without a status.
+            A `WireError` without a status, `WireFailure.STOPPED`.
         """
         reason = "the REST client is closed" if self._closed.is_set() else "cancelled"
-        return WireError(f"GET {request.target}: {reason}", host=self._host, path=request.target)
+        return WireError(
+            f"GET {request.target}: {reason}",
+            host=self._host,
+            path=request.target,
+            kind=WireFailure.STOPPED,
+        )
 
     def _unanswered(
         self, request: RequestTarget, error: urllib3.exceptions.HTTPError
@@ -924,6 +942,7 @@ class RestClient:
                 "SSL_CERT_FILE to a bundle that trusts it",
                 host=self._host,
                 path=request.target,
+                kind=WireFailure.LOCAL,
             ) from error
         if is_proxy_auth_failure(error):
             raise WireError(
@@ -932,12 +951,14 @@ class RestClient:
                 status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                 host=self._host,
                 path=request.target,
+                kind=WireFailure.LOCAL,
             ) from error
         return _Retryable(
             WireError(
                 f"GET {request.target} on {self._host} failed: {error}",
                 host=self._host,
                 path=request.target,
+                kind=WireFailure.NO_ANSWER,
             )
         )
 

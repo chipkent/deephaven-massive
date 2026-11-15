@@ -10,10 +10,10 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias
 
 import pytest
 from deephaven.table import Table
@@ -24,6 +24,7 @@ from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics
@@ -676,13 +677,11 @@ def test_a_retired_connection_is_never_leased(
     ws_session.session.release(second)
 
 
-def join(ws_session: WsSession, **changes: object) -> dm.MassiveSession:
+def join(ws_session: WsSession, config: dm.MassiveConfig | None = None) -> dm.MassiveSession:
     # A second session with the same key and connection settings, sharing the wrapper's
-    # connections; `changes` are other settings it differs in. The wrapper's own session is
-    # closed by its fixture, this one by the test.
-    session = dm.MassiveSession(
-        dataclasses.replace(ws_session.config, **cast("dict[str, Any]", changes))
-    )
+    # connections; `config`, when given, is the wrapper's with other settings it differs in.
+    # The wrapper's own session is closed by its fixture, this one by the test.
+    session = dm.MassiveSession(ws_session.config if config is None else config)
     connections = ws.WsConnections(
         session._core,
         resolve_host=ws_session._resolve,
@@ -691,7 +690,9 @@ def join(ws_session: WsSession, **changes: object) -> dm.MassiveSession:
         client_factory=ws_session.factory,
     )
     assert connections.group is ws_session.connections.group
-    cast("Any", session._core._ports)._streams = connections
+    ports = session._core._ports
+    assert isinstance(ports, SessionClients)
+    ports._streams = connections
     session._core.on_close(connections.close)
     return session
 
@@ -778,7 +779,8 @@ def test_closing_a_session_keeps_the_connection_it_shares(ws_session: WsSession)
 
 
 def _group_of(session: dm.MassiveSession) -> ws_connection.ConnectionGroup:
-    transport = cast("ws.WsConnections", session._core.stream_transport())
+    transport = session._core.stream_transport()
+    assert isinstance(transport, ws.WsConnections)
     return transport.group
 
 
@@ -873,12 +875,12 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
 def looked_up(ws_session: WsSession, *tickers: str) -> None:
     # Wait until the calendar has asked Massive's contracts for every ticker.
     def asked() -> bool:
-        sent = {
-            ticker
-            for path, query in ws_session.fetched
-            if path == "/futures/v1/contracts"
-            for ticker in cast("tuple[str, ...]", query["ticker.any_of"])
-        }
+        sent: set[str] = set()
+        for path, query in ws_session.fetched:
+            if path == "/futures/v1/contracts":
+                asked_for = query["ticker.any_of"]
+                assert isinstance(asked_for, tuple)
+                sent.update(asked_for)
         return set(tickers) <= sent
 
     ws_session.wait(lambda _: asked())
@@ -972,13 +974,16 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
             return None
 
         @staticmethod
-        def fetch_rows(path: str, _query: object, **_charging: object) -> list[dict[str, object]]:
-            reads.append(path)
+        def fetch_rows(
+            template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+        ) -> list[dict[str, object]]:
+            del query, bucket, cancel
+            reads.append(template)
             return []
 
     group = ws_session.connections.group
     real = group.sessions
-    group.sessions = cast("set[ws.WsConnections]", {_Freed()})
+    group.sessions = {_Freed()}
     try:
         with pytest.raises(dm.MassiveError, match="connection group has closed"):
             group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
@@ -1068,7 +1073,9 @@ def test_the_backlog_rewrite_repeats_until_the_rows_are_published(
 
     def shown() -> int:
         [row] = connections_of(ws_session, dh_to_pylist)
-        return cast("int", row["BufferedRows"])
+        buffered = row["BufferedRows"]
+        assert isinstance(buffered, int)
+        return buffered
 
     wait_for(lambda: shown() == 0)
     ws_session.session.release(result)
@@ -1092,7 +1099,9 @@ def test_buffered_rows_are_shown_until_they_are_published(
 
     def shown() -> int:
         [row] = connections_of(ws_session, dh_to_pylist)
-        return cast("int", row["BufferedRows"])
+        buffered = row["BufferedRows"]
+        assert isinstance(buffered, int)
+        return buffered
 
     wait_for(lambda: shown() == 0)
     ws_session.session.release(result)
@@ -1105,7 +1114,7 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    error = _massive.WireError("dropped")
+    error = _massive.WireError("dropped", kind=_massive.WireFailure.UNREADABLE)
     rejects = [
         _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
         for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
@@ -1307,30 +1316,34 @@ def _acks(ws_session: WsSession) -> int:
 
 def _down(ws_session: WsSession, connection: ws_connection.Connection) -> set[int]:
     # The streams the outage holds down, as the connection's loop sees them.
-    return cast("set[int]", ws_session.on_loop(connection, lambda: set(connection._episodes.down)))
+    down = ws_session.on_loop(connection, lambda: set(connection._episodes.down))
+    assert isinstance(down, set)
+    return down
 
 
 def _down_since(ws_session: WsSession, connection: ws_connection.Connection) -> float | None:
     # The outage's start as the connection's loop holds it.
-    return cast(
-        "float | None", ws_session.on_loop(connection, lambda: connection._episodes.down_since)
-    )
+    since = ws_session.on_loop(connection, lambda: connection._episodes.down_since)
+    assert since is None or isinstance(since, float)
+    return since
 
 
 def _left(ws_session: WsSession, connection: ws_connection.Connection, stream_id: int) -> float:
     # Seconds until a down stream's timer fails it.
     def left() -> float:
-        timer = cast("Any", connection._episodes.down[stream_id])
-        return cast("float", timer.when() - connection._client.loop.time())
+        timer = connection._episodes.down[stream_id]
+        return timer.when() - connection._client.loop.time()
 
-    return cast("float", ws_session.on_loop(connection, left))
+    seconds = ws_session.on_loop(connection, left)
+    assert isinstance(seconds, float)
+    return seconds
 
 
 def _expire(ws_session: WsSession, connection: ws_connection.Connection, *ids: int) -> None:
     # What the clock reaching each stream's max_outage does: its timer's callback, then a flush.
     def expire() -> None:
         for stream_id in ids or list(connection._episodes.down):
-            cast("Any", connection._episodes.down[stream_id]).cancel()
+            connection._episodes.down[stream_id].cancel()
             connection._stream_expired(stream_id)
 
     ws_session.on_loop(connection, expire)
@@ -1339,7 +1352,9 @@ def _expire(ws_session: WsSession, connection: ws_connection.Connection, *ids: i
 
 def _since(error: str) -> str:
     # The outage's start named in a failure.
-    return cast("re.Match[str]", re.search(r"since (\S+),", error)).group(1)
+    found = re.search(r"since (\S+),", error)
+    assert found is not None
+    return found.group(1)
 
 
 def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
@@ -1408,6 +1423,9 @@ def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
     assert [r["State"] for r in rows] == ["FAILED", "FAILED"]
     since = _since(rows[0]["Error"])
     assert [r["Error"] for r in rows] == [_outage_failure(since, "300")] * 2
+    failure = connection._episodes.failure
+    assert failure is not None
+    assert (failure.source, failure.is_retryable) == (dm.ErrorSource.NETWORK, True)
     # An expected failure: one WARNING for both streams, never an ERROR.
     failures = [r for r in caplog.records if "longer than MassiveConfig.max_outage" in r.message]
     assert [r.levelno for r in failures] == [logging.WARNING]
@@ -1427,14 +1445,9 @@ def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
     custom_session.wait(lambda s: WsState.RECONNECTING in s.states)
 
     def fired() -> bool:
-        return bool(
-            custom_session.on_loop(
-                connection,
-                lambda: (
-                    connection._episodes.down_since is not None and not connection._episodes.down
-                ),
-            )
-        )
+        # The stream stays expired until its table fails, which needs the flush below; the
+        # outage itself can end first, once the reconnect's subscription is acknowledged.
+        return bool(custom_session.on_loop(connection, lambda: connection._episodes.expired))
 
     wait_for(fired)  # the zero-second timer fires on the loop's next turn
     custom_session.flush()
@@ -1638,7 +1651,7 @@ def test_a_stream_the_outage_failed_is_not_held_down_again(ws_session: WsSession
 
     def expire_then_retry() -> set[int]:
         # In one loop turn, before the failed table's shutdown releases the stream.
-        cast("Any", connection._episodes.down[1]).cancel()
+        connection._episodes.down[1].cancel()
         connection._stream_expired(1)
         attempt()  # the next attempt of the same outage
         return set(connection._episodes.down)
@@ -1740,7 +1753,8 @@ def test_the_reconnect_deadline_is_the_earliest_held_down_stream_less_the_confir
     fake_ws_server.close(1011)
     ws_session.wait(lambda s: s.opens == 2)
     left = _left(ws_session, connection, 1)
-    seen = cast("float", ws_session.on_loop(connection, deadline))
+    seen = ws_session.on_loop(connection, deadline)
+    assert isinstance(seen, float)
     # The stream's time left, less the 5 s acknowledgement timeout, read a moment later.
     assert left - 5.0 - 1.0 < seen <= left - 5.0
     ws_session.session.release(result)
@@ -1827,7 +1841,7 @@ def _quiet_connection(
     # The state `Connection._check_frames` reads, without a socket: a live connection's status
     # frames would move its last-frame time while the test owns it. Each note the streams
     # would show goes to `notes`.
-    state = SimpleNamespace(
+    state: ws_connection.Connection = SimpleNamespace(  # type: ignore[assignment]  # a fake: only what _check_frames reads
         url=_URL,
         asset_class=AssetClass.STOCKS,
         _state=ConnectionState.CONNECTED,
@@ -1838,8 +1852,8 @@ def _quiet_connection(
     )
     for name in ("_check_frames", "_heard"):
         method = getattr(ws_connection.Connection, name)
-        setattr(state, name, functools.partial(method, cast("ws_connection.Connection", state)))
-    return cast("ws_connection.Connection", state)
+        setattr(state, name, functools.partial(method, state))
+    return state
 
 
 def test_a_silent_connection_warns_once_while_its_market_trades(
@@ -1905,7 +1919,9 @@ def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
     def error() -> str | None:
         [row] = streams_of(ws_session, dh_to_pylist)
         assert row["State"] == "RUNNING"  # silence never fails a stream
-        return cast("str | None", row["Error"])
+        text = row["Error"]
+        assert text is None or isinstance(text, str)
+        return text
 
     for frame in (_ack("T.AAPL"), json.dumps([trade("AAPL")])):  # a status, then data
         ws_session.on_loop(connection, lambda: connection._check_frames(time.time_ns() + later))
@@ -2116,7 +2132,10 @@ def test_a_shared_connection_taken_fails_only_the_tables_of_fail_sessions(
 ) -> None:
     # Differing only in connection_taken, the sessions still share one connection (`join`
     # checks it), so they never take it from each other.
-    other = join(ws_session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    other = join(
+        ws_session,
+        dataclasses.replace(ws_session.config, connection_taken=dm.ConnectionTaken.RECONNECT),
+    )
     mine = ws_session.query(TRADES, ["AAPL"]).append_only()
     theirs = ws_session.query(TRADES, ["AAPL"], other).append_only()
     ws_session.subscribed("T.AAPL")
@@ -2175,7 +2194,10 @@ def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it
 ) -> None:
     # A long backoff keeps the connection in its reconnect wait while the stream attaches.
     ws_session = make_ws_session(backoff=60.0)
-    other = join(ws_session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    other = join(
+        ws_session,
+        dataclasses.replace(ws_session.config, connection_taken=dm.ConnectionTaken.RECONNECT),
+    )
     theirs = ws_session.query(TRADES, ["AAPL"], other).blink()  # it keeps the connection
     ws_session.subscribed("T.AAPL")
     entered, go = threading.Event(), threading.Event()
@@ -2214,7 +2236,9 @@ def test_a_stream_that_opens_during_the_reconnect_wait_rides_the_reconnect(
     # It was never taken, so a FAIL session's stream that opens during the wait runs on, even
     # when another stream's release re-applies the setting while it opens.
     session = make_ws_session(backoff=60.0)
-    other = join(session, connection_taken=dm.ConnectionTaken.RECONNECT)
+    other = join(
+        session, dataclasses.replace(session.config, connection_taken=dm.ConnectionTaken.RECONNECT)
+    )
     kept = session.query(TRADES, ["AAPL"], other).blink()
     leaving = session.query(TRADES, ["IBM"], other).blink()
     session.subscribed("T.AAPL", "T.IBM")
@@ -2302,3 +2326,13 @@ def test_a_taken_connection_decides_to_close_once(
     closes = [r for r in caplog.records if "the connection closes" in r.getMessage()]
     assert len(closes) == 1
     del first, second
+
+
+def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
+    # Every state has its rule; a new one fails until it has, never only shows in the row.
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    with pytest.raises(AssertionError):
+        ws_session.on_loop(connection, lambda: connection._on_state("BOGUS", None))  # type: ignore[arg-type]  # the point: refused at run time
+    ws_session.session.release(result)

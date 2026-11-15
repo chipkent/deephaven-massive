@@ -1,9 +1,9 @@
 """Tests for the `history()` source choice: partition dates, publication, REST, and AUTO."""
 
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -13,6 +13,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.bar_periods import futures_bar_request
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.dates import (
+    DateLike,
     DaySpan,
     TimeRange,
 )
@@ -27,16 +28,21 @@ from deephaven_massive._datasets.history_source import (
     history_window,
     partition_dates,
     rest_history_problem,
+    warn_unfilled,
 )
-from deephaven_massive._datasets.request import Request
+from deephaven_massive._datasets.request import ParamValue, Request
 from deephaven_massive._datasets.row_times import (
     BarBounds,
     FuturesBarCompletion,
     RowTimes,
     StartRule,
 )
+from deephaven_massive._datasets.symbols import NormalizedSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, NotBars, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Transport
+from deephaven_massive._session import CATALOG
 
 NEW_YORK = ZoneInfo("America/New_York")
 FF = Transport.FLAT_FILES
@@ -162,21 +168,13 @@ YIELDS = DatasetSpec(
 NOWHERE = replace(YIELDS, name="economy.nowhere", history_path=None, fetch_path="/fed/v1/inflation")
 
 
-def config(**overrides: object) -> dm.MassiveConfig:
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    fields.update(overrides)
-    return dm.MassiveConfig(**cast("dict[str, Any]", fields))
-
-
-NO_S3 = config(s3_access_key_id=None, s3_secret_access_key=None)
-
-
-def request(symbols: object = ("AAPL",), **fields: object) -> Request:
-    return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
+CONFIG = dm.MassiveConfig(
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+)
+NO_S3 = replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
+AAPL = ("AAPL",)
 
 
 def many(count: int) -> tuple[str, ...]:
@@ -185,17 +183,19 @@ def many(count: int) -> tuple[str, ...]:
 
 def window(
     spec: DatasetSpec,
-    start: object,
-    end: object,
+    start: DateLike,
+    end: DateLike | None,
     *,
     now: datetime = NOW,
-    **fields: object,
+    timespan: Timespan | None = None,
+    multiplier: int = 1,
+    filters: tuple[tuple[str, ParamValue], ...] = (),
 ) -> HistoryWindow:
     return history_window(
         spec,
-        Request(**cast("dict[str, Any]", fields)),
-        start=cast("Any", start),
-        end=cast("Any", end),
+        Request(timespan=timespan, multiplier=multiplier, filters=filters),
+        start=start,
+        end=end,
         now=now,
     )
 
@@ -256,13 +256,16 @@ def test_a_bar_must_lie_in_the_range_and_end_by_now() -> None:
         StartRule.RANGE,
     )
     indices = window(INDEX_BARS, "2025-03-03", "2025-03-04", timespan=Timespan.DAY)
-    assert cast("BarBounds", indices.bars).latest == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
+    assert indices.bars is not None
+    assert indices.bars.latest == datetime(2025, 3, 5, 1, tzinfo=NEW_YORK)
     # Datetimes end at their end; an open end, or one after now, at now.
     end = datetime(2025, 3, 5, 9, 30, tzinfo=NEW_YORK)
     exact = window(STOCK_BARS, "2025-03-03T00:00:00-05:00", end, timespan=Timespan.DAY)
-    assert cast("BarBounds", exact.bars).latest == end
+    assert exact.bars is not None
+    assert exact.bars.latest == end
     open_end = window(STOCK_BARS, "2025-03-03", None, timespan=Timespan.DAY)
-    assert cast("BarBounds", open_end.bars).latest == NOW
+    assert open_end.bars is not None
+    assert open_end.bars.latest == NOW
     # Futures dates end at 17:00 Chicago on the last session's date, and are kept by their
     # label, not their start: a folded session opens before its first date.
     span = ("2025-03-03", "2025-03-05")
@@ -392,28 +395,34 @@ def test_partition_dates_of_futures_instants_are_their_sessions(
 
 
 def test_flat_file_prefix_by_timespan_and_multiplier() -> None:
-    assert flat_file_prefix(STOCK_TRADES, request()) == "us_stocks_sip/trades_v1"
-    minute = request(timespan=Timespan.MINUTE)
+    assert flat_file_prefix(STOCK_TRADES, Request(symbols=AAPL)) == "us_stocks_sip/trades_v1"
+    minute = Request(symbols=AAPL, timespan=Timespan.MINUTE)
     assert flat_file_prefix(STOCK_BARS, minute) == "us_stocks_sip/minute_aggs_v1"
-    assert flat_file_prefix(STOCK_BARS, request(timespan=Timespan.MINUTE, multiplier=5)) is None
-    assert flat_file_prefix(STOCK_BARS, request(timespan=Timespan.HOUR)) is None
-    assert flat_file_prefix(YIELDS, request(None)) is None
+    assert (
+        flat_file_prefix(STOCK_BARS, Request(symbols=AAPL, timespan=Timespan.MINUTE, multiplier=5))
+        is None
+    )
+    assert flat_file_prefix(STOCK_BARS, Request(symbols=AAPL, timespan=Timespan.HOUR)) is None
+    assert flat_file_prefix(YIELDS, Request(symbols=None)) is None
 
 
 def test_rest_history_problem() -> None:
-    assert rest_history_problem(STOCK_TRADES, request()) is None
-    assert rest_history_problem(NOWHERE, request(None)) == "economy.nowhere has no REST history"
+    assert rest_history_problem(STOCK_TRADES, Request(symbols=AAPL)) is None
+    assert (
+        rest_history_problem(NOWHERE, Request(symbols=None))
+        == "economy.nowhere has no REST history"
+    )
     every = "stocks.trades history over REST needs explicit symbols"
-    assert rest_history_problem(STOCK_TRADES, request(dm.ALL)) == every
-    daily = request(dm.ALL, timespan=Timespan.DAY)
+    assert rest_history_problem(STOCK_TRADES, Request(symbols=dm.ALL)) == every
+    daily = Request(symbols=dm.ALL, timespan=Timespan.DAY)
     assert rest_history_problem(STOCK_BARS, daily) is None  # the grouped-daily endpoint
     # No grouped-daily endpoint, or bars it does not serve: dm.ALL needs explicit symbols.
     index_every = "indices.bars history over REST needs explicit symbols"
     assert rest_history_problem(INDEX_BARS, daily) == index_every
     stock_every = "stocks.bars history over REST needs explicit symbols"
-    five = request(dm.ALL, timespan=Timespan.DAY, multiplier=5)
+    five = Request(symbols=dm.ALL, timespan=Timespan.DAY, multiplier=5)
     assert rest_history_problem(STOCK_BARS, five) == stock_every
-    minute = request(dm.ALL, timespan=Timespan.MINUTE)
+    minute = Request(symbols=dm.ALL, timespan=Timespan.MINUTE)
     assert rest_history_problem(STOCK_BARS, minute) == stock_every
 
 
@@ -427,15 +436,21 @@ def decide(
     requested: HistorySource = HistorySource.AUTO,
     cfg: dm.MassiveConfig | None = None,
 ) -> SourceChoice:
-    return choose_source(spec, req, requested=requested, config=cfg or config())
+    return choose_source(spec, req, requested=requested, config=cfg or CONFIG)
 
 
-def choose(spec: DatasetSpec, req: Request, **kwargs: object) -> HistorySource:
-    return decide(spec, req, **cast("dict[str, Any]", kwargs)).source
+def choose(
+    spec: DatasetSpec,
+    req: Request,
+    *,
+    requested: HistorySource = HistorySource.AUTO,
+    cfg: dm.MassiveConfig | None = None,
+) -> HistorySource:
+    return decide(spec, req, requested=requested, cfg=cfg).source
 
 
 def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
-    bars = request(dm.ALL, timespan=Timespan.HOUR, multiplier=5, adjusted=True)
+    bars = Request(symbols=dm.ALL, timespan=Timespan.HOUR, multiplier=5, adjusted=True)
     with pytest.raises(ValueError, match=r"stocks\.bars history has no possible source") as info:
         choose(STOCK_BARS, bars, cfg=NO_S3)
     assert str(info.value) == (
@@ -452,7 +467,7 @@ def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
 
 def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
     # indices.values has no REST history, so even one symbol reads flat files.
-    assert decide(INDEX_VALUES_SPEC, request(("I:SPX",))) == SourceChoice(
+    assert decide(INDEX_VALUES_SPEC, Request(symbols=("I:SPX",))) == SourceChoice(
         HistorySource.FLAT_FILES,
         "REST cannot serve it: indices.values has no REST history",
         Alternative.UNAVAILABLE,
@@ -460,10 +475,10 @@ def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
 
 
 def test_auto_with_only_rest_possible_uses_rest() -> None:
-    choice = decide(STOCK_TRADES, request(many(500)), cfg=NO_S3)
+    choice = decide(STOCK_TRADES, Request(symbols=many(500)), cfg=NO_S3)
     assert choice.source is HistorySource.REST
     assert choice.reason.startswith("flat files cannot serve it: no S3 credentials")
-    assert decide(YIELDS, request(None)) == SourceChoice(
+    assert decide(YIELDS, Request(symbols=None)) == SourceChoice(
         HistorySource.REST,
         "flat files cannot serve it: economy.yields has no flat files",
         Alternative.UNAVAILABLE,
@@ -493,24 +508,26 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
     ],
 )
 def test_auto_with_both_possible_switches_at_the_threshold(
-    symbols: object, expected: SourceChoice
+    symbols: NormalizedSymbols, expected: SourceChoice
 ) -> None:
     # The daily grouped endpoint makes REST possible for dm.ALL too.
-    req = request(symbols, timespan=Timespan.DAY, adjusted=False)
+    req = Request(symbols=symbols, timespan=Timespan.DAY, adjusted=False)
     assert decide(STOCK_BARS, req) == expected
 
 
 def test_auto_threshold_comes_from_the_config() -> None:
-    cfg = config(flat_file_symbol_threshold=3)
-    assert choose(STOCK_TRADES, request(many(2)), cfg=cfg) is HistorySource.REST
-    assert choose(STOCK_TRADES, request(many(3)), cfg=cfg) is HistorySource.FLAT_FILES
+    cfg = replace(CONFIG, flat_file_symbol_threshold=3)
+    assert choose(STOCK_TRADES, Request(symbols=many(2)), cfg=cfg) is HistorySource.REST
+    assert choose(STOCK_TRADES, Request(symbols=many(3)), cfg=cfg) is HistorySource.FLAT_FILES
 
 
 def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
     forced = HistorySource.FLAT_FILES
-    assert decide(STOCK_TRADES, request(), requested=forced) == SourceChoice(forced, "requested")
+    assert decide(STOCK_TRADES, Request(symbols=AAPL), requested=forced) == SourceChoice(
+        forced, "requested"
+    )
     with pytest.raises(ValueError, match="cannot be read from flat files") as info:
-        choose(STOCK_TRADES, request(), requested=forced, cfg=NO_S3)
+        choose(STOCK_TRADES, Request(symbols=AAPL), requested=forced, cfg=NO_S3)
     assert str(info.value) == (
         "stocks.trades cannot be read from flat files: no S3 credentials are configured "
         "(MassiveConfig s3_access_key_id and s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID "
@@ -520,7 +537,7 @@ def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
 
 def test_adjusted_bars_of_every_symbol_say_why_no_source_serves_them() -> None:
     # Flat files hold as-traded prices and REST reads minute bars one symbol at a time.
-    req = request(dm.ALL, timespan=Timespan.MINUTE, adjusted=True)
+    req = Request(symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=True)
     with pytest.raises(ValueError, match=r"with adjusted=True has no source") as info:
         choose(STOCK_BARS, req)
     assert str(info.value) == (
@@ -562,7 +579,7 @@ def test_flat_file_constraints_of_bars_and_datasets(
     adjusted: bool | None,
     problem: str | None,
 ) -> None:
-    req = request(timespan=timespan, multiplier=multiplier, adjusted=adjusted)
+    req = Request(symbols=AAPL, timespan=timespan, multiplier=multiplier, adjusted=adjusted)
     forced = HistorySource.FLAT_FILES
     if problem is None:
         assert choose(spec, req, requested=forced) is HistorySource.FLAT_FILES
@@ -575,8 +592,10 @@ def test_crypto_and_forex_day_bars_follow_the_usual_auto_rule() -> None:
     # Every source stamps them alike, and a crypto stamp off the cut fails loudly, so AUTO
     # picks the source by symbol count as for every other dataset.
     for spec, pair in ((CRYPTO_BARS, "X:BTCUSD"), (FOREX_BARS, "C:EURUSD")):
-        assert choose(spec, request((pair,), timespan=Timespan.DAY)) is HistorySource.REST
-        assert choose(spec, request(many(60), timespan=Timespan.DAY)) is (HistorySource.FLAT_FILES)
+        assert choose(spec, Request(symbols=(pair,), timespan=Timespan.DAY)) is HistorySource.REST
+        assert choose(spec, Request(symbols=many(60), timespan=Timespan.DAY)) is (
+            HistorySource.FLAT_FILES
+        )
 
 
 def test_longer_futures_bars_by_date_need_every_session_in_the_range() -> None:
@@ -673,3 +692,11 @@ def test_the_current_partition_is_today_in_the_day_zone_or_the_current_session(
     assert current_partition(FUTURES_TRADES, now=evening) == date(2025, 3, 4)
     monkeypatch.setattr(history_source, "_now", lambda: evening)
     assert current_partition(STOCK_TRADES) == date(2025, 3, 3)
+
+
+def test_an_unfilled_warning_for_a_source_auto_never_chooses_is_a_defect() -> None:
+    # AUTO resolves to REST or the flat files; any other choice has no "other" source to name.
+    choice = SourceChoice(HistorySource.AUTO, "a defect", Alternative.AVAILABLE)
+    warnings = BoundedLog(logging.getLogger("tests.history_source"), limit=1, level=logging.INFO)
+    with pytest.raises(BrokenGuaranteeError, match=r"^stocks\.trades history\(\) chose "):
+        warn_unfilled(STOCK_TRADES, choice, catalog=CATALOG, warnings=warnings)

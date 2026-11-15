@@ -26,6 +26,12 @@ Datasets:
     reads symbols of several asset classes at once. `dm.datasets()` lists every dataset in a
     table, with each one's query methods in its `Methods` column.
 
+    To annotate your own code, import the class of a namespace, such as `StocksNamespace` for
+    `m.stocks`, from `deephaven_massive.namespaces`, and the class of a query, such as
+    `StreamHistoryQuery`, from `deephaven_massive.queries`. The types of the arguments,
+    `dm.SymbolsLike`, `dm.DateLike`, and `dm.FilterValue`, are here, and so is
+    `dm.AllSymbols`, the type of `dm.ALL`.
+
 Query methods:
     A query reads nothing until you call one of its methods. It has only the methods its
     dataset supports:
@@ -67,17 +73,26 @@ Enums:
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Errors from Massive, failed reads, and failed live tables are all `dm.MassiveError`s.
-    `dm.AuthenticationError` means Massive refused your keys. `dm.EntitlementError` means your
-    plan doesn't include the data. Each error's `cause` is a `dm.ErrorCause`, which says
-    whether the error is expected, a mistake in your code, or a bug in the library to report.
+    `dm.MassiveError` covers every error Massive reports and every failure inside a method of
+    a query, such as `fetch()`. `dm.AuthenticationError` means your API key is missing or Massive
+    refused your keys. `dm.EntitlementError` means your plan doesn't include the data.
+    `dm.SessionClosedError` means the session is closed. Each error's `source` says what
+    stopped the call, as a `dm.ErrorSource`. Its `is_retryable` says whether the same call may
+    succeed later, and its `is_bug` whether a bug caused it.
     A wrong argument raises `TypeError` or `ValueError` at the call instead.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 
 Server:
-    Sessions run inside a Deephaven server: in its console, in an application script, or in
-    Python after starting `deephaven_server.Server`. Without a server, you can import the
-    package and use its errors, enums, and logging functions.
+    The library runs inside a Deephaven server: in its console, in an application script, or
+    in a Python program that starts one first. Importing the package without a running server
+    fails with Deephaven's own error. In a plain Python program, start the server before the
+    import::
+
+        from deephaven_server import Server
+
+        Server(port=10000, jvm_args=["-Xmx4g"]).start()
+
+        import deephaven_massive as dm
 
 Next steps:
     - The README and its tutorial: https://github.com/chipkent/deephaven-massive
@@ -91,20 +106,74 @@ Attributes:
     __version__: The installed version, such as `"0.1.0"`.
 """
 
-from importlib import import_module as _import_module
 from importlib.metadata import version as _version
-from typing import TYPE_CHECKING
+
+from deephaven_massive._config import MassiveConfig
+from deephaven_massive._dataset_list import datasets
+from deephaven_massive._datasets.dates import DateLike
+from deephaven_massive._datasets.filters import FilterValue
+from deephaven_massive._datasets.symbols import (
+    ALL,
+    AllSymbols,
+    SymbolsLike,
+    canonical_symbol,
+    canonical_symbol_crypto,
+    canonical_symbol_forex,
+    canonical_symbol_future,
+    canonical_symbol_future_spread,
+    canonical_symbol_index,
+    canonical_symbol_option,
+    canonical_symbol_stock,
+    canonical_symbol_stock_cms,
+    canonical_symbol_stock_nasdaq,
+    canonical_symbol_stock_yahoo,
+)
+from deephaven_massive._debug_log import LogOutput, disable_debug_logging, enable_debug_logging
+from deephaven_massive._enums import (
+    AssetClass,
+    ConditionDataType,
+    ConnectionTaken,
+    ContractType,
+    Direction,
+    FuturesVenue,
+    HistorySource,
+    Locale,
+    Market,
+    OnError,
+    Order,
+    PollMode,
+    Reread,
+    SeriesType,
+    Sip,
+    Subscription,
+    SymbolConvention,
+    TickerType,
+    Timeframe,
+    Timespan,
+)
+from deephaven_massive._errors import (
+    AuthenticationError,
+    EntitlementError,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+)
+from deephaven_massive._session import MassiveSession
+from deephaven_massive._tables.symbols import canonicalize_symbols
 
 __all__ = [
     "ALL",
+    "AllSymbols",
     "AssetClass",
     "AuthenticationError",
     "ConditionDataType",
     "ConnectionTaken",
     "ContractType",
+    "DateLike",
     "Direction",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
+    "FilterValue",
     "FuturesVenue",
     "HistorySource",
     "Locale",
@@ -118,9 +187,11 @@ __all__ = [
     "PollMode",
     "Reread",
     "SeriesType",
+    "SessionClosedError",
     "Sip",
     "Subscription",
     "SymbolConvention",
+    "SymbolsLike",
     "TickerType",
     "Timeframe",
     "Timespan",
@@ -143,141 +214,3 @@ __all__ = [
 ]
 
 __version__: str = _version("deephaven-massive")
-
-# Each lazily resolved public name, and the private module that defines it.
-_EXPORTS: dict[str, str] = {
-    "ALL": "deephaven_massive._types",
-    "AssetClass": "deephaven_massive._enums",
-    "AuthenticationError": "deephaven_massive._errors",
-    "ConditionDataType": "deephaven_massive._enums",
-    "ConnectionTaken": "deephaven_massive._enums",
-    "ContractType": "deephaven_massive._enums",
-    "Direction": "deephaven_massive._enums",
-    "EntitlementError": "deephaven_massive._errors",
-    "ErrorCause": "deephaven_massive._errors",
-    "FuturesVenue": "deephaven_massive._enums",
-    "HistorySource": "deephaven_massive._enums",
-    "Reread": "deephaven_massive._enums",
-    "Locale": "deephaven_massive._enums",
-    "LogOutput": "deephaven_massive._debug_log",
-    "Market": "deephaven_massive._enums",
-    "MassiveConfig": "deephaven_massive._config",
-    "MassiveError": "deephaven_massive._errors",
-    "MassiveSession": "deephaven_massive._session",
-    "Order": "deephaven_massive._enums",
-    "PollMode": "deephaven_massive._enums",
-    "SeriesType": "deephaven_massive._enums",
-    "Sip": "deephaven_massive._enums",
-    "Subscription": "deephaven_massive._enums",
-    "TickerType": "deephaven_massive._enums",
-    "Timeframe": "deephaven_massive._enums",
-    "Timespan": "deephaven_massive._enums",
-    "canonical_symbol": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_crypto": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_forex": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_future": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_future_spread": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_index": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_option": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_stock": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_stock_cms": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_stock_nasdaq": "deephaven_massive._datasets.symbols",
-    "canonical_symbol_stock_yahoo": "deephaven_massive._datasets.symbols",
-    "canonicalize_symbols": "deephaven_massive._tables.symbols",
-    "OnError": "deephaven_massive._enums",
-    "SymbolConvention": "deephaven_massive._enums",
-    "datasets": "deephaven_massive._dataset_list",
-    "disable_debug_logging": "deephaven_massive._debug_log",
-    "enable_debug_logging": "deephaven_massive._debug_log",
-}
-
-# Type checkers read the imports, so they see each name's real type and flag a name outside
-# `__all__`; at run time `__getattr__` resolves the names instead.
-if TYPE_CHECKING:
-    from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._dataset_list import datasets
-    from deephaven_massive._datasets.symbols import (
-        canonical_symbol,
-        canonical_symbol_crypto,
-        canonical_symbol_forex,
-        canonical_symbol_future,
-        canonical_symbol_future_spread,
-        canonical_symbol_index,
-        canonical_symbol_option,
-        canonical_symbol_stock,
-        canonical_symbol_stock_cms,
-        canonical_symbol_stock_nasdaq,
-        canonical_symbol_stock_yahoo,
-    )
-    from deephaven_massive._debug_log import (
-        LogOutput,
-        disable_debug_logging,
-        enable_debug_logging,
-    )
-    from deephaven_massive._enums import (
-        AssetClass,
-        ConditionDataType,
-        ConnectionTaken,
-        ContractType,
-        Direction,
-        FuturesVenue,
-        HistorySource,
-        Locale,
-        Market,
-        OnError,
-        Order,
-        PollMode,
-        Reread,
-        SeriesType,
-        Sip,
-        Subscription,
-        SymbolConvention,
-        TickerType,
-        Timeframe,
-        Timespan,
-    )
-    from deephaven_massive._errors import (
-        AuthenticationError,
-        EntitlementError,
-        ErrorCause,
-        MassiveError,
-    )
-    from deephaven_massive._session import MassiveSession
-    from deephaven_massive._tables.symbols import canonicalize_symbols
-    from deephaven_massive._types import ALL
-else:
-
-    def __getattr__(name: str) -> object:
-        """Resolve a public name by importing the private module that defines it.
-
-        Nothing is cached in this module's namespace. The import system caches the defining
-        module, and its per-module lock serializes concurrent first imports, so this function
-        writes nothing itself and a repeated lookup costs a dictionary lookup.
-
-        Args:
-            name: The attribute requested.
-
-        Returns:
-            The object `name` refers to.
-
-        Raises:
-            AttributeError: If `name` is not a public name of the package.
-        """
-        try:
-            module = _EXPORTS[name]
-        except KeyError:
-            raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
-        return getattr(_import_module(module), name)
-
-
-def __dir__() -> list[str]:
-    """Return the public names, for completion in IDEs and the Deephaven console.
-
-    Returns:
-        `__all__`, sorted.
-    """
-    return sorted(__all__)
-
-
-# Keep the namespace to the public names: the helper import goes once the module is built.
-del TYPE_CHECKING

@@ -17,18 +17,18 @@ import weakref
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
 from deephaven import empty_table
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
-from deephaven_massive._types import override
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter
@@ -362,7 +362,9 @@ def test_history_plus_live_keeps_one_row_per_minute(
             for i, c in [(1, 3.0), (2, 4.0)]
         ]
         session.publish(*live)
-        table = namespace["aapl_today"]
+        # History reads in the background, so it may land before or after the stream's
+        # minutes: the rows are compared oldest first.
+        table = namespace["aapl_today"].sort("TimestampStart")
         pace = threading.Event()  # never set; only paces the loop
         made = dh_to_pylist(table)
         for _ in range(500):
@@ -472,6 +474,15 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
     assert failed.status == examples.FAILED
     already = examples.Outcome("10_b.py", examples.FAILED, 1.0, "RuntimeError: x")
     assert examples.stream_verdict(already, [refusal]) is already
+
+
+def test_stream_verdict_counts_a_refused_background_read_as_refused() -> None:
+    passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
+    plan = "stocks.bars: the Stocks subscription of your plan does not include this data"
+    delayed = "AAPL would be delayed, and ... MassiveConfig.delayed_subscriptions, so ..."
+    for read in (plan, delayed):
+        assert examples.stream_verdict(passed, [read]).status == examples.REFUSED
+    assert examples.stream_verdict(passed, [plan, "HTTP 500"]).status == examples.FAILED
 
 
 def test_failed_streams_lists_none_once_the_session_is_closed(market: MarketServer) -> None:
@@ -668,7 +679,8 @@ class BrokenTable:
 
 
 def test_save_tables_records_a_table_it_cannot_read_and_goes_on(tmp_path: Path) -> None:
-    tables = {"broken": cast("Table", BrokenTable()), "fine": empty_table(1)}
+    broken: Table = BrokenTable()  # type: ignore[assignment]  # a table that fails to read
+    tables = {"broken": broken, "fine": empty_table(1)}
     unsaved = examples.save_tables(tables, tmp_path, SecretFilter(("K-2",)))
     assert unsaved == ["broken: RuntimeError: the stream failed: K-2"]
     assert (tmp_path / "broken.error.txt").read_text() == (

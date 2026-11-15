@@ -10,7 +10,7 @@ stream's `on_shutdown_callback`, alive exactly as long as it lives.
 import logging
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -26,8 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars, Recency, Subscription
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.snapshots import SNAPSHOTS
+from deephaven_massive._snapshots import SNAPSHOTS
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
@@ -41,6 +40,7 @@ from deephaven_massive._tables.columns import (
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive.namespaces import _indices as indices
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -319,7 +319,7 @@ def test_the_column_table_lists_every_column(
     assert column_descriptions(table) == dict(COLUMN_TABLE_DESCRIPTIONS)
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
     with pytest.raises(TypeError):  # read-only: no caller can change the header text
-        cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"
+        COLUMN_TABLE_DESCRIPTIONS["Name"] = "changed"  # type: ignore[index]  # the point: read-only
 
 
 def _string_objects(table: Table, column: str) -> int:

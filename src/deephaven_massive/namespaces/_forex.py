@@ -1,0 +1,556 @@
+"""The `m.forex` namespace: foreign exchange.
+
+Datasets: quotes, each pair's last quote, bars, each pair's previous day's bar, fair market
+value, snapshots, movers, and currency conversion.
+
+Each dataset is one factory method on `ForexNamespace` that validates its arguments and returns a
+query; nothing touches the network until a verb is called on the query. This module owns the
+namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dataset catalog (`CATALOG`
+in `_session.py`).
+
+A currency pair is Massive's REST ticker, `C:EURUSD`: every factory takes only that form
+(`check_symbol` in `_datasets/symbols.py`; `dm.canonical_symbol_forex` converts `EUR/USD`), the
+`Symbol` column always holds it, and the transports write the WebSocket form (`EUR-USD`) for
+topics and read every spelling Massive sends back (`EUR/USD` in frames, `X:EUR-USD` in the
+quotes flat-file sample). The last-quote
+endpoint takes a pair as two path segments (`/v1/last_quote/currencies/EUR/USD`); its spec
+declares the symbol as filled from the request, so the row's `Symbol` is the whole pair.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import TYPE_CHECKING, ClassVar, Final
+
+from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    Direction,
+    NotBars,
+    Timespan,
+    _require_enum,
+)
+from deephaven_massive._errors import raises_through
+from deephaven_massive._massive import Transport
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
+    SNAPSHOT_SYMBOLS_PER_REQUEST,
+    build_query,
+)
+from deephaven_massive.queries import (
+    FetchQuery,
+    StreamHistoryQuery,
+    SymbolStreamQuery,
+)
+
+if TYPE_CHECKING:
+    from deephaven_massive._datasets.symbols import SymbolsLike
+
+__all__ = ["DATASETS", "ForexNamespace"]
+
+
+_REST: Final = Transport.REST
+_WS: Final = Transport.WS
+_FLAT_FILES: Final = Transport.FLAT_FILES
+
+_AGGREGATES_PAGE: Final = 50_000
+"""The aggregates range endpoint's largest `limit`, which counts the base aggregates
+behind a page. Its specification states this maximum only in prose, so it is typed here."""
+
+_LAST_QUOTE: Final = "/v1/last_quote/currencies/{from}/{to}"
+_QUOTES: Final = "/v3/quotes/{fxTicker}"
+_QUOTE_FILES: Final = "global_forex/quotes_v1"
+
+QUOTES: Final = DatasetSpec(
+    name="forex.quotes",
+    summary="Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.",
+    asset_class=AssetClass.FOREX,
+    kind="quotes",
+    history_path=_QUOTES,
+    channels={NotBars.ANY: "C"},
+    flat_file_prefixes={NotBars.ANY: _QUOTE_FILES},
+    keys={
+        (_REST, _QUOTES): SourceKeys(
+            symbol=KeySpec("fxTicker", from_request=True), time=KeySpec("ParticipantTimestamp")
+        ),
+        (_WS, "forex/C"): SourceKeys(
+            symbol=KeySpec("Ticker"), time=KeySpec("ParticipantTimestamp")
+        ),
+        (_FLAT_FILES, _QUOTE_FILES): SourceKeys(
+            symbol=KeySpec("Ticker"), time=KeySpec("ParticipantTimestamp")
+        ),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
+)
+"""`m.forex.quotes`: the `C` stream, REST quote history, and quote files."""
+
+LAST_QUOTE: Final = DatasetSpec(
+    name="forex.last_quote",
+    summary="The latest best bid and ask of each currency pair.",
+    asset_class=AssetClass.FOREX,
+    kind="quotes",
+    fetch_path=_LAST_QUOTE,
+    serves_current_data=True,
+    refused_alternative="forex.snapshots",
+    keys={
+        # The last quote's `timestamp` is `Timestamp` after its projection onto the quotes kind.
+        (_REST, _LAST_QUOTE): SourceKeys(
+            symbol=KeySpec("from", from_request=True), time=KeySpec("Timestamp")
+        ),
+    },
+    per_symbol=True,
+    revision_keys=("Timestamp",),
+)
+"""`m.forex.last_quote`: each pair's last quote, in the quotes columns its endpoint fills."""
+
+_PREV: Final = "/v2/aggs/ticker/{forexTicker}/prev"
+_RANGE: Final = "/v2/aggs/ticker/{forexTicker}/range/{multiplier}/{timespan}/{from}/{to}"
+_GROUPED: Final = "/v2/aggs/grouped/locale/global/market/fx/{date}"
+_MINUTE_FILES: Final = "global_forex/minute_aggs_v1"
+_DAY_FILES: Final = "global_forex/day_aggs_v1"
+_BAR_KEYS: Final = SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("WindowStart"))
+_STREAM_BAR_KEYS: Final = SourceKeys(
+    symbol=KeySpec("Pair"), time=KeySpec("WindowStart"), end=KeySpec("EndTimestamp")
+)
+
+BARS: Final = DatasetSpec(
+    name="forex.bars",
+    summary="Aggregate bars of currency pairs: open, high, low, close, and volume per window.",
+    asset_class=AssetClass.FOREX,
+    is_bars=True,
+    kind="bars",
+    history_path=_RANGE,
+    grouped_daily_path=_GROUPED,
+    channels={Timespan.SECOND: "CAS", Timespan.MINUTE: "CA"},
+    flat_file_prefixes={Timespan.MINUTE: _MINUTE_FILES, Timespan.DAY: _DAY_FILES},
+    keys={
+        (_REST, _RANGE): SourceKeys(
+            symbol=KeySpec("forexTicker", from_request=True), time=KeySpec("WindowStart")
+        ),
+        (_REST, _GROUPED): _BAR_KEYS,
+        (_WS, "forex/CAS"): _STREAM_BAR_KEYS,
+        (_WS, "forex/CA"): _STREAM_BAR_KEYS,
+        (_FLAT_FILES, _MINUTE_FILES): _BAR_KEYS,
+        (_FLAT_FILES, _DAY_FILES): _BAR_KEYS,
+    },
+    page_size=_AGGREGATES_PAGE,
+)
+"""`m.forex.bars`: `CAS` and `CA` streams, ranges, grouped daily bars, and bar files."""
+
+PREVIOUS_DAY_BAR: Final = DatasetSpec(
+    name="forex.previous_day_bar",
+    summary="The previous UTC day's open, high, low, close, and volume of each currency pair.",
+    asset_class=AssetClass.FOREX,
+    kind="bars",
+    fetch_path=_PREV,
+    keys={(_REST, _PREV): _BAR_KEYS},
+    per_symbol=True,
+    revision_keys=("TimestampStart",),
+)
+"""`m.forex.previous_day_bar`: each pair's 1-day bar of the previous UTC day, from `/prev`."""
+
+FMV: Final = DatasetSpec(
+    name="forex.fmv",
+    summary="Massive's fair market value of each currency pair, streamed as it updates.",
+    asset_class=AssetClass.FOREX,
+    kind="fmv",
+    channels={NotBars.ANY: "FMV"},
+    channel_family=ChannelFamily.FMV,
+    keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
+    real_time_only=True,
+)
+"""`m.forex.fmv`: the `FMV` stream of the Business feed."""
+
+_SNAPSHOTS: Final = "/v2/snapshot/locale/global/markets/forex/tickers"
+
+SNAPSHOTS: Final = DatasetSpec(
+    name="forex.snapshots",
+    summary=(
+        "The current state of currency pairs: today's bar, the last minute, and the last quote."
+    ),
+    asset_class=AssetClass.FOREX,
+    fetch_path=_SNAPSHOTS,
+    serves_current_data=True,
+    keys={(_REST, _SNAPSHOTS): SourceKeys(symbol=KeySpec("Ticker"))},
+    symbol_param="tickers",
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    revision_keys=("Updated",),
+)
+"""`m.forex.snapshots`: the full-market snapshot, narrowed by its `tickers` parameter."""
+
+_MOVERS: Final = "/v2/snapshot/locale/global/markets/forex/{direction}"
+
+MOVERS: Final = DatasetSpec(
+    name="forex.movers",
+    summary="The twenty currency pairs that gained or lost the most since the previous UTC close.",
+    asset_class=AssetClass.FOREX,
+    fetch_path=_MOVERS,
+    serves_current_data=True,
+    keys={(_REST, _MOVERS): SourceKeys(symbol=KeySpec("Ticker"))},
+    revision_keys=("Updated",),
+)
+"""`m.forex.movers`: the top gainers or losers, the direction a path segment."""
+
+_CONVERSION: Final = "/v1/conversion/{from}/{to}"
+
+CONVERSION: Final = DatasetSpec(
+    name="forex.conversion",
+    summary="An amount converted between two currencies at the latest quote.",
+    asset_class=AssetClass.FOREX,
+    fetch_path=_CONVERSION,
+    serves_current_data=True,
+    # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
+    keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
+    # The quote the conversion used: an explicit APPEND poll appends each new conversion.
+    revision_keys=("LastQuoteParticipantTimestamp",),
+)
+"""`m.forex.conversion`: one conversion between two currencies at the latest quote."""
+
+DATASETS: Final[tuple[DatasetSpec, ...]] = (
+    QUOTES,
+    LAST_QUOTE,
+    BARS,
+    PREVIOUS_DAY_BAR,
+    FMV,
+    SNAPSHOTS,
+    MOVERS,
+    CONVERSION,
+)
+"""Every dataset of `m.forex`, one `DatasetSpec` each, in the order of the namespace's methods."""
+
+
+def _currency(name: str, value: object) -> str:
+    """Return a currency code argument of the conversion, which must be text.
+
+    Massive judges the code itself: it answers HTTP 404 ("Couldn't find requested currency
+    pair") to one it does not know, such as `aud`, so any text is sent as written. Only an
+    empty code is refused: the code is a segment of the request's path, and an empty segment
+    can't be sent.
+
+    Args:
+        name: The parameter's name, for messages.
+        value: The code as passed.
+
+    Returns:
+        The code unchanged.
+
+    Raises:
+        TypeError: If `value` is not a `str`.
+        ValueError: If `value` is empty.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a str, not {type(value).__name__}")
+    if not value:
+        raise ValueError(
+            f"{name} is empty, and an empty code can't be sent: it is a segment of the "
+            "request's path"
+        )
+    return value
+
+
+class ForexNamespace(Namespace):
+    """The forex datasets, reached as `m.forex`.
+
+    Each method returns a query of one dataset, and together they cover quotes, bars, each pair's
+    last quote and previous day's bar, fair market value, snapshots, movers, and currency
+    conversion. A method reads nothing, so it never blocks. You can call it from any
+    thread.
+    You reach it through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import ForexNamespace` to annotate your own code.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            rates = m.forex.quotes(["C:EURUSD", "C:GBPUSD"]).last_by()
+    """
+
+    __slots__ = ()
+    _path: ClassVar[str] = "forex"
+
+    @raises_through(build_query)
+    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+        """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
+
+        Each row holds one quote of Massive's feed, which combines prices from banks and trading
+        venues. `Date` is the UTC date of `Timestamp`. For each pair's latest quote alone, use
+        `last_quote()`.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
+                `dm.canonical_symbol_forex` converts `EUR/USD`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.quotes.md.
+
+        Raises:
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
+
+        Example:
+            ::
+
+                eur = m.forex.quotes("C:EURUSD").last_by()
+        """
+        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
+
+    @raises_through(build_query)
+    def last_quote(self, symbols: SymbolsLike) -> FetchQuery:
+        """The latest best bid and ask of each currency pair.
+
+        Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
+        logs a WARNING. Each poll sees only the quote that is latest at that moment; `quotes()`
+        streams every quote. Currencies Basic doesn't include this dataset.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use
+                `m.forex.snapshots(dm.ALL)`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.last_quote.md.
+
+        Raises:
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
+
+        Example:
+            ::
+
+                top = m.forex.last_quote(["C:EURUSD", "C:USDJPY"]).poll(5)
+        """
+        return build_query(
+            self._core,
+            LAST_QUOTE,
+            query_type=FetchQuery,
+            symbols=symbols,
+            all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
+        )
+
+    @raises_through(build_query)
+    def bars(
+        self,
+        symbols: SymbolsLike,
+        timespan: Timespan,
+        *,
+        multiplier: int = 1,
+    ) -> StreamHistoryQuery:
+        """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
+
+        Each row is one bar of `multiplier` times `timespan`. Days are UTC days, though the
+        interbank day rolls at 17:00 New York time. Weeks run Sunday to Saturday. Currency pairs
+        have no splits, so there's no `adjusted`. For each pair's previous day alone, use
+        `previous_day_bar()`.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()`
+                takes `dm.ALL` for one-minute and one-day bars.
+            timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
+            multiplier: Units per bar.
+
+        Returns:
+            A query that reads history, and streams 1-second and 1-minute bars at
+            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
+            columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.bars.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair.
+
+        Example:
+            ::
+
+                hourly = m.forex.bars("C:EURUSD", dm.Timespan.HOUR).history(
+                    "2026-10-01", "2026-10-23"
+                )
+        """
+        return build_query(
+            self._core,
+            BARS,
+            query_type=StreamHistoryQuery,
+            symbols=symbols,
+            timespan=timespan,
+            multiplier=multiplier,
+        )
+
+    @raises_through(build_query)
+    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
+        """The previous UTC day's open, high, low, close, and volume of each currency pair.
+
+        Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
+        row, and the library logs a WARNING.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair's bar
+                of one day, use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.previous_day_bar.md.
+
+        Raises:
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            ValueError: If:
+                - `symbols` is `dm.ALL`, None, or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
+
+        Example:
+            ::
+
+                yesterday = m.forex.previous_day_bar("C:EURUSD").fetch()
+        """
+        return build_query(
+            self._core,
+            PREVIOUS_DAY_BAR,
+            query_type=FetchQuery,
+            symbols=symbols,
+            all_alternative=(
+                "use m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
+                "every ticker's bar of that day"
+            ),
+            timespan=Timespan.DAY,
+        )
+
+    @raises_through(build_query)
+    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+        """Massive's fair market value of each currency pair, streamed as it updates.
+
+        Each row holds one update of Massive's own real-time price estimate. Only Currencies
+        Business includes it. It streams only, with no history.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.fmv.md.
+
+        Raises:
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
+
+        Example:
+            ::
+
+                fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
+        """
+        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+
+    @raises_through(build_query)
+    def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
+        """The current state of currency pairs: today's bar, the last minute, and the last quote.
+
+        Each row holds one pair's bars for today and the previous UTC day, and its latest minute
+        bar. It also holds the pair's last quote and its change since the previous close.
+
+        Args:
+            symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair Massive tracks.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.snapshots.md.
+
+        Raises:
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            ValueError: If:
+                - `symbols` is None or empty;
+                - a ticker isn't Massive's exact ticker of a currency pair;
+                - a table has no `Symbol` column.
+
+        Example:
+            ::
+
+                latest = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
+        """
+        return build_query(self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols)
+
+    @raises_through(_require_enum)
+    def movers(self, direction: Direction) -> FetchQuery:
+        """The twenty currency pairs that gained or lost the most since the previous UTC close.
+
+        Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
+        change. Massive clears the list daily at midnight Eastern time and refills it as quotes
+        arrive, so the list can be empty just after midnight. A `poll()` table keeps one row per
+        pair, so pairs come and go as the ranking changes.
+
+        Args:
+            direction: `dm.Direction.GAINERS` for the largest increases, or `dm.Direction.LOSERS`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.movers.md.
+
+        Raises:
+            TypeError: If `direction` isn't a `dm.Direction`. `dm.Direction("gainers")` converts
+                text.
+
+        Example:
+            ::
+
+                losers = m.forex.movers(dm.Direction.LOSERS).poll(60)
+        """
+        side = _require_enum(direction, Direction, "direction")
+        return build_query(self._core, MOVERS, query_type=FetchQuery, params={"direction": side})
+
+    @raises_through(build_query, _currency)
+    def conversion(
+        self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
+    ) -> FetchQuery:
+        """An amount converted between two currencies at the latest quote.
+
+        The table has one row. It holds the converted amount, the amount you passed, and the last
+        bid and ask the conversion used.
+
+        Args:
+            from_currency: The code of the currency to convert from, such as `"AUD"`. Massive
+                answers HTTP 404 to a code it doesn't know, such as `"aud"`, and the read
+                raises `MassiveError`.
+            to_currency: The code of the currency to convert to, such as `"USD"`.
+            amount: The amount to convert, any finite number; 1.0 by default.
+            precision: The decimal places of the result; 2 by default.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.conversion.md.
+
+        Raises:
+            TypeError: If a currency isn't a `str`, `amount` isn't an `int` or `float`, or
+                `precision` isn't an `int`. A `bool` is neither number.
+            ValueError: If a currency is empty, or `amount` is NaN or infinite.
+
+        Example:
+            ::
+
+                usd = m.forex.conversion("AUD", "USD", amount=100.0, precision=4).fetch()
+        """
+        base = _currency("from_currency", from_currency)
+        target = _currency("to_currency", to_currency)
+        if isinstance(amount, bool) or not isinstance(amount, int | float):
+            raise TypeError(f"amount must be an int or float, not {type(amount).__name__}")
+        # Massive converts any finite amount, 0 and negative ones included; a request cannot
+        # carry NaN or an infinity as a number.
+        if not isinstance(amount, int) and not math.isfinite(amount):
+            raise ValueError(f"amount must be finite, got {amount!r}")
+        if isinstance(precision, bool) or not isinstance(precision, int):
+            raise TypeError(f"precision must be an int, not {type(precision).__name__}")
+        # The endpoint's `precision` is an enum of digit strings, so it is sent as text. Massive
+        # judges the value: it honors 5, which its specification does not list.
+        params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
+        return build_query(self._core, CONVERSION, query_type=FetchQuery, params=params)

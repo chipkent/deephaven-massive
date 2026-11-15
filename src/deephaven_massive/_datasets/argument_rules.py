@@ -91,7 +91,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "timespan": (
             "The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or "
-            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, "
+            "`dm.Timespan.DAY`. `SESSION`, a trading session, is for futures only; a futures "
+            "`DAY` bar is one session. On a bars dataset, "
             "one-second and one-minute bars with `multiplier=1` also stream. Bars of other "
             "lengths are history only."
         ),
@@ -101,8 +102,29 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "venues": (
             "The futures exchanges whose flat files `history()` reads, as a set of "
-            "`dm.FuturesVenue` members. The default is all four. Pass the ones your plan "
-            "includes."
+            "`dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. "
+            "Each exchange's file of a day holds every contract it trades, so naming fewer "
+            "exchanges downloads less.\n"
+            "\n"
+            "Massive refuses the files of an exchange your plan doesn't include. `history()` "
+            "reads REST instead when REST can serve the read. When it must read flat files "
+            "(`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):\n"
+            "\n"
+            "- Left out, the read tries every exchange and skips each one Massive refuses. It "
+            "logs one warning naming them. The table's description names them too. For a "
+            "watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.\n"
+            "- An exchange you name follows [`refused_venues`](#refused_venues).\n"
+            "- If Massive refuses every exchange, the read fails."
+        ),
+        "refused_venues": (
+            "What a flat-file read does when Massive refuses the files of an exchange you name "
+            "in [`venues`](#venues). It takes a `dm.OnError`. Left out, it follows "
+            "`MassiveConfig.refused_venues`, which is `RAISE` unless you set it.\n"
+            "\n"
+            "- `RAISE` fails the read with `EntitlementError`, naming the exchange.\n"
+            "- `LOG` skips each refused exchange for the whole range, logs one warning naming "
+            "them, and lists them in the table's description.\n"
+            "- `IGNORE` skips them too, logging only at DEBUG."
         ),
     }
 )

@@ -74,7 +74,12 @@ from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, failure_text
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorSource,
+    MassiveError,
+    failure_text,
+)
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._ingest.rest_requests import largest_page
 from deephaven_massive._massive import Cancel, Transport, source
@@ -186,6 +191,31 @@ class ScheduledSession:
     day: date
     opens: int
     closes: int
+
+
+def _lookup_keys(items: list[object]) -> tuple[set[str], set[str], list[object]]:
+    """Sort queued lookups into the contracts and the products whose schedules to load.
+
+    Args:
+        items: What the worker took from its queue at once, `_STOP` excepted.
+
+    Returns:
+        The contracts, the products, and every item that is not a lookup
+        `FuturesCalendar._put` queues. Such an item is a defect of the library: it is set
+        apart, never taken for a lookup, so the caller logs it and still loads the others.
+    """
+    contracts: set[str] = set()
+    products: set[str] = set()
+    strays: list[object] = []
+    for entry in items:
+        match entry:
+            case ("contracts", frozenset() as keys):
+                contracts.update(keys)
+            case ("schedules", frozenset() as keys):
+                products.update(keys)
+            case _:
+                strays.append(entry)
+    return contracts, products, strays
 
 
 class FuturesCalendar:
@@ -572,10 +602,15 @@ class FuturesCalendar:
                     break
             if any(entry is _STOP for entry in items):
                 return
-            contracts: set[str] = set()
-            products: set[str] = set()
-            for kind, keys in (entry for entry in items if isinstance(entry, tuple)):
-                (contracts if kind == "contracts" else products).update(keys)
+            contracts, products, strays = _lookup_keys(items)
+            for stray in strays:
+                logger.error(
+                    "%s: futures schedules: the lookup queue holds %r, which is no lookup; the "
+                    "worker skips it and loads the others. %s",
+                    self._label,
+                    stray,
+                    LIBRARY_BUG,
+                )
             try:
                 if contracts:
                     products |= self._load_contracts(contracts)
@@ -618,7 +653,7 @@ class FuturesCalendar:
                         if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
                             found[ticker] = found[ticker] or product
         except MassiveError as error:
-            self._failure(contracts, f"looking up its product failed: {error}", cause=error.cause)
+            self._failure(contracts, f"looking up its product failed: {error}", error)
             with self._lock:
                 unknown = {c: None for c in contracts if c not in self._products}
                 self._products = MappingProxyType({**self._products, **unknown})
@@ -647,7 +682,7 @@ class FuturesCalendar:
             with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
                 rows = self._fetch(self._schedules_path, query, bucket=_BUCKET, cancel=lane)
         except MassiveError as error:
-            self._failure(products, f"loading its schedule failed: {error}", cause=error.cause)
+            self._failure(products, f"loading its schedule failed: {error}", error)
             return
         events: dict[str, dict[date, list[int]]] = {product: {} for product in products}
         for row in rows:
@@ -674,9 +709,7 @@ class FuturesCalendar:
                 self._loaded[product] = self._asked[product] = now
                 self._failed.pop(product, None)
 
-    def _failure(
-        self, keys: set[str], why: str, *, cause: ErrorCause = ErrorCause.EXPECTED
-    ) -> None:
+    def _failure(self, keys: set[str], why: str, error: MassiveError | None = None) -> None:
         """Record that loading some contracts or products failed, and log it once.
 
         Their rows are misses, with a null `Date`; they are asked for again after
@@ -688,7 +721,8 @@ class FuturesCalendar:
         Args:
             keys: The contracts or products.
             why: The failure, for the log and the misses.
-            cause: Whose problem the failure is; expected by default.
+            error: The `MassiveError` that failed the lookup, whose `is_bug` sets the level; None
+                for any other failure, which the caller has logged with its trace.
         """
         with self._lock:
             closed = self._closed
@@ -696,10 +730,17 @@ class FuturesCalendar:
                 self._failed[key] = why
         if not closed:
             logger.log(
-                logging.WARNING if cause is ErrorCause.EXPECTED else logging.ERROR,
+                logging.ERROR if error is not None and error.is_bug else logging.WARNING,
                 "%s: futures schedules: %s",
                 self._label,
-                failure_text(MassiveError(f"{why} ({', '.join(sorted(keys))})", cause=cause)),
+                failure_text(
+                    MassiveError(
+                        f"{why} ({', '.join(sorted(keys))})",
+                        source=ErrorSource.MASSIVE if error is None else error.source,
+                        is_bug=error is not None and error.is_bug,
+                    )
+                ),
+                exc_info=error if error is not None and error.is_bug else None,
             )
 
 

@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import pytest
 from deephaven.table import Table
@@ -19,10 +19,10 @@ from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import indicators
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _indicators as indicators
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 OWNER = "namespaces/indicators"
@@ -33,7 +33,7 @@ WINDOWED = [("sma", indicators.SMA), ("ema", indicators.EMA), ("rsi", indicators
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.indicators
-    assert type(namespace) is indicators._Indicators
+    assert type(namespace) is indicators.IndicatorsNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -76,7 +76,7 @@ def test_a_windowed_indicator_builds_its_query(
 ) -> None:
     factory = getattr(massive_session.indicators, name)
     query = factory(["X:BTCUSD", "AAPL"], 20)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is spec
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
@@ -118,7 +118,7 @@ def test_a_windowed_indicator_builds_its_query(
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_summary_opens_the_docstring(name: str) -> None:
-    doc = getattr(indicators._Indicators, name).__doc__
+    doc = getattr(indicators.IndicatorsNamespace, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"indicators.{name}"].summary
 
 
@@ -148,7 +148,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
     with pytest.raises(ValueError, match="window must be positive"):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        i.rsi("AAPL", 14, adjusted=cast("bool", 1))
+        i.rsi("AAPL", 14, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="the library sets expand_underlying itself"):
         i.sma("AAPL", 20, filters={"expand_underlying": True})
     with pytest.raises(ValueError, match=r"^adjusted is set through its own argument, adjusted="):
@@ -168,18 +168,18 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
     with pytest.raises(
         TypeError, match=rf"^window must be an int, not Timespan\.MINUTE: {keyword}"
     ):
-        i.sma("AAPL", cast("int", dm.Timespan.MINUTE))
+        i.sma("AAPL", dm.Timespan.MINUTE)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=rf"^window must be an int, not 'hour': {keyword}"):
-        i.rsi("AAPL", cast("int", "hour"))
+        i.rsi("AAPL", "hour")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^short_window must be an int, not Timespan\.DAY: "):
-        i.macd("AAPL", short_window=cast("int", dm.Timespan.DAY))
+        i.macd("AAPL", short_window=dm.Timespan.DAY)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^window must be an int, not float$"):
-        i.ema("AAPL", cast("int", 2.5))
+        i.ema("AAPL", 2.5)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
-    factories: list[Callable[..., Query]] = [
+    factories: list[Callable[..., FetchQuery]] = [
         lambda **kw: i.sma("AAPL", 20, **kw),
         lambda **kw: i.ema("AAPL", 20, **kw),
         lambda **kw: i.rsi("AAPL", 14, **kw),
@@ -213,7 +213,7 @@ def test_the_vendor_samples_decode_without_drift(
     # The rows are `results.values`; `results.underlying` holds the bars and is not decoded.
     name, kind = fixture.split("_")
     payload = json.loads(load_fixture(OWNER, f"{fixture}.json"))
-    rest_path = cast("RestPath", source(R, f"/v1/indicators/{name}/{{{kind}Ticker}}"))
+    rest_path = CATALOG.rest_path(f"/v1/indicators/{name}/{{{kind}Ticker}}")
     spec = CATALOG.by_name[f"indicators.{name}"]
     required = [f.column for f in required_fields(spec, rest_path)]
     assert required == ["Timestamp"]
@@ -257,7 +257,7 @@ def test_each_symbol_class_is_served_by_its_own_path(
         order=dm.Order.ASC,
         limit=10,
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     shared = {
         "timespan": ["hour"],
         "window": ["50"],
@@ -299,7 +299,7 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
 
     fake_rest.reply("/v1/indicators/sma/AAPL", values(datetime(2025, 1, 1, 5, tzinfo=UTC)))
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", values(datetime(2025, 1, 2, tzinfo=UTC)))
-    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch())
+    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch(wait=True))
     windows = {r["Symbol"]: (r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out}
     new_york = timedelta(hours=5)  # UTC-5 in January
     assert windows == {
@@ -338,7 +338,7 @@ def test_a_range_of_dates_follows_each_symbols_class_days(
     query = rest_session.indicators.sma(
         ["AAPL", "X:BTCUSD"], 20, start=date(2025, 1, 2), end=date(2025, 1, 3)
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     assert sorted((r["Symbol"], r["Date"]) for r in out) == [
         ("AAPL", "2025-01-02"),
         ("X:BTCUSD", "2025-01-02"),
@@ -394,7 +394,7 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warn
     stamp = int(moment.timestamp() * 1000)
     reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
     fake_rest.reply("/v1/indicators/sma/AAPL", reply)
-    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch())
+    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Value"]) for r in out] == [
         (*window, 1.0)
     ]
@@ -413,11 +413,11 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
-    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
+    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch(wait=True)
     assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
     # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
     with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch()
+        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch(wait=True)
 
 
 _SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")
@@ -428,10 +428,11 @@ wire."""
 @pytest.mark.parametrize("name", NAMES)
 def test_every_signature_default_is_the_default_massive_documents(name: str) -> None:
     spec = CATALOG.by_name[f"indicators.{name}"]
-    path = source(R, cast("str", spec.fetch_path))
+    assert spec.fetch_path is not None
+    path = source(R, spec.fetch_path)
     assert isinstance(path, RestPath)
     documented = {p.name: p.default for p in path.params}
-    signature = inspect.signature(getattr(indicators._Indicators, name)).parameters
+    signature = inspect.signature(getattr(indicators.IndicatorsNamespace, name)).parameters
     compared = [
         n for n in (*_SIGNATURE_PARAMS, "timespan", "series_type", "adjusted") if n in signature
     ]
@@ -454,7 +455,7 @@ def test_macd_returns_its_three_lines(
     query = rest_session.indicators.macd(
         "X:BTCUSD", short_window=12, long_window=26, signal_window=9
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     params = dict(fake_rest.get_queries())["/v1/indicators/macd/X:BTCUSD"]
     assert (params["short_window"], params["long_window"], params["signal_window"]) == (
         ["12"],
@@ -476,7 +477,7 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
     fake_rest.reply("/v1/indicators/sma/C%3AEURUSD", empty)
     day = date(2025, 1, 2)
     symbols = ["AAPL", "X:BTCUSD", "C:EURUSD"]
-    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch()
+    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch(wait=True)
     requests = dict(fake_rest.get_queries())
     # A crypto or forex day is a UTC day; a stock day is a New York day (UTC-5 in January).
     # Forex takes the stock template, so its zone comes from the symbol, not the path.

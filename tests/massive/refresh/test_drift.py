@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[3]
 REST = "https://massive.com/docs/rest/"
 WS = "https://massive.com/docs/websocket/"
 FLAT = "https://massive.com/docs/flat-files/"
-COMMAND = "uv run python -m deephaven_massive._massive.refresh"
+COMMAND = "uv run python scripts/refresh.py"
 NO_HAND = HandInput(
     lexicons={},
     shapes={},
@@ -58,6 +58,8 @@ NO_HAND = HandInput(
     kinds={},
     sample_errors=(),
     projections={},
+    spellings={},
+    shared_descriptions={},
     transport_only={},
     venues={},
     undeclared_fields={},
@@ -831,7 +833,7 @@ def test_the_report_lists_each_section_found_with_its_action() -> None:
         "## Deprecations (1)\n\n"
         "Action: replace the dataset's path, or add it to `EXCLUSIONS` with its reason.\n\n"
         "- REST `/v1/old`: deprecated\n\n"
-        f"Reproduce this report with `{COMMAND} --check` in a source checkout.\n"
+        f"Reproduce this report with `{COMMAND} --check --report drift.md` in a source checkout.\n"
     )
     changes = (Drift(section=Section.CHANGES, area="REST", item="/v1/x", detail="new"),)
     text = Report(items=changes, fetched=FETCHED, bucket_listed=False).text()

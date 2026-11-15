@@ -103,7 +103,7 @@ def test_futures_files_hold_only_the_session_of_their_key(
     try:
         bars = live_session.futures.bars(
             dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
-        ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES)
+        ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True)
         evidence(f"library CME session bars of {recent_monday}: {len(table_rows(bars))} rows")
     except dm.EntitlementError:
         raise
@@ -237,7 +237,7 @@ def test_auto_minute_bars_through_today_match_rest(
     query = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE, adjusted=False)
     read: dict[str, list[tuple[str, int]]] = {}
     for chosen in (dm.HistorySource.AUTO, dm.HistorySource.REST):
-        table = query.history(previous_trading_day, today, source=chosen)
+        table = query.history(previous_trading_day, today, source=chosen, wait=True)
         rows = table_rows(table.view(["Date", "TimestampStart"]))
         read[chosen.value] = sorted(
             (str(r["Date"]), int(r["TimestampStart"]))

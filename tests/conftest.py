@@ -1,9 +1,9 @@
 """Test-suite configuration: the embedded Deephaven JVM and the shared fixtures.
 
-The embedded server starts in `pytest_configure`, before collection, so test modules can import
-`deephaven` at module level, exactly as the library does. This module itself is imported
-before `pytest_configure` runs, so it reaches `deephaven` only through `importlib` inside
-fixtures, never through a module-level import.
+The embedded server is started by the `-p` plugin `tests/embedded_server.py`, which pytest
+imports before this module, so this module and every test module can import `deephaven` and the
+library at module level, exactly as users do; `pytest_configure` checks the server before
+collection.
 
 Test modules never import from this file; they request its fixtures by name. Fakes from
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
@@ -34,7 +34,9 @@ import gc
 import gzip
 import importlib
 import inspect
+import itertools
 import os
+import queue
 import re
 import sys
 import threading
@@ -45,14 +47,25 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Final, TypeAlias
 from zoneinfo import ZoneInfo
 
+import deephaven
 import pyarrow as pa
 import pytest
-from deephaven_server import Server
+from _pytest import logging as pytest_logging
+from deephaven import arrow as dh_arrow
+from deephaven import column as dh_column
+from deephaven import execution_context as dh_execution_context
+from deephaven import jcompat, liveness_scope, table_factory, table_listener
+from deephaven import table as dh_table
+from deephaven import update_graph as dh_update_graph
+from deephaven.stream.table_publisher import table_publisher
 
+import deephaven_massive as dm
+from deephaven_massive import _massive, _session
 from deephaven_massive._errors import EntitlementError, MassiveError
+from deephaven_massive._ingest import rate_limits, ws_connection
 from deephaven_massive._massive import (
     FlatFileClient,
     ReadColumn,
@@ -63,6 +76,15 @@ from deephaven_massive._massive import (
     object_key,
     source,
 )
+from deephaven_massive._tables import execution_context as dm_execution_context
+from deephaven_massive._tables import live_set, publisher, stream_ids
+from deephaven_massive._tables.liveness import new_scope
+from tests._fakes.clock import FakeClock
+from tests._fakes.rest import FakeRestServer
+from tests._fakes.s3 import FakeS3
+from tests._fakes.stream import FakeStreamTransport
+from tests._fakes.ws import FakeMassiveServer, TradeFeed
+from tests._fakes.ws_session import WsSession
 from tests._live import (
     calendar,
     classes,
@@ -78,7 +100,8 @@ from tests._live import (
     ticker_lists,
     week_windows,
 )
-from tests._live.live_run import stream_units
+from tests._live.live_run import stream_units, upgrade_check
+from tests.embedded_server import CYCLE_MILLIS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
@@ -90,90 +113,37 @@ if TYPE_CHECKING:
     from deephaven_massive import MassiveConfig, MassiveSession
     from deephaven_massive._enums import Subscription
     from deephaven_massive._ingest.rate_limits import GovernorRegistry
-    from tests._fakes.clock import FakeClock
-    from tests._fakes.rest import FakeRestServer
-    from tests._fakes.s3 import FakeS3
-    from tests._fakes.stream import FakeStreamTransport
-    from tests._fakes.ws import FakeMassiveServer, TradeFeed
-    from tests._fakes.ws_session import WsSession
+
+# jpy, the Python-Java bridge Deephaven runs on, ships no type information, so it is loaded
+# by name, as the library loads it.
+jpy = importlib.import_module("jpy")
 
 _DATA_DIR = Path(__file__).parent / "data"
 
-_CYCLE_MILLIS = 25
-"""The update-graph cycle of the test JVM, in milliseconds (Deephaven's default is 1000)."""
 
-_JVM_ARGS = [
-    "-Xmx2g",
-    # A short update-graph cycle keeps ticking-table tests fast. pytest_configure checks that
-    # the JVM applied it: an unknown property is silently ignored.
-    f"-DPeriodicUpdateGraph.targetCycleDurationMillis={_CYCLE_MILLIS}",
-    # A JVM crash writes its hs_err log to the repository root, where CI collects it, instead
-    # of the working directory or, if that is not writable, the temporary directory.
-    f"-XX:ErrorFile={Path(__file__).resolve().parent.parent}/hs_err_pid%p.log",
-]
-
-
-def _is_xdist_controller(config: pytest.Config) -> bool:
-    """Tell whether this process hands tests to pytest-xdist workers instead of running them.
-
-    The first part is xdist's own condition for starting its distributed session: a
-    distribution mode other than `no` and at least one worker (`-n 0` leaves none), in a run
-    that is more than `--collect-only`, under which xdist stays out entirely. Under `--fixtures`
-    and `--fixtures-per-test` xdist does start its workers, but pytest lists the fixtures by
-    collecting the tests in the main process itself, which imports the test modules and so
-    needs a JVM; such a run counts as no controller here. Workers carry `workerinput`.
-
-    Args:
-        config: The pytest configuration.
-
-    Returns:
-        True only in the xdist controller of a distributed run.
-    """
-    option = config.option
-    return (
-        getattr(option, "dist", "no") != "no"
-        and bool(getattr(option, "tx", None))
-        and not option.collectonly
-        and not option.showfixtures
-        and not option.show_fixtures_per_test
-        and not hasattr(config, "workerinput")
-    )
-
-
-# `trylast` matters: pytest's faulthandler plugin installs its SIGSEGV handler in its own
-# `pytest_configure`. The JVM must install its signal handlers after that, chaining to the
-# faulthandler, because the JVM raises SIGSEGV on purpose (implicit null checks, safepoints).
-# Started first, the JVM's handlers would be replaced and the first such signal would kill
-# the process.
-@pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
-    """Start the embedded Deephaven server once per process, before collection.
+    """Check the embedded Deephaven server before collection, and set up the run's records.
 
-    Then check that the update graph runs the 25 ms cycle the tests are written for. Under
-    pytest-xdist (`-n`), only the worker processes start a server.
+    The `-p` plugin `tests/embedded_server.py` has already started the server, in every
+    process of the run. This registers `tests/_live/parallel.py` as a plugin, whose hook
+    refuses a parallel run that selects a live test, then checks that the update graph runs
+    the cycle the tests are written for, then records Deephaven's fatal errors
+    (`_record_jvm_fatal_errors`) and the library's liveness-scope releases made without the
+    update graph's lock (`_record_unlocked_library_releases`).
 
     Args:
-        config: The pytest configuration, read to tell an xdist controller from a worker.
+        config: The pytest configuration, whose plugin manager takes the refusal's plugin.
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
-    # The xdist controller only hands tests to its workers and reports their results; it never
-    # imports a test module or runs a test. Each worker is its own process that runs this hook
-    # and starts its own JVM, so a JVM in the controller would cost only startup time and
-    # memory.
-    if _is_xdist_controller(config):
-        return
-    # Port 0 asks the OS for an ephemeral port, so two test runs can share a machine.
-    Server(port=0, jvm_args=_JVM_ARGS).start()
+    config.pluginmanager.register(parallel, parallel.PLUGIN_NAME)
     atexit.register(_final_jvm_exit)
-    jpy = importlib.import_module("jpy")
-    execution_context = importlib.import_module("deephaven.execution_context")
     periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
-    j_update_graph = execution_context.get_exec_ctx().update_graph.j_update_graph
+    j_update_graph = dh_execution_context.get_exec_ctx().update_graph.j_update_graph
     cycle = int(jpy.cast(j_update_graph, periodic).getTargetCycleDurationMillis())
-    if cycle != _CYCLE_MILLIS:
-        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {_CYCLE_MILLIS} ms")
+    if cycle != CYCLE_MILLIS:
+        raise pytest.UsageError(f"update-graph cycle is {cycle} ms, expected {CYCLE_MILLIS} ms")
     _record_jvm_fatal_errors()
     _record_unlocked_library_releases()
 
@@ -198,24 +168,23 @@ def _record_unlocked_library_releases() -> None:
     fakes release their own scopes as they like. The suite runs every branch of the library,
     so a clean run shows that every release site holds the lock.
     """
-    liveness_scope = importlib.import_module("deephaven.liveness_scope")
-    locks = importlib.import_module("deephaven.update_graph")
-    execution_context = importlib.import_module("deephaven.execution_context")
-    update_graph = execution_context.get_exec_ctx().update_graph
-    package = importlib.import_module("deephaven_massive")
-    library = f"{Path(cast('str', package.__file__)).parent}{os.sep}"
+    update_graph = dh_execution_context.get_exec_ctx().update_graph
+    library = f"{Path(dm.__file__).parent}{os.sep}"
     real = liveness_scope.LivenessScope.release
 
-    def release(scope: object) -> None:
-        caller = cast("types.FrameType", cast("types.FrameType", inspect.currentframe()).f_back)
-        locked = locks.has_shared_lock(update_graph) or locks.has_exclusive_lock(update_graph)
+    def release(scope: liveness_scope.LivenessScope) -> None:
+        caller = sys._getframe(1)
+        locked = dh_update_graph.has_shared_lock(
+            update_graph
+        ) or dh_update_graph.has_exclusive_lock(update_graph)
         if caller.f_code.co_filename.startswith(library) and not locked:
             where = f"{caller.f_code.co_filename}:{caller.f_lineno} ({caller.f_code.co_name})"
             with _UNLOCKED_RELEASES_LOCK:
                 _UNLOCKED_RELEASES.append(f"{where} on {threading.current_thread().name}")
         real(scope)
 
-    liveness_scope.LivenessScope.release = release
+    # Wraps the method for the whole run, so it is never undone.
+    pytest.MonkeyPatch().setattr(liveness_scope.LivenessScope, "release", release)
 
 
 def _take_unlocked_releases() -> list[str]:
@@ -255,8 +224,6 @@ def _record_jvm_fatal_errors() -> None:
     runs before the handler exits the process, so it never raises: whatever goes wrong while it
     writes is dropped, and the exit still happens.
     """
-    jpy = importlib.import_module("jpy")
-    jcompat = importlib.import_module("deephaven.jcompat")
     traces = jpy.get_type("org.apache.commons.lang3.exception.ExceptionUtils")
     path = Path(__file__).resolve().parent.parent / f"jvm_fatal_pid{os.getpid()}.log"
 
@@ -286,28 +253,6 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view) :]
 
 
-@pytest.hookimpl(optionalhook=True)
-def pytest_xdist_node_collection_finished(ids: Sequence[str]) -> None:
-    """End a parallel run that selected a live test, before any test starts.
-
-    pytest-xdist calls this in its controller each time a worker has collected, with the ids
-    of the tests that worker selected after `-m`, `-k`, and every other deselection. Each
-    worker's report is checked as it arrives, and the controller hands out no test until every
-    worker has reported, so a refusal always comes before any test is scheduled. The decision
-    rests on the selection, not on the `-m` expression, so no expression can slip a live test
-    past it. Without pytest-xdist, or with `-n 0`, the hook is never called.
-
-    A refused run ends through `pytest.exit` with pytest's usage-error status, 4, and a message
-    naming how many live tests the worker selected and the first of them.
-
-    Args:
-        ids: The ids of the tests the worker selected.
-    """
-    message = parallel.refusal(ids)
-    if message is not None:
-        pytest.exit(message, returncode=pytest.ExitCode.USAGE_ERROR)
-
-
 # --- JVM shutdown workaround -------------------------------------------------------------------
 # Leaving the process normally after the embedded JVM has run is not safe, for two reasons:
 #
@@ -332,12 +277,30 @@ _SESSIONS: list[pytest.Session] = []
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Remember the session so the exit handler can read its final exit status.
+    """Remember the session so the exit handler can read its final exit status, and warm up.
+
+    A process that runs tests also compiles its first formula here (`_warm_formula_compiler`);
+    the pytest-xdist controller runs none, so it skips that.
 
     Args:
         session: The pytest session that is starting.
     """
     _SESSIONS.append(session)
+    # pytest-xdist names each worker in this variable; a run with `-n` 1 or more has a `dist`.
+    worker = "PYTEST_XDIST_WORKER" in os.environ
+    if worker or session.config.getoption("dist", "no") == "no":
+        _warm_formula_compiler()
+
+
+def _warm_formula_compiler() -> None:
+    """Compile one formula, so no test pays for the process's first compile.
+
+    Deephaven compiles each new formula with the JDK's compiler, and a process's first compile
+    also loads and warms the compiler itself: several times as long as a later compile, and
+    over 10 seconds on a loaded machine. Paid before the first test, it falls outside every
+    test's time limit instead of inside the limit of whichever test happens to run first.
+    """
+    table_factory.empty_table(1).update("Warm = i")
 
 
 @pytest.hookimpl(wrapper=True, trylast=True)
@@ -391,8 +354,7 @@ def dh_exec_ctx() -> ExecutionContext:
     Returns:
         The execution context of the main thread's script session.
     """
-    execution_context = importlib.import_module("deephaven.execution_context")
-    ctx: ExecutionContext = execution_context.get_exec_ctx()
+    ctx: ExecutionContext = dh_execution_context.get_exec_ctx()
     return ctx
 
 
@@ -407,13 +369,11 @@ def blink_creations(dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPat
     Returns:
         The list, in creation order; empty until a table is created.
     """
-    publisher = importlib.import_module("deephaven_massive._tables.publisher")
-    update_graph = importlib.import_module("deephaven.update_graph")
-    real = publisher.table_publisher
+    real: Callable[..., object] = table_publisher
     locked: list[bool] = []
 
     def recording(*args: object, **kwargs: object) -> object:
-        locked.append(update_graph.has_shared_lock(dh_exec_ctx.update_graph))
+        locked.append(dh_update_graph.has_shared_lock(dh_exec_ctx.update_graph))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(publisher, "table_publisher", recording)
@@ -432,10 +392,9 @@ def next_update_cycle(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
     Returns:
         The function.
     """
-    execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
 
     def run() -> None:
-        if not execution_context.wait_for_update_cycle(dh_exec_ctx, 30.0):
+        if not dm_execution_context.wait_for_update_cycle(dh_exec_ctx, 30.0):
             pytest.fail("no update cycle ran within 30 s")
 
     return run
@@ -454,11 +413,9 @@ def dh_to_pylist() -> Callable[[Table], list[dict[str, Any]]]:
     Returns:
         A function mapping a table to one `{column: value}` dictionary per row.
     """
-    dh_arrow = importlib.import_module("deephaven.arrow")
-    update_graph = importlib.import_module("deephaven.update_graph")
 
     def to_pylist(table: Table) -> list[dict[str, Any]]:
-        with update_graph.shared_lock(table):
+        with dh_update_graph.shared_lock(table):
             rows: list[dict[str, Any]] = dh_arrow.to_arrow(table).to_pylist()
         return rows
 
@@ -483,13 +440,11 @@ def dh_input_table(dh_exec_ctx: ExecutionContext) -> Callable[..., InputTable]:
         A function that takes `input_table`'s arguments (`col_defs`, and `key_cols` for a
         keyed table) and returns the new table.
     """
-    deephaven = importlib.import_module("deephaven")
-    update_graph = importlib.import_module("deephaven.update_graph")
 
     def create(
         col_defs: Mapping[str, Any], *, key_cols: str | list[str] | None = None
     ) -> InputTable:
-        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
             table: InputTable = deephaven.input_table(dict(col_defs), key_cols=key_cols)
         return table
 
@@ -497,7 +452,37 @@ def dh_input_table(dh_exec_ctx: ExecutionContext) -> Callable[..., InputTable]:
 
 
 _CONSOLE_COMMAND_TIMEOUT: Final = 30.0
-"""Seconds `console_command` lets one command run before it fails the test as a deadlock."""
+"""Seconds `console_command` lets one command go without running before it is a deadlock."""
+
+_CONSOLE_COMMAND_RUNNING_SHARE: Final = 0.01
+"""Least share of a `console_command` window a command's thread must run on the CPU to be alive.
+
+A deadlocked thread waits and runs for almost no time: a wait in short chunks wakes a few
+times a second for microseconds each. A thread doing work runs far more, even on a machine
+so loaded that its first formula compile takes a minute: there it ran for about 5% of the wall
+time. One percent keeps a wide margin on both sides.
+"""
+
+
+def _thread_cpu_seconds(java_thread_id: int | None) -> float | None:
+    """Return how long, in seconds of CPU time, a JVM thread has run.
+
+    Args:
+        java_thread_id: The thread's `java.lang.Thread` id, or None before the thread has
+            published it.
+
+    Returns:
+        Its CPU time, or None once the JVM no longer has the thread, which has then ended.
+        0.0 before the id is known, and on a JVM that does not measure thread CPU time, where
+        a slow command then counts as stuck after one window.
+    """
+    if java_thread_id is None:
+        return 0.0
+    beans = jpy.get_type("java.lang.management.ManagementFactory").getThreadMXBean()
+    if not (beans.isThreadCpuTimeSupported() and beans.isThreadCpuTimeEnabled()):
+        return 0.0
+    nanos = int(beans.getThreadCpuTime(java_thread_id))
+    return None if nanos < 0 else nanos / 1e9
 
 
 @pytest.fixture
@@ -513,24 +498,32 @@ def console_command(
     Java exclusive lock itself, as the console does.
 
     A command that raises fails the test: pytest reports the thread's exception with its
-    traceback. A command that has not returned after 30 seconds is a deadlock: its thread still
-    holds the lock, so no update cycle can run again in this process and every later test would
-    hang too. The function then fails the test, naming the deadlock, and stops the run after it
-    (`session.shouldstop`, which pytest-xdist passes on to the whole run); the thread is a
-    daemon, so it cannot keep the process alive.
+    traceback. A command whose thread spends 30 seconds waiting, running on the CPU for under
+    1% of them, is a deadlock: its thread still holds the lock, so no update cycle can run
+    again in this process and every later test would hang too. The function then fails the
+    test, naming the deadlock, and stops the run after it (`session.shouldstop`, which
+    pytest-xdist passes on to the whole run); the thread is a daemon, so it cannot keep the
+    process alive. A command still running after 30 seconds is slow, not stuck: on a loaded
+    machine a first formula compile can take a minute, so the function waits another 30
+    seconds and looks again. The test's own time limit bounds the whole; when it interrupts
+    the wait with the command still running, the function stops the run too, since the
+    command still holds the lock.
 
     Returns:
         The function; it takes the command and returns once the command has returned. Its
         keyword `timeout` replaces the 30 seconds for a command that may wait longer by
         design, such as a live read paced at Basic's 5 requests a minute.
     """
-    execution_context = importlib.import_module("deephaven_massive._tables.execution_context")
+    java_thread = jpy.get_type("java.lang.Thread")
 
     def run(command: Callable[[], None], *, timeout: float = _CONSOLE_COMMAND_TIMEOUT) -> None:
         returned = threading.Event()
+        # The command's thread puts its Java thread id here once, for the CPU time checks.
+        published: queue.SimpleQueue[int] = queue.SimpleQueue()
 
         def body() -> None:
-            with execution_context.entered(dh_exec_ctx):
+            with dm_execution_context.entered(dh_exec_ctx):
+                published.put(int(java_thread.currentThread().getId()))
                 lock = dh_exec_ctx.update_graph.j_update_graph.exclusiveLock()
                 lock.lock()
                 try:
@@ -541,15 +534,35 @@ def console_command(
 
         thread = threading.Thread(target=body, name="console command", daemon=True)
         thread.start()
-        thread.join(timeout)
-        if thread.is_alive():
-            deadlock = (
-                f"a console command deadlocked: it did not return within "
-                f"{timeout:.0f} s, waiting for something that needs the update "
-                "graph's lock, which it holds; no update cycle can run in this process again"
-            )
-            request.session.shouldstop = deadlock
-            pytest.fail(deadlock)
+        java_thread_id: int | None = None
+        ran = 0.0
+        deadlock: str | None = None
+        try:
+            while True:
+                thread.join(timeout)
+                if not thread.is_alive():
+                    break
+                if java_thread_id is None and not published.empty():
+                    java_thread_id = published.get()
+                total = _thread_cpu_seconds(java_thread_id)
+                if total is None:
+                    continue  # its Java thread has ended, so the next join returns at once
+                window, ran = total - ran, total
+                if window < timeout * _CONSOLE_COMMAND_RUNNING_SHARE:
+                    deadlock = (
+                        f"a console command deadlocked: in {timeout:.0f} s its thread ran on "
+                        f"the CPU for {window:.3f} s and otherwise waited, for something that "
+                        "needs the update graph's lock, which it holds; no update cycle can run "
+                        "in this process again"
+                    )
+                    pytest.fail(deadlock)
+        finally:
+            if thread.is_alive():
+                request.session.shouldstop = deadlock or (
+                    "a console command was interrupted while it still runs and holds the "
+                    "update graph's lock; no update cycle can run in this process until it "
+                    "returns"
+                )
         if not returned.is_set():
             pytest.fail("the console command raised; its traceback is reported with this test")
 
@@ -568,18 +581,15 @@ def string_objects() -> Callable[[Table, str], int]:
     Returns:
         A function of a table and a column name, counting the objects among non-null values.
     """
-    liveness = importlib.import_module("deephaven.liveness_scope")
-    jpy = importlib.import_module("jpy")
-    update_graph = importlib.import_module("deephaven.update_graph")
     java_table = jpy.get_type("io.deephaven.engine.table.Table")
 
     def count(table: Table, column: str) -> int:
         # The derived tables live in a scope of their own, released at once: a refreshing table
         # derived from a live result would keep its stream or poll running.
-        scope = liveness.LivenessScope()
+        scope = new_scope()
         try:
             # Java calls: the Python wrappers would copy this frame's locals.
-            with scope.open(), update_graph.shared_lock(table):
+            with scope.open(), dh_update_graph.shared_lock(table):
                 refs = table.j_table.update(f"Ref = java.lang.System.identityHashCode({column})")
                 distinct = refs.where(f"!isNull({column})").selectDistinct("Ref")
                 return int(jpy.cast(distinct, java_table).size())
@@ -625,8 +635,6 @@ def failures_heard() -> Iterator[Callable[[Table], Callable[[], int]]]:
     Returns:
         A function mapping a table to the reader of its count.
     """
-    table_listener = importlib.import_module("deephaven.table_listener")
-    dh_table = importlib.import_module("deephaven.table")
     handles = []
 
     def watch(table: Table) -> Callable[[], int]:
@@ -669,19 +677,13 @@ def user_tables(
         A function of the result, its symbol column, and an ordering column of `double`
         or `Instant` values, returning the four tables in the order above.
     """
-    dh_table = importlib.import_module("deephaven.table")
-    column = importlib.import_module("deephaven.column")
-    factory = importlib.import_module("deephaven.table_factory")
-    liveness = importlib.import_module("deephaven.liveness_scope")
-    update_graph = importlib.import_module("deephaven.update_graph")
-    jpy = importlib.import_module("jpy")
     table_tools = jpy.get_type("io.deephaven.engine.util.TableTools")
-    scope = liveness.LivenessScope()
+    scope = new_scope()
 
     def derive(result: Table, symbol: str, ordered: str) -> list[Table]:
-        with scope.open(), update_graph.shared_lock(dh_exec_ctx.update_graph):
-            marks = factory.new_table(
-                [column.string_col(symbol, ["AAPL"]), column.string_col("Mark", ["m"])]
+        with scope.open(), dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
+            marks = table_factory.new_table(
+                [dh_column.string_col(symbol, ["AAPL"]), dh_column.string_col("Mark", ["m"])]
             ).j_table
             kind = result.j_table.getDefinition().getColumn(ordered).getDataType().getName()
             lowest = {"java.time.Instant": "'2020-01-01T00:00:00 ET'", "double": "0.0"}[kind]
@@ -696,7 +698,7 @@ def user_tables(
             return [dh_table.Table(j_table=t) for t in tables]
 
     yield derive
-    with update_graph.shared_lock(dh_exec_ctx.update_graph):
+    with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
         scope.release()
 
 
@@ -754,7 +756,6 @@ def cycles_ended(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
     Returns:
         The function.
     """
-    update_graph = importlib.import_module("deephaven.update_graph")
 
     def wait() -> None:
         clock = dh_exec_ctx.update_graph.j_update_graph.clock()
@@ -764,7 +765,7 @@ def cycles_ended(dh_exec_ctx: ExecutionContext) -> Callable[[], None]:
         while clock.currentStep() < target:
             assert time.monotonic() < deadline, "the update graph ran no cycle in 30 s"
             pause.wait(0.005)
-        with update_graph.shared_lock(dh_exec_ctx.update_graph):
+        with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
             pass
 
     return wait
@@ -846,8 +847,7 @@ def fake_ws_server() -> Iterator[FakeMassiveServer]:
     Yields:
         The running server; its `url()` is the endpoint to connect to.
     """
-    ws = importlib.import_module("tests._fakes.ws")
-    server: FakeMassiveServer = ws.FakeMassiveServer()
+    server: FakeMassiveServer = FakeMassiveServer()
     yield server
     server.stop()
 
@@ -859,8 +859,7 @@ def fake_rest() -> Iterator[FakeRestServer]:
     Yields:
         The server; script it with `reply` and read `requests` afterwards.
     """
-    rest = importlib.import_module("tests._fakes.rest")
-    server: FakeRestServer = rest.FakeRestServer()
+    server: FakeRestServer = FakeRestServer()
     server.start()
     yield server
     server.close()
@@ -877,7 +876,6 @@ def rest_session(fake_rest: FakeRestServer) -> Iterator[MassiveSession]:
         An open session with a test key, closed at teardown; read what it sent with
         `fake_rest.get_queries()`.
     """
-    dm = importlib.import_module("deephaven_massive")
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     session: MassiveSession = dm.MassiveSession(config)
     yield session
@@ -891,7 +889,6 @@ def massive_session() -> Iterator[MassiveSession]:
     Yields:
         An open session on the embedded server's execution context.
     """
-    dm = importlib.import_module("deephaven_massive")
     session: MassiveSession = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     yield session
     session.close()
@@ -968,7 +965,6 @@ def _check_nothing_outlives_the_test(request: pytest.FixtureRequest) -> Iterator
                 # query scope through jpy, and a session, a result, or a table derived from it
                 # among them lives until the JVM collects them: that is Deephaven's, not a leak
                 # of the library.
-                jpy = importlib.import_module("jpy")
                 jpy.get_type("java.lang.System").gc()
                 jvm_collected = True
             for thread in threads:  # wait on the threads themselves, briefly each
@@ -1033,8 +1029,11 @@ def _collect_cycles(before: _Running) -> set[str]:
     """Collect garbage, and name the sessions the test started that only a cycle held.
 
     Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
-    to be inspected; then empties it, which frees it. A session in that garbage was reachable
-    only through a reference cycle, which reference counting never frees.
+    to be inspected; then empties it and collects again without the flag, which frees it.
+    Emptying the list alone frees nothing: the cycles still hold each other, so every later
+    look would find them again, and a worker's garbage, and the time to inspect it, would grow
+    with every test it runs. A session in that garbage was reachable only through a reference
+    cycle, which reference counting never frees.
 
     Args:
         before: What ran when the test started.
@@ -1042,10 +1041,9 @@ def _collect_cycles(before: _Running) -> set[str]:
     Returns:
         The labels of those sessions, except the ones only a traceback's frames held.
     """
-    session = importlib.import_module("deephaven_massive._session")
     _, alive, _, _ = _new(before)
-    with session._keys_lock:
-        cores = [ref() for ref in session._open_sessions]
+    with _session._keys_lock:
+        cores = [ref() for ref in _session._open_sessions]
     wanted = {id(core): core.label for core in cores if core is not None and core.label in alive}
     del cores
     gc.set_debug(gc.DEBUG_SAVEALL)
@@ -1060,7 +1058,10 @@ def _collect_cycles(before: _Running) -> set[str]:
     # cycle. That is how Python works, not a leak, so the references out of frames and
     # tracebacks are not followed, and only a session another cycle holds is named.
     cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
+    found = bool(garbage)
     del garbage
+    if found:
+        gc.collect()
     return {wanted[key] for key in cyclic}
 
 
@@ -1113,8 +1114,8 @@ def _held_by_cycles(garbage: list[object], *, follow: Callable[[object], bool]) 
             referents = []
         elif id(item) in owners:
             owner = owners[id(item)]
-            attributes = cast("dict[str, object]", item).items()
-            referents = [v for k, v in attributes if not _restored_method(owner, k, v)]
+            assert isinstance(item, dict)
+            referents = [v for k, v in item.items() if not _restored_method(owner, k, v)]
         else:
             referents = gc.get_referents(item)
         holds[id(item)] = [id(each) for each in referents if id(each) in ids]
@@ -1175,7 +1176,7 @@ def _drop_logged_objects(item: pytest.Item) -> None:
     Args:
         item: The test item.
     """
-    records_key = importlib.import_module("_pytest.logging").caplog_records_key
+    records_key = pytest_logging.caplog_records_key
     for records in item.stash.get(records_key, {}).values():
         for record in records:
             record.msg, record.args, record.exc_info = record.getMessage(), None, None
@@ -1188,13 +1189,10 @@ def _running() -> tuple[set[str], set[str], set[object], set[threading.Thread]]:
         The labels of the sessions in the live set, the labels of every session not yet
         freed, the connection groups, and the alive library threads (`_LIBRARY_THREADS`).
     """
-    core = importlib.import_module("deephaven_massive._tables.session_core")
-    session = importlib.import_module("deephaven_massive._session")
-    ws_connection = importlib.import_module("deephaven_massive._ingest.ws_connection")
-    with core._live_lock:
-        live: set[str] = {each.label for each in core._live.values()}
-    with session._keys_lock:
-        cores = [ref() for ref in session._open_sessions]
+    with live_set._live_lock:
+        live: set[str] = {each.label for each in live_set._live.values()}
+    with _session._keys_lock:
+        cores = [ref() for ref in _session._open_sessions]
     alive = {each.label for each in cores if each is not None}
     with ws_connection._groups_lock:
         groups: set[object] = set(ws_connection._groups.values())
@@ -1209,11 +1207,9 @@ def _fresh_stream_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Number each test's streams from 1, so tests can name them by id.
 
     Stream ids are process-unique in the library (a module-level counter in
-    `_tables/session_core.py`); each test gets a fresh counter.
+    `_tables/stream_ids.py`); each test gets a fresh counter.
     """
-    core = importlib.import_module("deephaven_massive._tables.session_core")
-    itertools = importlib.import_module("itertools")
-    monkeypatch.setattr(core, "_stream_numbers", itertools.count(1))
+    monkeypatch.setattr(stream_ids, "_stream_numbers", itertools.count(1))
 
 
 @pytest.fixture(autouse=True)
@@ -1233,16 +1229,12 @@ def rest_clock(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
     Returns:
         The clock.
     """
-    clock_module = importlib.import_module("tests._fakes.clock")
-    functools = importlib.import_module("functools")
-    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
-    wire = importlib.import_module("deephaven_massive._massive")
-    clock: FakeClock = clock_module.FakeClock()
+    clock: FakeClock = FakeClock()
     if request.node.get_closest_marker(_INTEGRATION) is not None:
         registry = _live_governors()
     else:
         create = functools.partial(
-            wire.RequestGovernor,
+            _massive.RequestGovernor,
             rate_limits.BUCKETS,
             learn_only=rate_limits.LEARN_ONLY,
             clock=clock,
@@ -1264,8 +1256,7 @@ def fake_streams(
     Returns:
         The fake, for inspecting opened streams and shutdown callbacks.
     """
-    stream = importlib.import_module("tests._fakes.stream")
-    fake: FakeStreamTransport = stream.FakeStreamTransport(massive_session._core)
+    fake: FakeStreamTransport = FakeStreamTransport(massive_session._core)
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: fake)
     return fake
 
@@ -1288,11 +1279,11 @@ def make_ws_session(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     Yields:
         The factory.
     """
-    module = importlib.import_module("tests._fakes.ws_session")
     with contextlib.ExitStack() as sessions:
 
         def make(**options: object) -> WsSession:
-            session: WsSession = module.WsSession(fake_ws_server, **options)
+            factory: Callable[..., WsSession] = WsSession
+            session = factory(fake_ws_server, **options)
             sessions.callback(_drop_session, session)  # last: after the close below
             sessions.callback(session.close)
             return session
@@ -1427,7 +1418,7 @@ class Soak:
         self._report = report
         self._notes: dict[str, object] = {}
         self._pause = threading.Event()  # never set; only paces the rounds
-        runtime = importlib.import_module("jpy").get_type("java.lang.Runtime")
+        runtime = jpy.get_type("java.lang.Runtime")
         self._runtime = runtime.getRuntime()
 
     def note(self, **figures: object) -> None:
@@ -1490,7 +1481,7 @@ class Soak:
             threads running.
         """
         gc.collect()
-        importlib.import_module("jpy").get_type("java.lang.System").gc()
+        jpy.get_type("java.lang.System").gc()
         used = self._runtime.totalMemory() - self._runtime.freeMemory()
         return used, len(gc.get_objects()), threading.active_count()
 
@@ -1505,11 +1496,11 @@ def make_trade_feed(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
     Yields:
         The factory; call `start()` on the feed it returns.
     """
-    module = importlib.import_module("tests._fakes.ws")
     feeds: list[TradeFeed] = []
 
     def make(symbols: list[str], **options: object) -> TradeFeed:
-        feed: TradeFeed = module.TradeFeed(fake_ws_server, symbols, **options)
+        factory: Callable[..., TradeFeed] = TradeFeed
+        feed = factory(fake_ws_server, symbols, **options)
         feeds.append(feed)
         return feed
 
@@ -1633,8 +1624,7 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
     Returns:
         The fake, for storing objects and inspecting requests.
     """
-    s3 = importlib.import_module("tests._fakes.s3")
-    fake: FakeS3 = s3.FakeS3()
+    fake: FakeS3 = FakeS3()
     fake.install(monkeypatch)
     return fake
 
@@ -1709,7 +1699,6 @@ def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
         The probed plans. A `PlanProbeError` of a probe that cannot tell them
         (`probe.probe_tiers`) propagates.
     """
-    dm = importlib.import_module("deephaven_massive")
     lease = _live_governors().lease(
         api_key=config.api_key,
         base_url=config.rest_base_url,
@@ -1778,7 +1767,6 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
     if declared:
         run_plans = plans.declared_plans(declared)
     else:
-        dm = importlib.import_module("deephaven_massive")
         config: MassiveConfig = dm.MassiveConfig(api_key=api_key)
         today = calendar.today()
         owner = {
@@ -1835,7 +1823,6 @@ def _live_governors() -> GovernorRegistry:
     Returns:
         The registry; its governors wait on the real clock.
     """
-    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
     with _LIVE_LOCK:
         if not _LIVE_GOVERNORS:
             _LIVE_GOVERNORS.append(rate_limits.GovernorRegistry())
@@ -1851,7 +1838,6 @@ def _basic_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
     Returns:
         Each class on Basic, as a `dm.Subscription`.
     """
-    dm = importlib.import_module("deephaven_massive")
     return frozenset(
         dm.Subscription(name) for name, tier in run_plans.tiers.items() if tier == "basic"
     )
@@ -1869,7 +1855,6 @@ def _delayed_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription
     Returns:
         Each class on a delayed plan, as a `dm.Subscription`.
     """
-    dm = importlib.import_module("deephaven_massive")
     return frozenset(
         dm.Subscription(name)
         for name, tier in run_plans.tiers.items()
@@ -2374,7 +2359,6 @@ def one_request_call(basic_class: str) -> Callable[[MassiveSession], object]:
     Returns:
         A function that makes the call in a session and returns its result.
     """
-    upgrade_check = importlib.import_module("tests._live.live_run.upgrade_check")
     call: Callable[[MassiveSession], object] = upgrade_check.CALLS[basic_class]
     return call
 
@@ -2396,7 +2380,6 @@ def own_governors(rest_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> Gov
         The registry; its governors wait on the real clock.
     """
     del rest_clock  # requested only for its order: it is set up before this fixture
-    rate_limits = importlib.import_module("deephaven_massive._ingest.rate_limits")
     registry: GovernorRegistry = rate_limits.GovernorRegistry()
     monkeypatch.setattr(rate_limits, "GOVERNORS", registry)
     return registry
@@ -2432,7 +2415,6 @@ def futures_spread_report() -> Callable[
         evidence lines (`ticker_lists.spread_report`) judged by the library's
         `canonical_symbol_future_spread`.
     """
-    dm = importlib.import_module("deephaven_massive")
     return functools.partial(ticker_lists.spread_report, spread=dm.canonical_symbol_future_spread)
 
 
@@ -2736,7 +2718,6 @@ def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
     Returns:
         The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
     """
-    dm = importlib.import_module("deephaven_massive")
     config: MassiveConfig = dm.MassiveConfig(
         api_key=_required_env("MASSIVE_API_KEY"),
         rest_basic_subscriptions=_basic_subscriptions(run_plans),
@@ -2789,7 +2770,6 @@ def live_session(live_config: MassiveConfig) -> Iterator[MassiveSession]:
     Yields:
         An open session on the embedded server's execution context.
     """
-    dm = importlib.import_module("deephaven_massive")
     session: MassiveSession = dm.MassiveSession(live_config)
     yield session
     session.close()
@@ -2843,7 +2823,6 @@ def rest_for_key(live_config: MassiveConfig) -> Iterator[Callable[[str], RestCli
     Yields:
         A function taking an API key and returning a `RestClient` with one connection.
     """
-    dm = importlib.import_module("deephaven_massive")
     opened: list[tuple[RestClient, Any]] = []
 
     def open_client(api_key: str) -> RestClient:
@@ -3108,7 +3087,6 @@ def table_rows() -> Callable[[Table], list[dict[str, Any]]]:
     Returns:
         A function mapping a table to one `{column: value}` dictionary per row.
     """
-    dh_arrow = importlib.import_module("deephaven.arrow")
 
     def read(table: Table) -> list[dict[str, Any]]:
         data = dh_arrow.to_arrow(table)
@@ -4148,7 +4126,6 @@ def special_dividends(
 
     def find(session: MassiveSession) -> list[events.Dividend]:
         if "dividends" not in _EVENTS:
-            dm = importlib.import_module("deephaven_massive")
             start, end = events.event_window(calendar.today())
             query = session.stocks.dividends(
                 start=start,
@@ -4158,7 +4135,7 @@ def special_dividends(
                 limit=50,
                 filters={"distribution_type": "special"},
             )
-            rows = table_rows(query.fetch())
+            rows = table_rows(query.fetch(wait=True))
             found = events.special_dividends(rows, _all_splits(session, table_rows))
             common = _is_common_stock(session, table_rows)
             _EVENTS["dividends"] = _common_events(
@@ -4216,14 +4193,13 @@ def _all_splits(
         The rows of `stocks.splits`, newest first, announced future ones included.
     """
     if "all splits" not in _EVENTS:
-        dm = importlib.import_module("deephaven_massive")
         query = session.stocks.splits(
             start=events.event_window(calendar.today())[0],
             sort="execution_date",
             order=dm.Order.DESC,
             limit=5_000,
         )
-        _EVENTS["all splits"] = table_rows(query.fetch())
+        _EVENTS["all splits"] = table_rows(query.fetch(wait=True))
     return list(_EVENTS["all splits"])
 
 
@@ -4240,11 +4216,10 @@ def _is_common_stock(
         A function of a ticker: True when `reference.tickers` lists it as a common stock (one
         request); an ETF, leveraged or not, a fund, or a warrant answers no row.
     """
-    dm = importlib.import_module("deephaven_massive")
 
     def check(symbol: str) -> bool:
         query = session.reference.tickers(symbol, ticker_type=dm.TickerType.CS)
-        return bool(table_rows(query.fetch()))
+        return bool(table_rows(query.fetch(wait=True)))
 
     return check
 

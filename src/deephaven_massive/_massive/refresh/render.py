@@ -68,7 +68,7 @@ DESCRIPTIONS_FILE: Final = SPEC_DIRECTORY / "descriptions.json"
 """The generated file of the vendor's field descriptions, fetch date, and source URLs."""
 
 # The command that writes the file, recorded in it.
-_GENERATED_BY: Final = "python -m deephaven_massive._massive.refresh"
+_GENERATED_BY: Final = "python scripts/refresh.py"
 
 
 def _line(value: Mapping[str, Json]) -> str:

@@ -132,7 +132,7 @@ fixes.
 ## Tutorial
 
 Paste each example into the **Console** panel of the Deephaven IDE and run it. The table gives
-each example's plan, and Examples 9 to 13 read the settings file that Example 8 saves.
+each example's plan, and Examples 8 to 12 read the settings file that Example 7 saves.
 
 | # | Example | Plan |
 |---|---|---|
@@ -141,14 +141,14 @@ each example's plan, and Examples 9 to 13 read the settings file that Example 8 
 | 3 | [Date ranges: compare three stocks' price returns over a year](#compare-stocks) | Stocks Basic |
 | 4 | [Charts: plot a stock's daily closes for a year](#chart-closes) | Stocks Basic |
 | 5 | [Live tables: poll for the latest news headlines](#follow-the-news) | Stocks Basic |
-| 6 | [Stopping live tables: stop the news feed and keep a snapshot](#stop-live-tables) | Stocks Basic |
-| 7 | [Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes](#drive-with-a-watchlist) | Stocks Basic |
-| 8 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) | Stocks Starter or higher |
-| 9 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) | Stocks Starter or higher |
-| 10 | [Live calculations: track each stock's change since the previous close](#change-since-close) | Stocks Starter or higher |
-| 11 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) | Stocks Starter or higher |
-| 12 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) | Stocks Starter or higher |
-| 13 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) | Stocks Starter or higher |
+| 6 | [Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes](#drive-with-a-watchlist) | Stocks Basic |
+| 7 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) | Stocks Starter or higher |
+| 8 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) | Stocks Starter or higher |
+| 9 | [Live calculations: track each stock's change since the previous close](#change-since-close) | Stocks Starter or higher |
+| 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) | Stocks Starter or higher |
+| 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) | Stocks Starter or higher |
+| 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) | Stocks Starter or higher |
+| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
 
 <a id="read-daily-bars"></a>
 
@@ -163,8 +163,8 @@ m = dm.MassiveSession()
 apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 ```
 
-`apple` has five rows, one per trading day, with columns such as `Date`, `Open`, `High`, `Low`,
-`Close`, and `Volume`.
+`apple` fills in with five rows, one per trading day, with columns such as `Date`, `Open`,
+`High`, `Low`, `Close`, and `Volume`.
 
 `m` is the session, your connection to Massive. Every dataset works the same way through it.
 `m.stocks.bars(...)` is a query, which names the data and reads nothing. `history()` and the
@@ -216,7 +216,7 @@ from deephaven import agg
 
 m = dm.MassiveSession()
 year = m.stocks.bars(["AAPL", "MSFT", "NVDA"], dm.Timespan.DAY).history(
-    "2025-11-03", "2026-10-30", wait=False
+    "2025-11-03", "2026-10-30"
 )
 returns = year.agg_by(
     [agg.sorted_first("Date", "Start = Close"), agg.sorted_last("Date", "End = Close")],
@@ -225,10 +225,11 @@ returns = year.agg_by(
 ```
 
 `returns` has one row per stock, with its close on the first and last day and its percent
-return. It starts empty and fills in when the download finishes.
+return.
 
-With `wait=False`, `history()` hands back `year` at once and reads its rows in the background,
-so the console stays free while Basic's request limit paces the download.
+`history()` returns `year` at once and downloads its rows in the background, so the console
+stays free. `year` and `returns` start empty, and Deephaven updates both when the rows arrive. To
+wait for the rows instead, pass `wait=True`.
 
 Dates are `yyyy-MM-dd` text in every table, so they sort by day and join across tables. A range
 includes both of its dates, and for stocks a date is the trading day in New York.
@@ -277,26 +278,8 @@ first poll after Massive lists it.
 `poll()` returns a live table. At each poll it asks Massive again, and a news table adds only
 the articles it hasn't seen. `latest` updates with it.
 
-The poll keeps running until you stop it, which the next example does.
-
-<a id="stop-live-tables"></a>
-
-### Stopping live tables: stop the news feed and keep a snapshot
-
-Stop Example 5's news poll when you're done with it, still on Stocks Basic. In the console where
-it runs, close its session and keep a copy of the headlines:
-
-```python continues
-m.close()
-kept = latest.snapshot()
-```
-
-`headlines` and `latest` stop updating and show an error saying the session was closed, and
-they keep their rows. `kept` is a static copy that you can filter and join like any table.
-
-`m.close()` stops every live table of the session, and a closed session reads nothing more. To
-stop one table and keep the session, call `m.release(table)`. The table then stops once no panel
-or other table uses it.
+The poll keeps running until you close its session with `m.close()`. The
+[last example](#stop-live-tables) shows the other ways to stop live tables.
 
 Next, a live table whose stocks you change while it runs.
 
@@ -371,8 +354,8 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 ```
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
-`TodaysChangePerc`. On Starter or Developer without the setting, the same call raises
-`dm.EntitlementError`.
+`TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
+an error that names the setting to change.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
@@ -401,7 +384,7 @@ latest = m.stocks.bars(watchlist, dm.Timespan.MINUTE).last_by()
 `latest` gets a row for each stock with its first minute bar, and the row changes as each minute
 ends.
 
-`last_by()` reads Massive's stream instead of polling, and like the poll in Example 7, the
+`last_by()` reads Massive's stream instead of polling, and like the poll in Example 6, the
 stream follows the watchlist.
 
 Massive sends a minute bar only for a minute with trades. Stocks trade in pre-market, regular,
@@ -501,7 +484,7 @@ Next, a live chart and a live table on one screen.
 
 Put a live chart and a live table side by side with
 [deephaven.ui](https://deephaven.io/core/ui/docs/), on Stocks Starter or higher. The table is
-Example 10's change table:
+Example 9's change table:
 
 ```python
 import deephaven.plot.express as dx
@@ -528,6 +511,44 @@ A dashboard arranges panels in rows and columns, and each panel holds any table 
 Deephaven's guide to
 [creating dashboards](https://deephaven.io/core/ui/docs/creating-layouts/creating-dashboards/)
 shows more layouts.
+
+Next, how to stop live tables when you're done with them.
+
+<a id="stop-live-tables"></a>
+
+### Stopping live tables: release one table or close the session
+
+Stop the live tables you no longer need, on Stocks Basic. This example starts two polls of its
+own:
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+closes = m.stocks.previous_day_bar(["AAPL", "MSFT"]).poll(60)
+headlines = m.reference.news(["AAPL", "NVDA"], limit=5).poll(300)
+```
+
+To stop one table, release it:
+
+```python continues
+m.release(closes)
+```
+
+`closes` stops once you close its panel, if no other table uses it. The session and
+`headlines` keep running.
+
+When you're done with them all, keep a copy of the rows you want and close the session:
+
+```python continues
+kept = headlines.snapshot()
+m.close()
+```
+
+Closing stops every live table of the session: `headlines` stops updating, shows an error
+saying the session was closed, and keeps its rows. `kept` is a static copy that you can filter
+and join like any table. A closed session reads nothing more. To read more data, open a new
+one with `m = dm.MassiveSession()`, or rerun any example, since each opens its own.
 
 <a id="configuration"></a>
 
@@ -589,7 +610,7 @@ m = dm.MassiveSession(config)
 ```
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
-[Example 8](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
+[Example 7](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
 <a id="next-steps"></a>

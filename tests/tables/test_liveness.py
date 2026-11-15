@@ -11,7 +11,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from deephaven import empty_table, time_table
@@ -20,14 +20,13 @@ from deephaven.execution_context import ExecutionContext
 from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 from deephaven.update_graph import shared_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, NotBars
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.liveness import (
     QueueWorker,
@@ -37,9 +36,11 @@ from deephaven_massive._tables.liveness import (
     make_result,
     new_scope,
     release_scope,
+    weak_owner_callback,
 )
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._types import override
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import SymbolStreamQuery
 
 if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
@@ -66,9 +67,9 @@ SPEC = DatasetSpec(
 
 
 def query(session: dm.MassiveSession, symbols: list[str] | None = None) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=symbols or ["AAPL"])
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+    return build_query(
+        session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols or ["AAPL"]
+    )
 
 
 # --- Components ------------------------------------------------------------------------------
@@ -93,15 +94,35 @@ class _RecordingScope:
             raise RuntimeError("released twice")
 
 
+class _Owner:
+    def __init__(self) -> None:
+        self.released: list[int] = []
+
+    def release(self, stream_id: int) -> None:
+        self.released.append(stream_id)
+
+
+def test_an_owner_callback_runs_the_method_and_holds_its_owner_weakly() -> None:
+    owner = _Owner()
+    callback = weak_owner_callback(owner, _Owner.release, 7)
+    alive = weakref.ref(owner)
+    callback()
+    assert owner.released == [7]
+    del owner
+    assert alive() is None  # the callback kept no strong reference
+
+
 def test_release_scope_holds_the_update_graph_lock(dh_exec_ctx: ExecutionContext) -> None:
     # A release can destroy a refreshing table; under the lock, no update cycle runs meanwhile.
     scope = _RecordingScope(dh_exec_ctx)
-    release_scope(dh_exec_ctx, cast("LivenessScope", scope))
+    recorded: LivenessScope = scope  # type: ignore[assignment]  # a fake that records the lock
+    release_scope(dh_exec_ctx, recorded)
     assert scope.locked == [True]
     assert not holds_update_graph_lock(dh_exec_ctx)  # let go after the release
     failing = _RecordingScope(dh_exec_ctx, fail=True)
+    broken: LivenessScope = failing  # type: ignore[assignment]  # a fake whose release fails
     with pytest.raises(RuntimeError, match=r"^released twice$"):  # its own error, not wrapped
-        release_scope(dh_exec_ctx, cast("LivenessScope", failing))
+        release_scope(dh_exec_ctx, broken)
     assert failing.locked == [True]
     assert not holds_update_graph_lock(dh_exec_ctx)  # let go after a failed release too
 
@@ -119,7 +140,8 @@ def test_release_scope_in_a_console_command_takes_the_lock_again(
 ) -> None:
     # A console command holds the exclusive lock; it takes the shared lock again at once.
     scope = _RecordingScope(dh_exec_ctx)
-    console_command(lambda: release_scope(dh_exec_ctx, cast("LivenessScope", scope)))
+    recorded: LivenessScope = scope  # type: ignore[assignment]  # a fake that records the lock
+    console_command(lambda: release_scope(dh_exec_ctx, recorded))
     assert scope.locked == [True]
 
 
@@ -421,11 +443,11 @@ def test_a_failed_build_drops_its_hold(
         raise RuntimeError("cannot shape")
 
     with pytest.raises(RuntimeError, match="cannot shape"):
-        core.stream_result(
+        core.streams.result(
             SPEC, q._request, channel="T", query="<Query test>", verb="blink", build=broken
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core._stream_ids == {}
+    assert core.streams._stream_ids == {}
 
 
 def test_an_interrupted_build_drops_its_hold(
@@ -438,11 +460,11 @@ def test_an_interrupted_build_drops_its_hold(
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        core.stream_result(
+        core.streams.result(
             SPEC, q._request, channel="T", query="<Query test>", verb="blink", build=interrupted
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core._stream_ids == {}
+    assert core.streams._stream_ids == {}
 
 
 def test_streams_are_shared_then_reopened(
@@ -536,10 +558,13 @@ def test_a_failing_scope_release_still_notifies_the_owner(dh_exec_ctx: Execution
             raise RuntimeError("cannot release")
 
     notified: list[str] = []
-    record = ResultRecord(cast("LivenessScope", BrokenScope()), lambda: notified.append("released"))
+    broken: LivenessScope = BrokenScope()  # type: ignore[assignment]  # a fake whose release fails
+    record = ResultRecord(broken, lambda: notified.append("released"))
+    reaper = Reaper(dh_exec_ctx, "unused-reaper")  # the reap under test never uses it
     with pytest.raises(RuntimeError, match="cannot release"):
-        ResultRegistry(threading.RLock(), cast("Reaper", None), dh_exec_ctx)._reap(record)
+        ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)._reap(record)
     assert notified == ["released"]
+    reaper.stop()
 
 
 class _Fatal(BaseException):
@@ -738,7 +763,7 @@ def test_an_interrupt_right_after_the_finalizer_is_created_never_releases_twice(
     done = threading.Event()
     core._reaper.submit(done.set)
     assert done.wait(TIMEOUT)
-    assert core._streams[1].row.held_results == 1  # `first` still holds the stream
+    assert core.streams._streams[1].row.held_results == 1  # `first` still holds the stream
     massive_session.release(first)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -820,7 +845,9 @@ def test_soak_released_and_collected_results_free_their_streams(
             for _ in soak.rounds():
                 soak_settle(
                     core,
-                    lambda: core.results.held() <= SOAK_HELD and len(core._streams) <= SOAK_HELD,
+                    lambda: (
+                        core.results.held() <= SOAK_HELD and len(core.streams._streams) <= SOAK_HELD
+                    ),
                     f"at most {SOAK_HELD} results and streams",
                 )
                 soak.note(results_opened=sum(steps), rows=sum(feed.sent().values()))
@@ -831,7 +858,7 @@ def test_soak_released_and_collected_results_free_their_streams(
     feed.stop()
     soak_settle(
         core,
-        lambda: core.results.held() == 0 and not core._streams,
+        lambda: core.results.held() == 0 and not core.streams._streams,
         "every result and stream to go",
     )
     soak_settle(core, lambda: not harness.connections.group.streams, "the routes to empty")

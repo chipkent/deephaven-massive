@@ -1,7 +1,7 @@
 """Regenerate the committed wire schemas from the vendored snapshot: the refresh's one entry.
 
-`refresh()` is what `python -m deephaven_massive._massive.refresh` runs. It composes the
-other modules and adds only the rule for writing:
+`refresh()` is what `scripts/refresh.py` runs. It composes the other modules and adds only
+the rule for writing:
 
 1. `snapshot.Snapshot.load` reads the vendored snapshot and verifies it against its manifest;
 2. `generate` runs the three generators, `rest_sources.generate_rest` (the OpenAPI specification),
@@ -236,9 +236,10 @@ def _check_kinds(
 
     Raises:
         RefreshError: With every problem found: two transports' sources sharing a key, a
-            stale hand entry, a conversion no sample needs, two concepts in one column, a
-            stale `KINDS` or `PROJECTIONS` entry, a type or transport disagreement, or a
-            column order that cannot be taken from a kind.
+            stale hand entry, a conversion no sample needs, two concepts in one column, two
+            names for a field Massive documents alike, a stale `KINDS` or `PROJECTIONS`
+            entry, a type or transport disagreement, or a column order that cannot be taken
+            from a kind.
     """
     problems: list[Problem] = []
     by_key: dict[str, Source] = {}
@@ -257,6 +258,7 @@ def _check_kinds(
     problems += gates.unneeded_type_fixes(hand, uses)
     problems += gates.unused_description_fixes(hand, uses)
     problems += gates.concept_collisions(hand, uses)
+    problems += gates.field_spellings(hand, uses)
     found, member_problems = kinds.members(hand, by_key)
     problems += member_problems
     problems += kinds.type_agreement(found)

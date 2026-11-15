@@ -19,6 +19,7 @@ import logging
 import math
 import time
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -291,19 +292,18 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
                 f"{_errors(_ohlcv(bar), _ohlcv(prev))[4]}"
             )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    evidence(
-        "library history(REST): "
-        f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
-    )
+    rest = partial(bars.history, day, day, source=dm.HistorySource.REST, wait=True)
+    evidence(f"library history(REST): {_library_rows(rest, table_rows)}")
     _assert_one_utc_day(day, prev, ranged=ranged, grouped=grouped)
     if "currencies" in classes_on_basic:
         evidence("Currencies on Basic: the library's previous_day_bar and dm.ALL are not read")
         return
     prev_bar = live_session.crypto.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
+    prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
+    evidence(f"library previous_day_bar (/prev): {prev_rows}")
     every = live_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: every.history(day, day, source=dm.HistorySource.REST), table_rows
+        lambda: every.history(day, day, source=dm.HistorySource.REST, wait=True), table_rows
     )
     shown = outcome if isinstance(outcome, str) else f"{len(outcome)} rows"
     evidence(f"library dm.ALL history(REST) (grouped daily): {shown}")
@@ -364,7 +364,9 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
             )
     flat = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(
+            recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
+        ),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -519,7 +521,7 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
         evidence(line)
     first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.crypto.bars(_PAIR, dm.Timespan.WEEK).history(
-        first, last, source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST, wait=True
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")

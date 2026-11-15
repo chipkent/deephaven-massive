@@ -174,8 +174,8 @@ it did not render, and a parity test fails on any difference.
 **48. Vendor descriptions live in a separate generated file** (2026-10-26),
 `spec/descriptions.json`, normalized to plain text and joined into each field at load.
 
-**49. Each table keeps its endpoint's spelling** (2026-10-27). A concept Massive spells two ways
-gets one column within a table, but there is no cross-table synonym map.
+**49. Each table keeps its endpoint's spelling** (2026-10-27). *Superseded by 101.* A concept
+Massive spells two ways gets one column within a table, but there is no cross-table synonym map.
 
 **50. Dataset parameter gaps** (2026-10-28). `order` is sent as is where a path has it and
 folded into `sort` where it does not; instant axes are half-open and date axes whole days; the
@@ -267,7 +267,8 @@ indicators' `adjusted: bool = True`).
 
 **68. Long downloads read in the background with `wait=False`** (2026-10-29). `fetch()` and
 `history()` return at once a refreshing, empty table that receives the complete result in one
-update. No `Future`, because its `result()` could not wait inside a console command.
+update. No `Future`, because its `result()` could not wait inside a console command. *Its
+opt-in is superseded by 100: reading in the background is the default.*
 
 **69. More inputs and a list of datasets** (2026-10-30). Date arguments take what
 `deephaven.time` takes (Java instants and dates, numpy, pandas, Deephaven's own text) but never
@@ -399,3 +400,274 @@ only while a table of a `RECONNECT` session remains, and otherwise closes, showi
 plain drop still reconnects, and a refusal at the key still waits (`WAITING_SLOT`) and fails at
 `max_outage`. `reconnect_backoff` keeps its 15 s minimum, now for limiting reconnect churn, not
 because Massive refuses a sooner reconnect.
+
+**98. A user finds a public name where they would look for it** (2026-11-11). What a user types in
+ordinary use is on the package root, `dm`: the session and its settings, the enums, the errors,
+`ALL` and its type `AllSymbols`, the argument types, the symbol converters, `datasets()`, the
+logging switches, and `__version__`. Classes a user only receives, and names only in type hints,
+live in public packages named for what the user does with them, checked against numpy, pandas, and
+Deephaven: a user imports a class to name the object a call handed them, and as Deephaven's
+`deephaven.table` holds `Table`, `deephaven_massive.queries` holds the query classes (with the code
+that picks a dataset's class) and `deephaven_massive.namespaces` the classes of `m.stocks` and the
+other fifteen namespaces (with the dataset factory they share). numpy's and pandas' `typing` modules
+name a use instead; here that name would hold two unrelated kinds of class and read like the
+standard library's `typing`. Code lives in the package that exposes it: inside a public package
+every module except `__init__.py` is private, no package holds both `x` and `_x`, no public module
+re-exports a private twin, an `__init__.py` only imports and lists names (the root's also reads
+`__version__`), and no `__module__` or `__qualname__` is rewritten. Every type the public contract
+declares (parameter, return, property, documented exception) is public, with no exception.
+`docs/dev/public-api.md` states the principle, and `tests/test_layout.py` checks the layout rules
+rather than a list of public modules.
+
+This renames and moves public names: the module `deephaven_massive.queries` and the private
+`_query.py` it re-exported become one package, whose modules split by subject; the shared base is
+public as `Query`, with `columns()`, and the REST class, formerly `Query`, is `FetchQuery`; the
+sixteen namespace classes become public, named from their session path (`StocksNamespace`,
+`PartnersBenzingaNamespace`); `Symbols`, `DateLike`, and `FilterValue` move from
+`deephaven_massive.queries` to the root, the first renamed `dm.SymbolsLike`; and the type of
+`dm.ALL` becomes public as `dm.AllSymbols`, a one-member enum whose member is `dm.ALL`. Each
+`bars()` has one signature and returns a `StreamHistoryQuery`, whatever its timespan: Massive
+streams only 1-second and 1-minute bars at `multiplier=1`, so the stream methods of any other bars
+raise `ValueError`, naming the call and the bars that stream, since the library cannot express that
+stream. A dataset method passes the class it declares to the shared factory, which builds the class
+the dataset's spec derives and fails as a library defect when it is not that class or a subclass, so
+no method casts its query. A namespace takes the `MassiveSession` it belongs to, and a query class's
+constructor refuses users, since the generated one would declare private types: the library builds
+queries through `__new__`, as a frozen dataclass's own constructor does.
+
+Imports are eager, and the promise that `import deephaven_massive` works without Java is withdrawn:
+the lazy loading that kept it (`__getattr__` on the root and on `_massive`) hid every name's real
+home from readers and tools. Every import now loads the whole library, `boto3` and `websockets`
+included, and Deephaven. Without a running Deephaven server the import fails with Deephaven's own
+error; the root docstring and the troubleshooting page show how to start one first, and so do the
+scripts, the test run (a pytest plugin), and the spec refresh, which now runs with Java and writes
+its drift report to a file.
+
+The run-time hints that named the dataset to use for a method a query lacks (`Query.__getattr__`)
+are removed. A missing method raises Python's own `AttributeError`, as tab completion and `hasattr`
+already show the methods a query has, and `docs/troubleshooting.md` lists the alternatives under
+each message. The `Methods` column of `dm.datasets()` and the dataset reference name the bars that
+stream instead of listing their stream methods unqualified.
+
+**99. A malformed flat-file line follows `MassiveConfig.malformed_rows`, `LOG` by default**
+(2026-11-10). Rule 24 gives each cause of a bad row its own `dm.OnError` setting (66, 81); a
+flat-file line that is not a readable row had none: it was skipped with one WARNING per file.
+The setting is `malformed_rows`, named like its siblings (`unreadable_symbols`, ...) for what it
+governs. A malformed line is one that does not split into the header's fields (too few or too
+many, or a quote that does not close) or is not UTF-8 text. Under `LOG`, the default and the
+former behavior, the line is skipped and each file that had one logs one WARNING with the count
+and the first one's row number and fault, never its text; under `IGNORE` that line is at DEBUG;
+under `RAISE`, `history()` fails with `RowDataError` (`ErrorCause.LIBRARY_DEFECT`, data from
+Massive the library can't read) at the first block after the line, naming the file and the row,
+and a `history()` of a live table marks every symbol of the read `FAILED`, `PERMANENT`. A static
+`history()` has no `m.streams()` row, so the log line is its only record under `LOG`, as for its
+siblings. A file whose every line is malformed fails under every setting: that affects every
+row. A line that is not UTF-8 text used to fail the whole `history()` call, not one block:
+Arrow refuses a chunk with an invalid UTF-8 value in a column it reads (`CSV conversion error to
+string: invalid UTF8 data`), and a line that also has the wrong field count fails before the
+skip handler runs, because pyarrow decodes the row's text first. The reader now checks each
+chunk as UTF-8 in one zero-copy Arrow validation and, only for a chunk that fails, removes the
+lines that do not decode before Arrow reads it, counting them as malformed; Arrow's own UTF-8
+check is off, since every chunk it reads is checked. Such a line is skipped whole even when its
+bad byte is in a column the library drops.
+
+**100. `fetch()` and `history()` read in the background by default: `wait=False`** (2026-11-11).
+"Yes, go with wait=False as the default. Waiting is dumb because it blocks all massive downloads
+and makes startup slow." Like every other verb, the call returns a table at once: "If there is no
+data in the table, it should return with no rows. It is up to a user to choose when they want
+the data to show up and how they want the program to wait." `wait=True` keeps the blocking call
+and its static table. What raises at the call, whatever `wait` is: an argument error
+(`TypeError`, `ValueError`), a closed session, and, as decisions 66 and 81 and `poll()` and the
+streams already have it, a crypto pair passed in code that Massive's crypto ticker list does
+not hold, or a failed read of that list, for the paths that take a pair as its two currencies
+(`fetch(wait=False)` failed its table instead, a defect). What Massive answers later fails the
+table, logged and shown in `m.streams()` `Error`, as for `poll()` and the streams. No `with`-block waiting: `close()` and `__exit__` keep their
+behavior, so a read still loading when its session closes fails. Made consistent on the way,
+since the default path now runs them: every background and watchlist read runs on the session's
+read pool of `max_concurrency` threads, where each background read had an unbounded thread of
+its own; a background flat-file `history()` under `AUTO` checks the REST parameters of the days
+it may read from REST at the call, as a call that waits raises them, even when the files serve
+every day; and a watchlist read that does not wait fails its table when every symbol it held at
+the call ends `FAILED`, such as on a plan without the dataset (decision 11), as a call that
+waits raises then. A failure that may pass counts once its retries run out; a symbol with rows,
+or deleted before it failed, settles the check, and a symbol added later fails alone. Accepted consequences: a script that reads rows on the next line gets none (pass
+`wait=True`, or let Deephaven update what is built on the table); a `try`/`except` around a
+default call no longer catches Massive's answers; the `call N start:` line and the table
+description change (`fetch()` is the background call, `fetch(wait=True)` the blocking one); the
+order of a `merge` of a background read and a stream follows which lands first.
+
+**101. One field has one column name across datasets** (2026-11-11). Where Massive spells one
+field two ways on two endpoints, every dataset takes one of Massive's own spellings, through a
+reasoned hand table, `refresh/overrides.py` `SPELLINGS`: `(source, key)` to the long name an
+object or field takes, the endpoint it is taken from, and why the two are the same field. An
+empty long name drops a wrapper object's name, so the option chain's, the unified snapshot's,
+and the futures snapshot's `details` fields take the names `/v3/reference/options/contracts`
+and `/futures/v1/contracts` give them flat (`StrikePrice`, `ProductCode`, `Ticker`), and the
+snapshots' `last_quote.bid` and `.ask` take `bid_price` and `ask_price`, as do the forex
+conversion's `last.bid` and `.ask` (`LastBidPrice`). The futures snapshot's
+`last_quote.last_updated` and `last_trade.last_updated` take `timestamp`, the key under which
+`/futures/v1/quotes` and `/futures/v1/trades` give the same description and unit. Object
+prefixes stay otherwise: dropping them all would put 78 pairs of different fields in one
+column, and `day` and `session` are different objects. A pair is renamed only when Massive's
+documentation of both fields, their types, and their units leave no doubt; a pair with doubt
+keeps its names until a live test settles it and the owner decides (items 84 to 86:
+`todaysChange` and `day.change`, `updated` and `last_updated`, the conversion's `last` and
+`lastQuote`). The partners keep their own spellings: Benzinga's `Firm` (on a rating) and
+`FirmName` (on an analyst), whose tables join by `BenzingaFirmId`, and Fable's
+`MerchantTicker` (point in time) and `Ticker` (the current mapping). The refresh's
+`field-spelling` gate keeps it so: fields with one own description must share one long name,
+and fields with one wire key and one description one column, unless
+`SHARED_DESCRIPTIONS` names the description with why its fields differ; a new dataset that
+brings a second name for such a field stops the refresh.
+
+**102. From `0.1.0`, a breaking change needs the owner's permission and names the next version**
+
+The library had no users before its first release, so nothing was kept, aliased, or shimmed for
+compatibility and a rename was an ordinary edit. Once `0.1.0` is on PyPI, users' code and
+settings files depend on the documented contract. A change breaks when code written to the last
+release's documented contract stops working or gets a different documented result. From
+`0.1.0`, such a change needs the owner's permission; when the owner requests a public change,
+the agent says whether it breaks code and, if so, which version comes next, before making it.
+Versions follow `docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0`
+owe no compatibility; in `0.x` a break raises the minor and anything else the patch; from
+`1.0.0`, standard Semantic Versioning.
+
+**103. A value Massive judges is sent; a value check needs evidence that Massive answers wrongly
+with no error** (2026-11-12). The library refuses an argument value itself only when it is the
+wrong Python type, when no request can carry it, or when Massive, sent it, returns wrong or empty
+data with no error, and each such check states which, with its evidence. Live checks of the values
+the library refused (items 87 to 103, 105, and 106) sorted them. Massive refuses or serves
+correctly, so the library now sends: lower-case currency codes (HTTP 404), conversion amounts of 0
+or below and `precision=5` (served), a `sort` value or field the path does not have (HTTP 400), a
+`sort` part or filter list item with surrounding whitespace (served as the field or ticker it
+names), `Timespan.SESSION` outside futures and a bar multiplier below 1 (HTTP 400), and the option
+chain of a currency or crypto pair (HTTP 400). So the wire encoder sends an enum value its
+parameter does not list. Massive answers with no rows and no error, so the library keeps refusing:
+an indicator timespan the path does not list and an indicator window below 1, a reference
+`asset_class` the endpoint does not list, `limit` below 1, a filter value outside an enum
+parameter's values, trailing-twelve-month balance sheets, the option contracts of a currency or
+crypto pair, a range whose start is after its end, and a range that starts after now. A reversed
+range also has no request to send, since `history()` turns a range into the bars or days inside it.
+Futures `Timespan.DAY` bars are read from REST only and sent as `resolution=1day`, which Massive
+serves in the shape of `1session` bars, and are dated and kept as session bars; item 107 compares
+the two at larger multipliers. With no evidence for refusing them, the option chain and the
+contracts list also send an option contract as their underlying (items 108 and 109), and a filter
+list sends an empty item (item 118); each live check records Massive's answer.
+
+**107. Futures `history()` reads every exchange the plan allows; a named one follows
+`refused_venues`** (2026-11-13). Massive publishes futures flat files per exchange, and a plan may
+include only some. The futures `trades`, `quotes`, and `bars` take `venues:
+AbstractSet[FuturesVenue] | None = None`, so a read of `dm.ALL` or a long range can download less.
+Left out, a read takes every exchange the plan allows: a `history()` that REST cannot serve
+(`dm.ALL`, or `source=FLAT_FILES`) skips every file of an exchange S3 refuses, over the whole range,
+so the table has no holes, logs one WARNING naming the skipped exchanges with Massive's answer, and
+names them in the table's description (or, for a table that follows a live symbol table, in each
+symbol's `Transport` in `m.symbol_reads()`). An exchange the call names follows `refused_venues:
+dm.OnError | None = None`, whose `None` means the argument was left out and
+`MassiveConfig.refused_venues` (`RAISE` by default) applies, because naming an exchange the plan
+lacks is a bug in the caller. A call whose every exchange is refused raises either way, and a list
+of tickers REST can serve still reads REST when S3 refuses its files. The library learns which
+exchanges a plan includes only from Massive's refusals: it encodes no plan tier and never guesses a
+ticker's exchange, since Massive can change its plans. A problem with one value in the data stays a
+`MassiveConfig` setting, `LOG` by default. This supersedes decision 93's wording that one bad row
+never fails a table: `RAISE` fails it when a user chooses it. `canonicalize_symbols` keeps its `LOG`
+default (decision 93); the `OnError` docstring that said `RAISE` was wrong.
+
+**108. The day's change is `TodaysChange` in every dataset, the conversion's quote is
+`LastQuote*`, and `updated` keeps `Updated`** (2026-11-13). Live reads settled the three pairs
+decision 101 left open (items 84 to 86). The option chain's `day.change` and
+`day.change_percent` are the v2 snapshots' and movers' `todaysChange` and `todaysChangePerc`,
+the latest price minus the previous close and that change in percent of it. The chain takes
+the v2 names, `TodaysChange` and `TodaysChangePerc`, because the stocks, forex, and crypto
+snapshots and movers are the most used feeds and keep their columns. The forex conversion's
+`last` object is the pair's last quote, so its columns take the forex snapshot's names:
+`LastQuoteBidPrice`, `LastQuoteAskPrice`, `LastQuoteExchange`, and
+`LastQuoteParticipantTimestamp`. Both renames are `SPELLINGS` entries. The v2 `updated` is not
+the unified snapshot's `last_updated`, so it stays `Updated`.
+
+**109. A value the type checker cannot prove is checked at run time, or marked where a test breaks it**
+
+A `cast` tells mypy a value has a type without checking it, so a wrong assumption fails later and
+elsewhere, with an `AttributeError` far from its cause. The library checks the fact instead:
+`required(value, what)` returns a value its design guarantees is present (a path a dataset's spec
+declares for the read the caller makes, the session behind a weak reference the caller holds)
+and `required_instance(value, kind, what)` one it guarantees is of a type (a state's detail, a
+stop token the ingest layer made); each raises `BrokenGuaranteeError` naming `what` when the
+guarantee breaks. That error is not a `MassiveError`, so no handler of Massive's failures
+takes a broken guarantee for one symbol's or one cycle's expected failure: every handler of
+defects logs it with its traceback, as it logs any other exception. A fact the code has just
+established is an `assert`; a union a function really returns is in its signature
+(`Permit | WireError`, `_Refused`); a column reader's fast path learns its list's type from a
+`TypeGuard` that reads the value types in one builtin pass; a type deephaven-core
+mis-annotates is checked once with `required_instance`, and jpy is loaded by name with a
+type-checker override (`import jpy`). Tests narrow with `assert isinstance`, and mark what they
+break on purpose with a `# type: ignore[code]` and its reason on the line: a wrong-type
+argument (`the point: refused at run time`), a write to a read-only mapping (`the point:
+read-only`), a fake bound once where a real class is declared, and an attribute botocore's
+stubs leave out; a fake credential takes `# noqa: S106`. Untyped `**kwargs` give way to typed
+keywords and `dataclasses.replace`. Two casts stay in `src/`, each with its reason on its
+line: the Java object `parse_date_like` reads through jpy, which has no type information, and
+`options.chain`'s refusal of `dm.ALL`, an argument its type says is never `dm.ALL`.
+*Its rule that a broken guarantee is not a `MassiveError` is superseded by 105.*
+
+**105. An error says what stopped the call, whether to retry it, and whether a bug caused it**
+(2026-11-12). Owner, approving the design: "I approve the rest of that design", and for the
+names, "Q1: errors design is approved." `MassiveError.cause` and `dm.ErrorCause` are replaced by
+three attributes, because the old `cause` collided with Python's `__cause__` and one value mixed
+two questions: whose move it is, and whether to log at ERROR.
+
+- `source`, a `dm.ErrorSource`: `MASSIVE` only where Massive answered with a refusal or an
+  error (an HTTP error status from Massive or S3, a rejected key, a plan without the data, a
+  WebSocket status message, another connection taking the WebSocket connection, a list of
+  Massive's that lacks a pair); `NETWORK` when no answer came through the library's retries
+  (a TLS handshake that failed for another reason than the certificate, and a proxy that
+  could not reach the server, included), or a stream or `poll()` cycle got no data for
+  `max_outage`; `USER` when the user's code or settings stopped it (a missing API key,
+  delayed data `delayed_subscriptions` refuses, a closed session, a failing symbol table, a
+  certificate, proxy credential, or AWS profile setting, a read the user stopped);
+  `LIBRARY` for a bug, Massive data the library cannot read and a failure inside a wire client
+  included. One failure has one source on every transport. More members may come, so handlers
+  keep a default case.
+- Every wire error carries exactly one `WireFailure`, which its client must choose (refused,
+  no answer, local settings, stopped, unreadable, client defect), so no failure becomes
+  Massive's answer by default. A stop the library chooses itself (its other requests after
+  one fails, a failed poll or followed read) is never surfaced: the failure that caused it is.
+- `is_retryable`: true for HTTP 429, 500, 502, 503, and 504, for no answer (`NETWORK`), and for
+  two answers that mean try again: HTTP 404 on a later page of a paged REST read
+  (`CutShortError`), and S3's `RequestTimeout` (HTTP 400) on a flat file. Both stay `MASSIVE`,
+  since Massive or S3 answered. The owner, on 2026-11-12: "Fable should research the cases and
+  determine the proper behavior." The research found that a new call of a cut-short read starts
+  over with a new cursor, as a followed read already does, and the message already says to
+  retry; why the later page answers 404 (a cursor's lifetime) is unverified, and item 117
+  records it. AWS documents `RequestTimeout` as a connection that stalled, and botocore's
+  standard, adaptive, and legacy retry modes all count it transient. The wire error marks it
+  (`means_retry`), so the public layer never matches on status 400. False for every other
+  status, authentication, entitlement, a closed session, and a taken connection, and always for
+  a bug. A flat file not yet published and pages that disagree on `adjusted` are retryable too:
+  neither is an HTTP status, and both messages say to retry. A read that fails
+  because every symbol failed is retryable only when every symbol's error is, and raises the
+  first bug among them when there is one. The library has already retried a server failure
+  or a lost connection before it raises, and it raises a rate limit as soon as waiting it out
+  would take the read past its patience (10 minutes of pauses, or 90 seconds for a console
+  command).
+- `is_bug`: true for every `LIBRARY` error and for a user's bug the library caught (a failing
+  symbol table, a parameter a path does not take, a symbol table row that is not Massive's
+  ticker, a session made outside a server). The library logs a failure at ERROR exactly when
+  `is_bug` is true.
+
+A call on a closed session, and a live table whose session closes, raise or fail with the new
+public `dm.SessionClosedError` (source `USER`). A wrong argument type stays a `TypeError`, and a
+wrong value a `ValueError`; any other exception escaping a query method is a bug, logged at
+ERROR with its traceback and raised as a `MassiveError` (`LIBRARY`) chained to it, so every
+failure inside a query method is a `MassiveError`. Every `LIBRARY` error's message ends with
+how to report it, and every `USER` error's message names its fix: a closed session says to open
+a new `dm.MassiveSession()`, and a stopped read says why it stopped and to call the method again.
+
+A broken guarantee (`required` and `required_instance`, decision 109) is a `MassiveError` too,
+whose source is `LIBRARY`, so it is a bug. This replaces decision 109's choice of an exception
+outside the hierarchy, which would break this decision's promise that every failure inside a
+query method is a `MassiveError`. Since a handler can no longer tell a bug by its class, every
+handler that absorbs one symbol's or one cycle's failure logs a bug at ERROR with its traceback
+(`log_failure` attaches the traceback itself), and a handler that drops a failure quietly (a
+futures watchlist change that meets a closing session) catches only `SessionClosedError`, so a
+bug there raises.

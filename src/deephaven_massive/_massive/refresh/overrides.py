@@ -33,7 +33,20 @@ can. This module holds the rest, each entry with its reason, and nothing else:
   WebSocket sources;
 - `PROJECTIONS`: the fields a source contributes to one kind, under the kind's names;
 - `TRANSPORT_ONLY`: the columns of a kind's group legitimately on one transport only;
-- `VENUES`: the futures venues folded into a flat-file prefix's `{venue}` template.
+- `VENUES`: the futures venues folded into a flat-file prefix's `{venue}` template;
+- `SPELLINGS`: the long name an object or field takes from another endpoint where Massive
+  spells one field two ways (`strike_price` flat in `/v3/reference/options/contracts`,
+  `details.strike_price` in the option chain), so the field has one column name in every
+  dataset. The key is `(source, key)`, the dotted key of an object, whose name its fields'
+  columns begin with, or of a field; an empty long name drops a wrapper object's name, and
+  `whole_key` makes a field's long name replace its whole key, its objects' names included. Each
+  entry cites the endpoint whose spelling it takes and says why the two are the same field:
+  Massive documents them alike, with the same type and unit. The generator applies it before
+  the lexicons and `NAMES`;
+- `SHARED_DESCRIPTIONS`: a description Massive gives to fields that keep different names, with
+  those long names and why they are different fields. The `field-spelling` gate
+  (`gates.field_spellings`) requires one long name per description, and one column per wire
+  key and description, unless an entry here names the description.
 
 Every entry names a source by its key (a REST path template exactly as the specification
 spells it, a WebSocket `"<cluster>/<channel>"`, or a flat-file prefix) and a wire key or
@@ -76,6 +89,8 @@ __all__ = [
     "PARAM_UNITS",
     "PROJECTIONS",
     "RESULT_KEYS",
+    "SHARED_DESCRIPTIONS",
+    "SPELLINGS",
     "TAG_CONFLICTS",
     "TRANSPORT_ONLY",
     "TYPE_FIXES",
@@ -87,6 +102,8 @@ __all__ = [
     "Name",
     "Projection",
     "ResultKey",
+    "SharedDescription",
+    "Spelling",
     "TypeFix",
     "UndeclaredField",
     "Unit",
@@ -1737,3 +1754,236 @@ VENUES: Mapping[str, str] = MappingProxyType(
     }
 )
 """The futures venues folded into the `{venue}` template of a flat-file prefix, with reasons."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Spelling:
+    """The long name of one segment of a wire key, taken from another endpoint.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.refresh.overrides import SPELLINGS
+
+            chain = "/v3/snapshot/options/{underlyingAsset}"
+            assert SPELLINGS[(chain, "last_quote.bid")].long_name == "bid_price"
+
+    Attributes:
+        long_name: The long name in snake case, or `""` to drop a wrapper object's name from
+            its fields' columns.
+        source: The endpoint, and the field where it helps, whose spelling it takes.
+        reason: Why the two are the same field: the documentation of both, quoted or named.
+        whole_key: Whether `long_name` names a field's whole key, its objects' names dropped,
+            for a field the other endpoint serves outside any object.
+    """
+
+    long_name: str
+    source: str
+    reason: str
+    whole_key: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class SharedDescription:
+    """A description that Massive gives to fields that keep different names.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.refresh.overrides import SHARED_DESCRIPTIONS
+
+            entry = SHARED_DESCRIPTIONS["The Timestamp in Unix MS."]
+            assert "participant_timestamp" in entry.long_names
+
+    Attributes:
+        long_names: The long names, in snake case, of the fields that share it.
+        reason: Why they are different fields, or why one table column carries them anyway.
+    """
+
+    long_names: frozenset[str]
+    reason: str
+
+
+_CHAIN = "/v3/snapshot/options/{underlyingAsset}"
+_UNIFIED = "/v3/snapshot"
+_FUTURES = "/futures/v1/snapshot"
+_CONVERSION = "/v1/conversion/{from}/{to}"
+
+_OPTION_DETAILS = Spelling(
+    long_name="",
+    source="/v3/reference/options/contracts",
+    reason='The `details` object ("The details for this contract.") holds a contract\'s '
+    "reference fields under the keys and descriptions `/v3/reference/options/contracts` "
+    'gives them flat (`strike_price`: "The strike price of the option contract."), with the '
+    "same types, so its name is dropped.",
+)
+_QUOTE = (
+    'The `last_quote` object ("The most recent quote for this contract.") documents `{key}` '
+    'as "The {side} price.", the text, type, and unit of `{key}_price` in `/v3/quotes`, and '
+    "of the v2 snapshots' `lastQuote.{short}`, read as `{key}_price`."
+)
+_FUTURES_QUOTE = (
+    'The futures snapshot\'s `last_quote.{key}` is "The {text}", the {side} price, beside '
+    "`{key}_size` and `{key}_timestamp`, which `/futures/v1/quotes/{{ticker}}` spells alike. "
+    "That endpoint names the price itself `{key}_price`, a number, as here."
+)
+_FUTURES_TIME = (
+    "The futures snapshot documents `last_{event}.last_updated` with the text and unit of "
+    '`/futures/v1/{event}s/{{ticker}}` `timestamp`: "The time when the {event} was generated '
+    'at the exchange to nanosecond precision."'
+)
+_CONVERSION_QUOTE = (
+    "The conversion's `last` object is documented word for word as `/v1/last_quote/currencies"
+    '/{{from}}/{{to}}` `last` ("Contains the requested quote data for the specified forex '
+    'currency pair."), whose `{key}` ("The {side} price.") the quotes table reads as '
+    "`{key}_price`, the spelling of `/v3/quotes/{{fxTicker}}`."
+)
+
+_TODAYS_CHANGE = (
+    'The option chain documents `day.{key}` as "The {measure} of the price change for the '
+    'contract from the previous trading day.", a number, as the v2 stocks, forex, and crypto '
+    'snapshots and movers document `{v2_key}` ("{v2_text}"). Live reads of 2026-11-11 and '
+    "2026-11-12 (UTC) found both to be one quantity: for SPY's option chain, `day.change` was "
+    "`day.close` minus `day.previous_close`, and `day.change_percent` 100 times that over "
+    "`day.previous_close`; for AAPL, MSFT, SPY, IWM, and XLU, `todaysChange` was the latest "
+    "price (the last trade or minute close) minus `prevDay.c`, and `todaysChangePerc` 100 times "
+    "that over `prevDay.c`. The chain takes the v2 name, which the six snapshot and mover "
+    "tables already use."
+)
+
+SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
+    {
+        **{
+            (_CHAIN, f"day.{key}"): Spelling(
+                long_name=long_name,
+                source=f"/v2/snapshot/locale/us/markets/stocks/tickers `{v2_key}`",
+                reason=_TODAYS_CHANGE.format(
+                    key=key, measure=measure, v2_key=v2_key, v2_text=v2_text
+                ),
+                whole_key=True,
+            )
+            for key, measure, long_name, v2_key, v2_text in (
+                (
+                    "change",
+                    "value",
+                    "todays_change",
+                    "todaysChange",
+                    "The value of the change from the previous day.",
+                ),
+                (
+                    "change_percent",
+                    "percent",
+                    "todays_change_perc",
+                    "todaysChangePerc",
+                    "The percentage change since the previous day.",
+                ),
+            )
+        },
+        (_CHAIN, "details"): _OPTION_DETAILS,
+        (_UNIFIED, "details"): _OPTION_DETAILS,
+        (_FUTURES, "details"): Spelling(
+            long_name="",
+            source="/futures/v1/contracts",
+            reason="The `details` object holds a contract's reference fields under the keys "
+            "`/futures/v1/contracts` gives them flat, with the same types: `product_code` is "
+            '"The identifier for the contract\'s product." in both, and `settlement_date` '
+            '"The day that this contract is settled." here and "The date on which this '
+            'contract settles." there, so its name is dropped.',
+        ),
+        **{
+            (source, f"last_quote.{key}"): Spelling(
+                long_name=f"{key}_price",
+                source=f"/v3/quotes/{{stockTicker}} and /v3/quotes/{{optionsTicker}} `{key}_price`",
+                reason=_QUOTE.format(key=key, side=side, short=short),
+            )
+            for source in (_CHAIN, _UNIFIED)
+            for key, side, short in (("bid", "bid", "p"), ("ask", "ask", "P"))
+        },
+        **{
+            (_FUTURES, f"last_quote.{key}"): Spelling(
+                long_name=f"{key}_price",
+                source=f"/futures/v1/quotes/{{ticker}} `{key}_price`",
+                reason=_FUTURES_QUOTE.format(key=key, side=side, text=text),
+            )
+            for key, side, text in (
+                ("bid", "bid", "highest price a buyer is willing to pay."),
+                ("ask", "ask", "lowest price a seller is willing to accept."),
+            )
+        },
+        **{
+            (_FUTURES, f"last_{event}.last_updated"): Spelling(
+                long_name="timestamp",
+                source=f"/futures/v1/{event}s/{{ticker}} `timestamp`",
+                reason=_FUTURES_TIME.format(event=event),
+            )
+            for event in ("quote", "trade")
+        },
+        **{
+            (_CONVERSION, f"last.{key}"): Spelling(
+                long_name=f"{key}_price",
+                source=f"/v3/quotes/{{fxTicker}} `{key}_price`",
+                reason=_CONVERSION_QUOTE.format(key=key, side=key),
+            )
+            for key in ("bid", "ask")
+        },
+        (_CONVERSION, "last"): Spelling(
+            long_name="last_quote",
+            source="/v2/snapshot/locale/global/markets/forex/tickers `lastQuote`",
+            reason="Live reads of 2026-11-12 found the conversion's `last` to be the pair's last "
+            "quote: in both directions of AUD/USD, 7 of 8 tries read one bid, ask, exchange, and "
+            "time in the conversion's `last`, `/v1/last_quote/currencies/{from}/{to}`, and the v2 "
+            'forex snapshot\'s `lastQuote` ("The most recent quote for this ticker."), so the '
+            "object takes the snapshot's name.",
+        ),
+        (_CONVERSION, "last.timestamp"): Spelling(
+            long_name="participant_timestamp",
+            source="/v2/snapshot/locale/global/markets/forex/tickers `lastQuote.t`",
+            reason='The conversion\'s `last.timestamp` ("The Unix millisecond timestamp.") is '
+            "the v2 forex snapshot's `lastQuote.t` (\"The millisecond accuracy timestamp of the "
+            'quote."), read as `participant_timestamp`: both are milliseconds, and the live reads '
+            "of 2026-11-12 found them equal whenever the two carried one quote (1794443156000 "
+            "for AUD/USD).",
+        ),
+    }
+)
+"""`(source, key)` to the long name of that object or field, taken from another endpoint."""
+
+SHARED_DESCRIPTIONS: Mapping[str, SharedDescription] = MappingProxyType(
+    {
+        "An array of results containing the requested data.": SharedDescription(
+            long_names=frozenset({"open_trades", "closing_trades"}),
+            reason="The crypto daily open and close's two lists: the opening trades and the "
+            "closing trades.",
+        ),
+        "The Timestamp in Unix MS.": SharedDescription(
+            long_names=frozenset(
+                {"unix_timestamp", "sip_timestamp", "participant_timestamp", "timestamp"}
+            ),
+            reason="Massive gives this text to the time of several streams' events: a stocks "
+            "LULD band's time, an options trade's or quote's SIP time, a forex or crypto "
+            "event's participant time, and an index value's time. Each takes the name its "
+            "own REST or flat-file data gives it (the lexicons).",
+        ),
+        "The Unix millisecond timestamp.": SharedDescription(
+            long_names=frozenset({"participant_timestamp", "timestamp"}),
+            reason="Massive gives this text to the time of a forex or crypto last quote or last "
+            "trade. On `/v1/last_quote` and `/v1/last/crypto` it is the row's own time, the "
+            "library's `Timestamp` column. In the conversion it is the time of the quote the "
+            "conversion used, a field of that quote, which takes the forex snapshot's name for "
+            "its quote's time, as the quote's other fields take the snapshot's names.",
+        ),
+        (
+            "The exchange ID. See Exchanges (https://massive.com/docs/rest/stocks/"
+            "market-operations/exchanges) for Massive's mapping of exchange IDs."
+        ): SharedDescription(
+            long_names=frozenset({"ask_exchange", "bid_exchange", "exchange"}),
+            reason="A quote's ask exchange and bid exchange, and a trade's exchange: three fields.",
+        ),
+        "The exchange symbol that this item is traded under.": SharedDescription(
+            long_names=frozenset({"symbol", "ticker"}),
+            reason="The row's instrument, which every table shows under its key column "
+            "`Symbol`, whichever of the two Massive sends.",
+        ),
+    }
+)
+"""A description several fields share to the long names they keep and why."""

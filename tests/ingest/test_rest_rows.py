@@ -10,7 +10,7 @@ from deephaven_massive._datasets.dates import DaySpan, TimeRange
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import HistoryWindow
 from deephaven_massive._enums import OnError
-from deephaven_massive._errors import ErrorCause, RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, RowDataError
 from deephaven_massive._ingest import rest_rows
 from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, source
@@ -138,9 +138,9 @@ def test_a_page_whose_every_row_is_dropped_raises() -> None:
     assert str(info.value) == (
         "stocks.trades: every row of a page of 2 was dropped, so Massive's format may have "
         f"changed; the first: {TRADES_PATH}: row 0: no SipTimestamp (wire key 'sip_timestamp'), "
-        "which the dataset needs"
+        f"which the dataset needs. {LIBRARY_BUG}"
     )
-    assert info.value.cause is ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is ErrorSource.LIBRARY
 
 
 def test_an_empty_page_is_no_error() -> None:

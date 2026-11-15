@@ -7,10 +7,10 @@ Open, high, low, close, and volume bars of futures contracts.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVenue))
+m.futures.bars(symbols, timespan, *, multiplier=1, venues=None, refused_venues=None)
 ```
 
-- [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
+- [Methods](README.md#query-methods): `history(start, end=None)`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
@@ -22,9 +22,10 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers, a contracts table, or `dm.ALL` for every contract. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.DAY`. |
+| [`timespan`](README.md#timespan) | The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use `SESSION`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
-| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
+| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. Left out, it reads every exchange your plan allows. |
+| [`refused_venues`](README.md#refused_venues) | What `history()` does when Massive refuses an exchange named in `venues`. Left out, `MassiveConfig.refused_venues` applies. |
 
 ## Plans
 

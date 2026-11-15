@@ -34,9 +34,10 @@ of it, from the state the previous step leaves the reader in.
 For a new page, a new section, or a restructure, write the outline first: the headings, one line
 on what each section delivers, and for examples the progression table (title, goal, the one new
 idea, plan). Check it against the owner's list of sections and the page map, then send it to
-the owner (or the coordinator who spawned you) and wait for sign-off before you write prose.
-Restructuring prose that's already written is where the cost is. An edit inside an approved
-outline skips this step, and so does a task whose request already fixes the outline.
+the owner (or the coordinator who spawned you, who quotes the owner's sign-off). Until sign-off,
+gather and source the facts (step 1), but write no prose the outline decides: restructuring
+prose that's already written is where the cost is. An edit inside an approved outline skips this
+step, and so does a task whose request already fixes the outline.
 
 ### 3. Write
 

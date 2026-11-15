@@ -15,7 +15,7 @@ import inspect
 import json
 import logging
 from datetime import UTC, date, datetime, time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -33,20 +33,19 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import options
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
-    HistoryQuery,
+from deephaven_massive._massive import Transport, to_batch
+from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.namespaces import _options as options
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
     Query,
-    QueryBase,
     StreamHistoryQuery,
     StreamQuery,
     SymbolStreamQuery,
-    query_class,
 )
-from deephaven_massive._session import CATALOG
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
@@ -84,7 +83,7 @@ def ny_midnight_ns(day: date) -> int:
     return int(datetime.combine(day, time(), ZoneInfo("America/New_York")).timestamp()) * 10**9
 
 
-def request_of(query: QueryBase) -> dict[str, Any]:
+def request_of(query: Query) -> dict[str, Any]:
     r = query._request
     return {"symbols": r.symbols, "params": dict(r.params), "filters": dict(r.filters)}
 
@@ -94,7 +93,7 @@ def request_of(query: QueryBase) -> dict[str, Any]:
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.options
-    assert type(namespace) is options._Options
+    assert type(namespace) is options.OptionsNamespace
     assert isinstance(namespace, Namespace)
     assert repr(namespace).endswith(" options>")
 
@@ -190,16 +189,16 @@ def test_each_dataset_reads_its_sources() -> None:
     ("spec", "expected"),
     [
         (options.TRADES, StreamHistoryQuery),
-        (options.LAST_TRADE, Query),
+        (options.LAST_TRADE, FetchQuery),
         (options.QUOTES, StreamHistoryQuery),
-        (options.BARS, HistoryQuery),
-        (options.PREVIOUS_DAY_BAR, Query),
+        (options.BARS, StreamHistoryQuery),
+        (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, SymbolStreamQuery),
         (options.ADMIN_MESSAGES, StreamQuery),
-        (options.CHAIN, Query),
-        (options.SNAPSHOTS, Query),
-        (options.CONTRACTS, Query),
-        (options.DAILY_OPEN_CLOSE, Query),
+        (options.CHAIN, FetchQuery),
+        (options.SNAPSHOTS, FetchQuery),
+        (options.CONTRACTS, FetchQuery),
+        (options.DAILY_OPEN_CLOSE, FetchQuery),
     ],
 )
 def test_query_class_of_each_dataset(spec: DatasetSpec, expected: type) -> None:
@@ -288,7 +287,7 @@ def test_bar_prices_say_how_they_are_adjusted() -> None:
 @pytest.mark.parametrize(
     ("spec", "gone"),
     [
-        (options.CHAIN, {"DetailsTicker", "UnderlyingAssetTicker"}),
+        (options.CHAIN, {"Ticker", "UnderlyingAssetTicker"}),
         (options.SNAPSHOTS, {"Ticker", "UnderlyingAssetTicker"}),
         (options.CONTRACTS, {"Ticker", "UnderlyingTicker"}),
     ],
@@ -336,7 +335,7 @@ def required_keys(path: str) -> tuple[str, ...]:
 def test_required_keys_are_the_row_keys_of_each_path() -> None:
     assert required_keys("/v3/trades/{optionsTicker}") == ("SipTimestamp",)
     assert required_keys("/v2/last/trade/{optionsTicker}") == ("SipTimestamp", "Ticker")
-    assert required_keys("/v3/snapshot/options/{underlyingAsset}") == ("DetailsTicker",)
+    assert required_keys("/v3/snapshot/options/{underlyingAsset}") == ("Ticker",)
 
 
 @pytest.mark.parametrize(
@@ -359,7 +358,7 @@ def test_fixtures_are_shaped_like_the_generated_fields(
 ) -> None:
     required = required_keys(path)
     body = json.loads(load_fixture(OWNER, name))
-    rest = cast("RestPath", source(R, path))
+    rest = CATALOG.rest_path(path)
     if rest.result_key is None:  # the body is the row; its envelope keys are not fields
         rows = [{k: v for k, v in body.items() if k not in {"status", "request_id"}}]
     else:
@@ -374,7 +373,7 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
-    rest = cast("RestPath", source(R, "/v3/snapshot"))
+    rest = CATALOG.rest_path("/v3/snapshot")
     batch, _ = to_batch(rows, rest, required=("Ticker",))
     table = batch.to_pydict()
     assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
@@ -418,27 +417,35 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
 
 
-def test_bars_pick_their_class_from_the_timespan(massive_session: dm.MassiveSession) -> None:
+def test_every_bars_call_is_one_class_and_only_some_stream(
+    massive_session: dm.MassiveSession,
+) -> None:
     bars = massive_session.options.bars
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.SECOND)) is StreamHistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.DAY)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.MINUTE, multiplier=5)) is HistoryQuery
-    assert type(bars(CONTRACT, dm.Timespan.HOUR)) is HistoryQuery
+    for timespan, multiplier in [
+        (dm.Timespan.MINUTE, 1),
+        (dm.Timespan.SECOND, 1),
+        (dm.Timespan.DAY, 1),
+        (dm.Timespan.MINUTE, 5),
+        (dm.Timespan.HOUR, 1),
+    ]:
+        assert type(bars(CONTRACT, timespan, multiplier=multiplier)) is StreamHistoryQuery
+    for timespan, multiplier in [(dm.Timespan.DAY, 1), (dm.Timespan.MINUTE, 5)]:
+        with pytest.raises(ValueError, match=r"\.ring\(\): only 1-second and 1-minute bars"):
+            bars(CONTRACT, timespan, multiplier=multiplier).ring(10)
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
     assert bars(CONTRACT, dm.Timespan.MINUTE)._request.adjusted is True
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars(CONTRACT, dm.Timespan.SESSION)
+    # Massive answers HTTP 400 to session bars outside futures, so they are sent.
+    assert bars(CONTRACT, dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars(CONTRACT, cast("dm.Timespan", "minute"))
+        bars(CONTRACT, "minute")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", 1))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     # None would read as a path without `adjusted`: REST would send Massive's default,
     # adjusted, while the flat files, as traded, could serve the same call.
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=cast("bool", None))
+        bars(CONTRACT, dm.Timespan.MINUTE, adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.MassiveSession) -> None:
@@ -450,7 +457,7 @@ def test_chain_sends_its_underlying_and_contract_type(massive_session: dm.Massiv
         limit=10,
         filters={"strike_price_gte": 150, "expiration_date_lte": "2025-01-17"},
     )
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": None,
         "params": {
@@ -491,6 +498,16 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
         massive_session.options.contracts(underlying=tickers)
 
 
+def test_a_chain_of_a_pair_fails_with_massive_s_answer(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "ERROR", "request_id": "r", "error": "Invalid ticker."}
+    fake_rest.reply_default(Reply(refusal, status=400))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 400 .*Invalid ticker\."):
+        rest_session.options.chain("C:EURUSD").fetch(wait=True)
+    assert [path for path, _ in fake_rest.get_queries()] == ["/v3/snapshot/options/C:EURUSD"]
+
+
 def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None:
     chain = massive_session.options.chain
     with pytest.raises(
@@ -500,23 +517,25 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
             r"m\.options\.snapshots\(dm\.ALL\) lists every contract$"
         ),
     ):
-        chain(cast("str", dm.ALL))
+        chain(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
-        chain(cast("str", 1))
+        chain(1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
         chain("aapl")
     with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
         chain("i:SPX")
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
-        chain("C:EURUSD")
-    with pytest.raises(ValueError, match=r"^underlying must be a stock or index ticker"):
-        chain("O:AAPL250117C00150000")
+    # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
+    assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
+    assert request_of(chain("X:BTCUSD"))["params"]["underlyingAsset"] == "X:BTCUSD"
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(chain(contract))["params"]["underlyingAsset"] == contract
     assert request_of(chain("KIMpL"))["params"]["underlyingAsset"] == "KIMpL"  # case is kept
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        chain("AAPL", contract_type=cast("dm.ContractType", "call"))
+        chain("AAPL", contract_type="call")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^contract_type is set through its own argument"):
         chain("AAPL", filters={"contract_type": "call"})
     with pytest.raises(ValueError, match=r"options\.chain has no filter 'ticker'"):
@@ -528,7 +547,7 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
 ) -> None:
     snapshots = massive_session.options.snapshots
     q = snapshots([CONTRACT], filters={"ticker_gte": "O:A"}, limit=500)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": (CONTRACT,),
         "params": {},
@@ -553,7 +572,7 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         expired=True,
         filters={"strike_price_gte": 100, "expiration_date_lte": date(2026, 1, 16)},
     )
-    assert type(listed) is Query
+    assert type(listed) is FetchQuery
     assert request_of(listed) == {
         "symbols": None,
         "params": {
@@ -577,6 +596,13 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
+    # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
+    for pair in ("C:EURUSD", "X:BTCUSD"):
+        with pytest.raises(ValueError, match=rf"^underlying='{pair}' is a currency or crypto"):
+            contracts(underlying=pair)
+    # What Massive answers to a contract as the underlying is for it to judge.
+    contract = "O:AAPL250117C00150000"
+    assert request_of(contracts(underlying=contract))["params"]["underlying_ticker"] == contract
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
     with pytest.raises(
@@ -592,9 +618,9 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
         contracts("aapl")  # not canonical: the symbol check explains it
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
-        contracts(underlying=cast("str", dm.ALL))
+        contracts(underlying=dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
-        contracts(expired=cast("bool", 1))
+        contracts(expired=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="needs a timezone"):
         contracts(as_of=datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None))
     for key in (
@@ -623,7 +649,7 @@ def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> Non
 def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSession) -> None:
     daily = massive_session.options.daily_open_close
     q = daily("O:AAPL250117C00150000", date(2025, 1, 2))
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert request_of(q) == {
         "symbols": (CONTRACT,),
         "params": {"date": date(2025, 1, 2)},
@@ -632,9 +658,9 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     assert q._request.adjusted is True
     assert daily(CONTRACT, "2025-01-02", adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", 0))
+        daily(CONTRACT, "2025-01-02", adjusted=0)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        daily(CONTRACT, "2025-01-02", adjusted=cast("bool", None))
+        daily(CONTRACT, "2025-01-02", adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
     # Massive has no grouped daily endpoint for options: the day's bars serve every contract.
     with pytest.raises(
         ValueError,
@@ -643,31 +669,32 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     ):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
-        daily(CONTRACT, cast("str", 20250102))
+        daily(CONTRACT, 20250102)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession) -> None:
     m = massive_session
-    call, desc = cast("dm.ContractType", "call"), cast("dm.Order", "desc")
+    call, desc = "call", "desc"
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        m.options.bars(CONTRACT, cast("dm.Timespan", "day"))
+        m.options.bars(CONTRACT, "day")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        m.options.chain("AAPL", contract_type=call)
+        m.options.chain("AAPL", contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
-        m.options.contracts(contract_type=call)
+        m.options.contracts(contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.chain("AAPL", order=desc)
+        m.options.chain("AAPL", order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.snapshots(CONTRACT, order=desc)
+        m.options.snapshots(CONTRACT, order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        m.options.contracts(order=desc)
+        m.options.contracts(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- Docstrings ------------------------------------------------------------------------------
 
 
-def _factory(name: str) -> Callable[..., object]:
-    return cast("Callable[..., object]", getattr(options._Options, name))
+def _factory(name: str) -> object:
+    method: object = getattr(options.OptionsNamespace, name)
+    return method
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -679,7 +706,7 @@ def test_docstrings_name_their_dataset_page(name: str) -> None:
 def test_every_factory_has_a_dataset() -> None:
     public = {
         name
-        for name, member in vars(options._Options).items()
+        for name, member in vars(options.OptionsNamespace).items()
         if callable(member) and not name.startswith("_")
     }
     assert public == set(NAMES)
@@ -693,7 +720,7 @@ def test_typed_filters_are_left_alone_when_no_filters_are_given(
     assert request_of(massive_session.options.chain("AAPL", filters=empty))["filters"] == {}
     # A filters value that is no mapping gets the factory's TypeError, not a key complaint.
     with pytest.raises(TypeError, match="filters must be a mapping, not list"):
-        massive_session.options.chain("AAPL", filters=cast("Mapping[str, Any]", ["contract_type"]))
+        massive_session.options.chain("AAPL", filters=["contract_type"])  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- End to end: REST ------------------------------------------------------------------------
@@ -735,7 +762,7 @@ def test_the_one_row_datasets_share_the_columns_of_their_kind(
         assert len(shared) > 5
     assert not hasattr(massive_session.options.trades(CONTRACT), "fetch")
     assert not hasattr(massive_session.options.bars(CONTRACT, dm.Timespan.DAY), "fetch")
-    assert type(massive_session.options.last_trade(CONTRACT)) is Query
+    assert type(massive_session.options.last_trade(CONTRACT)) is FetchQuery
 
 
 def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
@@ -743,7 +770,7 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
 ) -> None:
     prev = massive_session.options.previous_day_bar
     q = prev(CONTRACT)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert (q._request.timespan, q._request.multiplier, q._request.adjusted) == (
         dm.Timespan.DAY,
         1,
@@ -751,9 +778,9 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
     )
     assert prev(CONTRACT, adjusted=False)._request.adjusted is False
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        prev(CONTRACT, adjusted=cast("bool", 1))
+        prev(CONTRACT, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        prev(CONTRACT, adjusted=cast("bool", None))
+        prev(CONTRACT, adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         ValueError,
         match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
@@ -769,7 +796,7 @@ def test_last_trade_fetch_reads_the_last_trade(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/last/trade/{TSLA}"), Reply(body(load_fixture, "last_trade.json")))
-    out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch())
+    out = rows(rest_session.options.last_trade("O:TSLA210903C00700000").fetch(wait=True))
     assert fake_rest.get_queries() == [(f"/v2/last/trade/{TSLA}", {})]
     assert len(out) == 1
     row = out[0]
@@ -793,7 +820,9 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     day = date(2014, 6, 2)
     midnight = int(datetime(2014, 6, 2, 4, tzinfo=UTC).timestamp()) * NS  # New York midnight
     trades = rows(
-        rest_session.options.trades(contract).history(day, day, source=HistorySource.REST)
+        rest_session.options.trades(contract).history(
+            day, day, source=HistorySource.REST, wait=True
+        )
     )
     assert fake_rest.get_queries() == [
         (
@@ -816,7 +845,9 @@ def test_trades_and_quotes_history_read_a_day_over_rest(
     fake_rest.reply(wire(f"/v3/quotes/{quote_contract}"), Reply(body(load_fixture, "quotes.json")))
     day = date(2022, 2, 17)
     quotes = rows(
-        rest_session.options.quotes(quote_contract).history(day, day, source=HistorySource.REST)
+        rest_session.options.quotes(quote_contract).history(
+            day, day, source=HistorySource.REST, wait=True
+        )
     )
     path, query = fake_rest.get_queries()[-1]
     assert path == f"/v3/quotes/{quote_contract}"
@@ -835,7 +866,7 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(wire(f"/v2/aggs/ticker/{TSLA}/prev"), Reply(body(load_fixture, "prev.json")))
-    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert fake_rest.get_queries() == [(f"/v2/aggs/ticker/{TSLA}/prev", {"adjusted": ["true"]})]
     # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it.
@@ -856,11 +887,12 @@ def test_previous_day_bar_fetches_the_previous_session_and_bars_read_a_range(
     end = int(datetime(2021, 9, 25, 4, tzinfo=UTC).timestamp()) * 1000 - 1
     path = f"/v2/aggs/ticker/{contract}/range/1/day/{start}/{end}"
     # The sample echoes `adjusted: true`; unadjusted bars come back saying so.
-    ranged = cast("dict[str, object]", body(load_fixture, "range.json"))
+    ranged = body(load_fixture, "range.json")
+    assert isinstance(ranged, dict)
     fake_rest.reply(wire(path), Reply({**ranged, "adjusted": False}))
     bars = rows(
         rest_session.options.bars(contract, dm.Timespan.DAY, adjusted=False).history(
-            date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST
+            date(2021, 9, 23), date(2021, 9, 24), source=HistorySource.REST, wait=True
         )
     )
     assert fake_rest.get_queries()[-1] == (
@@ -894,13 +926,13 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
         Reply({"status": "OK", "results": [{"T": TSLA, "t": early, "c": 1.0}]}),
         Reply({"status": "OK", "results": [{"T": TSLA, "t": afternoon, "c": 1.0}]}),
     )
-    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    prev = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"]) for r in prev] == [
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
     assert not stamp_warnings(caplog)
     # 14:30 is served too, as sent: its stamp, a day later its end, no Date, one WARNING.
-    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch())
+    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd] == [
         (None, afternoon * 10**6, (afternoon + 86_400_000) * 10**6)
     ]
@@ -927,7 +959,7 @@ def test_chain_reads_one_underlying(
             sort="strike_price",
             order=dm.Order.ASC,
             filters={"expiration_date_lte": date(2022, 1, 21), "strike_price_gte": 150},
-        ).fetch()
+        ).fetch(wait=True)
     )
     assert fake_rest.get_queries() == [
         (
@@ -945,12 +977,12 @@ def test_chain_reads_one_underlying(
     (row,) = out
     assert (row["Symbol"], row["Underlying"]) == ("O:AAPL220121C00150000", "AAPL")
     assert row["OptionRoot"] == "AAPL"
-    assert (row["DetailsStrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
+    assert (row["StrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
         150.0,
         0.00229,
         1543.0,
     )
-    assert row["DetailsExpirationDate"] == "2022-01-21"  # every date is ISO text
+    assert row["ExpirationDate"] == "2022-01-21"  # every date is ISO text
     assert row["DayLastUpdated"] == 1605195918507251700
 
 
@@ -962,7 +994,7 @@ def test_snapshots_ask_for_options_250_contracts_a_request(
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     contracts = [f"O:NCLH221014C{strike:08d}" for strike in range(1000, 1000 + 251)]
-    rest_session.options.snapshots(contracts).fetch()
+    rest_session.options.snapshots(contracts).fetch(wait=True)
     requests = fake_rest.get_queries()
     # The two requests run concurrently, so they arrive in either order.
     chunks = sorted((q["ticker.any_of"][0].split(",") for _, q in requests), key=len)
@@ -979,7 +1011,7 @@ def test_snapshots_send_no_type_beside_tickers(
     # Massive answers `type` beside `ticker.any_of` with HTTP 400 "Cannot specify tickers and
     # type.", so only `dm.ALL` sends it; this is the exact query sent for one contract.
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
-    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch()
+    rest_session.options.snapshots(["O:NCLH221014C00005000"]).fetch(wait=True)
     assert [r.target for r in fake_rest.requests if r.method == "GET"] == [
         "/v3/snapshot?limit=250&ticker.any_of=O%3ANCLH221014C00005000"
     ]
@@ -992,7 +1024,7 @@ def test_snapshots_keep_the_error_row_of_a_contract(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
-    out = rows(rest_session.options.snapshots(dm.ALL).fetch())
+    out = rows(rest_session.options.snapshots(dm.ALL).fetch(wait=True))
     assert fake_rest.get_queries() == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
     found, missing = out
     assert (found["Symbol"], found["Underlying"], found["Error"]) == (
@@ -1022,7 +1054,7 @@ def test_contracts_list_or_read_each_contract(
             sort="strike_price",
             order=dm.Order.DESC,
             filters={"strike_price_lte": 90},
-        ).fetch()
+        ).fetch(wait=True)
     )
     assert fake_rest.get_queries() == [
         (
@@ -1050,7 +1082,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
-    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch())
+    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch(wait=True))
     assert fake_rest.get_queries()[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},
@@ -1072,7 +1104,7 @@ def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
     reply = Reply(body(load_fixture, "contracts_index.json"))
     fake_rest.reply("/v3/reference/options/contracts", reply)
-    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
     ]
@@ -1099,7 +1131,7 @@ def test_a_table_of_index_underlyings_lists_each_one_s_contracts_by_its_bare_tic
     reply = Reply(body(load_fixture, "contracts_index.json"))
     fake_rest.reply("/v3/reference/options/contracts", reply)
     underlyings = new_table([string_col("Symbol", ["I:SPX"])])
-    listed = rows(rest_session.options.contracts(underlying=underlyings).fetch())
+    listed = rows(rest_session.options.contracts(underlying=underlyings).fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
     ]
@@ -1116,7 +1148,7 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
         reply = Reply(body(load_fixture, "chain.json"))
         fake_rest.reply(f"/v3/snapshot/options/{underlying}", reply)
     underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
-    out = rows(rest_session.options.chain(underlyings).fetch())
+    out = rows(rest_session.options.chain(underlyings).fetch(wait=True))
     assert [path for path, _ in fake_rest.get_queries()] == [
         "/v3/snapshot/options/AAPL",
         "/v3/snapshot/options/MSFT",
@@ -1146,7 +1178,7 @@ def test_rows_of_another_instrument_keep_their_underlying_and_warn_once(
     reply = Reply(body={"status": "OK", "request_id": "r", "results": [stock]})
     fake_rest.reply("/v3/reference/options/contracts", reply)
     for _ in range(2):
-        listed = rows(rest_session.options.contracts(underlying="I:DJT").fetch())
+        listed = rows(rest_session.options.contracts(underlying="I:DJT").fetch(wait=True))
         assert [(r["Symbol"], r["Underlying"]) for r in listed] == [("O:DJT261120C00020000", "DJT")]
     assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
     assert warnings_of(caplog) == [
@@ -1174,9 +1206,9 @@ def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_on
     empty = Reply(body={"status": "OK", "request_id": "r", "results": []})
     both = Reply(body={"status": "OK", "request_id": "r", "results": [coded, bare]})
     fake_rest.reply(path, empty, both)
-    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch()) == []
+    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True)) == []
     for _ in range(2):
-        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch())
+        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
         assert [(r["Symbol"], r["Underlying"]) for r in listed] == [
             ("O:SPX261120C00400000", "I:SPX"),
             ("O:SPX261120C00600000", "SPX"),
@@ -1196,7 +1228,7 @@ def test_a_list_argument_with_named_contracts_fails_before_any_request(
     # The per-contract path takes only `as_of`; a list-only argument cannot be honored there.
     q = rest_session.options.contracts(symbols=[CONTRACT], underlying="AAPL")
     with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
-        q.fetch()
+        q.fetch(wait=True)
     assert fake_rest.get_queries() == []
 
 
@@ -1209,7 +1241,9 @@ def test_daily_open_close_reads_one_day_per_contract(
     path = f"/v1/open-close/{TSLA}/2023-01-09"
     fake_rest.reply(wire(path), Reply(body(load_fixture, "open_close.json")))
     out = rows(
-        rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch()
+        rest_session.options.daily_open_close(TSLA, date(2023, 1, 9), adjusted=False).fetch(
+            wait=True
+        )
     )
     assert fake_rest.get_queries() == [(path, {"adjusted": ["false"]})]
     assert [(r["Symbol"], r["Date"], r["Open"], r["Close"], r["AfterHours"]) for r in out] == [
@@ -1377,14 +1411,8 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
         massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
-    methods = "its methods are blink(), append_only(), ring()"
-    with pytest.raises(AttributeError) as last_by:
-        query.last_by  # noqa: B018  # the attribute lookup is the test
-    assert str(last_by.value) == f"options.admin_messages has no last_by(); {methods}"
-    with pytest.raises(AttributeError) as fetch:
-        query.fetch  # noqa: B018  # the attribute lookup is the test
-    # No snapshot serves the messages, so none is offered.
-    assert str(fetch.value) == f"options.admin_messages has no fetch(); {methods}"
+    assert not hasattr(query, "last_by")
+    assert not hasattr(query, "fetch")
 
 
 def test_admin_messages_of_every_exchange_arrive_in_each_shape(
@@ -1523,12 +1551,12 @@ def s3_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.
         "FlatFileClient",
         functools.partial(_massive.FlatFileClient, clock=FakeClock()),
     )
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    m = dm.MassiveSession(dm.MassiveConfig(**cast("dict[str, Any]", fields)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+    )
+    m = dm.MassiveSession(config)
     yield m
     m.close()
 
@@ -1611,7 +1639,7 @@ def test_a_flat_file_of_each_prefix_round_trips(
 ) -> None:
     key = f"{prefix}/2023/03/2023-03-13.csv.gz"
     fake_s3.put(key, make_csv_gz("\n".join([header, *lines]) + "\n"))
-    out = rows(build(s3_session).history(DAY, DAY, source=HistorySource.FLAT_FILES))
+    out = rows(build(s3_session).history(DAY, DAY, source=HistorySource.FLAT_FILES, wait=True))
     assert fake_s3.requests == [("flatfiles", key)]
     (row,) = out  # the other contract's row is filtered out
     assert row["Symbol"] == PUT

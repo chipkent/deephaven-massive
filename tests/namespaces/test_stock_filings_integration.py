@@ -63,7 +63,7 @@ def test_filings_rows_without_a_ticker(
     }
     counts = {}
     for name, query in queries.items():
-        rows = table_rows(query.fetch())
+        rows = table_rows(query.fetch(wait=True))
         lacking = [row for row in rows if row["Symbol"] is None]
         counts[name] = len(rows)
         cut = " (cut short at the limit)" if len(rows) in {_FILINGS_LIMIT, paged} else ""
@@ -106,7 +106,7 @@ def test_insider_activity_and_holdings_keys_name_one_row_each(
     }
     shared: dict[str, list[tuple[object, ...]]] = {}
     for name, (query, keys) in queries.items():
-        rows = table_rows(query.fetch())
+        rows = table_rows(query.fetch(wait=True))
         seen: dict[tuple[object, ...], set[str]] = {}
         for row in rows:
             content = repr(sorted((k, v) for k, v in row.items() if k != "TimestampInsert"))

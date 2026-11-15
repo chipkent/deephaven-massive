@@ -1,4 +1,4 @@
-"""Log records kept bounded: once per process, per value up to a limit, per failure, or by length.
+"""Log records kept bounded: once per key, per value up to a limit, per failure, or by length.
 
 Some facts are worth logging once rather than on every event, some bad values can arrive
 without end, and some lists can hold thousands of items. The helpers here keep these records
@@ -7,12 +7,14 @@ from flooding the log:
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
   unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
   one-second bar whose end from Massive is not its start plus one second.
+- `LoggedKeys` holds the facts one owner has logged, such as one `history()` call: a record
+  naming several facts logs only the new ones, and the keys go when the owner drops it.
 - `BoundedLog` logs a record at its level the first time each value is seen, for at most a
   fixed number of distinct values, so a stream of bad values that may never end (a watchlist
   row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
   it uses bounded.
 - `log_failure` logs a failure that fails a live table, once per failure object, at the level
-  its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
+  its `is_bug` gives (`_errors.is_bug_of`): one connection failure that fails a hundred streams
   is one record, not a hundred.
 - `bounded_list` renders a list of any length as its count and its first `LIST_LIMIT` items,
   for a record that names symbols, topics, or stream ids: a stream of 5,000 symbols logs one
@@ -31,7 +33,7 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
+from deephaven_massive._errors import MassiveError, failure_text, is_bug_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "LIST_LIMIT",
     "BoundedLog",
+    "LoggedKeys",
     "bounded_list",
     "log_failure",
     "log_once",
@@ -49,8 +52,50 @@ LIST_LIMIT: Final = 20
 """How many items `bounded_list` shows before it only counts the rest."""
 
 
-_logged_lock = threading.Lock()
-_logged: set[str] = set()
+class LoggedKeys:
+    """The keys of the facts one owner has logged, so each is logged once while the owner lives.
+
+    For facts worth stating once per owner rather than once per process: a `history()` call
+    that reads its files again as symbols join keeps one, so each read logs only what no
+    earlier read of the call logged, and the keys go when the call's result is dropped.
+    Thread-safe: one leaf lock guards the keys and is never held while logging.
+
+    Example:
+        ::
+
+            import logging
+
+            from deephaven_massive._log_limits import LoggedKeys
+
+            logged = LoggedKeys()
+            for venue in logged.first_seen(["NYMEX", "CME", "NYMEX"]):
+                logging.getLogger("example").warning("skipping %s", venue)
+    """
+
+    __slots__ = ("_keys", "_lock")
+
+    def __init__(self) -> None:
+        """Start with no fact logged."""
+        self._lock = threading.Lock()
+        self._keys: set[str] = set()
+
+    def first_seen(self, keys: Iterable[str]) -> list[str]:
+        """Return the keys this owner has not seen before, and mark them seen.
+
+        Args:
+            keys: The facts' keys.
+
+        Returns:
+            The keys seen for the first time, in the order given, without repeats.
+        """
+        with self._lock:
+            new = [key for key in dict.fromkeys(keys) if key not in self._keys]
+            self._keys.update(new)
+        return new
+
+
+_logged: Final = LoggedKeys()
+"""The facts `log_once` has logged in the process."""
 
 
 def log_once(
@@ -69,11 +114,8 @@ def log_once(
         *args: The message's arguments.
         level: The logging level; INFO by default.
     """
-    with _logged_lock:
-        if key in _logged:
-            return
-        _logged.add(key)
-    log.log(level, message, *args)
+    if _logged.first_seen((key,)):
+        log.log(level, message, *args)
 
 
 def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:
@@ -190,11 +232,11 @@ def log_failure(
     expected: int = logging.WARNING,
     exc_info: BaseException | None = None,
 ) -> bool:
-    """Log a failure that fails a live table, once per failure, at the level its cause gives.
+    """Log a failure that fails a live table, once per failure, at the level its `is_bug` gives.
 
-    A defect (`ErrorCause.USER_DEFECT` or `ErrorCause.LIBRARY_DEFECT`, and any exception that is
-    not a `MassiveError`) logs at ERROR, a library defect with how to report it
-    (`_errors.failure_text`); an expected failure logs at `expected`. One `MassiveError` object
+    A bug (`MassiveError.is_bug`, and any exception that is not a `MassiveError`) logs at
+    ERROR, a library bug with how to report it (`_errors.failure_text`); any other failure
+    logs at `expected`. One `MassiveError` object
     is logged once: the connection that fails a hundred streams with one error logs one
     record, and every later call with the same object logs at DEBUG instead. Thread-safe; the
     set of failures logged holds them weakly, so it never keeps one alive.
@@ -206,14 +248,18 @@ def log_failure(
         *args: The message's other arguments, before the failure's text.
         expected: The level of an expected failure; WARNING by default, DEBUG for one the
             caller also raises.
-        exc_info: The exception whose traceback the record carries, or None for none.
+        exc_info: The exception whose traceback the record carries, or None (absent) for none,
+            except that a bug always carries its own.
 
     Returns:
         True when this call logged the failure at its level; False when the same failure had
         been logged already, and this call logged at DEBUG.
     """
     first = mark_failure_logged(error)
-    level = expected if cause_of(error) is ErrorCause.EXPECTED else logging.ERROR
+    bug = is_bug_of(error)
+    level = expected if not bug else logging.ERROR
+    if bug and exc_info is None:
+        exc_info = error  # a bug is logged with its traceback, wherever it is absorbed
     log.log(
         level if first else logging.DEBUG,
         message,

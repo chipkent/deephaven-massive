@@ -61,7 +61,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
@@ -69,12 +69,16 @@ from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    SessionClosedError,
     from_wire,
-    wire_cause,
+    required,
+    required_instance,
+    wire_source,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
 from deephaven_massive._ingest.host_decision import refused_snapshot, unlabelled
@@ -93,6 +97,7 @@ from deephaven_massive._massive import (
     DriftReport,
     Transport,
     WireAuthError,
+    WireError,
     WsState,
 )
 from deephaven_massive._tables.diagnostics import (
@@ -113,8 +118,9 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
 
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import Reject, Source, Status, WireError
+    from deephaven_massive._massive import Reject, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
@@ -129,6 +135,7 @@ __all__ = [
     "Connection",
     "ConnectionGroup",
     "ConnectionStream",
+    "GroupSession",
 ]
 
 logger = logging.getLogger(__name__)
@@ -219,6 +226,28 @@ class _Client(Sender, Protocol):
         self, channel: str, keys: frozenset[str], *, symbol: str | None = None
     ) -> None:
         """Declare a channel's required key columns and its symbol column."""
+        ...
+
+
+class GroupSession(Protocol):
+    """A session of a connection group, as the group reads through it: a `WsConnections`."""
+
+    @property
+    def closed(self) -> bool:
+        """True once the session's `close` has run."""
+        ...
+
+    def core(self) -> SessionCore | None:
+        """Return the session's core, or None once it has been freed.
+
+        Returns:
+            The core.
+        """
+        ...
+
+    @property
+    def fetch_rows(self) -> RowFetch:
+        """Returns every row of a REST path for a query, through the session's REST transport."""
         ...
 
 
@@ -720,7 +749,7 @@ class Connection:
         if stream is None:
             self._unknown(stream_id, self.change_symbols, (added, removed))
             return
-        symbols = (cast("frozenset[str]", stream.symbols) | added) - removed
+        symbols = (required(stream.symbols, f"stream {stream_id}'s symbols") | added) - removed
         # The stream's session resolved every added crypto pair before posting the change.
         with self._lock:
             pairs = dict(self._group.pairs)
@@ -1030,18 +1059,23 @@ class Connection:
         self._next_reconnect_at = None  # shown only while a reconnect waits for its time
         if state is WsState.TAKEN:
             self.subscriptions.ended()
-            self._taken(cast("float", detail))
+            self._taken(required_instance(detail, float, "a TAKEN state's next attempt"))
             return
-        if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
+        if state is WsState.RECONNECTING or state is WsState.WAITING_SLOT:
             self.subscriptions.ended()
-            self._next_reconnect_at = int(cast("float", detail) * 1e9)
-            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=cast("float", detail))
+            at = required_instance(detail, float, f"a {state.value} state's next attempt")
+            self._next_reconnect_at = int(at * 1e9)
+            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=at)
             self._outage(detail=self._slot_text() if state is WsState.WAITING_SLOT else None)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
-            self._failed(cast("WireError", detail))
+            self._failed(required_instance(detail, WireError, "a FAILED state's error"))
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
+        elif state is WsState.CONNECTING:
+            pass  # only the row shows it: the socket is not yet open
+        else:
+            assert_never(state)  # a new state needs its rule here
         self._state = ConnectionState(state.value)
         self._write_row()
         if state in {WsState.CLOSED, WsState.FAILED}:
@@ -1087,7 +1121,7 @@ class Connection:
         Returns:
             True when the connection closed.
         """
-        at = cast("float", self._taken_at)
+        at = required(self._taken_at, "the time the connection was taken")
         group = self._group
         error = MassiveError(
             f"another connection with this API key took the WebSocket connection to "
@@ -1095,7 +1129,7 @@ class Connection:
             "the other program or session that uses the key and call the method again, or set "
             "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
             f"connection back; see {_TAKEN_HELP}",
-            cause=ErrorCause.EXPECTED,
+            source=ErrorSource.MASSIVE,
         )
         with self._lock:
             leased = [sid for sid, connection in group.streams.items() if connection is self]
@@ -1190,14 +1224,14 @@ class Connection:
                 f"includes no WebSocket streams for {self.asset_class.value}, not only a bad key",
                 status=wire.status,
                 request_id=wire.request_id,
-                cause=wire.cause,
+                source=wire.source,
             )
         else:
             public = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "
                 f"{error.message}",
                 status=error.status,
-                cause=wire_cause(error),  # an internal error of the client is a defect
+                source=wire_source(error),  # an internal error of the client is a defect
             )
         self._last_error = str(public)
         log_failure(logger, public, "%s")
@@ -1463,13 +1497,13 @@ class Connection:
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
         if episodes.failure is None:
-            since = utc_text(cast("float", episodes.down_since))
+            since = utc_text(required(episodes.down_since, "the outage's start"))
             episodes.failure = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} has been down "
                 f"since {since}, longer than MassiveConfig.max_outage "
                 f"({self._group.max_outage:g} s); the rows from {since} on are missing, so this "
                 "table stopped; call the verb again for a new live table",
-                cause=ErrorCause.EXPECTED,
+                source=ErrorSource.NETWORK,
             )
         self.flusher.fail([stream_id], episodes.failure)
 
@@ -1521,7 +1555,7 @@ class Connection:
         subscriptions = self.subscriptions
         acknowledged = subscriptions.acknowledged
         topics = _TopicStates(
-            generation=cast("int", subscriptions.generation),  # set while connected
+            generation=required(subscriptions.generation, "a connected socket's generation"),
             acknowledged=acknowledged,
             answered=acknowledged | subscriptions.no_ack,
             deferred=subscriptions.deferred,
@@ -1904,7 +1938,9 @@ def _sharing_value(name: str, value: object) -> Hashable:
         A hashable value, equal for equal settings.
     """
     if name == "api_key":
-        return hashlib.sha256(cast("str", value).encode()).digest()
+        return hashlib.sha256(
+            required_instance(value, str, "the api_key setting").encode()
+        ).digest()
     if isinstance(value, Mapping):
         return frozenset(value.items())
     return value
@@ -1975,7 +2011,7 @@ class ConnectionGroup:
         self.connections: dict[str, Connection] = {}
         self.streams: dict[int, Connection] = {}
         self.owners: dict[int, WsConnections] = {}
-        self.sessions: set[WsConnections] = set()
+        self.sessions: set[GroupSession] = set()
         self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
@@ -2079,7 +2115,7 @@ class ConnectionGroup:
             The calendar.
 
         Raises:
-            MassiveError: If every session has left the group meanwhile.
+            SessionClosedError: If every session has left the group meanwhile.
         """
         with self.lock:
             found = self._calendar
@@ -2098,7 +2134,9 @@ class ConnectionGroup:
         if found is not candidate:
             candidate.close()
         if found is None:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return found
 
     def _fetch_rows(
@@ -2120,12 +2158,15 @@ class ConnectionGroup:
             The rows.
 
         Raises:
-            MassiveError: If no session of the group is open, or the read fails.
+            SessionClosedError: If no session of the group is open.
+            MassiveError: If the read fails.
         """
         with self.lock:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:

@@ -4,8 +4,8 @@
 # Usage: scripts/spec-drift-issue.sh < report.md
 #
 # The weekly drift workflow (.github/workflows/spec-drift.yml) runs it when
-# `python -m deephaven_massive._massive.refresh --check` finds drift, with that report on
-# standard input. It needs gh, authenticated through GH_TOKEN for the repository GH_REPO names,
+# `scripts/refresh.py --check --report drift.md` finds drift, with that report on standard
+# input. It needs gh, authenticated through GH_TOKEN for the repository GH_REPO names,
 # and jq.
 #
 #   - It creates the `spec-drift` label unless the repository has it (label names compare

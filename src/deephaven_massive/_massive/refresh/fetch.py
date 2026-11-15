@@ -1,8 +1,8 @@
 """Download Massive's published specifications and store them as the canonical snapshot.
 
-`python -m deephaven_massive._massive.refresh --fetch` calls `fetch`, which replaces the
-vendored snapshot (`vendor/massive/` in the source checkout, whose layout and manifest
-`snapshot` owns) with the live vendor sources:
+`scripts/refresh.py --fetch` calls `fetch`, which replaces the vendored snapshot
+(`vendor/massive/` in the source checkout, whose layout and manifest `snapshot` owns) with the
+live vendor sources:
 
 - `openapi.json`: the REST specification from `https://api.massive.com/openapi`. The older
   `https://api.massive.com/specs/rest.json` is a stale subset of about 33 paths and is never

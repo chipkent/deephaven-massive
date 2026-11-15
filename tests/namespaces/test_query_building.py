@@ -2,9 +2,8 @@
 
 Two rules over the factory methods live here too. The annotation rule: for every dataset of
 the catalog, the return annotation of its factory method is the class `query_class` derives
-from the spec (for `bars`, each overload matches `bar_query_class`, the implementation
-returns `HistoryQuery`, and `timespan` has no default anywhere), and every public factory
-method maps to exactly one dataset. The summary rule: every factory's docstring starts with
+from the spec (for `bars`, `StreamHistoryQuery`, with `timespan` required), and every public
+factory method maps to exactly one dataset. The summary rule: every factory's docstring starts with
 its `DatasetSpec.summary`. Each rule is a function over a session class and a catalog, so it
 is checked against the real tree and against synthetic namespaces that break it.
 """
@@ -19,7 +18,7 @@ import re
 import typing
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, date, datetime
-from typing import Any, ClassVar, Literal, cast, overload
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 import pytest
@@ -28,7 +27,7 @@ from deephaven.column import int_col, string_col
 from deephaven.time import to_j_instant, to_j_local_date
 
 import deephaven_massive as dm
-from deephaven_massive import _enums, _query, _types
+from deephaven_massive import _enums, queries
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
@@ -36,12 +35,13 @@ from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
 from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces.query_building import (
+from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.namespaces._query_building import (
     ADJUSTED_PRICE,
     ADJUSTED_VOLUME,
     SNAPSHOT_SYMBOLS_PER_REQUEST,
-    Namespace,
-    _is_default,
+    _check_bar_period,
     _time_value,
     accepted_values,
     adjustment_notes,
@@ -52,16 +52,8 @@ from deephaven_massive._namespaces.query_building import (
     require_bool,
     value_table,
 )
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    bar_query_class,
-    query_class,
-)
-from deephaven_massive._session import CATALOG
-from deephaven_massive._types import StreamSpan
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
+from deephaven_massive.queries._choice import query_class
 
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
@@ -111,20 +103,47 @@ INDICATOR = DatasetSpec(
 )
 
 
-def build(session: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def build(
+    session: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    symbols: dm.SymbolsLike | None = None,
+    symbols_optional: bool = True,
+    all_alternative: str | None = None,
+    timespan: Timespan | None = None,
+    venues: collections.abc.Set[FuturesVenue] | None = None,
+    start: dm.DateLike | None = None,
+    end: dm.DateLike | None = None,
+    params: Mapping[str, object] | None = None,
+    filters: Mapping[str, dm.FilterValue] | None = None,
+    limit: int | None = None,
+) -> Query:
     # Most tests build a list dataset without symbols, which only filter it; the refusal of
     # None for a dataset that needs symbols has its own test.
-    kwargs.setdefault("symbols_optional", True)
-    return build_query(session._core, spec, **cast("dict[str, Any]", kwargs))
+    return build_query(
+        session._core,
+        spec,
+        query_type=Query,
+        symbols=symbols,
+        symbols_optional=symbols_optional,
+        all_alternative=all_alternative,
+        timespan=timespan,
+        venues=venues,
+        start=start,
+        end=end,
+        params=params,
+        filters=filters,
+        limit=limit,
+    )
 
 
 def test_list_params() -> None:
     assert list_params(sort=None, order=None) == {}
     assert list_params(sort="ticker", order=Order.DESC) == {"sort": "ticker", "order": Order.DESC}
     with pytest.raises(TypeError, match="sort must be a str"):
-        list_params(sort=cast("str", 1), order=None)
+        list_params(sort=1, order=None)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        list_params(sort=None, order=cast("Order", "desc"))
+        list_params(sort=None, order="desc")  # type: ignore[arg-type]  # the point: refused at run time
     # Whether `order` needs `sort` depends on the dataset's paths, which `build_query` reads.
     assert list_params(sort=None, order=Order.DESC) == {"order": Order.DESC}
 
@@ -147,7 +166,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
     assert "limit=5" in repr(massive_session.stocks.dividends("AAPL", limit=5))
     assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.limit is None
     with pytest.raises(TypeError, match="limit must be an int"):
-        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=cast("int", "10"))
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], limit="10")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=True)
     with pytest.raises(ValueError, match="limit must be positive"):
@@ -174,7 +193,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
         params={"sort": "ex_dividend_date", "limit": None, "tickers": ["B", "A"]},
         filters={"frequency_lte": 12, "frequency": 4, "distribution_type": "recurring"},
     )
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
     assert request.start == date(2025, 1, 1)
@@ -190,7 +209,7 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
 
 def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession) -> None:
     q = build(massive_session, INDICATOR, timespan=Timespan.DAY)
-    assert type(q) is Query  # not a bars dataset: the timespan does not pick the class
+    assert type(q) is FetchQuery  # not a bars dataset: the timespan does not pick the class
     assert q._request.symbols is None
     assert q._request.timespan is Timespan.DAY
 
@@ -246,29 +265,35 @@ def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSessio
     assert build(massive_session, TRADES_SPEC, symbols=dm.ALL)._request.symbols is dm.ALL
 
 
-def test_bars_pick_their_class(massive_session: dm.MassiveSession) -> None:
+def test_every_bars_call_builds_one_class(massive_session: dm.MassiveSession) -> None:
+    # The timespan no longer picks a class: the stream methods refuse bars that don't stream.
     q = build(massive_session, STOCK_BARS, symbols="AAPL", timespan=Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
     q = build(massive_session, FUTURES_BARS, symbols="ESZ5", timespan=Timespan.SESSION)
-    assert type(q) is HistoryQuery
-    assert type(build(massive_session, STOCK_BARS, symbols="AAPL")) is HistoryQuery
+    assert type(q) is StreamHistoryQuery
+    assert type(build(massive_session, STOCK_BARS, symbols="AAPL")) is StreamHistoryQuery
 
 
 def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> None:
     q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={FuturesVenue.CME})
     assert q._request.venues == (FuturesVenue.CME,)
-    assert build(massive_session, FUTURES_BARS, symbols="ESZ5")._request.venues is None
+    # Left out, every venue the plan allows, each refused one skipped with a warning.
+    every = build(massive_session, FUTURES_BARS, symbols="ESZ5")._request
+    assert (every.venues, every.refused_venues) == (tuple(FuturesVenue), dm.OnError.LOG)
+    # A dataset whose flat files are not per venue has none.
+    plain = build(massive_session, DIVIDENDS)._request
+    assert (plain.venues, plain.refused_venues) == (None, None)
     with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})
+        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
     m = massive_session
     assert dict(m.reference.tickers(sort="name")._request.params)["sort"] == "name"
-    with pytest.raises(ValueError, match=r"^reference\.tickers: sort 'nam' is not a sort field"):
-        m.reference.tickers(sort="nam")
+    # A field the path does not list is sent: Massive answers it with HTTP 400.
+    assert dict(m.reference.tickers(sort="nam")._request.params)["sort"] == "nam"
     statements = m.stocks.financials.balance_sheets
     assert dict(statements(sort="period_end.desc,fiscal_year")._request.params)["sort"] == (
         "period_end.desc,fiscal_year"
@@ -283,11 +308,11 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
         with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
             build(massive_session, DIVIDENDS, filters={key: "2025-01-01"})
     with pytest.raises(TypeError, match="filters must be a mapping"):
-        build(massive_session, DIVIDENDS, filters=[("a", 1)])
+        build(massive_session, DIVIDENDS, filters=[("a", 1)])  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="filter names must be str"):
-        build(massive_session, DIVIDENDS, filters={1: "a"})
+        build(massive_session, DIVIDENDS, filters={1: "a"})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match="sequence of str or date; got dict"):
-        build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})
+        build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
     # A dataset without a time axis takes its timestamp filters through `filters`, and the
@@ -323,6 +348,7 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
 ) -> None:
     # The indicator timestamps take whole milliseconds, as their ISO-8601 text does.
     instant = to_j_instant("2025-01-02T14:30:00.001Z")
+    assert instant is not None
     filters = build(
         massive_session,
         INDICATOR,
@@ -336,13 +362,17 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
         ("timestamp_lt", datetime(2025, 1, 2, 14, 30, 0, 2000, tzinfo=UTC)),
     )
     assert all(type(value) is datetime for _, value in filters)
-    for day in (to_j_local_date("2025-01-02"), np.datetime64("2025-01-02")):
+    java_day = to_j_local_date("2025-01-02")
+    assert java_day is not None
+    for day in (java_day, np.datetime64("2025-01-02")):
         assert build(
-            massive_session, INDICATOR, filters={"timestamp_gte": day}
+            massive_session,
+            INDICATOR,
+            filters={"timestamp_gte": day},
         )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
     # A Java day in a list is a day; the next element is the first the list refuses.
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
-        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})
+        build(massive_session, DIVIDENDS, filters={"a": [java_day, 1]})
     # An instant between two microseconds rounds outward: an upper bound up, any other down,
     # whether the name is a filter key or a wire name.
     between = to_j_instant("2025-01-02T14:30:00.000001001Z")
@@ -375,12 +405,6 @@ def test_every_snapshot_splits_its_tickers_alike() -> None:
     assert {spec.symbols_per_request for spec in lists} == {SNAPSHOT_SYMBOLS_PER_REQUEST}
 
 
-def test_namespaces_hold_the_core(massive_session: dm.MassiveSession) -> None:
-    namespace = Namespace(massive_session._core)
-    assert namespace._core is massive_session._core
-    assert not hasattr(namespace, "_query")
-
-
 def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession) -> None:
     build(massive_session, DIVIDENDS, filters={"frequency": 4})
     with pytest.raises(ValueError, match="has no filter 'pay_date_lte'"):
@@ -391,44 +415,7 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
 
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
-        build(massive_session, INDICATOR, timespan="day")
-
-
-def test_namespaces_repr_as_their_path(massive_session: dm.MassiveSession) -> None:
-    label = repr(massive_session).removeprefix("<").split(" open")[0]
-    m = massive_session
-    namespaces = {
-        "stocks": m.stocks,
-        "options": m.options,
-        "futures": m.futures,
-        "indices": m.indices,
-        "forex": m.forex,
-        "crypto": m.crypto,
-        "reference": m.reference,
-        "indicators": m.indicators,
-        "economy": m.economy,
-        "partners": m.partners,
-        "partners.benzinga": m.partners.benzinga,
-        "partners.etf_global": m.partners.etf_global,
-        "partners.tmx": m.partners.tmx,
-        "partners.fable": m.partners.fable,
-    }
-    for path, namespace in namespaces.items():
-        assert repr(namespace) == f"<{label} {path}>"
-
-
-def test_a_wrong_call_names_the_method_by_its_path(massive_session: dm.MassiveSession) -> None:
-    m = massive_session
-    bars = cast("Callable[..., object]", m.stocks.bars)  # a call no overload accepts
-    with pytest.raises(
-        TypeError, match=r"^stocks\.bars\(\) takes 3 positional arguments but 5 were"
-    ):
-        bars("AAPL", dm.Timespan.MINUTE, 1, "adjusted")
-    news = cast("Callable[..., object]", m.partners.benzinga.news)
-    with pytest.raises(TypeError, match=r"^partners\.benzinga\.news\(\) got an unexpected"):
-        news(tickerz="AAPL")
-    assert m.options.chain.__qualname__ == "options.chain"
-    assert m.stocks.financials.balance_sheets.__qualname__ == "stocks.financials.balance_sheets"
+        build(massive_session, INDICATOR, timespan="day")  # type: ignore[arg-type]  # the point: refused at run time
 
 
 NEWS = DatasetSpec(
@@ -481,14 +468,31 @@ def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSessio
 
 def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
     spec = STOCK_BARS
-    q = build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=False)
+    q = build_query(massive_session._core, spec, query_type=Query, symbols=["AAPL"], adjusted=False)
     assert q._request.adjusted is False
-    assert build_query(massive_session._core, spec, symbols=["AAPL"])._request.adjusted is None
+    assert (
+        build_query(
+            massive_session._core, spec, query_type=Query, symbols=["AAPL"]
+        )._request.adjusted
+        is None
+    )
     with pytest.raises(TypeError, match="adjusted must be a bool, not str"):
-        build_query(massive_session._core, spec, symbols=["AAPL"], adjusted=cast("bool", "false"))
+        build_query(
+            massive_session._core,
+            spec,
+            query_type=Query,
+            symbols=["AAPL"],
+            adjusted="false",  # type: ignore[arg-type]  # the point: refused at run time
+        )
     # One channel only: adjusted never travels in params, where a transport could drop it.
     with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
-        build_query(massive_session._core, spec, symbols=["AAPL"], params={"adjusted": False})
+        build_query(
+            massive_session._core,
+            spec,
+            query_type=Query,
+            symbols=["AAPL"],
+            params={"adjusted": False},
+        )
 
 
 def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> None:
@@ -497,7 +501,13 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
     with pytest.raises(
         ValueError, match=r"^adjusted is set through its own argument, adjusted=, not filters"
     ):
-        build_query(massive_session._core, STOCK_BARS, symbols=["AAPL"], filters={"adjusted": True})
+        build_query(
+            massive_session._core,
+            STOCK_BARS,
+            query_type=Query,
+            symbols=["AAPL"],
+            filters={"adjusted": True},
+        )
 
 
 def test_a_symbol_table_is_boxed_by_identity(
@@ -592,8 +602,8 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
     names = {
         **vars(collections.abc),
         **vars(dt),
-        **vars(_query),
-        **vars(_types),
+        **{name: getattr(queries, name) for name in queries.__all__},
+        **{name: getattr(dm, name) for name in ("SymbolsLike", "DateLike", "FilterValue")},
         **vars(_enums),
         "AbstractSet": collections.abc.Set,
         "Literal": Literal,
@@ -613,7 +623,7 @@ def _factories(owner: type, path: str) -> Iterator[tuple[str, Callable[..., obje
         path: The dotted path of `owner` from the session, empty for the session.
 
     Yields:
-        `(dataset path, factory)` pairs, such as `("stocks.trades", _Stocks.trades)`.
+        `(dataset path, factory)` pairs, such as `("stocks.trades", Stocks.trades)`.
     """
     for name, member in vars(owner).items():
         if name.startswith("_"):
@@ -627,49 +637,20 @@ def _factories(owner: type, path: str) -> Iterator[tuple[str, Callable[..., obje
             yield dotted, member
 
 
-def _bar_problems(name: str, spec: DatasetSpec, factory: Callable[..., object]) -> list[str]:
-    """Check each `bars` overload against `bar_query_class`, and the implementation.
-
-    An overload's return type must be a base of the class `bar_query_class` picks for every
-    timespan and multiplier its annotations allow, and that class itself for at least one.
-    `timespan` must be required in the implementation and in every overload: every call names
-    its bar length.
+def _bar_problems(name: str, factory: Callable[..., object]) -> list[str]:
+    """Check that a `bars` factory requires its timespan: every call names its bar length.
 
     Args:
         name: The dataset name, for the messages.
-        spec: The bars dataset.
         factory: Its factory method.
 
     Returns:
-        One message per mismatch.
+        One message when `timespan` has a default.
     """
-    problems = []
-    if _hints(factory)["return"] is not HistoryQuery:
-        problems.append(f"{name}: the bars implementation must return HistoryQuery")
-    overloads = typing.get_overloads(factory)
-    if not overloads:
-        problems.append(f"{name}: a bars factory needs its overloads")
-    timespans = [inspect.signature(v).parameters.get("timespan") for v in (factory, *overloads)]
-    if any(p is not None and p.default is not inspect.Parameter.empty for p in timespans):
-        problems.append(f"{name}: timespan must be required, with no default")
-    for variant in overloads:
-        hints = _hints(variant)
-        returned = hints["return"]
-        spans = typing.get_args(hints["timespan"]) or tuple(Timespan)
-        multipliers = typing.get_args(hints["multiplier"]) or (1, 2)
-        picked = set()
-        for span in spans:
-            for multiplier in multipliers:
-                try:
-                    picked.add(bar_query_class(spec, span, multiplier))
-                except ValueError:  # a timespan the asset class's endpoint does not accept
-                    continue
-        if returned not in picked or not all(issubclass(c, returned) for c in picked):
-            problems.append(
-                f"{name}: an overload returns {returned.__name__}, but its timespans give "
-                f"{sorted(c.__name__ for c in picked)}"
-            )
-    return problems
+    timespan = inspect.signature(factory).parameters.get("timespan")
+    if timespan is not None and timespan.default is not inspect.Parameter.empty:
+        return [f"{name}: timespan must be required, with no default"]
+    return []
 
 
 def _factory_map(session: type) -> dict[str, Callable[..., object]]:
@@ -731,10 +712,11 @@ def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list
         factory = factories.get(name)
         if factory is None:
             problems.append(f"{name}: a dataset with no factory")
-        elif spec.is_bars:
-            problems.extend(_bar_problems(name, spec, factory))
-        elif _hints(factory)["return"] is not query_class(spec):
-            problems.append(f"{name}: the factory must return {query_class(spec).__name__}")
+        else:
+            if spec.is_bars:
+                problems.extend(_bar_problems(name, factory))
+            if _hints(factory)["return"] is not query_class(spec):
+                problems.append(f"{name}: the factory must return {query_class(spec).__name__}")
     return problems
 
 
@@ -744,18 +726,12 @@ def test_every_factory_returns_the_class_of_its_dataset() -> None:
 
 class _Good(Namespace):
     __slots__ = ()
-    # Each stand-in has a path of its own: a namespace renames its methods to their paths, and
-    # `typing` files overloads by that name, so two stand-ins on one path would share overloads.
     _path: ClassVar[str] = "stocks"
 
-    @overload
-    def bars(self, timespan: StreamSpan, *, multiplier: Literal[1] = 1) -> StreamHistoryQuery: ...
-    @overload
-    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery: ...
-    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> HistoryQuery:
+    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> StreamHistoryQuery:
         raise NotImplementedError
 
-    def dividends(self) -> Query:
+    def dividends(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -763,26 +739,20 @@ class _Bad(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "options"
 
-    @overload
-    def bars(
-        self, timespan: Literal[Timespan.DAY], *, multiplier: Literal[1] = 1
-    ) -> StreamHistoryQuery: ...
-    @overload
-    def bars(
-        self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
-    ) -> HistoryQuery: ...
     def bars(  # a default timespan, which every bars factory must not have
         self, timespan: Timespan = Timespan.MINUTE, *, multiplier: int = 1
-    ) -> QueryBase:
+    ) -> Query:
         raise NotImplementedError
 
-    def trades(self) -> Query:  # the trades dataset streams, so this must be a SymbolStreamQuery
+    def trades(
+        self,
+    ) -> FetchQuery:  # the trades dataset streams, so this must be a SymbolStreamQuery
         raise NotImplementedError
 
-    def news(self) -> Query:  # no dataset is named options.news
+    def news(self) -> FetchQuery:  # no dataset is named options.news
         raise NotImplementedError
 
-    def minute_bars(self) -> HistoryQuery:  # a bars dataset served without its overloads
+    def minute_bars(self) -> HistoryQuery:  # bars stream, so this must be a StreamHistoryQuery
         raise NotImplementedError
 
 
@@ -795,7 +765,7 @@ class _GoodSession:
     def label(self) -> str:  # a property that leads to no namespace
         raise NotImplementedError
 
-    def snapshots(self) -> Query:
+    def snapshots(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -804,7 +774,7 @@ class _BadSession:
     def options(self) -> _Bad:
         raise NotImplementedError
 
-    def snapshots(self) -> Query:  # no snapshots dataset
+    def snapshots(self) -> FetchQuery:  # no snapshots dataset
         raise NotImplementedError
 
 
@@ -843,14 +813,10 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
     assert annotation_problems(_BadSession, specs) == [
         "options.news: a factory with no dataset",
         "snapshots: a factory with no dataset",
-        "options.bars: the bars implementation must return HistoryQuery",
         "options.bars: timespan must be required, with no default",
-        (
-            "options.bars: an overload returns StreamHistoryQuery, but its timespans give "
-            "['HistoryQuery']"
-        ),
+        "options.bars: the factory must return StreamHistoryQuery",
         "options.trades: the factory must return SymbolStreamQuery",
-        "options.minute_bars: a bars factory needs its overloads",
+        "options.minute_bars: the factory must return StreamHistoryQuery",
         "options.splits: a dataset with no factory",
     ]
 
@@ -879,18 +845,18 @@ def test_symbols_is_the_first_positional_parameter_of_every_factory() -> None:
 class _Summarized(Namespace):
     __slots__ = ()
 
-    def dividends(self) -> Query:
+    def dividends(self) -> FetchQuery:
         """Cash dividends of US-listed stocks. The rest of the summary line.
 
         The rest of the docstring.
         """
         raise NotImplementedError
 
-    def splits(self) -> Query:
+    def splits(self) -> FetchQuery:
         """Something else entirely."""
         raise NotImplementedError
 
-    def news(self) -> Query:
+    def news(self) -> FetchQuery:
         raise NotImplementedError
 
 
@@ -1063,15 +1029,6 @@ def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
         assert set(spec.column_notes) <= columns, name
 
 
-def test_an_array_argument_is_never_its_default() -> None:
-    # A numpy array's `==` answers element by element; the repr must not ask its truth.
-    assert not _is_default(np.array([1, 1]), 1)
-    assert _is_default(1, 1)
-    assert _is_default({FuturesVenue.CME}, frozenset({FuturesVenue.CME}))
-    assert not _is_default(None, inspect.Parameter.empty)
-    assert not _is_default(2, None)
-
-
 def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:
     # Every public dataset method that takes `limit`, with the dataset it reads: a namespace
     # method's name is its dataset's (`stocks.dividends`), and the session's own is `snapshots`.
@@ -1085,7 +1042,7 @@ def _dataset_methods() -> Iterator[tuple[DatasetSpec, Callable[..., object]]]:
         for name, method in vars(cls).items():
             public = callable(method) and not name.startswith("_")
             if public and "limit" in inspect.signature(method).parameters:
-                yield CATALOG.by_name[method.__qualname__], method
+                yield CATALOG.by_name[f"{cls._path}.{name}"], method
 
 
 def _caps_each_symbol(spec: DatasetSpec) -> bool:
@@ -1128,14 +1085,39 @@ def test_every_dataset_says_whether_limit_caps_the_total_or_each_symbol() -> Non
     assert wrong == []
 
 
-def test_a_namespace_method_logs_the_input_it_refuses(
-    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
+    massive_session: dm.MassiveSession,
 ) -> None:
-    with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._namespaces"),
-        pytest.raises(TypeError),
-    ):
-        massive_session.stocks.trades(42)  # type: ignore[arg-type]  # a refused symbol type
-    refusals = [r for r in caplog.records if "m.stocks.trades refused" in r.getMessage()]
-    assert [r.levelno for r in refusals] == [logging.DEBUG]
-    assert refusals[0].getMessage().startswith("m.stocks.trades refused: TypeError: ")
+    # A streaming dataset declared as a REST one would lie to its caller.
+    with pytest.raises(dm.MassiveError) as info:
+        build_query(massive_session._core, TRADES_SPEC, query_type=FetchQuery, symbols=["AAPL"])
+    assert info.value.source is dm.ErrorSource.LIBRARY
+    assert str(info.value).startswith(
+        "m.stocks.trades gives a SymbolStreamQuery, not the FetchQuery it declares. "
+    )
+    # A subclass of the declared class is what the declaration promises.
+    minute = build_query(
+        massive_session._core,
+        STOCK_BARS,
+        query_type=HistoryQuery,
+        symbols=["AAPL"],
+        timespan=Timespan.HOUR,
+    )
+    assert type(minute) is StreamHistoryQuery
+
+
+def test_bar_periods_are_left_to_massive() -> None:
+    # Massive answers HTTP 400 to a multiplier below 1 and to session bars outside futures, and
+    # serves futures day bars, so none is refused here.
+    _check_bar_period(Timespan.DAY, 1)
+    _check_bar_period(Timespan.SESSION, 1)
+    _check_bar_period(Timespan.DAY, 0)
+    _check_bar_period(Timespan.MINUTE, -5)
+    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+        _check_bar_period("day", 1)
+
+
+@pytest.mark.parametrize("multiplier", [True, 1.0])
+def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        _check_bar_period(Timespan.DAY, multiplier)

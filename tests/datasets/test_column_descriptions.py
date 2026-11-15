@@ -4,16 +4,19 @@ The descriptions are read from merged schemas, the process's catalog's and synth
 the merge is what applies the rules to every column.
 """
 
-from typing import cast
-
 import pytest
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.column_descriptions import JSON_TEXT_NOTE, TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import ColumnType, dataset_schema
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
-from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -217,7 +220,7 @@ def test_every_transport_has_one_user_facing_spelling() -> None:
         Transport.WS: "WebSocket",
     }
     with pytest.raises(TypeError):  # read-only: no caller can respell a transport
-        cast("dict[Transport, str]", TRANSPORT_LABELS)[Transport.WS] = "WS"
+        TRANSPORT_LABELS[Transport.WS] = "WS"  # type: ignore[index]  # the point: read-only
 
 
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:

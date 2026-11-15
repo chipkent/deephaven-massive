@@ -9,15 +9,11 @@ from __future__ import annotations
 import importlib
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from deephaven_massive._massive import BucketState
 from tests._live import pacing
-
-if TYPE_CHECKING:
-    from deephaven_massive._massive import RequestGovernor
 
 _ROOT = Path(__file__).resolve().parents[2]
 """The repository root, whose `tests/` holds the live test modules."""
@@ -206,9 +202,7 @@ def test_wait_progress_writes_one_line_per_new_wait() -> None:
     governor = _Governor()
     governor.put(_state("options", limit=5, attempts=7))
     lines: list[str] = []
-    progress = pacing.WaitProgress(
-        cast("RequestGovernor", governor), requests=5, write=lines.append
-    )
+    progress = pacing.WaitProgress(governor, requests=5, write=lines.append)
     progress()  # nothing waits
     governor.put(_state("options", limit=5, attempts=9, waiting=1))
     progress()
@@ -233,9 +227,7 @@ def test_wait_progress_writes_one_line_per_new_wait() -> None:
 def test_wait_progress_shows_a_pause_after_a_refusal() -> None:
     governor = _Governor()
     lines: list[str] = []
-    progress = pacing.WaitProgress(
-        cast("RequestGovernor", governor), requests=3, write=lines.append
-    )
+    progress = pacing.WaitProgress(governor, requests=3, write=lines.append)
     governor.put(_state("other", attempts=1, waiting=1, paused_until=1_030.0))
     progress()
     governor.put(_state("other", attempts=1, waiting=2))

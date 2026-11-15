@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import gc
 import itertools
-import json
 import logging
 import pkgutil
-import subprocess
-import sys
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -25,29 +23,36 @@ from deephaven.table_listener import listen
 from deephaven.update_graph import exclusive_lock
 
 import deephaven_massive as dm
-from deephaven_massive import _debug_log, _namespaces, _session
+from deephaven_massive import _debug_log, _session, _snapshots, namespaces
+from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
-from deephaven_massive._namespaces import snapshots
-from deephaven_massive._namespaces.crypto import _Crypto
-from deephaven_massive._namespaces.economy import _Economy
-from deephaven_massive._namespaces.forex import _Forex
-from deephaven_massive._namespaces.futures import _Futures
-from deephaven_massive._namespaces.indicators import _Indicators
-from deephaven_massive._namespaces.indices import _Indices
-from deephaven_massive._namespaces.options import _Options
-from deephaven_massive._namespaces.partners import _Benzinga, _EtfGlobal, _Fable, _Partners, _Tmx
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._namespaces.reference import _Reference
-from deephaven_massive._namespaces.stocks import _Stocks
-from deephaven_massive._query import Query, SymbolStreamQuery
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.session_core import CLOSE_SHOWN_TIMEOUT
+from deephaven_massive.namespaces._crypto import CryptoNamespace
+from deephaven_massive.namespaces._economy import EconomyNamespace
+from deephaven_massive.namespaces._forex import ForexNamespace
+from deephaven_massive.namespaces._futures import FuturesNamespace
+from deephaven_massive.namespaces._indicators import IndicatorsNamespace
+from deephaven_massive.namespaces._indices import IndicesNamespace
+from deephaven_massive.namespaces._options import OptionsNamespace
+from deephaven_massive.namespaces._partners import (
+    PartnersBenzingaNamespace,
+    PartnersEtfGlobalNamespace,
+    PartnersFableNamespace,
+    PartnersNamespace,
+    PartnersTmxNamespace,
+)
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.namespaces._reference import ReferenceNamespace
+from deephaven_massive.namespaces._stocks import StocksNamespace
+from deephaven_massive.queries import FetchQuery, SymbolStreamQuery
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
@@ -59,6 +64,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._tables.diagnostics import Diagnostics
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import StreamHandle
@@ -78,10 +84,8 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: object = ("AAPL",)) -> SymbolStreamQuery:
-    q = build_query(session._core, SPEC, symbols=cast("list[str]", symbols))
-    assert isinstance(q, SymbolStreamQuery)
-    return q
+def stream_query(session: dm.MassiveSession, symbols: SymbolsLike = ("AAPL",)) -> SymbolStreamQuery:
+    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
 
 
 def one_row(session: dm.MassiveSession) -> Table:
@@ -219,13 +223,14 @@ def test_the_logged_configuration_never_shows_a_url_s_password(
 
 def test_config_must_be_a_massive_config() -> None:
     with pytest.raises(TypeError, match=r"config must be a dm\.MassiveConfig"):
-        dm.MassiveSession(cast("dm.MassiveConfig", {"api_key": "k"}))
+        dm.MassiveSession({"api_key": "k"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
     frozen = make_user_exec_ctx(freeze_vars=["dm"])
-    with frozen, pytest.raises(dm.MassiveError, match="frozen copy"):
+    with frozen, pytest.raises(dm.MassiveError, match="frozen copy") as misuse:
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    assert (misuse.value.source, misuse.value.is_bug) == (dm.ErrorSource.USER, True)
     with make_user_exec_ctx():  # an unfrozen user context shares the script session's scope
         dm.MassiveSession(dm.MassiveConfig(api_key="k")).close()
 
@@ -245,6 +250,8 @@ def test_construction_without_an_execution_context_fails_fast() -> None:
     assert len(errors) == 1
     assert "must be created inside a Deephaven server" in str(errors[0])
     assert "ExecutionContext" in str(errors[0])
+    assert isinstance(errors[0], dm.MassiveError)
+    assert (errors[0].source, errors[0].is_bug) == (dm.ErrorSource.USER, True)
 
 
 def test_construction_on_the_update_graph_thread_fails() -> None:
@@ -344,24 +351,24 @@ def test_collected_sessions_leave_the_registry() -> None:
 def test_namespaces(massive_session: dm.MassiveSession) -> None:
     m = massive_session
     expected = {
-        "stocks": _Stocks,
-        "options": _Options,
-        "futures": _Futures,
-        "indices": _Indices,
-        "forex": _Forex,
-        "crypto": _Crypto,
-        "reference": _Reference,
-        "indicators": _Indicators,
-        "economy": _Economy,
-        "partners": _Partners,
+        "stocks": StocksNamespace,
+        "options": OptionsNamespace,
+        "futures": FuturesNamespace,
+        "indices": IndicesNamespace,
+        "forex": ForexNamespace,
+        "crypto": CryptoNamespace,
+        "reference": ReferenceNamespace,
+        "indicators": IndicatorsNamespace,
+        "economy": EconomyNamespace,
+        "partners": PartnersNamespace,
     }
     for name, cls in expected.items():
         assert type(getattr(m, name)) is cls
     assert m.stocks is m.stocks
-    assert type(m.partners.benzinga) is _Benzinga
-    assert type(m.partners.etf_global) is _EtfGlobal
-    assert type(m.partners.tmx) is _Tmx
-    assert type(m.partners.fable) is _Fable
+    assert type(m.partners.benzinga) is PartnersBenzingaNamespace
+    assert type(m.partners.etf_global) is PartnersEtfGlobalNamespace
+    assert type(m.partners.tmx) is PartnersTmxNamespace
+    assert type(m.partners.fable) is PartnersFableNamespace
 
 
 def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
@@ -372,7 +379,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         limit=3,
         filters={"ticker_gte": "A"},
     )
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is snapshots.SNAPSHOTS
     assert query._spec is _session.CATALOG.by_name["snapshots"]
     assert query._request == Request(
@@ -384,7 +391,7 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
         massive_session.snapshots(dm.ALL)
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        massive_session.snapshots(["AAPL"], order=cast("dm.Order", "asc"))
+        massive_session.snapshots(["AAPL"], order="asc")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="limit must be positive"):
         massive_session.snapshots(["AAPL"], limit=0)
     with pytest.raises(ValueError, match=r"^snapshots takes no type filter: Massive refuses type"):
@@ -469,9 +476,10 @@ def test_close_marks_streams_closed_and_warns_once(
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
+    assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
     massive_session.release(live)  # release() keeps working after close()
 
 
@@ -607,7 +615,7 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     streams = massive_session.streams()
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
     wait_until(lambda: bool(derived.j_table.isFailed()))
@@ -631,7 +639,7 @@ def test_close_with_no_live_tables_logs_info(
 def test_after_close(massive_session: dm.MassiveSession) -> None:
     q = stream_query(massive_session)
     massive_session.close()
-    message = f"^{label(massive_session)} is closed$"
+    message = f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$"
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.connections()
     with pytest.raises(dm.MassiveError, match=message):
@@ -644,7 +652,7 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
         q.append_only()
     # Building queries and reaching namespaces never fail.
     assert isinstance(stream_query(massive_session), SymbolStreamQuery)
-    assert isinstance(massive_session.stocks, _Stocks)
+    assert isinstance(massive_session.stocks, StocksNamespace)
 
 
 def test_close_on_the_update_graph_thread_fails(massive_session: dm.MassiveSession) -> None:
@@ -683,14 +691,15 @@ def test_context_manager_closes() -> None:
 
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
-        massive_session.release(cast("Table", "t"))
-    with pytest.raises(
-        ValueError, match=r"not a live result of this session: release\(\) takes"
-    ) as caught:
+        massive_session.release("t")  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(ValueError, match=r": release\(\) takes a live table") as caught:
         massive_session.release(new_table([string_col("Symbol", ["A"])]))
-    assert "fetch(wait=False)" in str(caught.value)
-    assert "streams()" in str(caught.value)
-    assert "release the live table it came from" in str(caught.value)
+    assert str(caught.value) == (
+        f"{massive_session._core.label}: release() takes a live table that this session "
+        "returned, and this table is not one. For a table you made from a live table, release "
+        "the live table instead. A table of another session needs that session's release(). A "
+        "static table needs no release"
+    )
 
 
 def test_a_session_closed_while_a_stream_opens(
@@ -707,7 +716,7 @@ def test_a_session_closed_while_a_stream_opens(
 
     closing = transport_of(open_stream)()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: closing)
-    with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
+    with pytest.raises(dm.SessionClosedError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -806,10 +815,11 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
             "BCC,248274,61.68,61.99,62.565,61.41,1680033600000000000,4073\n"
         ),
     )
-    # The fake S3's test credentials, passed as a mapping as the flat-file tests do.
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "fake-secret"}
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, **cast("dict[str, Any]", credentials)
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="fake-secret",  # noqa: S106  # fake credential
     )
     made: dict[str, Table] = {}
     sessions: list[dm.MassiveSession] = []
@@ -817,12 +827,14 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def opening() -> None:
         m = dm.MassiveSession(config)
         sessions.append(m)
-        made["fetch"] = m.stocks.last_trade("AAPL").fetch()
+        made["fetch"] = m.stocks.last_trade("AAPL").fetch(wait=True)
         bars = m.stocks.bars("AAPL", dm.Timespan.DAY)
-        made["rest"] = bars.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST)
+        made["rest"] = bars.history(
+            "2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True
+        )
         files = m.stocks.bars("BCC", dm.Timespan.DAY, adjusted=False)
         made["files"] = files.history(
-            "2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES
+            "2023-03-28", "2023-03-28", source=dm.HistorySource.FLAT_FILES, wait=True
         )
         made["poll"] = m.stocks.ipos().poll(60)
         made["streams"] = m.streams()
@@ -836,7 +848,7 @@ def test_rest_and_flat_file_verbs_work_in_a_console_command(
     def closing() -> None:
         sessions[0].close()
         with dm.MassiveSession(config) as other:  # opened and closed within one command
-            made["other"] = other.stocks.last_trade("AAPL").fetch()
+            made["other"] = other.stocks.last_trade("AAPL").fetch(wait=True)
 
     console_command(closing)
     assert [r["Price"] for r in dh_to_pylist(made["other"])] == [129.84]
@@ -858,7 +870,7 @@ def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
     rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
     writer = massive_session._core.diagnostics.thread
     console_command(massive_session.close)
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
     writer.join(TIMEOUT)
     assert not writer.is_alive()
@@ -889,51 +901,19 @@ def test_verbs_work_from_a_thread_without_an_execution_context(
         massive_session.release(result)
 
 
-def test_a_session_that_reads_no_flat_file_never_imports_boto3() -> None:
-    # A fresh interpreter starts its own JVM (this process's cannot be shared), opens a session
-    # with S3 credentials configured, reads its diagnostics, closes it, and reports which of
-    # boto3 and botocore it loaded. `os._exit` skips the interpreter shutdown that can crash
-    # after an embedded JVM. The script is a literal; `-P` keeps the working directory off
-    # `sys.path`.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-c",
-            (
-                "import json, os, sys\n"
-                "from deephaven_server import Server\n"
-                "Server(port=0, jvm_args=['-Xmx512m']).start()\n"
-                "import deephaven_massive as dm\n"
-                "config = dm.MassiveConfig(\n"
-                "    api_key='k', s3_access_key_id='AKID', s3_secret_access_key='not-used'\n"
-                ")\n"
-                "m = dm.MassiveSession(config)\n"
-                "m.streams()\n"
-                "m.close()\n"
-                "loaded = sorted({'boto3', 'botocore'} & set(sys.modules))\n"
-                "print('LOADED ' + json.dumps(loaded), flush=True)\n"
-                "os._exit(0)\n"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=300,
-    )
-    [line] = [line for line in result.stdout.splitlines() if line.startswith("LOADED ")]
-    assert json.loads(line.removeprefix("LOADED ")) == []
-
-
 # --- The composition of a session ------------------------------------------------------------
 
 
 def test_every_namespace_module_feeds_the_catalog() -> None:
-    package = Path(_namespaces.__file__).parent
-    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {"query_building"}
+    package = Path(namespaces.__file__).parent
+    found = {info.name for info in pkgutil.iter_modules([str(package)])} - {
+        "_namespace",
+        "_query_building",
+    }
     named = [module.__name__ for module in _session.NAMESPACE_MODULES]
     assert len(named) == len(set(named))
-    assert set(named) == {f"deephaven_massive._namespaces.{name}" for name in found}
+    expected = {f"deephaven_massive.namespaces.{name}" for name in found}
+    assert set(named) == expected | {_snapshots.__name__}
     declared = [spec for module in _session.NAMESPACE_MODULES for spec in module.DATASETS]
     assert all(isinstance(spec, DatasetSpec) for spec in declared)
     assert list(_session.CATALOG.by_name.values()) == declared

@@ -4,7 +4,6 @@ import csv
 import io
 import logging
 from collections.abc import Callable
-from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -47,8 +46,10 @@ STK, OPT, FUT, IDX, FX, CRY = (
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
-    split = cast("tuple[str, str]", tuple(expected.split("-")))
-    pairs = {symbol: split} if asset_class is CRY else {}
+    pairs: dict[str, tuple[str, str]] = {}
+    if asset_class is CRY:
+        base, quote = expected.split("-")
+        pairs = {symbol: (base, quote)}
     assert ws_symbol(asset_class, symbol, pairs) == expected
 
 
@@ -135,7 +136,8 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
     for row in rows:
         ticker, websocket = row["ticker"], row["websocket"]
         assert is_canonical(CRY, ticker)
-        split = cast("tuple[str, str]", tuple(websocket.split("-")))
+        base, quote = websocket.split("-")
+        split = (base, quote)
         assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
         assert canonical_from_wire(CRY, websocket) == ticker
 
@@ -262,3 +264,9 @@ def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
         None,
         "SPX",  # a futures code, not an option's
     ]
+
+
+def test_a_class_with_no_spellings_is_a_defect() -> None:
+    # Every class names its file spellings; a new one fails until it does, never reads as stocks.
+    with pytest.raises(AssertionError):
+        wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time

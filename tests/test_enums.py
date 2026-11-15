@@ -202,12 +202,17 @@ def _resolution_namespace() -> dict[str, object]:
     namespace.update(vars(typing))
     namespace.update(vars(collections.abc))
     for module_name in (
-        "_types",
         "_enums",
         "_errors",
         "_config",
         "_debug_log",
-        "_query",
+        "queries",
+        "queries._call",
+        "queries._query",
+        "queries._fetch",
+        "queries._stream",
+        "queries._history",
+        "_datasets.filters",
         "_session",
         "_datasets.catalog",
         "_tables.liveness",
@@ -217,11 +222,11 @@ def _resolution_namespace() -> dict[str, object]:
         "_datasets.timestamps",
         "_tables.diagnostics",
         "_tables.watchlist",
-        "_namespaces.query_building",
-        "_namespaces.partners",
-        "_namespaces.stocks",
-        "_namespaces.stock_financials",
-        "_namespaces.stock_filings",
+        "namespaces._query_building",
+        "namespaces._partners",
+        "namespaces._stocks",
+        "namespaces._stock_financials",
+        "namespaces._stock_filings",
     ):
         namespace.update(vars(importlib.import_module(f"deephaven_massive.{module_name}")))
     namespace.update({"Table": Table, "InputTable": InputTable})
@@ -240,12 +245,12 @@ def _literal_strings(annotation: object) -> list[str]:
 
 def _public_callables() -> list[tuple[str, object]]:
     # Every public function and method reachable from the package and its namespaces.
-    query = importlib.import_module("deephaven_massive._query")
+    query = importlib.import_module("deephaven_massive.queries")
     classes: list[type] = [dm.MassiveSession, dm.MassiveConfig]
     classes += [
         getattr(query, name)
         for name in (
-            "Query",
+            "FetchQuery",
             "StreamQuery",
             "SymbolStreamQuery",
             "HistoryQuery",
@@ -291,7 +296,7 @@ def test_public_signatures_have_no_string_literals() -> None:
 
 def test_namespaces_are_reached_by_the_walk() -> None:
     names = {name.split(".")[0] for name, _ in _public_callables()}
-    assert {"MassiveSession", "Query", "StreamQuery", "HistoryQuery"} <= names
+    assert {"MassiveSession", "FetchQuery", "StreamQuery", "HistoryQuery"} <= names
 
 
 def test_literal_detection_ignores_enum_members() -> None:
@@ -303,10 +308,13 @@ def test_literal_detection_ignores_enum_members() -> None:
 # plain string through `_require_enum`, and each has a test that says so (named alongside). A new
 # enum parameter fails `test_enum_parameters_are_the_allowlist` until it is added here together
 # with its own rejection test.
+_ECONOMY_ENUMS = "namespaces/test_economy.py::test_enums_reject_text"
+_INDICATOR_ENUMS = "namespaces/test_indicators.py::test_enums_reject_text"
+_REFERENCE_ENUMS = "namespaces/test_reference.py::test_enums_reject_text"
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
 _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
-_SYMBOL_SETTINGS = "test_config.py::test_symbol_settings_are_the_enum"
+_ON_ERROR_SETTINGS = "test_config.py::test_on_error_settings_are_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
@@ -317,10 +325,12 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.noncanonical_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unlisted_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unreadable_symbols": _SYMBOL_SETTINGS,
-    "MassiveConfig.__init__.unavailable_symbols": _SYMBOL_SETTINGS,
+    "MassiveConfig.__init__.noncanonical_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unlisted_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.refused_venues": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
@@ -328,84 +338,92 @@ ENUM_PARAMETERS = {
     "canonicalize_symbols.convention": _CANONICALIZE_ENUMS,
     "canonicalize_symbols.on_error": _CANONICALIZE_ENUMS,
     "MassiveSession.snapshots.order": "test_session.py::test_unified_snapshots",
-    "_Economy.funding_conditions.order": "namespaces/test_economy.py::test_enums_reject_text",
-    "_Economy.inflation.order": "namespaces/test_economy.py::test_enums_reject_text",
-    "_Economy.inflation_expectations.order": "namespaces/test_economy.py::test_enums_reject_text",
-    "_Economy.labor_market.order": "namespaces/test_economy.py::test_enums_reject_text",
-    "_Economy.treasury_yields.order": "namespaces/test_economy.py::test_enums_reject_text",
-    "_Indicators.ema.order": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.ema.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.ema.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.macd.order": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.macd.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.macd.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.rsi.order": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.rsi.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.rsi.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.sma.order": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.sma.series_type": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Indicators.sma.timespan": "namespaces/test_indicators.py::test_enums_reject_text",
-    "_Reference.conditions.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.conditions.data_type": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.conditions.order": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.conditions.sip": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.exchanges.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.exchanges.locale": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.news.order": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.ticker_types.asset_class": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.ticker_types.locale": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.tickers.market": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.tickers.ticker_type": "namespaces/test_reference.py::test_enums_reject_text",
-    "_Reference.tickers.order": "namespaces/test_reference.py::test_enums_reject_text",
-    "Query.poll.mode": "test_query.py::test_poll_mode_is_an_enum",
-    "HistoryQuery.history.source": "test_query.py::test_history_argument_errors",
-    "StreamHistoryQuery.history.source": "test_query.py::test_history_argument_errors",
-    "HistoryQuery.history.reread": "test_query.py::test_history_argument_errors",
-    "StreamHistoryQuery.history.reread": "test_query.py::test_history_argument_errors",
-    "_Futures.trades.venues": _FUTURES_ENUMS,
-    "_Futures.quotes.venues": _FUTURES_ENUMS,
-    "_Futures.bars.venues": _FUTURES_ENUMS,
-    "_Futures.snapshots.order": _FUTURES_ENUMS,
-    "_Futures.contracts.order": _FUTURES_ENUMS,
-    "_Futures.products.order": _FUTURES_ENUMS,
-    "_Futures.schedules.order": _FUTURES_ENUMS,
-    "_Forex.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
-    "_Forex.movers.direction": "namespaces/test_forex.py::test_movers",
-    "_Indices.bars.timespan": "namespaces/test_indices.py::test_bars_check_their_argument_types",
-    "_Indices.snapshots.order": (
+    "EconomyNamespace.funding_conditions.order": _ECONOMY_ENUMS,
+    "EconomyNamespace.inflation.order": _ECONOMY_ENUMS,
+    "EconomyNamespace.inflation_expectations.order": _ECONOMY_ENUMS,
+    "EconomyNamespace.labor_market.order": _ECONOMY_ENUMS,
+    "EconomyNamespace.treasury_yields.order": _ECONOMY_ENUMS,
+    "IndicatorsNamespace.ema.order": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.ema.series_type": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.ema.timespan": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.macd.order": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.macd.series_type": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.macd.timespan": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.rsi.order": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.rsi.series_type": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.rsi.timespan": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.sma.order": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.sma.series_type": _INDICATOR_ENUMS,
+    "IndicatorsNamespace.sma.timespan": _INDICATOR_ENUMS,
+    "ReferenceNamespace.conditions.asset_class": _REFERENCE_ENUMS,
+    "ReferenceNamespace.conditions.data_type": _REFERENCE_ENUMS,
+    "ReferenceNamespace.conditions.order": _REFERENCE_ENUMS,
+    "ReferenceNamespace.conditions.sip": _REFERENCE_ENUMS,
+    "ReferenceNamespace.exchanges.asset_class": _REFERENCE_ENUMS,
+    "ReferenceNamespace.exchanges.locale": _REFERENCE_ENUMS,
+    "ReferenceNamespace.news.order": _REFERENCE_ENUMS,
+    "ReferenceNamespace.ticker_types.asset_class": _REFERENCE_ENUMS,
+    "ReferenceNamespace.ticker_types.locale": _REFERENCE_ENUMS,
+    "ReferenceNamespace.tickers.market": _REFERENCE_ENUMS,
+    "ReferenceNamespace.tickers.ticker_type": _REFERENCE_ENUMS,
+    "ReferenceNamespace.tickers.order": _REFERENCE_ENUMS,
+    "FetchQuery.poll.mode": "queries/test_fetch.py::test_poll_mode_is_an_enum",
+    "HistoryQuery.history.source": "queries/test_history.py::test_history_argument_errors",
+    "StreamHistoryQuery.history.source": "queries/test_history.py::test_history_argument_errors",
+    "HistoryQuery.history.reread": "queries/test_history.py::test_history_argument_errors",
+    "StreamHistoryQuery.history.reread": "queries/test_history.py::test_history_argument_errors",
+    "FuturesNamespace.trades.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
+    "FuturesNamespace.trades.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.quotes.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.refused_venues": _FUTURES_ENUMS,
+    "FuturesNamespace.bars.timespan": (
+        "namespaces/test_futures.py::test_bars_take_the_day_timespan"
+    ),
+    "FuturesNamespace.snapshots.order": _FUTURES_ENUMS,
+    "FuturesNamespace.contracts.order": _FUTURES_ENUMS,
+    "FuturesNamespace.products.order": _FUTURES_ENUMS,
+    "FuturesNamespace.schedules.order": _FUTURES_ENUMS,
+    "ForexNamespace.bars.timespan": "namespaces/test_forex.py::test_bars_reject_bad_arguments",
+    "ForexNamespace.movers.direction": "namespaces/test_forex.py::test_movers",
+    "IndicesNamespace.bars.timespan": (
+        "namespaces/test_indices.py::test_bars_check_their_argument_types"
+    ),
+    "IndicesNamespace.snapshots.order": (
         "namespaces/test_indices.py::test_snapshots_check_their_list_parameters"
     ),
-    "_Crypto.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
-    "_Crypto.movers.direction": "namespaces/test_crypto.py::test_movers",
+    "CryptoNamespace.bars.timespan": "namespaces/test_crypto.py::test_bar_arguments_are_checked",
+    "CryptoNamespace.movers.direction": "namespaces/test_crypto.py::test_movers",
     **dict.fromkeys(
         (
-            "_Benzinga.analysts.order",
-            "_Benzinga.analyst_insights.order",
-            "_Benzinga.ratings.order",
-            "_Benzinga.bulls_bears_say.order",
-            "_Benzinga.guidance.order",
-            "_Benzinga.earnings.order",
-            "_Benzinga.firms.order",
-            "_Benzinga.news.order",
-            "_EtfGlobal.analytics.order",
-            "_EtfGlobal.constituents.order",
-            "_EtfGlobal.fund_flows.order",
-            "_EtfGlobal.profiles.order",
-            "_EtfGlobal.taxonomies.order",
-            "_Tmx.corporate_events.order",
-            "_Fable.merchant_aggregates.order",
-            "_Fable.merchant_hierarchy.order",
+            "PartnersBenzingaNamespace.analysts.order",
+            "PartnersBenzingaNamespace.analyst_insights.order",
+            "PartnersBenzingaNamespace.ratings.order",
+            "PartnersBenzingaNamespace.bulls_bears_say.order",
+            "PartnersBenzingaNamespace.guidance.order",
+            "PartnersBenzingaNamespace.earnings.order",
+            "PartnersBenzingaNamespace.firms.order",
+            "PartnersBenzingaNamespace.news.order",
+            "PartnersEtfGlobalNamespace.analytics.order",
+            "PartnersEtfGlobalNamespace.constituents.order",
+            "PartnersEtfGlobalNamespace.fund_flows.order",
+            "PartnersEtfGlobalNamespace.profiles.order",
+            "PartnersEtfGlobalNamespace.taxonomies.order",
+            "PartnersTmxNamespace.corporate_events.order",
+            "PartnersFableNamespace.merchant_aggregates.order",
+            "PartnersFableNamespace.merchant_hierarchy.order",
         ),
         "namespaces/test_partners.py::test_order_is_an_enum",
     ),
     **dict.fromkeys(
         (
-            "_Options.bars.timespan",
-            "_Options.chain.contract_type",
-            "_Options.chain.order",
-            "_Options.snapshots.order",
-            "_Options.contracts.contract_type",
-            "_Options.contracts.order",
+            "OptionsNamespace.bars.timespan",
+            "OptionsNamespace.chain.contract_type",
+            "OptionsNamespace.chain.order",
+            "OptionsNamespace.snapshots.order",
+            "OptionsNamespace.contracts.contract_type",
+            "OptionsNamespace.contracts.order",
         ),
         "namespaces/test_options.py::test_enum_arguments_reject_plain_strings",
     ),
@@ -415,26 +433,34 @@ ENUM_PARAMETERS = {
 _STOCKS = "namespaces/test_stocks.py::"
 _STOCK_FINANCIALS = "namespaces/test_stock_financials.py::"
 _STOCK_LIST_DATASETS = (
-    *(f"_Stocks.{name}" for name in ("dividends", "splits", "ipos", "short_interest")),
-    *(f"_Stocks.{name}" for name in ("short_volume", "share_float")),
-    *(f"_StockFinancials.{name}" for name in ("balance_sheets", "income_statements")),
-    *(f"_StockFinancials.{name}" for name in ("cash_flow_statements", "ratios")),
-    *(f"_StockFilings.{name}" for name in ("index", "sections_10k", "text_8k")),
-    *(f"_StockFilings.{name}" for name in ("disclosures_8k", "risk_factors")),
-    *(f"_StockFilings.{name}" for name in ("institutional_holdings", "initial_insider_ownership")),
-    *(f"_StockFilings.{name}" for name in ("insider_transactions", "risk_factor_taxonomy")),
-    *(f"_StockFilings.{name}" for name in ("insider_activity", "insider_holdings")),
-    "_StockFilings.disclosure_taxonomy",
+    *(f"StocksNamespace.{name}" for name in ("dividends", "splits", "ipos", "short_interest")),
+    *(f"StocksNamespace.{name}" for name in ("short_volume", "share_float")),
+    *(f"StocksFinancialsNamespace.{name}" for name in ("balance_sheets", "income_statements")),
+    *(f"StocksFinancialsNamespace.{name}" for name in ("cash_flow_statements", "ratios")),
+    *(f"StocksFilingsNamespace.{name}" for name in ("index", "sections_10k", "text_8k")),
+    *(f"StocksFilingsNamespace.{name}" for name in ("disclosures_8k", "risk_factors")),
+    *(
+        f"StocksFilingsNamespace.{name}"
+        for name in ("institutional_holdings", "initial_insider_ownership")
+    ),
+    *(
+        f"StocksFilingsNamespace.{name}"
+        for name in ("insider_transactions", "risk_factor_taxonomy")
+    ),
+    *(f"StocksFilingsNamespace.{name}" for name in ("insider_activity", "insider_holdings")),
+    "StocksFilingsNamespace.disclosure_taxonomy",
 )
 ENUM_PARAMETERS |= {
-    "_Stocks.bars.timespan": f"{_STOCKS}test_bars_reject_bad_arguments",
-    "_Stocks.movers.direction": f"{_STOCKS}test_movers_take_a_direction",
+    "StocksNamespace.bars.timespan": f"{_STOCKS}test_bars_reject_bad_arguments",
+    "StocksNamespace.movers.direction": f"{_STOCKS}test_movers_take_a_direction",
     **{
         f"{name}.order": f"{_STOCKS}test_list_datasets_take_the_list_block"
         for name in _STOCK_LIST_DATASETS
     },
     **{
-        f"_StockFinancials.{name}.timeframe": f"{_STOCK_FINANCIALS}test_statements_take_a_timeframe"
+        f"StocksFinancialsNamespace.{name}.timeframe": (
+            f"{_STOCK_FINANCIALS}test_statements_take_a_timeframe"
+        )
         for name in ("balance_sheets", "income_statements", "cash_flow_statements")
     },
 }
@@ -478,3 +504,10 @@ def test_each_asset_class_has_one_subscription() -> None:
         dm.AssetClass.CRYPTO: dm.Subscription.CURRENCIES,
     }
     assert _enums.subscription_of(_enums.ClassFromPrefix.ANY) is None
+
+
+def test_forex_has_one_spelling_in_the_enums() -> None:
+    # Massive's wire value is "fx"; the member is FOREX in both enums that name forex.
+    assert dm.Market.FOREX.value == "fx"
+    assert dm.AssetClass.FOREX.name == dm.Market.FOREX.name
+    assert "FX" not in dm.Market.__members__

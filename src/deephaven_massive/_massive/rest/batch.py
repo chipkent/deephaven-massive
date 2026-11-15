@@ -61,8 +61,8 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
-from types import MappingProxyType, NoneType
-from typing import TYPE_CHECKING, Final, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 
@@ -257,6 +257,30 @@ class _Reading:
     reason: str = ""
 
 
+def _objects_under(
+    holders: Sequence[Mapping[str, object]], key: str
+) -> list[Mapping[str, object]] | None:
+    """Return the object each holder keeps under a key, an empty one where it holds none.
+
+    Args:
+        holders: The rows, or the objects one level into them.
+        key: The key to read in each.
+
+    Returns:
+        One object per holder; or None when some holder keeps a value that is not an object.
+    """
+    found: list[Mapping[str, object]] = []
+    for holder in holders:
+        value = holder.get(key)
+        if value is None:
+            found.append(_NO_OBJECT)
+        elif type(value) is dict:
+            found.append(value)
+        else:
+            return None
+    return found
+
+
 def _by_column(
     rows: Sequence[Mapping[str, object]],
     fields: Sequence[Field],
@@ -292,11 +316,10 @@ def _by_column(
     levels: dict[str, Sequence[Mapping[str, object]]] = {"": rows}
     for prefix in sorted(objects, key=lambda name: name.count(".")):
         parent, _, key = prefix.rpartition(".")
-        found = [level.get(key) for level in levels[parent]]
-        if not set(map(type, found)) <= {dict, NoneType}:
+        found = _objects_under(levels[parent], key)
+        if found is None:
             return f"the wire key {prefix!r} holds a value that is not an object"
-        objects_found = [_NO_OBJECT if value is None else value for value in found]
-        levels[prefix] = cast("list[Mapping[str, object]]", objects_found)
+        levels[prefix] = found
     extra: dict[str, object] = {}
     for prefix, level in levels.items():
         _undeclared(level, prefix, fields, objects=objects, into=extra)

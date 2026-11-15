@@ -4,25 +4,28 @@ The races between a maker and its waiters, through real reads and the rate gover
 tested where the lookups are made, in `tests/ingest/test_rest.py`.
 """
 
+import math
 from concurrent.futures import Future
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
+from deephaven_massive._errors import from_wire
 from deephaven_massive._ingest import shared_lookup
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 
 
 def _lookup() -> SharedLookup[str, object]:
-    # No test here waits, so no governor is needed.
-    return SharedLookup("MassiveSession #1", cast("Any", None))
+    # No test here waits, so the governor is never asked.
+    return SharedLookup("MassiveSession #1", _massive.RequestGovernor(["other"]))
 
 
 def test_a_claim_is_made_once_and_its_value_is_known_after() -> None:
     lookup = _lookup()
     claim = lookup.claim_or_wait(
-        "k", bucket="other", patience=cast("Any", None), what="k", public=cast("Any", None)
+        "k", bucket="other", patience=_massive.Patience(math.inf), what="k", public=from_wire
     )
     assert isinstance(claim, Claim)
     assert lookup.known("k") is None  # being made
@@ -63,7 +66,7 @@ def test_a_failure_tells_waiters_to_copy_it_or_try_again(
     assert isinstance(held, shared_lookup._AbandonedError) is abandoned
     if isinstance(error, RuntimeError):
         assert isinstance(held, dm.MassiveError)
-        assert held.cause is dm.ErrorCause.LIBRARY_DEFECT
+        assert held.source is dm.ErrorSource.LIBRARY
         assert str(held).startswith("the read failed: RuntimeError('bug')")
     assert lookup._claim("k")[1]  # forgotten
 
@@ -76,6 +79,14 @@ def test_waiters_get_a_copy_of_the_makers_error() -> None:
         shared_lookup._outcome(future)
     assert info.value is not error
     assert (info.value.status, info.value.request_id) == (403, "r1")
+
+
+def test_a_waiters_copy_keeps_whether_the_call_may_succeed_later() -> None:
+    future: Future[Any] = Future()
+    future.set_exception(dm.MassiveError("connection reset", is_retryable=True))
+    with pytest.raises(dm.MassiveError) as info:
+        shared_lookup._outcome(future)
+    assert info.value.is_retryable
 
 
 def test_a_value_is_retired_only_when_old_and_current(monkeypatch: pytest.MonkeyPatch) -> None:

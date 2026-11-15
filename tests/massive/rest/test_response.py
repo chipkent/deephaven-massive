@@ -4,7 +4,9 @@ import json
 from typing import TYPE_CHECKING, SupportsIndex, overload
 
 import pytest
+from typing_extensions import override
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
@@ -19,7 +21,6 @@ from deephaven_massive._massive.rest.response import (
     http_error,
 )
 from deephaven_massive._massive.spec.types import DriftReport, RestPath
-from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -110,7 +111,8 @@ def test_a_missing_result_key_under_any_other_status_is_an_error(status: str) ->
         "(request_id r): the body has no 'results'"
     )
     assert (caught.value.status, caught.value.request_id) == (200, "r")
-    assert caught.value.unreadable  # a body of the wrong shape is a gap in the library
+    # A body of the wrong shape is a gap in the library.
+    assert caught.value.kind is WireFailure.UNREADABLE
     assert type(caught.value) is WireError
 
 
@@ -222,7 +224,7 @@ def test_error_is_a_wire_error_on_every_path_even_with_rows(rest_path: RestPath)
     with pytest.raises(WireError, match=r"with status ERROR .*: bad ticker$") as caught:
         _decode(body, rest_path)
     assert type(caught.value) is WireError
-    assert not caught.value.unreadable  # Massive's own answer, not a body it cannot read
+    assert caught.value.kind is WireFailure.REFUSED  # Massive's own answer, not an unreadable body
 
 
 def test_an_error_status_without_a_message_says_so() -> None:
@@ -280,7 +282,7 @@ def test_a_body_that_is_not_json_is_an_error_quoting_its_start(data: bytes) -> N
     assert repr(data[:200]) in caught.value.message
     assert caught.value.status == 200
     assert isinstance(caught.value.__cause__, ValueError)
-    assert caught.value.unreadable
+    assert caught.value.kind is WireFailure.UNREADABLE
 
 
 def test_a_huge_bad_body_is_quoted_only_for_200_bytes() -> None:

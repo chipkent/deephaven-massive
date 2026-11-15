@@ -4,20 +4,29 @@ The checks every dataset of the `m.stocks` tree shares (catalog gates, fixtures,
 arguments) are in `test_stocks.py`.
 """
 
+import functools
 from collections.abc import Callable
-from typing import cast
 
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._query import QueryBase
+from deephaven_massive.queries import Query
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., QueryBase]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., QueryBase]", target)
+    assert callable(target)
+    method = target
+
+    @functools.wraps(method)
+    def make(*args: object, **kwargs: object) -> Query:
+        query = method(*args, **kwargs)
+        assert isinstance(query, Query)
+        return query
+
+    return make
 
 
 @pytest.mark.parametrize(

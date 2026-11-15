@@ -124,6 +124,12 @@ unreadable_symbols: log  # the default
 # A symbol Massive answers as not found: log, ignore, or raise.
 unavailable_symbols: log  # the default
 
+# A flat-file line that isn't a readable row: log, ignore, or raise.
+malformed_rows: log  # the default
+
+# A futures exchange you name that the plan lacks: log, ignore, or raise.
+refused_venues: raise  # the default
+
 # The WebSocket host per asset class: index values stream only from business.massive.com.
 websocket_hosts:
   indices: business.massive.com
@@ -168,6 +174,8 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `unlisted_symbols` | Decides what happens when a watchlist or other table you pass holds a crypto pair that isn't on Massive's crypto ticker list, or one the library couldn't look up there. | `log`, `ignore`, or `raise` | `log` |
 | `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read. | `log`, `ignore`, or `raise` | `log` |
 | `unavailable_symbols` | Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't request with the arguments you gave it. | `log`, `ignore`, or `raise` | `log` |
+| `malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
+| `refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. A call's own `refused_venues` argument overrides it. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
 | `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
 | `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
@@ -196,10 +204,10 @@ Leave out Advanced and Business plans, which are real-time. Never list
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
-Leave a delayed subscription out, and a stream or a `fetch()` of its current data
-raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
-table of it fails with the same message. `history()` and other past data don't
-depend on this setting.
+Leave a delayed subscription out, and a stream of its current data raises
+`EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
+`poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+`history()` and other past data don't depend on this setting.
 
 #### rest_basic_subscriptions
 
@@ -245,8 +253,10 @@ of a live table reads REST whenever REST can serve it.
 #### max_concurrency
 
 Raise it to run more at once, or lower it to open fewer connections. Both limits
-cover all the session's calls together. A Basic subscription still keeps to five
-requests a minute.
+cover all the session's calls together. It also sets how many downloads of
+`fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
+the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
+subscription still keeps to five requests a minute.
 
 #### noncanonical_symbols
 
@@ -270,8 +280,9 @@ Set `raise` when a stream must not run without every pair you asked for.
 
 - `log` skips the pair and logs a warning naming it.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` makes a stream or `fetch()` fail with `MassiveError` at the
-  call, and fails a `poll()` table, or a live table when such a pair is added later.
+- `raise` makes a stream fail with `MassiveError` at the call, and fails
+  a `fetch()` or `poll()` table, or a live table when such a pair is added later.
+  `fetch(wait=True)` raises it at the call.
 
 It applies to streams and to calls for a pair's last trade or daily open and close. A
 pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
@@ -280,8 +291,9 @@ pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls 
 Under `log` or `ignore`, a stream keeps its other pairs. A
 stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
 until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
-of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
-pairs are all skipped raises `MassiveError` at the call.
+of a live table marks it `FAILED` in `m.symbol_reads()`. A stream whose pairs are all
+skipped raises `MassiveError` at the call, and a `fetch()` whose pairs are all
+skipped fails its table, or raises with `wait=True`.
 
 #### unreadable_symbols
 
@@ -304,15 +316,54 @@ should stop.
 - `log` leaves the symbol out, keeps the others, and logs a warning
   naming it.
 - `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` fails a `poll()` table and makes a `fetch()` or `history()`
-  raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
-  symbol `FAILED` in `m.symbol_reads()` and reads the others.
+- `raise` fails a `poll()`, `fetch()`, or `history()` table with
+  `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
+  A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
+  `m.symbol_reads()` and reads the others.
 
 Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
 also one the poll can't read, such as a crypto pair in an indicator poll with
 `adjusted=False`. Under `log` or `ignore`, a `poll()` table
 lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
 a `dm.PollMode.REPLACE` poll drops its rows.
+
+#### malformed_rows
+
+Set `raise` when a `history()` read from flat files must have every row
+of each file it reads.
+
+- `log` skips the line, keeps the file's other rows, and logs one warning
+  per file with the count of such lines and the first one's row number. The warning
+  never quotes the line.
+- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `raise` makes `history()` raise `MassiveError`, naming the file and the
+  first such line's row. A `history()` of a live table instead marks every symbol
+  of the read `FAILED` in `m.symbol_reads()`.
+
+Only a `history()` that reads flat files meets such a line. Under any setting, a
+file whose every line is malformed fails the read.
+
+#### refused_venues
+
+It applies only to exchanges a call names. A call that leaves `venues` out reads
+every exchange the plan allows: where only flat files can serve it, it skips each
+one Massive refuses with a warning, whatever this setting says. Set
+`log` when your calls name exchanges your plan may not cover and should
+read the ones it does.
+
+- `raise` makes `history()` raise `EntitlementError`, naming the
+  exchange, `venues=`, and `refused_venues=`.
+- `log` skips every file of each refused exchange over the whole range,
+  logs one warning with Massive's status and text, and names the exchanges in the
+  table's description. For a watchlist, each symbol's `Transport` in
+  `m.symbol_reads()` names them instead.
+- `ignore` does the same with no warning: only the `DEBUG` log and the
+  description or `m.symbol_reads()` name them.
+
+It applies only when REST can't serve the call: `dm.ALL`, or
+`source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive
+refuses the flat files. Under any setting, a call whose every exchange is refused
+raises `EntitlementError`.
 
 #### websocket_hosts
 

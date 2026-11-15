@@ -8,21 +8,22 @@ import threading
 import time
 import weakref
 from collections.abc import Callable
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from types import MethodType, SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import agg, empty_table
 from deephaven import arrow as dh_arrow
+from deephaven.liveness_scope import LivenessScope
 from deephaven.table import Table
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables import background_read
+from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
 from deephaven_massive._tables.diagnostics import StreamState
 from deephaven_massive._tables.execution_context import entered
@@ -35,7 +36,8 @@ from deephaven_massive._tables.liveness import (
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from deephaven.liveness_scope import LivenessScope
+    from deephaven.table_listener import TableUpdate
+
 
 TIMEOUT = 30.0
 
@@ -101,10 +103,18 @@ def open_test_read(m: dm.MassiveSession, run: Run, *, note: str | None = None) -
     )
 
 
+def _read_of(fail: Callable[[MassiveError], bool]) -> BackgroundRead:
+    # A registered read's fail hook is the read's bound method.
+    assert isinstance(fail, MethodType)
+    read = fail.__self__
+    assert isinstance(read, BackgroundRead)
+    return read
+
+
 def the_read(m: dm.MassiveSession) -> BackgroundRead:
-    # The one read the session registered: its fail hook is the read's bound method.
-    (state,) = m._core._workers.values()
-    return cast("BackgroundRead", cast("Any", state.fail).__self__)
+    # The one read the session registered.
+    (state,) = m._core.workers._workers.values()
+    return _read_of(state.fail)
 
 
 def failed(table: Table) -> bool:
@@ -150,14 +160,14 @@ def test_a_read_fills_its_table_in_one_update(
     )
     read = the_read(massive_session)
     gate.set()
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     row = until_done(stream_rows)
     assert tickers(result, dh_to_pylist) == ["AAPL", "MSFT"]
     assert (row["State"], row["RowsPublished"], row["Error"]) == ("DONE", 2, None)
     massive_session.release(result)
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("DONE", 0)  # final: a release keeps it
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_read_without_a_note_says_only_that_it_reads_in_the_background(
@@ -167,7 +177,7 @@ def test_a_read_without_a_note_says_only_that_it_reads_in_the_background(
     assert result.attributes()["TableDescription"] == (
         f"test.trades: A dataset for the tests. {BACKGROUND_NOTE}"
     )
-    the_read(massive_session).thread.join(TIMEOUT)
+    the_read(massive_session).join(TIMEOUT)
     # An empty result adds no rows, so the read itself records it DONE once published.
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", 0)
@@ -199,7 +209,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
 
     with caplog.at_level(logging.WARNING, logger=background_read.__name__):
         result = open_test_read(massive_session, run)
-        the_read(massive_session).thread.join(TIMEOUT)
+        the_read(massive_session).join(TIMEOUT)
     until(lambda: failed(result))
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == (
@@ -223,7 +233,7 @@ def test_a_defect_fails_the_table_with_a_massive_error_naming_it(
         partial = static_rows(massive_session, "AAPL").drop_columns("Price")
     with caplog.at_level(logging.ERROR, logger=background_read.__name__):
         result = open_test_read(massive_session, returning(partial))
-        the_read(massive_session).thread.join(TIMEOUT)
+        the_read(massive_session).join(TIMEOUT)
     until(lambda: failed(result))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
@@ -273,13 +283,106 @@ def test_releasing_a_loading_read_stops_it_and_publishes_nothing(
         del result
         gc.collect()
         until(lambda: read.stopped)
-        read.thread.join(TIMEOUT)
-    assert not read.thread.is_alive()
+        read.join(TIMEOUT)
+    assert read.join(TIMEOUT)
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"], row["RowsPublished"]) == ("RELEASED", 0, 0)
     assert [r.getMessage() for r in caplog.records if "stopped" in r.getMessage()] != []
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
+
+
+def _reads(m: dm.MassiveSession) -> list[BackgroundRead]:
+    # Every read the session registered, in call order.
+    states = sorted(m._core.workers._workers.items())
+    return [_read_of(state.fail) for _, state in states]
+
+
+def test_reads_beyond_max_concurrency_wait_their_turn_on_the_read_pool(
+    massive_session: dm.MassiveSession,
+    stream_rows: Rows,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
+    gate = threading.Event()
+    threads: list[str] = []
+
+    def held(stop: threading.Event) -> Table:
+        threads.append(threading.current_thread().name)
+        assert gate.wait(TIMEOUT)
+        return static_rows(massive_session, "AAPL")
+
+    def second(stop: threading.Event) -> Table:
+        threads.append(threading.current_thread().name)
+        return static_rows(massive_session, "MSFT")
+
+    first_result = open_test_read(massive_session, held)
+    until(lambda: len(threads) == 1)
+    second_result = open_test_read(massive_session, second)
+    assert [row["State"] for row in stream_rows()] == ["LOADING", "LOADING"]
+    assert len(threads) == 1  # the one thread is busy: the second read waits
+    gate.set()
+    for read in _reads(massive_session):
+        assert read.join(TIMEOUT)
+    prefix = massive_session._core.thread_prefix
+    assert threads == [f"{prefix} read_0", f"{prefix} read_0"]
+    massive_session.release(first_result)
+    massive_session.release(second_result)
+
+
+def test_a_read_released_before_its_turn_makes_no_request(
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
+    gate, began = threading.Event(), threading.Event()
+    calls: list[str] = []
+
+    def held(stop: threading.Event) -> Table:
+        began.set()
+        assert gate.wait(TIMEOUT)
+        return static_rows(massive_session, "AAPL")
+
+    def waiting(stop: threading.Event) -> Table:
+        calls.append("requested")
+        return static_rows(massive_session, "MSFT")
+
+    first_result = open_test_read(massive_session, held)
+    assert began.wait(TIMEOUT)
+    result = open_test_read(massive_session, waiting)
+    first, second = _reads(massive_session)
+    with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
+        massive_session.release(result)
+        del result
+        gc.collect()
+        until(lambda: second.stopped)
+        gate.set()
+        assert second.join(TIMEOUT)
+    assert calls == []
+    assert any("stopped before its turn" in m for m in caplog.messages)
+    assert first.join(TIMEOUT)
+    massive_session.release(first_result)
+
+
+def test_a_read_the_stopped_pool_refuses_never_runs(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    massive_session._core.reads.stop()  # as the close does, after it failed every read
+    calls: list[str] = []
+
+    def run(stop: threading.Event) -> Table:
+        calls.append("requested")
+        return static_rows(massive_session, "AAPL")
+
+    with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
+        result = open_test_read(massive_session, run)
+    read = the_read(massive_session)
+    assert read.stopped
+    assert not read.join(0)
+    assert calls == []
+    assert any("the read pool stopped" in m for m in caplog.messages)
+    massive_session.release(result)
 
 
 def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
@@ -296,12 +399,14 @@ def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
 
     result = open_test_read(massive_session, run)
     read = the_read(massive_session)
-    (call,) = massive_session._core._workers
+    (call,) = massive_session._core.workers._workers
     landed = background_read._RowsLanded(weakref.ref(massive_session._core), call)
     added = SimpleNamespace(size=lambda: 3)
-    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
+        j_table_update=SimpleNamespace(added=lambda: added)
+    )
     with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
-        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_update(update, is_replay=False)
         landed.on_error(RuntimeError("the table broke"))
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", 3)
@@ -310,9 +415,9 @@ def test_the_landing_listener_marks_the_read_done_with_the_rows_added(
         f"call {call}: its result failed: the table broke",
     ]
     gate.set()
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     massive_session.release(result)
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_derived_table_keeps_the_read_going_after_release(
@@ -339,13 +444,13 @@ def test_a_derived_table_keeps_the_read_going_after_release(
     (row,) = stream_rows()
     assert row["State"] == "RELEASED"
     gate.set()
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     row = until_done(stream_rows)  # the released result still records its rows landing
     assert row["RowsPublished"] == 1
     assert tickers(derived[0], dh_to_pylist) == ["AAPL"]
     derived.clear()
     release_scope(massive_session._core.exec_ctx, scope)
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_closing_the_session_fails_a_loading_read(
@@ -361,13 +466,13 @@ def test_closing_the_session_fails_a_loading_read(
     assert rows[0]["State"] == "LOADING"
     view = massive_session.streams()
     massive_session.close()
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     assert read.stopped
     until(lambda: failed(result))
     (row,) = [r for r in dh_to_pylist(view) if r["Kind"] == "read"]
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
     )
     del view
 
@@ -379,7 +484,7 @@ def test_a_close_after_the_rows_landed_changes_nothing(
 ) -> None:
     result = open_test_read(massive_session, returning(static_rows(massive_session, "AAPL")))
     read = the_read(massive_session)
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     until_done(stream_rows)
     view = massive_session.streams()
     massive_session.close()
@@ -407,7 +512,7 @@ def test_a_console_close_between_the_publish_and_the_landing_shows_the_read_done
     def command() -> None:
         results.append(open_test_read(massive_session, returning(rows)))
         read = the_read(massive_session)
-        read.thread.join(TIMEOUT)  # it published; the rows wait for the next cycle
+        read.join(TIMEOUT)  # it published; the rows wait for the next cycle
         massive_session.close()
         assert not read.fail(dm.MassiveError("closed"))  # it has its rows
 
@@ -434,9 +539,11 @@ def test_a_read_racing_close_after_registering_never_starts(
     track = ResultRegistry.track
     reads: list[BackgroundRead] = []
 
-    def track_then_close(self: ResultRegistry, *args: object) -> ResultRecord:
+    def track_then_close(
+        self: ResultRegistry, *args: *tuple[Table, LivenessScope, Callable[[], None]]
+    ) -> ResultRecord:
         reads.append(the_read(massive_session))
-        record = track(self, *cast("tuple[Table, LivenessScope, Callable[[], None]]", args))
+        record = track(self, *args)
         massive_session.close()
         return record
 
@@ -446,15 +553,15 @@ def test_a_read_racing_close_after_registering_never_starts(
     monkeypatch.undo()
     (read,) = reads
     assert read.stopped
-    assert read.thread.ident is None  # never started
-    until(lambda: not massive_session._core._workers)
+    assert not read.join(0)  # never submitted
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_read_on_a_closed_session_is_refused(massive_session: dm.MassiveSession) -> None:
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         open_test_read(massive_session, returning(static_rows(massive_session)))
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_a_failed_registration_releases_everything(
@@ -467,7 +574,7 @@ def test_a_failed_registration_releases_everything(
     with pytest.raises(KeyboardInterrupt):
         open_test_read(massive_session, returning(static_rows(massive_session)))
     monkeypatch.undo()
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
 
@@ -488,9 +595,9 @@ def test_a_read_opened_in_a_console_command_lands_after_it(
     def command() -> None:
         results.append(open_test_read(massive_session, returning(rows)))
         read = the_read(massive_session)
-        read.thread.join(TIMEOUT)  # it published without the lock
+        read.join(TIMEOUT)  # it published without the lock
         assert results[0].size == 0
-        (state,) = massive_session._core._workers.values()
+        (state,) = massive_session._core.workers._workers.values()
         assert state.row.state == StreamState.LOADING
 
     console_command(command)
@@ -534,7 +641,7 @@ def test_a_billion_rows_land_in_one_cycle_without_a_copy(
     result = open_test_read(massive_session, run)
     read = the_read(massive_session)
     gate.set()
-    read.thread.join(TIMEOUT)
+    read.join(TIMEOUT)
     published = time.monotonic()
     until(lambda: result.size == 1_000_000_000)
     assert time.monotonic() - published < 1.0
@@ -550,7 +657,7 @@ def test_a_result_past_two_billion_rows_reads_every_value(
     # result in slices: a value past 2^31 rows is the one the transport returned.
     count = 2**31 + 10
     result = open_test_read(massive_session, returning(lazy_rows(massive_session, count)))
-    the_read(massive_session).thread.join(TIMEOUT)
+    the_read(massive_session).join(TIMEOUT)
     until(lambda: result.size == count)
     with entered(massive_session._core.exec_ctx):
         late = result.slice(count - 3, count - 2)
@@ -618,7 +725,9 @@ def read_state(m: dm.MassiveSession, to_pylist: Callable[[Table], list[dict[str,
     # The read's state in m.streams(), once every row queued so far is applied.
     assert m._core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = to_pylist(m.streams())
-    return cast("str", row["State"])
+    state = row["State"]
+    assert isinstance(state, str)
+    return state
 
 
 def open_read_case(
@@ -889,8 +998,10 @@ def test_a_done_read_with_a_released_result_no_longer_holds_its_session(
         until_done(stream_rows)
         massive_session.release(result)
     del result
-    until(lambda: not core._workers)
-    assert not core._in_live
+    # The session leaves the live set once the read's record is gone and the reaper has let go
+    # of this test's own `m.streams()` views. Other threads make both changes, and each
+    # updates the live set last, so the test waits for the live set itself.
+    until(lambda: id(core) not in live_set._live)
     (row,) = stream_rows()
     assert (row["State"], row["RowsPublished"]) == ("DONE", count)
     assert [tickers(table, dh_to_pylist) for table in derived] == [["AAPL"][:count]] * 2
@@ -908,7 +1019,7 @@ def test_a_derived_table_outliving_its_freed_session_shuts_the_read_down_quietly
     result = open_test_read(m, returning(static_rows(m, "AAPL")))
     read = the_read(m)
     stream_id = read._call
-    workers = core._workers  # read after the core is gone too
+    workers = core.workers._workers  # read after the core is gone too
     until(lambda: workers[stream_id].row.state == StreamState.DONE)
     scope = new_scope()
     with scope.open():
@@ -934,15 +1045,15 @@ def test_the_landing_listener_of_a_freed_session_records_nothing(
 ) -> None:
     # A close marks a published read DONE before its rows land; its session may then be freed
     # before the cycle that lands them. Called here, as on an update-graph thread.
-    class Gone:
-        pass
+    def gone() -> None:
+        return None  # the core was freed
 
-    gone = Gone()
-    landed = background_read._RowsLanded(cast("Any", weakref.ref(gone)), 7)
-    del gone
+    landed = background_read._RowsLanded(gone, 7)
     added = SimpleNamespace(size=lambda: 3)
-    update = SimpleNamespace(j_table_update=SimpleNamespace(added=lambda: added))
+    update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
+        j_table_update=SimpleNamespace(added=lambda: added)
+    )
     with caplog.at_level(logging.DEBUG, logger=background_read.__name__):
-        landed.on_update(cast("Any", update), is_replay=False)
+        landed.on_update(update, is_replay=False)
     (record,) = [r for r in caplog.records if r.name == background_read.__name__]
     assert record.getMessage() == "call 7 done: its 3 rows landed in the result"

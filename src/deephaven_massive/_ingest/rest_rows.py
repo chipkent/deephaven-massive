@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
+    from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._massive import RestPath
 
 __all__ = [
@@ -227,8 +228,7 @@ class RowConverter:
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(rows, pa.string())
         dropped: pa.Array | None = None
-        reason = ""
-        odd: dict[str, DriftSample] = {}
+        found = DriftReport()
         rounded = RoundedFields()
         for column_type, name, source in self.columns:
             if name == OPTION_ROOT:
@@ -242,35 +242,80 @@ class RowConverter:
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
-                    read = self.symbols.read(values, {})
-                    if read.unreadable and not self.symbols.keeps:
-                        raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
-                    values, raw = read.symbols, read.raw
+                    values, raw = self._read_symbols(values)
                 if source.unit is not None:
-                    sent = values
-                    values, failed = masked_instants(
-                        source.unit,
-                        sent,
-                        time_column=name == self.time_name,
-                        label=f"{self.dataset}.{name}",
+                    values, failed, report = self._converted_instants(
+                        values, name=name, unit=source.unit, wire_key=source.field.wire_key
                     )
-                    first = first_failure(sent, failed)
-                    if first is not None and name == self.time_name:
+                    found = found.merge(report)
+                    if failed is not None:
                         dropped = failed
-                        reason = mismatch_message(f"{self.dataset}.{name}", source.unit, first)
-                    elif first is not None:
-                        odd[source.field.wire_key] = DriftSample(None, str(first))
             arrays[name] = rounded.widen(
                 values, column_type.arrow_type, wire_key=None if source is None else source.wire_key
             )
         self._canonical_underlyings(arrays)
         converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        drift = DriftReport(unconvertible=frozenset(odd), samples=odd).merge(rounded.drift())
+        drift = found.merge(rounded.drift())
         if dropped is not None:
             converted = converted.filter(pc.invert(dropped))
-            count = rows - converted.num_rows
-            drift = drift.merge(DriftReport(dropped_rows=count, dropped_reason=reason))
+            drift = drift.merge(DriftReport(dropped_rows=rows - converted.num_rows))
         return converted, drift
+
+    def _read_symbols(self, sent: pa.Array) -> tuple[pa.Array, pa.Array]:
+        """Read a page's symbols into the library's spellings (`symbols.read`).
+
+        Args:
+            sent: The `Symbol` column's values as sent.
+
+        Returns:
+            The `Symbol` column and the `RawSymbol` column: the text of each symbol the
+            library cannot read, whose `Symbol` is null.
+
+        Raises:
+            RowDataError: If a symbol is a spelling the library cannot read and the session's
+                `unreadable_symbols` is `RAISE`.
+        """
+        read = self.symbols.read(sent, {})
+        if read.unreadable and not self.symbols.keeps:
+            raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
+        return read.symbols, read.raw
+
+    def _converted_instants(
+        self, sent: pa.Array, *, name: str, unit: TimeUnit, wire_key: str
+    ) -> tuple[pa.Array, pa.Array | None, DriftReport]:
+        """Convert one epoch column to instants, and classify the values that fail.
+
+        Each value runs through the masked timestamp routine (`timestamps.masked_instants`),
+        and a value that fails it is null. A failure in the time column drops its row; one in
+        any other column is drift of its field.
+
+        Args:
+            sent: The column's values as sent.
+            name: The column's name.
+            unit: The unit of the column's epochs.
+            wire_key: The wire key of the field behind the column.
+
+        Returns:
+            The instants; the mask of the rows to drop, set only for the time column when a
+            value failed, else None; and the failures' drift: for the time column the
+            dropped rows' reason (their count is the caller's), for another column its wire key
+            as unconvertible with the first failing value; empty when nothing failed.
+        """
+        values, failed = masked_instants(
+            unit, sent, time_column=name == self.time_name, label=f"{self.dataset}.{name}"
+        )
+        first = first_failure(sent, failed)
+        if first is None:
+            return values, None, DriftReport()
+        if name == self.time_name:
+            reason = mismatch_message(f"{self.dataset}.{name}", unit, first)
+            return values, failed, DriftReport(dropped_reason=reason)
+        sample = DriftSample(None, str(first))
+        return (
+            values,
+            None,
+            DriftReport(unconvertible=frozenset({wire_key}), samples={wire_key: sample}),
+        )
 
     def _canonical_underlyings(self, arrays: dict[str, pa.Array]) -> None:
         """Give a page's index underlyings their `I:` prefix (`wire_symbols.index_underlyings`).

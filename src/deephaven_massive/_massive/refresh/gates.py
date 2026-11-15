@@ -10,7 +10,8 @@ rejects.
 This module owns the vocabulary every other refresh module reports in (`Gate`, `Problem`,
 `RefreshError`) and the checks that span sources or read the hand input as a whole: stale hand
 entries (`stale_entries`, `unneeded_type_fixes`, `unused_description_fixes`,
-`check_exclusions`) and one concept per column within a dataset kind (`concept_collisions`).
+`check_exclusions`), one concept per column within a dataset kind (`concept_collisions`), and
+one name per field Massive documents alike across every source (`field_spellings`).
 The checks that need one field or parameter at a time run inside the generator that meets it
 (`rest_sources`, `ws_sources`, `flat_file_sources`); the checks here read what each source consumed
 through `PathUse`, so this module depends on no generator. The checks that read the generated
@@ -23,6 +24,7 @@ types for type checking only.
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -31,10 +33,11 @@ from deephaven_massive._massive.refresh import naming
 from deephaven_massive._massive.spec.types import Transport
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._massive.refresh.hand_input import HandInput
-    from deephaven_massive._massive.refresh.overrides import TypeFix
+    from deephaven_massive._massive.refresh.overrides import Projection, TypeFix
 
 __all__ = [
     "Gate",
@@ -43,6 +46,7 @@ __all__ = [
     "RefreshError",
     "check_exclusions",
     "concept_collisions",
+    "field_spellings",
     "stale_entries",
     "unneeded_type_fixes",
     "unused_description_fixes",
@@ -67,13 +71,13 @@ class Gate(StrEnum):
     `*_timestamp`, `updated`, `*_updated`, `window_start`, `window_end`, or `*_time`."""
     STALE_ENTRY = "stale-entry"
     """A hand entry (a lexicon shape, identity, `NAMES`, `UNITS`, tag-conflict, `TYPE_FIXES`,
-    `KEY_FIXES`, `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
-    `PARAM_UNITS`, `EXCLUSIONS`, `SAMPLE_ERRORS`, or `IGNORED_KEYS` entry) naming a path,
-    field, parameter, or sample the snapshot no longer has, or claiming what the snapshot
-    contradicts (a `TYPE_FIXES` entry no documented sample needs any more, a `KEY_FIXES` entry
-    whose key the example no longer sends, an `UNDECLARED_FIELDS` or `IGNORED_KEYS` entry for a
-    key the source now declares, or a `DESCRIPTION_FIXES` entry quoting a description the
-    vendor no longer gives, among them)."""
+    `KEY_FIXES`, `SPELLINGS`, `SHARED_DESCRIPTIONS`, `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`,
+    `DESCRIPTION_FIXES`, `RESULT_KEYS`, `PARAM_UNITS`, `EXCLUSIONS`, `SAMPLE_ERRORS`, or
+    `IGNORED_KEYS` entry) naming a path, field, parameter, or sample the snapshot no longer
+    has, or claiming what the snapshot contradicts (a `TYPE_FIXES` entry no documented sample
+    needs any more, a `KEY_FIXES` entry whose key the example no longer sends, an
+    `UNDECLARED_FIELDS` or `IGNORED_KEYS` entry for a key the source now declares, or a
+    `DESCRIPTION_FIXES` entry quoting a description the vendor no longer gives, among them)."""
     TYPE_AGREEMENT = "type-agreement"
     """Within one of `overrides.KINDS`, one column whose `WireType`s do not join: the type
     lattice joins `long` with `double` to `double`, `long` with `long-array` to `long-array`,
@@ -94,6 +98,14 @@ class Gate(StrEnum):
     CONCEPT_COLLISION = "concept-collision"
     """Within one of `overrides.KINDS`, one column holding two concepts (a concept is a field's
     full long-name path, in snake case)."""
+    FIELD_SPELLING = "field-spelling"
+    """Two names for one field: fields of any sources that Massive describes with one text but
+    whose last segments take different long names (`bid` and `bid_price` for "The bid
+    price."), or fields with one wire key and one description in different columns
+    (`DetailsStrikePrice` beside a respelled `StrikePrice`), unless a
+    `overrides.SHARED_DESCRIPTIONS` entry lists exactly those long names with why they
+    differ. Also a `overrides.SPELLINGS` entry that drops a field's own name or coins a
+    library column."""
     EXAMPLE_TYPE = "example-type"
     """A documented example value (of the response's example, or of a field's own `example`)
     that the generated field refuses: the generated type and the documented wire disagree, so
@@ -197,6 +209,10 @@ class PathUse:
         described_keys: The wire keys of the generated fields, and of the nested objects
             whose notes they carry, whose `DESCRIPTION_FIXES` entry the generator looked up:
             only these entries can take effect.
+        descriptions: Each generated field's wire key to its own description, corrected by
+            any `DESCRIPTION_FIXES` entry, without the notes of its enclosing objects.
+        long_names: Each generated field's wire key to the long name of its last segment, in
+            snake case.
     """
 
     wire_keys: frozenset[str] = frozenset()
@@ -209,6 +225,8 @@ class PathUse:
     needed_conversions: frozenset[str] = frozenset()
     example_keys: frozenset[str] = frozenset()
     described_keys: frozenset[str] = frozenset()
+    descriptions: Mapping[str, str] = field(default_factory=dict)
+    long_names: Mapping[str, str] = field(default_factory=dict)
 
 
 def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
@@ -279,14 +297,193 @@ def concept_collisions(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator
                 )
 
 
+def field_spellings(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
+    """Require one name per field that Massive documents alike, across every source.
+
+    Two fields with one description (each field's own, corrected text) are taken to be one
+    field, so the long names of their last segments must agree, and two with one wire key as
+    well must agree on the whole column. A field's name is the one a `renames` projection
+    gives it, where one does, since that is the name its table shows. A
+    `SHARED_DESCRIPTIONS` entry exempts a description whose fields are different fields
+    (Massive gives "The Timestamp in Unix MS." to four kinds of time), but only while its
+    fields take exactly the long names the entry lists: a new source that brings another
+    name for one of them fails again. An empty description proves nothing and is skipped.
+
+    Args:
+        hand: The hand input, whose `shared_descriptions` exempts descriptions and whose
+            `projections` rename some fields.
+        uses: What each generated source consumed.
+
+    Yields:
+        One `field-spelling` problem per description whose fields take two long names, and
+        per wire key and description whose fields sit in two columns; one per
+        `SHARED_DESCRIPTIONS` entry whose long names differ from those of its fields; and
+        one `stale-entry` problem per entry whose description no field has.
+    """
+    by_text, by_key = _names_by_description(hand, uses)
+    yield from _shared_description_problems(hand, by_text)
+    for text, named in sorted(by_text.items()):
+        if len(named) > 1 and text not in hand.shared_descriptions:
+            yield Problem(
+                gate=Gate.FIELD_SPELLING,
+                source="",
+                key=" | ".join(sorted(named)),
+                message="fields Massive describes alike take different long names: "
+                f"{_where(named)}. If they are one field, give them one name with a SPELLINGS "
+                "entry (overrides.py) citing the endpoint whose spelling they take; if they "
+                "are different fields, add a SHARED_DESCRIPTIONS entry saying why",
+                description=text,
+            )
+    for (wire_key, text), columns in sorted(by_key.items()):
+        if len(columns) > 1 and text not in hand.shared_descriptions:
+            yield Problem(
+                gate=Gate.FIELD_SPELLING,
+                source="",
+                key=wire_key,
+                message="fields with one wire key and one description sit in different "
+                f"columns: {_where(columns)}. Give them one column with a SPELLINGS entry "
+                "like the other sources' (overrides.py), or add a SHARED_DESCRIPTIONS entry "
+                "saying why they are different fields",
+                description=text,
+            )
+
+
+_Named = dict[str, dict[str, set[str]]]
+
+
+def _names_by_description(
+    hand: HandInput, uses: Mapping[str, PathUse]
+) -> tuple[_Named, dict[tuple[str, str], dict[str, set[str]]]]:
+    """Gather the names of the described fields of every source, by description.
+
+    Args:
+        hand: The hand input, whose `kinds` list the sources' memberships and whose
+            `projections` give some fields other names in a kind.
+        uses: What each generated source consumed.
+
+    Returns:
+        Each own description to each long name its fields take, to `"<source> <wire key>"`
+        of each; and each wire key and description to each column, to its sources.
+    """
+    memberships: dict[str, list[Projection | None]] = {}
+    for kind, groups in hand.kinds.items():
+        for source in {source for group in groups.values() for source in group}:
+            memberships.setdefault(source, []).append(hand.projections.get((kind, source)))
+    by_text: _Named = {}
+    by_key: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for source, use in uses.items():
+        for wire_key, text in use.descriptions.items():
+            if not text:
+                continue
+            for long_name, column in _names_shown(use, wire_key, memberships.get(source, [])):
+                by_text.setdefault(text, {}).setdefault(long_name, set()).add(
+                    f"{source} {wire_key}"
+                )
+                by_key.setdefault((wire_key, text), {}).setdefault(column, set()).add(source)
+    return by_text, by_key
+
+
+def _names_shown(
+    use: PathUse, wire_key: str, memberships: Sequence[Projection | None]
+) -> set[tuple[str, str]]:
+    """Return every long name and column a field takes in a table.
+
+    Args:
+        use: What the field's source consumed.
+        wire_key: The field's wire key.
+        memberships: The source's projection in each kind it joins, `None` where it joins
+            with its own names.
+
+    Returns:
+        The long name and column each projection that names the field gives it, and the
+        field's own, unless every kind the source joins renames the field: a source in no
+        kind, in a kind without a projection, or that joins a kind keeping some `fields`
+        (whose own dataset still shows its own names) shows the field's own name.
+    """
+    projections = [projection for projection in memberships if projection is not None]
+    shown = {
+        (naming.snake(projection.named[wire_key]), naming.column_name([projection.named[wire_key]]))
+        for projection in projections
+        if wire_key in projection.named
+    }
+    renamed_everywhere = bool(memberships) and all(
+        projection is not None and wire_key in (projection.renames or {})
+        for projection in memberships
+    )
+    if not renamed_everywhere:
+        shown.add((use.long_names[wire_key], use.columns[wire_key]))
+    return shown
+
+
+def _shared_description_problems(hand: HandInput, by_text: _Named) -> Iterator[Problem]:
+    """Report each `SHARED_DESCRIPTIONS` entry no field has, or whose long names changed.
+
+    Args:
+        hand: The hand input.
+        by_text: Each own description to each long name its fields take, to where.
+
+    Yields:
+        A `stale-entry` problem per entry whose description no field has, and a
+        `field-spelling` problem per entry whose long names are not those of its fields.
+    """
+    for text, shared in sorted(hand.shared_descriptions.items()):
+        named = by_text.get(text)
+        if named is None:
+            yield Problem(
+                gate=Gate.STALE_ENTRY,
+                source="",
+                key=" | ".join(sorted(shared.long_names)),
+                message="SHARED_DESCRIPTIONS entry for a description no generated field has",
+                description=text,
+            )
+        elif set(named) != shared.long_names:
+            yield Problem(
+                gate=Gate.FIELD_SPELLING,
+                source="",
+                key=" | ".join(sorted(named)),
+                message=f"SHARED_DESCRIPTIONS lists the long names {sorted(shared.long_names)}, "
+                f"but the fields with this description take {_where(named)}. Give a field "
+                "that is one of them its name with a SPELLINGS entry, or list the new name in "
+                "the entry with why it is a different field",
+                description=text,
+            )
+
+
+def _generated_keys(use: PathUse) -> AbstractSet[str]:
+    """Return the dotted keys of a source's generated fields and objects.
+
+    Args:
+        use: What the source consumed.
+
+    Returns:
+        Every wire key and object key, the keys a `SPELLINGS` entry may name.
+    """
+    return use.wire_keys | use.objects
+
+
+def _where(named: Mapping[str, set[str]]) -> str:
+    """Return each name with the sources or fields that take it, for a problem's message.
+
+    Args:
+        named: A name to the sources, or `"<source> <wire key>"` texts, that take it.
+
+    Returns:
+        `"<name> (<where>, ...); ..."`, sorted.
+    """
+    return "; ".join(
+        f"{name} ({', '.join(sorted(where))})" for name, where in sorted(named.items())
+    )
+
+
 def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:
     """Report the hand entries that name a source, field, object, or parameter not generated.
 
     The entries checked here are those whose staleness shows only once every source of every
     transport has run: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES` (by the
-    declared key), `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `SAMPLE_ERRORS`, `IGNORED_KEYS`
-    (also when the source declares the key), lexicon `SHAPES`, `PARAM_UNITS`, `IDENTITY`, and
-    `RESULT_KEYS`; `unused_description_fixes` checks `DESCRIPTION_FIXES`. An entry the
+    declared key), `SPELLINGS`, `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `SAMPLE_ERRORS`,
+    `IGNORED_KEYS` (also when the source declares the key), lexicon `SHAPES`, `PARAM_UNITS`,
+    `IDENTITY`, and `RESULT_KEYS`; `unused_description_fixes` checks `DESCRIPTION_FIXES`, and
+    `field_spellings` `SHARED_DESCRIPTIONS`. An entry the
     snapshot contradicts on a field it does generate is reported by the generator that meets
     the field.
 
@@ -297,45 +494,45 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     Yields:
         One `stale-entry` problem per stale entry.
     """
-    field_tables: list[tuple[str, Iterable[tuple[str, str]]]] = [
-        ("NAMES", hand.names),
-        ("UNITS", hand.units),
-        ("TAG_CONFLICTS", hand.tag_conflicts),
-        ("TYPE_FIXES", hand.type_fixes),
-        ("KEY_FIXES", hand.key_fixes),
-        ("UNDECLARED_FIELDS", hand.undeclared_fields),
-        ("OPTIONAL_FIELDS", hand.optional_fields),
-        ("SAMPLE_ERRORS", [(e.path, e.wire_key) for e in hand.sample_errors]),
-    ]
-    for table, keys in field_tables:
-        for path, wire_key in keys:
-            use = uses.get(path)
-            if use is None or wire_key not in use.wire_keys | use.example_keys:
-                yield Problem(
-                    gate=Gate.STALE_ENTRY,
-                    source=path,
-                    key=wire_key,
-                    message=f"{table} entry for a field the snapshot does not generate",
-                )
+
+    def fields(use: PathUse) -> frozenset[str]:
+        return use.wire_keys | use.example_keys
+
+    absent = "entry for a field the snapshot does not generate"
+    yield from _stale_path_entries(
+        uses,
+        [
+            (hand.names, fields, f"NAMES {absent}"),
+            (hand.units, fields, f"UNITS {absent}"),
+            (hand.tag_conflicts, fields, f"TAG_CONFLICTS {absent}"),
+            (hand.type_fixes, fields, f"TYPE_FIXES {absent}"),
+            (hand.key_fixes, fields, f"KEY_FIXES {absent}"),
+            (hand.undeclared_fields, fields, f"UNDECLARED_FIELDS {absent}"),
+            (hand.optional_fields, fields, f"OPTIONAL_FIELDS {absent}"),
+            ([(e.path, e.wire_key) for e in hand.sample_errors], fields, f"SAMPLE_ERRORS {absent}"),
+        ],
+    )
     yield from _stale_ignored_keys(hand, uses)
-    for path, prefix in hand.shapes:
-        use = uses.get(path)
-        if use is None or prefix not in use.objects:
-            yield Problem(
-                gate=Gate.STALE_ENTRY,
-                source=path,
-                key=prefix,
-                message="lexicon shape for an object the snapshot does not generate",
-            )
-    for path, base in hand.param_units:
-        use = uses.get(path)
-        if use is None or base not in use.unit_bases:
-            yield Problem(
-                gate=Gate.STALE_ENTRY,
-                source=path,
-                key=base,
-                message="PARAM_UNITS entry for no string parameter the snapshot generates",
-            )
+    yield from _stale_path_entries(
+        uses,
+        [
+            (
+                hand.spellings,
+                _generated_keys,
+                "SPELLINGS entry for an object or field the snapshot does not generate",
+            ),
+            (
+                hand.shapes,
+                operator.attrgetter("objects"),
+                "lexicon shape for an object the snapshot does not generate",
+            ),
+            (
+                hand.param_units,
+                operator.attrgetter("unit_bases"),
+                "PARAM_UNITS entry for no string parameter the snapshot generates",
+            ),
+        ],
+    )
     used = set().union(*(use.identities for use in uses.values()))
     for key in sorted(set(hand.identity) - used):
         yield Problem(
@@ -352,6 +549,27 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
                 key="",
                 message="RESULT_KEYS entry for a path the snapshot does not generate",
             )
+
+
+def _stale_path_entries(
+    uses: Mapping[str, PathUse],
+    tables: Iterable[tuple[Iterable[tuple[str, str]], Callable[[PathUse], AbstractSet[str]], str]],
+) -> Iterator[Problem]:
+    """Report the hand entries that name a path not generated, or a name its path lacks.
+
+    Args:
+        uses: What each generated path consumed.
+        tables: Each table of entries, as `(path, name)` pairs; the names its path generated,
+            read from the path's use; and the message of a stale entry.
+
+    Yields:
+        One `stale-entry` problem per stale entry, in table order and each table's order.
+    """
+    for entries, generated, message in tables:
+        for path, name in entries:
+            use = uses.get(path)
+            if use is None or name not in generated(use):
+                yield Problem(gate=Gate.STALE_ENTRY, source=path, key=name, message=message)
 
 
 def _stale_ignored_keys(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Problem]:

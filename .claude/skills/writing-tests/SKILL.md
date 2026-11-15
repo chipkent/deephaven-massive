@@ -5,16 +5,18 @@ description: "Use this skill whenever you write, change, or debug a test in this
 
 # Writing tests
 
-`AGENTS.md` sets where tests go and what they may touch (rules 10, 11, 13, and 16). This skill
+`AGENTS.md` sets where tests go and what they may touch (Code and tests, and Limits). This skill
 holds the harness details that keep a test deterministic and the JVM alive.
 
 ## The embedded JVM
 
-- `tests/conftest.py` starts one embedded Deephaven server per pytest process before
-  collection, so test modules may import `deephaven` at module level. Under `-n`, each xdist
-  worker starts one and the controller starts none; `-n` with the live tests is refused.
-- Never start or stop another `Server` in that process (a subprocess may). Read the comments on
-  the `trylast` hook and the JVM shutdown block in `tests/conftest.py` before touching either.
+- The pytest plugin `tests/embedded_server.py`, loaded with `-p` from `pyproject.toml`, starts
+  one embedded Deephaven server per pytest process before any conftest imports the library, so
+  test modules may import `deephaven` and the library at module level. Under `-n`, the xdist
+  controller and each worker start one; `-n` with the live tests is refused.
+- Never start or stop another `Server` in that process (a subprocess may). Read the comments in
+  `tests/embedded_server.py` and on the JVM shutdown block in `tests/conftest.py` before
+  touching either.
 - The JVM raises SIGSEGV on purpose, so never call `faulthandler.enable()` once it runs. Any
   process that starts a `Server` leaves through `os._exit`, as `scripts/render_reference.py`
   does.
@@ -27,8 +29,13 @@ holds the harness details that keep a test deterministic and the JVM alive.
   `dh_to_pylist`, `load_fixture`, `make_csv_gz`).
 - Drive state through the fakes in `tests/_fakes/` and explicit flush or poll calls, never
   `time.sleep()`: a sleep is slow when it is long enough and flaky when it is not.
-- Payload fixtures live under `tests/data/<test owner path>/`.
+- Unit tests never reach Massive: they use the fakes and payload fixtures under
+  `tests/data/<test owner path>/`.
 - Every behavior change gets a test that fails without the change.
+- A choice over a closed set (`AGENTS.md`, **Every choice over a closed set handles each case
+  by name**) gets a test for each member, parametrized over the enum so a new member joins it,
+  and one that passes a value no case handles and expects the refusal. When the parameter's type rejects that value, mark the call
+  `# type: ignore[arg-type]  # the point: refused at run time`; strict mypy fails an unused one.
 
 ## Input tables that stand in for a watchlist
 
@@ -41,8 +48,11 @@ The library never uses input tables, but a test may, to play a user's watchlist.
 
 ## Live tests
 
-Live tests (`tests/**/test_*_integration.py`) call Massive with a real key; agents write them
-but never run them with a key. `docs/live-tests.md` is their runbook.
+Live tests (`tests/**/test_*_integration.py`) call Massive with the owner's key. Agents write
+them. One runs only under the owner's supervision (`AGENTS.md`, Limits): either the owner runs
+it, or you run it after their yes, in the session, to a message giving the exact command, what
+it costs, and what its result settles.
+`docs/live-tests.md` is their runbook.
 
 - A live test names the open questions it answers with `@pytest.mark.verifies("N")` (it asserts
   the answer the library assumes) or `@pytest.mark.settles("N")` (it records evidence a person

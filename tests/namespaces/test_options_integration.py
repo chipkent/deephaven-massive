@@ -4,8 +4,9 @@ Each test records what Massive sent (`evidence`). A test marked `settles` assert
 requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
 asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
 from the wire REST client, because "a key is missing" and "a key holds an empty list" look the same
-once the library has read them; the library's own answer is recorded beside them. How to run these
-tests is in `docs/live-tests.md`.
+once the library has read them; the library's own answer is recorded beside them. The underlying
+and contract-symbol tests send values the library refuses or used to (`tests/_live/bad_values.py`)
+and record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import calendar, greeks
+from tests._live import bad_values, calendar, greeks
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
-    from deephaven_massive._query import Query
+    from deephaven_massive.queries import FetchQuery
     from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration
@@ -149,14 +150,14 @@ def _raw(
         return []
 
 
-def _library(build: Callable[[], Query], table_rows: TableRows) -> list[dict[str, Any]] | str:
+def _library(build: Callable[[], FetchQuery], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Build one library query, fetch it, and describe the outcome.
 
     Returns:
         The result's rows, or the text of the error building or fetching raised.
     """
     try:
-        return table_rows(build().fetch())
+        return table_rows(build().fetch(wait=True))
     except dm.EntitlementError as error:
         return f"not entitled: needs {_SNAPSHOT_PLAN} ({error})"
     except (dm.MassiveError, ValueError) as error:
@@ -520,12 +521,12 @@ def _stamp_contract_weeks(
     daily = session.options.bars(ticker, dm.Timespan.DAY)
     evidence(
         f"library {ticker} history(REST): "
-        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest, wait=True))
     )
     weekly = session.options.bars(ticker, dm.Timespan.WEEK)
     evidence(
         f"library {ticker} week history: "
-        + library_stamps(partial(weekly.history, *stamp_days["week"], source=rest))
+        + library_stamps(partial(weekly.history, *stamp_days["week"], source=rest, wait=True))
     )
     return complete
 
@@ -556,7 +557,8 @@ def _prev_bars(
         evidence(f"{ticker} /prev: {type(error).__name__}: {error}")
         return []
     previous = session.options.previous_day_bar(ticker)
-    evidence(f"library {ticker} previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
+    prev_stamps = library_stamps(partial(previous.fetch, wait=True))
+    evidence(f"library {ticker} previous_day_bar fetch() (/prev): {prev_stamps}")
     return found
 
 
@@ -702,7 +704,7 @@ def test_option_day_bar_stamps_of_the_day_file(
         day_bar_report(ticker, days, {_DAY_FILE: files[ticker]})
         as_traded = live_session.options.bars(ticker, dm.Timespan.DAY, adjusted=False)
         outcome = library_stamps(
-            partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES)
+            partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES, wait=True)
         )
         evidence(f"library {ticker} history(FLAT_FILES): {outcome}")
     assert all(chosen.values()), f"the day files hold no candidate on both days: {roots}"
@@ -760,6 +762,7 @@ def test_option_bars_across_the_underlyings_split(
                     _SPLIT_DAY - timedelta(days=3),
                     _SPLIT_DAY + timedelta(days=2),
                     source=dm.HistorySource.REST,
+                    wait=True,
                 )
             )
             if adjusted:
@@ -815,7 +818,7 @@ def test_the_chain_follows_a_live_table_of_underlyings(
     underlyings = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     underlyings.add(new_table([string_col("Symbol", ["SPY"])]))
     query = m.options.chain(underlyings, contract_type=dm.ContractType.CALL, limit=20)
-    result = query.fetch()
+    result = query.fetch(wait=True)
     try:
         first = _underlyings_until(table_rows, result, lambda seen: seen == {"SPY"})
         evidence(f"at the call: {sorted(first)}, {result.size} rows")
@@ -980,13 +983,13 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
         pytest.skip(f"no call near SPY's {spot} carries greeks now")
     now = datetime.now(UTC)
     units = []
-    for row in table_rows(live_session.options.snapshots(symbols).fetch()):
+    for row in table_rows(live_session.options.snapshots(symbols).fetch(wait=True)):
         expiry = datetime.combine(
-            date.fromisoformat(row["DetailsExpirationDate"]), dt_time(16, 0), _NEW_YORK
+            date.fromisoformat(row["ExpirationDate"]), dt_time(16, 0), _NEW_YORK
         )
         textbook = greeks.black_scholes_gamma(
             spot=spot,
-            strike=row["DetailsStrikePrice"],
+            strike=row["StrikePrice"],
             years=(expiry - now).total_seconds() / (365 * 24 * 3600),
             volatility=row["ImpliedVolatility"],
             rate=rate,
@@ -1006,7 +1009,7 @@ def _risk_free_rate(
 ) -> tuple[float, str]:
     """Return the newest 3-month Treasury yield as a fraction, and a line that names it."""
     start = (today - timedelta(days=14)).isoformat()
-    yields = table_rows(live_session.economy.treasury_yields(start=start).fetch())
+    yields = table_rows(live_session.economy.treasury_yields(start=start).fetch(wait=True))
     dated = [row for row in yields if row["Yield3Month"] is not None]
     assert dated, f"no 3-month Treasury yield since {start}"
     newest = max(dated, key=lambda r: r["Date"])
@@ -1027,15 +1030,87 @@ def _calls_near_the_money(
         "expiration_date_lte": (today + timedelta(days=_GAMMA_DAYS[1])).isoformat(),
     }
     calls = partial(live_session.options.chain, "SPY", contract_type=dm.ContractType.CALL)
-    first = table_rows(calls(limit=1, filters=window).fetch())
+    first = table_rows(calls(limit=1, filters=window).fetch(wait=True))
     spot = first[0]["UnderlyingAssetPrice"] if first else None
     if spot is None:
-        bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch())
+        bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch(wait=True))
         assert len(bars) == 1, f"SPY has {len(bars)} previous-day bars, not one"
         spot = bars[0]["Close"]
         assert spot is not None, "SPY's previous-day bar has no close"
     near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
-    chain = table_rows(calls(filters={**window, **near}).fetch())
+    chain = table_rows(calls(filters={**window, **near}).fetch(wait=True))
     priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
-    priced.sort(key=lambda r: abs(r["DetailsStrikePrice"] - spot))
+    priced.sort(key=lambda r: abs(r["StrikePrice"] - spot))
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `C:EURUSD` and `X:BTCUSD` as the underlying.
+
+    The library sends any canonical ticker as the chain's `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)
+
+
+@pytest.mark.needs("options:starter")
+@pytest.mark.settles("108")
+@pytest.mark.requests(1)
+def test_massive_answers_a_chain_of_an_option_contract(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `O:AAPL250117C00150000`, a contract, as the underlying.
+
+    The library sends any canonical ticker as the chain's `underlying`. ERROR means Massive
+    judges it; EMPTY, or DATA, means it answers with no error, and the library should refuse
+    it. DATA counts the contracts on the contract sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN_CONTRACT, evidence)
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_contracts_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contracts list answers to `underlying_ticker` `C:EURUSD` and `X:BTCUSD`.
+
+    The library takes only a stock or index ticker as `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS, evidence)
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("109")
+@pytest.mark.requests(1)
+def test_massive_answers_contracts_of_an_option_contract(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contracts list answers to `underlying_ticker` `O:AAPL250117C00150000`.
+
+    The library sends any canonical ticker but a pair as `underlying`. ERROR means Massive
+    judges it; EMPTY, or DATA, means it answers with no error, and the library should refuse
+    it. DATA counts the contracts on the contract sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS_CONTRACT, evidence)
+
+
+@pytest.mark.needs("options:basic")
+@pytest.mark.settles("104")
+@pytest.mark.requests(1)
+def test_massive_answers_contract_details_of_a_stock_ticker(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contract overview answers for `AAPL`, a stock rather than a contract.
+
+    `m.options.contracts` refuses an underlying passed as `symbols` and names
+    `underlying=`. DATA counts the rows describing a contract named `AAPL`.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)

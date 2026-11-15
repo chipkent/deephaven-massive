@@ -39,24 +39,13 @@ from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
-_F = TypeVar("_F")
+from typing_extensions import override
 
 if TYPE_CHECKING:
     import datetime as dt
     from collections.abc import Iterable, Mapping, Sequence
-
-    from typing_extensions import override
-else:
-
-    def override(method: _F) -> _F:
-        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
-
-        Type checkers read `typing_extensions.override` instead, from its bundled stub, so
-        overrides stay checked without a run-time dependency.
-        """
-        return method
 
 
 __all__ = [

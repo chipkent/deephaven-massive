@@ -10,7 +10,7 @@ Call it from a session `m`, made with `dm.MassiveSession()`:
 m.forex.bars(symbols, timespan, *, multiplier=1)
 ```
 
-- [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
+- [Methods](README.md#query-methods): `history(start, end=None)`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()` takes `dm.ALL` for one-minute and one-day bars. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.SESSION`. |
+| [`timespan`](README.md#timespan) | The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 
 ## Plans

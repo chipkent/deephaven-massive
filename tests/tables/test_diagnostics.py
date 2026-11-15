@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -21,11 +21,13 @@ from deephaven.table import Table
 from deephaven.table_factory import InputTable
 from deephaven.table_listener import TableUpdate, listen
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
@@ -57,17 +59,17 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
     gaps_text,
     shown_query,
+    thread_died,
 )
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, Publisher, blink_publisher
 from deephaven_massive._tables.symbol_read_rows import (
     SYMBOL_READ_KEYS,
     SYMBOL_READS,
     SymbolReadRow,
     SymbolReadState,
 )
-from deephaven_massive._types import override
 
 Rows = Callable[[Table], list[dict[str, Any]]]
 TIMEOUT = 30.0
@@ -83,10 +85,6 @@ STREAM = StreamRow(
     transport=Transport.WS,
     created_at=1_700_000_000_000_000_000,
 )
-
-
-def _stream(**changes: object) -> StreamRow:
-    return dataclasses.replace(STREAM, **cast("dict[str, Any]", changes))
 
 
 def test_column_sets() -> None:
@@ -170,7 +168,7 @@ def test_column_sets() -> None:
 
 
 def test_stream_updates_set_only_the_given_fields() -> None:
-    row = _stream(host="socket.massive.com", rows_published=3)
+    row = dataclasses.replace(STREAM, host="socket.massive.com", rows_published=3)
     assert StreamUpdate().apply(row) == row
     updated = StreamUpdate(rows_published=10, deferred=2, symbol_count=5).apply(row)
     assert (updated.rows_published, updated.deferred, updated.symbol_count) == (10, 2, 5)
@@ -183,7 +181,7 @@ def test_warnings_of_several_sources_coexist_and_clear_alone() -> None:
     # The connection's outage and options-cap notes and the flush thread's stale symbols are
     # three writers of one Error: each sets or clears only its own part, shown in NotePart
     # order, so no source ever replaces or clears another's warning.
-    row = _stream(deferred=2)
+    row = dataclasses.replace(STREAM, deferred=2)
     stale = StreamUpdate(notes={NotePart.STALE_SYMBOLS: "rows for ESH5 are being dropped"})
     cap = StreamUpdate(notes={NotePart.CAP: "over capacity: 1002/1000; 2 deferred"})
     down = StreamUpdate(notes={NotePart.OUTAGE: "connection down since T; no data"})
@@ -206,7 +204,7 @@ def test_warnings_of_several_sources_coexist_and_clear_alone() -> None:
 
 def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_other() -> None:
     cap = StreamUpdate(notes={NotePart.CAP: "over capacity: 1002/1000; 2 deferred"})
-    row = cap.apply(_stream(deferred=2))
+    row = cap.apply(dataclasses.replace(STREAM, deferred=2))
     both = StreamUpdate(skipped="skipping 1 value").apply(row)
     assert as_row(both)["Error"] == "over capacity: 1002/1000; 2 deferred; skipping 1 value"
     alone = StreamUpdate(deferred=0, notes={NotePart.CAP: None}).apply(both)  # the cap frees up
@@ -223,7 +221,7 @@ def test_skipped_symbols_and_the_transport_warning_neither_hide_nor_clear_each_o
 @pytest.mark.parametrize("state", [StreamState.FAILED, StreamState.CLOSED])
 def test_stream_updates_keep_the_cause_of_a_stop(state: StreamState) -> None:
     # A flush or a poll cycle that races a failure or the close never replaces its cause.
-    row = _stream(state=state, error="the cause")
+    row = dataclasses.replace(STREAM, state=state, error="the cause")
     for text in ("a warning", None):
         updated = StreamUpdate(notes={NotePart.POLL_CYCLE: text}).apply(row)
         assert (updated.state, updated.error, as_row(updated)["Error"]) == (
@@ -306,8 +304,8 @@ def test_rows_replace_rows_by_key_in_order(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     diagnostics.write(STREAM)
-    diagnostics.write(_stream(held_results=0, state=StreamState.RELEASED))
-    diagnostics.write(_stream(stream_id=8))
+    diagnostics.write(dataclasses.replace(STREAM, held_results=0, state=StreamState.RELEASED))
+    diagnostics.write(dataclasses.replace(STREAM, stream_id=8))
     diagnostics.write(
         ConnectionRow(
             transport=Transport.REST,
@@ -348,8 +346,8 @@ def test_two_adds_of_one_key_in_one_cycle_show_the_latest(
     diagnostics = _diagnostics(dh_exec_ctx)
     streams = diagnostics._streams
     with exclusive_lock(dh_exec_ctx.update_graph):
-        streams.add([_stream(held_results=1)])
-        streams.add([_stream(held_results=2)])
+        streams.add([dataclasses.replace(STREAM, held_results=1)])
+        streams.add([dataclasses.replace(STREAM, held_results=2)])
     assert wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
     assert [r["HeldResults"] for r in dh_to_pylist(diagnostics.streams)] == [2]
     diagnostics.release()
@@ -360,7 +358,7 @@ def test_new_keys_append_in_first_seen_order_and_an_update_is_a_modify(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     for stream_id in (7, 3, 9):
-        diagnostics.write(_stream(stream_id=stream_id))
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=stream_id))
     assert diagnostics.wait_until_shown(TIMEOUT)
     updates: list[tuple[int, int, int]] = []
 
@@ -372,9 +370,9 @@ def test_new_keys_append_in_first_seen_order_and_an_update_is_a_modify(
 
     handle = listen(diagnostics.streams, on_update)
     try:
-        diagnostics.write(_stream(stream_id=5))
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=5))
         assert diagnostics.wait_until_shown(TIMEOUT)
-        diagnostics.write(_stream(stream_id=3, held_results=4))
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=3, held_results=4))
         assert diagnostics.wait_until_shown(TIMEOUT)
     finally:
         handle.stop()
@@ -389,7 +387,13 @@ def test_failed_writes_are_logged_and_the_writer_continues(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
-        diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
+        diagnostics.write(
+            dataclasses.replace(
+                STREAM,
+                stream_id=8,
+                dataset=5,  # type: ignore[arg-type]  # the point: a row that cannot be written
+            )
+        )
         diagnostics.write(STREAM)
         assert diagnostics.wait_until_shown(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
@@ -399,15 +403,18 @@ def test_failed_writes_are_logged_and_the_writer_continues(
 
 class _BrokenPublisher:
     # A diagnostics table's publisher whose add fails.
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         raise RuntimeError("the streams table is broken")
+
+    def publish_failure(self, error: Exception) -> None:
+        raise AssertionError(error)  # the writer lives: nothing fails the table
 
 
 def test_a_failing_table_does_not_cost_the_other_its_rows(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
-    diagnostics._streams.publisher = cast("BlinkPublisher", _BrokenPublisher())
+    diagnostics._streams.publisher = _BrokenPublisher()
     connection = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
@@ -423,7 +430,7 @@ def test_a_failing_table_does_not_cost_the_other_its_rows(
 class _CountingPublisher:
     # Wraps a publisher, records when each `add` began and ended, and holds the first one until
     # released, so rows queued meanwhile reach the writer as one batch.
-    def __init__(self, publisher: BlinkPublisher, *, hold: bool = True) -> None:
+    def __init__(self, publisher: Publisher, *, hold: bool = True) -> None:
         self.publisher = publisher
         self.adds: list[float] = []
         self.ends: list[float] = []
@@ -432,17 +439,20 @@ class _CountingPublisher:
         if not hold:
             self.gate.set()
 
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         self.adds.append(time.monotonic())
         self.entered.set()
         assert self.gate.wait(TIMEOUT)
-        self.publisher.add(rows)
+        self.publisher.add(table)
         self.ends.append(time.monotonic())
+
+    def publish_failure(self, error: Exception) -> None:
+        self.publisher.publish_failure(error)
 
 
 def _count_adds(diagnostics: Diagnostics, *, hold: bool = True) -> _CountingPublisher:
     counting = _CountingPublisher(diagnostics._streams.publisher, hold=hold)
-    diagnostics._streams.publisher = cast("BlinkPublisher", counting)
+    diagnostics._streams.publisher = counting
     return counting
 
 
@@ -459,10 +469,10 @@ def test_a_batch_is_converted_once(
     diagnostics = _diagnostics(dh_exec_ctx)
     monkeypatch.setattr(Schema, "to_arrow", counting)
     counting_adds = _count_adds(diagnostics)
-    diagnostics.write(_stream(stream_id=100))
+    diagnostics.write(dataclasses.replace(STREAM, stream_id=100))
     assert counting_adds.entered.wait(TIMEOUT)  # the writer now holds its next batch back
     for n in range(3):
-        diagnostics.write(_stream(stream_id=n))
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=n))
     counting_adds.gate.set()
     assert diagnostics.wait_until_shown(TIMEOUT)
     assert calls == [1, 3]  # one conversion per batch, never one per row
@@ -475,7 +485,13 @@ def test_a_batch_of_rows_that_do_not_fit_adds_nothing(
     diagnostics = _diagnostics(dh_exec_ctx)
     counting = _count_adds(diagnostics, hold=False)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
-        diagnostics.write(_stream(stream_id=8, dataset=cast("str", 5)))
+        diagnostics.write(
+            dataclasses.replace(
+                STREAM,
+                stream_id=8,
+                dataset=5,  # type: ignore[arg-type]  # the point: a row that cannot be written
+            )
+        )
         assert diagnostics.wait_until_shown(TIMEOUT)
     assert "failed to write a streams row" in caplog.text
     assert counting.adds == []
@@ -488,10 +504,10 @@ def test_queued_rows_are_coalesced_into_few_adds_at_least_an_interval_apart(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     counting = _count_adds(diagnostics)
-    diagnostics.write(_stream(stream_id=0, held_results=-1))
+    diagnostics.write(dataclasses.replace(STREAM, stream_id=0, held_results=-1))
     assert counting.entered.wait(TIMEOUT)  # the burst queues while the first add is held
     for n in range(1_000):
-        diagnostics.write(_stream(stream_id=n % 10, held_results=n))
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=n % 10, held_results=n))
     counting.gate.set()
     assert diagnostics.wait_until_shown(TIMEOUT)
     # The writer waited out the interval after the held add before it took the burst.
@@ -515,7 +531,7 @@ def test_release_adds_queued_rows_then_releases(
     assert not diagnostics.thread.is_alive()
     assert diagnostics.wait_until_shown(TIMEOUT)  # the kept table takes the rows in
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
-    diagnostics.write(_stream(stream_id=9))  # dropped: the writer has stopped
+    diagnostics.write(dataclasses.replace(STREAM, stream_id=9))  # dropped: the writer has stopped
     assert diagnostics.wait_until_shown(TIMEOUT)
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     release_scope(dh_exec_ctx, keeper)
@@ -533,7 +549,7 @@ def test_a_release_that_does_not_wait_lets_the_writer_finish_later(
     with exclusive_lock(dh_exec_ctx.update_graph):
         diagnostics.write(STREAM)
         diagnostics.release(wait=False)
-        diagnostics.write(_stream(stream_id=9))  # dropped: released
+        diagnostics.write(dataclasses.replace(STREAM, stream_id=9))  # dropped: released
     assert diagnostics.wait_until_shown(TIMEOUT)  # the writer ends, then a cycle shows its rows
     assert not diagnostics.thread.is_alive()
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
@@ -605,7 +621,7 @@ def test_concurrent_writes_racing_a_release_leave_one_consistent_row_per_key(
     def writer(stream_id: int) -> None:
         start.wait(TIMEOUT)
         for n in range(200):
-            diagnostics.write(_stream(stream_id=stream_id, held_results=n))
+            diagnostics.write(dataclasses.replace(STREAM, stream_id=stream_id, held_results=n))
 
     threads = [threading.Thread(target=writer, args=(stream_id,)) for stream_id in range(8)]
     for thread in threads:
@@ -688,7 +704,7 @@ def test_connection_rows_replace_by_their_key(
 def test_gaps_accumulate_and_outlast_the_note_that_announced_them() -> None:
     # 2026-11-02T14:00:00Z, in epoch nanoseconds, and one minute.
     start, minute = 1_793_628_000 * 10**9, 60 * 10**9
-    row = _stream()
+    row = STREAM
     assert as_row(row)["Gaps"] is None
     down = StreamUpdate(notes={NotePart.OUTAGE: "connection down since 2026-11-02T14:00:00Z"})
     row = down.apply(row)
@@ -715,7 +731,7 @@ def test_gaps_text_shows_the_latest_and_counts_the_earlier_ones() -> None:
 
 
 def test_stream_updates_keep_schema_drift() -> None:
-    row = _stream(schema_drift="WS:x+")
+    row = dataclasses.replace(STREAM, schema_drift="WS:x+")
     assert StreamUpdate(rows_published=1).apply(row).schema_drift == "WS:x+"
     # Clearing the error never clears the drift: drift is not a failure.
     assert StreamUpdate(notes={NotePart.CAP: None}).apply(row).schema_drift == "WS:x+"
@@ -725,7 +741,7 @@ def test_schema_drift_reaches_both_tables(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
-    diagnostics.write(_stream(schema_drift="REST:halted+", error="boom"))
+    diagnostics.write(dataclasses.replace(STREAM, schema_drift="REST:halted+", error="boom"))
     diagnostics.write(
         ConnectionRow(
             transport=Transport.WS,
@@ -1114,11 +1130,8 @@ class _RatePull:
         return list(self.rows), self.change
 
 
-def _rate_row(bucket: str, state: RateLimitState, **changes: object) -> RateLimitRow:
-    return dataclasses.replace(
-        RateLimitRow(bucket=bucket, state=state, updated_at=1),
-        **cast("dict[str, Any]", changes),
-    )
+def _rate_row(bucket: str, state: RateLimitState) -> RateLimitRow:
+    return RateLimitRow(bucket=bucket, state=state, updated_at=1)
 
 
 def test_rate_limit_rows_are_pulled_from_their_source_when_told(
@@ -1137,9 +1150,8 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     assert diagnostics.wait_until_shown(TIMEOUT)
     assert source.pulls == 1
     source.rows = [
-        _rate_row(
-            "stocks",
-            RateLimitState.PAUSED,
+        dataclasses.replace(
+            _rate_row("stocks", RateLimitState.PAUSED),
             requests_per_minute=5,
             limit_source=LimitSource.LEARNED,
             paused_until=2 * 10**18,
@@ -1294,12 +1306,12 @@ def test_a_field_name_becomes_a_pascal_case_column_name(name: str, expected: str
 
 
 def test_a_followed_read_row_shows_its_loading_count() -> None:
-    assert as_row(_stream(loading=2))["Loading"] == 2
+    assert as_row(dataclasses.replace(STREAM, loading=2))["Loading"] == 2
     assert as_row(STREAM)["Loading"] is None
 
 
 def test_a_followed_read_update_sets_its_loading_and_transport() -> None:
-    row = _stream(transport=Transport.REST)
+    row = dataclasses.replace(STREAM, transport=Transport.REST)
     updated = StreamUpdate(loading=3, transport=FLAT_FILES_AND_REST).apply(row)
     assert (updated.loading, updated.transport) == (3, FLAT_FILES_AND_REST)
     assert StreamUpdate().apply(updated) == updated
@@ -1317,8 +1329,8 @@ _SYMBOL_READ = SymbolReadRow(
 )
 
 
-def _symbol_read(symbol: str = "AAPL", **changes: object) -> SymbolReadRow:
-    return dataclasses.replace(_SYMBOL_READ, symbol=symbol, **cast("dict[str, Any]", changes))
+def _symbol_read(symbol: str = "AAPL") -> SymbolReadRow:
+    return dataclasses.replace(_SYMBOL_READ, symbol=symbol)
 
 
 def _reads(to_list: Rows, diagnostics: Diagnostics) -> list[tuple[int, str, str]]:
@@ -1334,9 +1346,11 @@ def test_symbol_reads_show_the_latest_row_of_each_key(
     assert diagnostics.symbol_reads.is_refreshing
     diagnostics.write(_symbol_read())
     diagnostics.write(_symbol_read("MSFT"))
-    diagnostics.write(_symbol_read(stream_id=8))
+    diagnostics.write(dataclasses.replace(_symbol_read(), stream_id=8))
     assert diagnostics.wait_until_shown(TIMEOUT)
-    diagnostics.write(_symbol_read(state=SymbolReadState.LOADING, attempts=1))
+    diagnostics.write(
+        dataclasses.replace(_symbol_read(), state=SymbolReadState.LOADING, attempts=1)
+    )
     assert diagnostics.wait_until_shown(TIMEOUT)
     expected = [(7, "AAPL", "LOADING"), (7, "MSFT", "QUEUED"), (8, "AAPL", "QUEUED")]
     assert _reads(dh_to_pylist, diagnostics) == expected
@@ -1348,4 +1362,24 @@ def test_the_tables_are_created_under_the_update_graphs_shared_lock(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     assert blink_creations == [True, True, True, True]
+    diagnostics.release()
+
+
+def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
+    died = thread_died("MassiveSession #1", "reaper", RuntimeError("boom"))
+    assert str(died) == (
+        "MassiveSession #1: its reaper thread died (RuntimeError('boom')); this table no longer "
+        f"updates. {LIBRARY_BUG}"
+    )
+    assert (died.source, died.is_bug) == (dm.ErrorSource.LIBRARY, True)
+    # An interrupt ends the thread too, but is no bug of the library.
+    interrupted = thread_died("MassiveSession #1", "reaper", KeyboardInterrupt())
+    assert (interrupted.source, interrupted.is_bug) == (dm.ErrorSource.USER, False)
+
+
+def test_an_item_the_writer_has_no_rule_for_is_a_defect(dh_exec_ctx: ExecutionContext) -> None:
+    # Only rows, events, and the rate-limit marker are queued; anything else raises, never pulls.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    with pytest.raises(BrokenGuaranteeError, match=r"^the diagnostics queue holds 'text'"):
+        diagnostics._apply(["text"])
     diagnostics.release()

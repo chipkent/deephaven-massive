@@ -8,15 +8,17 @@ import re
 import subprocess
 import sys
 import sysconfig
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive import _config, _query, _session
+from deephaven_massive import _config, _session
 from deephaven_massive._config import CONFIG_FILE_VARIABLE, MassiveConfig
 from deephaven_massive._enums import AssetClass, OnError, Subscription
+from deephaven_massive.queries import _call, _choice, _fetch, _history, _query, _stream
 
 ENV = (
     "MASSIVE_API_KEY",
@@ -30,11 +32,6 @@ ENV = (
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ENV:
         monkeypatch.delenv(name, raising=False)
-
-
-def _replace(config: MassiveConfig, **changes: object) -> MassiveConfig:
-    # dataclasses.replace with untyped values, to exercise the run-time validation.
-    return dataclasses.replace(config, **cast("dict[str, Any]", changes))
 
 
 @pytest.fixture
@@ -134,6 +131,8 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
+    assert base.malformed_rows is dm.OnError.LOG
+    assert base.refused_venues is dm.OnError.RAISE
     assert base.connection_taken is dm.ConnectionTaken.FAIL
 
 
@@ -144,7 +143,9 @@ def test_defaults_live_in_exactly_one_place() -> None:
         missing = dataclasses.MISSING
         assert f.default is not missing or f.default_factory is not missing, f.name
     assert list(inspect.signature(dm.MassiveSession).parameters) == ["config"]
-    others = inspect.getsource(_session) + inspect.getsource(_query)
+    others = "".join(
+        map(inspect.getsource, (_session, _call, _choice, _fetch, _history, _query, _stream))
+    )
     # The bucket name is matched as a string literal: _massive.flatfiles contains it.
     literals = ("120.0", "time(11, 30)", "files.massive.com", "api.massive.com", '"flatfiles"')
     for literal in literals:
@@ -163,22 +164,22 @@ def test_frozen_and_secrets_hidden() -> None:
 
 
 def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
-    assert _replace(base, reconnect_backoff=15.0).reconnect_backoff == 15.0
+    assert dataclasses.replace(base, reconnect_backoff=15.0).reconnect_backoff == 15.0
     with pytest.raises(ValueError, match="reconnect_backoff"):
-        _replace(base, reconnect_backoff=0)
+        dataclasses.replace(base, reconnect_backoff=0)
     with pytest.raises(
         ValueError,
         match=r"^reconnect_backoff must be at least 15 s, not 14\.99, which limits reconnect "
         r"churn$",
     ):
-        _replace(base, reconnect_backoff=14.99)
+        dataclasses.replace(base, reconnect_backoff=14.99)
     with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
-        _replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
+        dataclasses.replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
 
 
 def test_max_outage_may_be_zero_but_not_negative(base: MassiveConfig) -> None:
     # Zero means "fail at the first disconnect", so it is a valid limit; an int becomes a float.
-    zero = _replace(base, max_outage=0).max_outage
+    zero = dataclasses.replace(base, max_outage=0).max_outage
     assert (zero, type(zero)) == (0.0, float)
     for bad in (-1, float("inf"), float("nan")):
         with pytest.raises(
@@ -186,31 +187,53 @@ def test_max_outage_may_be_zero_but_not_negative(base: MassiveConfig) -> None:
             match=r"max_outage must be zero or more seconds, got .*; 0 fails live tables at the "
             "first disconnect",
         ):
-            _replace(base, max_outage=bad)
+            dataclasses.replace(base, max_outage=bad)
     with pytest.raises(ValueError, match="max_outage must be finite, got an int too large"):
-        _replace(base, max_outage=10**400)
+        dataclasses.replace(base, max_outage=10**400)
 
 
 @pytest.mark.parametrize("value", ["300", True, None])
 def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
     with pytest.raises(TypeError, match="max_outage must be a number of seconds, not "):
-        _replace(base, max_outage=value)
+        dataclasses.replace(base, max_outage=value)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize(
-    ("name", "value"),
+    ("name", "change"),
     [
-        ("subscription_confirmation_timeout", 0.0),
-        ("flush_interval", -1.0),
-        ("subscription_confirmation_timeout", float("inf")),
-        ("subscription_confirmation_timeout", float("nan")),
-        ("max_concurrency", 0),
-        ("flat_file_symbol_threshold", -5),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=0.0),
+        ),
+        ("flush_interval", lambda c: dataclasses.replace(c, flush_interval=-1.0)),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("inf")),
+        ),
+        (
+            "subscription_confirmation_timeout",
+            lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("nan")),
+        ),
+        ("max_concurrency", lambda c: dataclasses.replace(c, max_concurrency=0)),
+        (
+            "flat_file_symbol_threshold",
+            lambda c: dataclasses.replace(c, flat_file_symbol_threshold=-5),
+        ),
+    ],
+    ids=[
+        "timeout-zero",
+        "flush-negative",
+        "timeout-inf",
+        "timeout-nan",
+        "concurrency-zero",
+        "threshold-negative",
     ],
 )
-def test_positive_numbers(base: MassiveConfig, name: str, value: float) -> None:
+def test_positive_numbers(
+    base: MassiveConfig, name: str, change: Callable[[MassiveConfig], MassiveConfig]
+) -> None:
     with pytest.raises(ValueError, match=f"{name} must be positive"):
-        _replace(base, **{name: value})
+        change(base)
 
 
 @pytest.mark.parametrize("value", [60.0, 90.0])
@@ -220,9 +243,11 @@ def test_subscription_confirmation_timeout_is_below_the_no_ack_resend_interval(
     with pytest.raises(
         ValueError, match=r"subscription_confirmation_timeout must be below 60 s, not \d+: "
     ):
-        _replace(base, subscription_confirmation_timeout=value)
+        dataclasses.replace(base, subscription_confirmation_timeout=value)
     assert (
-        _replace(base, subscription_confirmation_timeout=59.0).subscription_confirmation_timeout
+        dataclasses.replace(
+            base, subscription_confirmation_timeout=59.0
+        ).subscription_confirmation_timeout
         == 59.0
     )
 
@@ -238,7 +263,7 @@ def test_subscription_confirmation_timeout_is_below_the_no_ack_resend_interval(
 )
 def test_numeric_types(base: MassiveConfig, name: str, value: object) -> None:
     with pytest.raises(TypeError, match=f"{name} must be"):
-        _replace(base, **{name: value})
+        dataclasses.replace(base, **{name: value})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_websocket_hosts_are_validated_and_frozen() -> None:
@@ -248,7 +273,7 @@ def test_websocket_hosts_are_validated_and_frozen() -> None:
     hosts[AssetClass.OPTIONS] = "x.massive.com"
     assert AssetClass.OPTIONS not in cfg.websocket_hosts
     with pytest.raises(TypeError):
-        cast("dict[AssetClass, str]", cfg.websocket_hosts)[AssetClass.OPTIONS] = "y"
+        cfg.websocket_hosts[AssetClass.OPTIONS] = "y"  # type: ignore[index]  # the point: read-only
 
 
 @pytest.mark.parametrize(
@@ -280,25 +305,30 @@ def test_websocket_hosts_types(base: MassiveConfig) -> None:
         TypeError,
         match=r"^websocket_hosts key must be dm\.AssetClass, e\.g\. dm\.AssetClass\.STOCKS$",
     ):
-        _replace(base, websocket_hosts={"stocks": "delayed.massive.com"})
+        dataclasses.replace(base, websocket_hosts={"stocks": "delayed.massive.com"})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match="must be a hostname str"):
-        _replace(base, websocket_hosts={AssetClass.STOCKS: 5})
+        dataclasses.replace(base, websocket_hosts={AssetClass.STOCKS: 5})  # type: ignore[dict-item]  # the point: refused at run time
     with pytest.raises(TypeError, match="websocket_hosts must be a mapping"):
-        _replace(base, websocket_hosts=["delayed.massive.com"])
+        dataclasses.replace(base, websocket_hosts=["delayed.massive.com"])  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_rest_basic_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
     declared = {Subscription.OPTIONS, Subscription.CURRENCIES}
-    cfg = _replace(base, rest_basic_subscriptions=declared)
+    cfg = dataclasses.replace(base, rest_basic_subscriptions=declared)
     declared.add(Subscription.STOCKS)  # the configuration keeps its own copy
     assert cfg.rest_basic_subscriptions == frozenset(
         {Subscription.OPTIONS, Subscription.CURRENCIES}
     )
     assert isinstance(cfg.rest_basic_subscriptions, frozenset)
-    same = _replace(base, rest_basic_subscriptions=frozenset(cfg.rest_basic_subscriptions))
+    same = dataclasses.replace(
+        base, rest_basic_subscriptions=frozenset(cfg.rest_basic_subscriptions)
+    )
     assert cfg == same
     assert hash(cfg) == hash(same)
-    assert _replace(base, rest_basic_subscriptions={}.keys()).rest_basic_subscriptions == set()
+    assert (
+        dataclasses.replace(base, rest_basic_subscriptions={}.keys()).rest_basic_subscriptions
+        == set()
+    )
 
 
 def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> None:
@@ -307,16 +337,16 @@ def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -
         match=r"^rest_basic_subscriptions must be a set of dm\.Subscription, such as "
         r"\{dm\.Subscription\.STOCKS\}, not list$",
     ):
-        _replace(base, rest_basic_subscriptions=[Subscription.STOCKS])
+        dataclasses.replace(base, rest_basic_subscriptions=[Subscription.STOCKS])  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         TypeError,
         match=r"^each rest_basic_subscriptions member must be dm\.Subscription, "
         r"e\.g\. dm\.Subscription\.OPTIONS$",
     ):
-        _replace(base, rest_basic_subscriptions={"options"})
+        dataclasses.replace(base, rest_basic_subscriptions={"options"})  # type: ignore[arg-type]  # the point: refused at run time
     # An asset class names the subscription that covers it.
     with pytest.raises(TypeError, match=r"e\.g\. dm\.Subscription\.STOCKS$"):
-        _replace(base, rest_basic_subscriptions={AssetClass.STOCKS})
+        dataclasses.replace(base, rest_basic_subscriptions={AssetClass.STOCKS})  # type: ignore[arg-type]  # the point: refused at run time
     # Forex and crypto are one subscription, whichever way they are spelled.
     for currency in (AssetClass.FOREX, AssetClass.CRYPTO, "forex", "Crypto"):
         with pytest.raises(
@@ -324,16 +354,16 @@ def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -
             match=r"^rest_basic_subscriptions must hold dm\.Subscription members; forex and "
             r"crypto are one subscription, dm\.Subscription\.CURRENCIES$",
         ):
-            _replace(base, rest_basic_subscriptions={currency})
+            dataclasses.replace(base, rest_basic_subscriptions={currency})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_delayed_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
     listed = {Subscription.OPTIONS, Subscription.FUTURES}
-    cfg = _replace(base, delayed_subscriptions=listed)
+    cfg = dataclasses.replace(base, delayed_subscriptions=listed)
     listed.add(Subscription.STOCKS)  # the configuration keeps its own copy
     assert cfg.delayed_subscriptions == frozenset({Subscription.OPTIONS, Subscription.FUTURES})
     assert isinstance(cfg.delayed_subscriptions, frozenset)
-    same = _replace(base, delayed_subscriptions=frozenset(cfg.delayed_subscriptions))
+    same = dataclasses.replace(base, delayed_subscriptions=frozenset(cfg.delayed_subscriptions))
     assert cfg == same
     assert hash(cfg) == hash(same)
     assert cfg != base
@@ -343,11 +373,11 @@ def test_delayed_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> N
     with pytest.raises(
         TypeError, match=r"^delayed_subscriptions must be a set of dm\.Subscription, such as "
     ):
-        _replace(base, delayed_subscriptions=[Subscription.STOCKS])
+        dataclasses.replace(base, delayed_subscriptions=[Subscription.STOCKS])  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^each delayed_subscriptions member must be"):
-        _replace(base, delayed_subscriptions={"options"})
+        dataclasses.replace(base, delayed_subscriptions={"options"})  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"forex and crypto are one subscription"):
-        _replace(base, delayed_subscriptions={"forex"})
+        dataclasses.replace(base, delayed_subscriptions={"forex"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
@@ -356,7 +386,7 @@ def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
         match=r"^delayed_subscriptions cannot hold dm\.Subscription\.CURRENCIES: Massive has no "
         r"delayed forex or crypto feed",
     ):
-        _replace(base, delayed_subscriptions={Subscription.CURRENCIES})
+        dataclasses.replace(base, delayed_subscriptions={Subscription.CURRENCIES})
 
 
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
@@ -366,12 +396,12 @@ def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> Non
         r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
         r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\)$",
     ):
-        _replace(base, websocket_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
+        dataclasses.replace(base, websocket_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
     # Any host named as a delayed feed asks for delayed data.
     with pytest.raises(
         ValueError, match=r"^websocket_hosts pins stocks to the delayed feed delayed\.x"
     ):
-        _replace(base, websocket_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
+        dataclasses.replace(base, websocket_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.FOREX, AssetClass.CRYPTO])
@@ -381,7 +411,7 @@ def test_forex_and_crypto_cannot_pin_a_delayed_feed(
     with pytest.raises(
         ValueError, match=r"Massive has no delayed forex or crypto feed; remove the pin$"
     ):
-        _replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
+        dataclasses.replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
 
 
 def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:
@@ -391,7 +421,7 @@ def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> N
         r"Massive's delayed feed delayed\.massive\.com, but websocket_hosts pins stocks to "
         r"socket\.massive\.com; remove one of the two$",
     ):
-        _replace(
+        dataclasses.replace(
             base,
             delayed_subscriptions={Subscription.STOCKS},
             websocket_hosts={AssetClass.STOCKS: "socket.massive.com"},
@@ -399,7 +429,7 @@ def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> N
 
 
 def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
-    cfg = _replace(
+    cfg = dataclasses.replace(
         base,
         delayed_subscriptions={Subscription.STOCKS},
         websocket_hosts={
@@ -410,16 +440,26 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
-_SYMBOL_SETTINGS = [
-    "noncanonical_symbols",
-    "unlisted_symbols",
-    "unreadable_symbols",
-    "unavailable_symbols",
-]
+_ON_ERROR_SETTERS: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
+    "noncanonical_symbols": lambda c, v: dataclasses.replace(c, noncanonical_symbols=v),
+    "unlisted_symbols": lambda c, v: dataclasses.replace(c, unlisted_symbols=v),
+    "unreadable_symbols": lambda c, v: dataclasses.replace(c, unreadable_symbols=v),
+    "unavailable_symbols": lambda c, v: dataclasses.replace(c, unavailable_symbols=v),
+    "malformed_rows": lambda c, v: dataclasses.replace(c, malformed_rows=v),
+}
+"""Each `OnError` setting, by name, with a function that sets it on a config."""
+
+_ON_ERROR_SETTINGS = list(_ON_ERROR_SETTERS)
+
+_EVERY_ON_ERROR_SETTER: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
+    **_ON_ERROR_SETTERS,
+    "refused_venues": lambda c, v: dataclasses.replace(c, refused_venues=v),
+}
+"""The `OnError` settings above and `refused_venues`, whose default is `RAISE`."""
 
 
-@pytest.mark.parametrize("setting", _SYMBOL_SETTINGS)
-def test_symbol_settings_default_to_log_and_read_no_environment(
+@pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
+def test_on_error_settings_default_to_log_and_read_no_environment(
     monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
     # The settings' old environment variables are gone: a value there changes nothing.
@@ -427,29 +467,30 @@ def test_symbol_settings_default_to_log_and_read_no_environment(
     assert getattr(MassiveConfig(api_key="k"), setting) is dm.OnError.LOG
 
 
-@pytest.mark.parametrize("setting", _SYMBOL_SETTINGS)
-def test_symbol_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
-    assert getattr(_replace(base, **{setting: dm.OnError.IGNORE}), setting) is dm.OnError.IGNORE
+@pytest.mark.parametrize("setting", list(_EVERY_ON_ERROR_SETTER))
+def test_on_error_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
+    changed = _EVERY_ON_ERROR_SETTER[setting](base, dm.OnError.IGNORE)
+    assert getattr(changed, setting) is dm.OnError.IGNORE
     with pytest.raises(
         TypeError, match=rf"^{setting} must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"
     ):
-        _replace(base, **{setting: "log"})
+        dataclasses.replace(base, **{setting: "log"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_connection_taken_is_the_enum(base: MassiveConfig) -> None:
     reconnect = dm.ConnectionTaken.RECONNECT
-    assert _replace(base, connection_taken=reconnect).connection_taken is reconnect
+    assert dataclasses.replace(base, connection_taken=reconnect).connection_taken is reconnect
     with pytest.raises(
         TypeError,
         match=r"^connection_taken must be dm\.ConnectionTaken, e\.g\. "
         r"dm\.ConnectionTaken\.RECONNECT$",
     ):
-        _replace(base, connection_taken="reconnect")
+        dataclasses.replace(base, connection_taken="reconnect")  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_api_key_must_be_a_string() -> None:
     with pytest.raises(TypeError, match="api_key must be a str, not NoneType"):
-        MassiveConfig(api_key=cast("str", None))
+        MassiveConfig(api_key=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize("api_key", ["s3c r3t", "s3c\tr3t", "s3cr3t\r\nX: y", "s3cr\u00e9t"])
@@ -488,7 +529,14 @@ def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
     assert "api_key" not in shown
 
 
-@pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url"])
+_URL_SETTERS: dict[str, Callable[[MassiveConfig, str], MassiveConfig]] = {
+    "rest_base_url": lambda c, url: dataclasses.replace(c, rest_base_url=url),
+    "s3_endpoint_url": lambda c, url: dataclasses.replace(c, s3_endpoint_url=url),
+}
+"""Each URL setting, by name, with a function that sets it on a config."""
+
+
+@pytest.mark.parametrize("name", list(_URL_SETTERS))
 @pytest.mark.parametrize(
     "url",
     [
@@ -507,7 +555,7 @@ def test_the_repr_never_shows_the_user_and_password_of_a_url() -> None:
 )
 def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> None:
     with pytest.raises(ValueError, match=f"^{name} must be an http or https URL with a host"):
-        _replace(MassiveConfig(api_key="k"), **{name: url})
+        _URL_SETTERS[name](MassiveConfig(api_key="k"), url)
 
 
 @pytest.mark.parametrize(
@@ -568,7 +616,7 @@ def test_the_bucket_must_not_be_blank(bucket: str) -> None:
 @pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url", "s3_bucket"])
 def test_the_text_settings_must_be_strings(base: MassiveConfig, name: str) -> None:
     with pytest.raises(TypeError, match=f"^{name} must be a str, not NoneType"):
-        _replace(base, **{name: None})
+        dataclasses.replace(base, **{name: None})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_a_refused_ws_host_never_shows_a_password() -> None:
@@ -642,6 +690,8 @@ noncanonical_symbols: raise
 unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
+malformed_rows: ignore
+refused_venues: log
 connection_taken: reconnect
 """,
     )
@@ -667,6 +717,8 @@ connection_taken: reconnect
         unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
+        malformed_rows=OnError.IGNORE,
+        refused_venues=OnError.LOG,
         connection_taken=dm.ConnectionTaken.RECONNECT,
     )
     config = MassiveConfig.from_file(file)
@@ -915,19 +967,19 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        # The symbol settings: an exact word.
+        # The error settings: an exact word.
         (
             "noncanonical_symbols: Raise\n",
             (
                 ", line 1, column 23: noncanonical_symbols 'Raise' "
-                "is not a symbol setting; write one of raise, log, ignore, exactly as shown"
+                "is not an error setting; write one of raise, log, ignore, exactly as shown"
             ),
         ),
         (
             'unreadable_symbols: " raise"\n',
             (
                 ", line 1, column 21: unreadable_symbols ' raise' "
-                "is not a symbol setting; write one of raise, log, ignore, exactly as shown"
+                "is not an error setting; write one of raise, log, ignore, exactly as shown"
             ),
         ),
         (
@@ -940,8 +992,8 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         (
             "unreadable_symbols: [log]\n",
             (
-                ", line 1, column 21: unreadable_symbols must be a "
-                "symbol setting (raise, log, ignore), not a list or mapping"
+                ", line 1, column 21: unreadable_symbols must be an "
+                "error setting (raise, log, ignore), not a list or mapping"
             ),
         ),
         # The subscription lists.
@@ -1125,8 +1177,10 @@ def test_an_environment_problem_names_the_variable_and_not_the_file(
 
 
 def test_a_missing_key_is_still_an_authentication_error(tmp_path: Path) -> None:
-    with pytest.raises(dm.AuthenticationError, match="no Massive API key"):
+    with pytest.raises(dm.AuthenticationError, match="no Massive API key") as missing:
         MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
+    # Massive refused nothing: the settings lack the key, and that is no bug.
+    assert (missing.value.source, missing.value.is_bug) == (dm.ErrorSource.USER, False)
 
 
 @pytest.mark.usefixtures("key")
@@ -1368,3 +1422,9 @@ def test_only_the_generated_part_of_the_page_is_rewritten() -> None:
 def test_a_page_without_both_markers_is_refused(page: str) -> None:
     with pytest.raises(ValueError, match="SETTINGS_REFERENCE_START and SETTINGS_REFERENCE_END"):
         _config.with_settings_reference(page)
+
+
+def test_every_url_setting_is_shown_without_its_credentials() -> None:
+    # A URL may hold a user and password; a new URL setting must say how it is shown.
+    urls = {f.name for f in dataclasses.fields(MassiveConfig) if f.name.endswith("_url")}
+    assert urls == set(_config._URL_SETTINGS)

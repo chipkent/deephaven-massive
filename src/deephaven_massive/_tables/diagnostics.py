@@ -10,9 +10,9 @@ replaces:
   (asset class, channel family) recording the host decision and its evidence. Keyed by
   `Transport`, `AssetClass`, and `Family`.
 - **streams**: one row per stream (a live subscription with its own publisher), per `poll()`
-  table, per background read (`wait=False`), and per followed read (a `history()` or `fetch()` that
-  follows a refreshing symbol table), told apart by `Kind`, with the `repr` of the query that opened
-  it in `Query`. Keyed by `StreamId`.
+  table, per background read (a `fetch()` or `history()` without `wait=True`), and per followed
+  read (a `history()` or `fetch()` that follows a refreshing symbol table), told apart by `Kind`,
+  with the `repr` of the query that opened it in `Query`. Keyed by `StreamId`.
 - **symbol_reads**: one row per symbol of each followed read: whether it is queued, loading,
   waiting to retry, done, failed, removed, stopped, or closed, with its source, its rows, its
   attempts, and its latest error. Keyed by `StreamId` and `Symbol`. The session's follow
@@ -71,15 +71,24 @@ import time
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
-from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    ErrorSource,
+    MassiveError,
+    library_bug,
+    required,
+    source_of,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
@@ -91,7 +100,6 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     symbol_read_values,
 )
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -103,11 +111,13 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
     from deephaven_massive._massive import DriftReport
+    from deephaven_massive._tables.publisher import Publisher
 
 __all__ = [
     "CONNECTIONS",
     "CONNECTION_KEYS",
     "DROPPED_COUNT_INTERVAL",
+    "FINAL_STATES",
     "FLAT_FILES_AND_REST",
     "GAPS_SHOWN",
     "QUERY_SHOWN",
@@ -181,7 +191,7 @@ class StreamKind(StrEnum):
     Attributes:
         STREAM: A WebSocket stream, shared by every live verb of an equal query.
         POLL: A `poll()` table, which re-reads a REST dataset on an interval.
-        READ: A background read, `fetch(wait=False)` or `history(..., wait=False)`, whose
+        READ: A background read, `fetch()` or `history()` without `wait=True`, whose
             table fills once, when its download completes; or a followed read, a `history()`
             or `fetch()` of a refreshing symbol table, whose table gains and drops each symbol's
             rows as the symbol table changes.
@@ -259,6 +269,9 @@ _NOTE_ORDER: Final = {part: index for index, part in enumerate(NotePart)}
 
 _STOPPED: Final = frozenset({StreamState.FAILED, StreamState.CLOSED})
 """The states whose `Error` names why the stream stopped, which no later update replaces."""
+FINAL_STATES: Final = frozenset({StreamState.FAILED, StreamState.CLOSED, StreamState.DONE})
+"""The states no failure changes any more: a failed or closed table, and a read whose rows have
+landed. `close()` and a dying library thread fail only the tables in none of them."""
 _NOT_A_COLUMN: Final = "not_a_column"
 """The metadata key of a row field that `as_row` leaves out of the table."""
 
@@ -769,7 +782,7 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
         commas with a `(+N more)` suffix when truncated; for `dm.ALL`, `(None, "ALL")`; for
         a reactive table, `(None, "reactive table")`.
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return None, "ALL"
     if isinstance(symbols, SymbolTable):
         return None, "reactive table"
@@ -1132,12 +1145,13 @@ class _KeyedTable:
         """
         self.name: Final = name
         self.schema: Final = schema
-        blink, self.publisher = blink_publisher(
+        blink, publisher = blink_publisher(
             name,
             col_defs(schema),
             on_shutdown=functools.partial(_log_shut_down, name),
             release_later=release_later,
         )
+        self.publisher: Publisher = publisher
         self.table: Final = blink.last_by(list(keys))
 
     def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow]) -> None:
@@ -1504,6 +1518,9 @@ class Diagnostics:
 
         Args:
             items: Rows, `wait_until_shown` events, and rate-limit markers, in queue order.
+
+        Raises:
+            BrokenGuaranteeError: If an item is none of those, rather than taking it for one.
         """
         streams: dict[int, StreamRow] = {}
         connections: dict[tuple[str, str, str], ConnectionRow] = {}
@@ -1522,8 +1539,10 @@ class Diagnostics:
                 connections[item.transport, item.asset_class, item.family] = item
             elif isinstance(item, SymbolReadRow):
                 symbol_reads[item.stream_id, item.symbol] = item
-            else:
+            elif item is _RATE_LIMITS_CHANGED:
                 pull = True
+            else:
+                raise BrokenGuaranteeError(library_bug(f"the diagnostics queue holds {item!r}"))
         try:
             for table, rows in (
                 (self._streams, lambda: list(streams.values())),
@@ -1554,7 +1573,7 @@ class Diagnostics:
         """
         with self._release_lock:
             self._rate_pending = False
-            pull = cast("RateLimitPull", self._rate_pull)
+            pull = required(self._rate_pull, "the rate-limit pull")
         rows, change = pull()
         self._rate_due = None if change is None else time.monotonic() + change
         return list(rows)
@@ -1584,12 +1603,14 @@ def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
         death: What ended the thread.
 
     Returns:
-        Such as `MassiveError("MassiveSession #1: its reaper thread died (SystemExit()); this
-        table no longer updates")`.
+        Such as `MassiveError("MassiveSession #1: its reaper thread died (KeyboardInterrupt());
+        this table no longer updates; open a new dm.MassiveSession() to read again")`. A death
+        of an `Exception` is a bug, whose message says how to report it instead.
     """
-    return MassiveError(
-        f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
-    )
+    source = source_of(death)
+    text = f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
+    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}; {NEW_SESSION}"
+    return MassiveError(message, source=source)
 
 
 def _pascal_case(name: str) -> str:

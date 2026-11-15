@@ -35,7 +35,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
+from tests._live.live_run.children import ENTER_PROMPT
 from tests._live.live_run.stream_capture import diagnostics_rows, wait_for_diagnostics
+from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,16 +45,16 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
 
-SUBSCRIPTIONS: Final = ("stocks", "options", "indices", "currencies", "futures")
+SUBSCRIPTIONS: Final = tuple(TIERS)
 
 CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
-    "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(),
+    "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(wait=True),
     # Options Basic includes a contract's bars, not the chain; an expired contract answers 404,
     # which counts against the minute the same.
-    "options": lambda m: m.options.previous_day_bar("O:SPY261218C00600000").fetch(),
-    "indices": lambda m: m.indices.previous_day_bar("I:NDX").fetch(),
-    "currencies": lambda m: m.forex.previous_day_bar("C:EURUSD").fetch(),
-    "futures": lambda m: m.futures.market_status(product_code="ES", limit=1).fetch(),
+    "options": lambda m: m.options.previous_day_bar("O:SPY261218C00600000").fetch(wait=True),
+    "indices": lambda m: m.indices.previous_day_bar("I:NDX").fetch(wait=True),
+    "currencies": lambda m: m.forex.previous_day_bar("C:EURUSD").fetch(wait=True),
+    "futures": lambda m: m.futures.market_status(product_code="ES", limit=1).fetch(wait=True),
 }
 """One call of each subscription that sends exactly one request."""
 
@@ -69,7 +71,8 @@ FRESH_MINUTE: Final = 65.0
 TOO_MANY_REQUESTS: Final = 429
 """The HTTP status of Massive's refusal for the per-minute limit."""
 
-PROMPT: Final = "Now upgrade {subscription} on the dashboard, then press Enter"
+PROMPT: Final = "Now upgrade {subscription} on the dashboard, then " + ENTER_PROMPT
+"""What the child prints before it reads Enter; its end tells the parent to wait for Enter."""
 
 
 @dataclass

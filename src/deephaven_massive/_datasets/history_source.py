@@ -48,12 +48,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from deephaven_massive._datasets.bar_periods import (
     bar_starts,
     futures_bar_request,
     futures_first_bucket_day,
+    futures_session_unit,
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
@@ -76,18 +77,19 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_on_or_before,
 )
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
+from deephaven_massive._datasets.symbols import AllSymbols
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError, library_bug, required
 from deephaven_massive._massive import ParamKind, Transport, source
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._types import DateLike
 
 __all__ = [
     "HISTORY_TRANSPORTS",
@@ -145,7 +147,7 @@ def session_date_param(spec: DatasetSpec) -> str:
     Returns:
         The parameter's wire name.
     """
-    rest_path = source(Transport.REST, cast("str", spec.history_path))
+    rest_path = source(Transport.REST, required(spec.history_path, f"{spec.name}'s history path"))
     [name] = [param.name for param in rest_path.params if param.kind is ParamKind.DATE]
     return name
 
@@ -262,6 +264,12 @@ def history_window(
             whole.latest.isoformat(),
         )
         return HistoryWindow(span, ended, None, instants, whole, now=moment)
+    if request.multiplier < 1 or (timespan is Timespan.SESSION and not futures):
+        # The library has no bar period to fit to the range here: a session outside futures,
+        # or a bar of no units or fewer. The range is requested as given, so Massive answers
+        # it, rather than the library returning no rows without a request.
+        whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
+        return HistoryWindow(span, ended, None, instants, whole, now=moment)
     keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
     # Futures intraday bars named by instants take `window_start` exactly. The aggregates' `{from}`
     # starts where the first whole period's days begin, so the bar of that period is returned
@@ -325,7 +333,7 @@ def _futures_sessions(
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(AssetClass.FUTURES, ended, timespan=timespan, multiplier=multiplier)
         return HistoryWindow(span, keep, span, requested, whole, now=now)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         # Only finished sessions, and no session ends on a Saturday or Sunday.
         last = min(span.last, futures_session(now) - _ONE_DAY)
@@ -441,7 +449,7 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     grouped = (
         spec.has_grouped_daily and request.timespan is Timespan.DAY and request.multiplier == 1
     )
-    if isinstance(request.symbols, _All) and not grouped:
+    if isinstance(request.symbols, AllSymbols) and not grouped:
         return f"{spec.name} history over REST needs explicit symbols"
     return None
 
@@ -475,7 +483,11 @@ def _flat_file_problems(
     if flat_file_prefix(spec, request) is None:
         if spec.is_bars and spec.flat_file_prefixes:
             spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
-            problems.append(f"{spec.name} flat files hold only {spans} bars")
+            # Futures day bars are read from REST; the session files hold session bars, which
+            # are not yet shown to be the same bars.
+            day = request.timespan is Timespan.DAY and Timespan.SESSION in spec.flat_file_prefixes
+            hint = "; use dm.Timespan.SESSION for every contract's daily bars" if day else ""
+            problems.append(f"{spec.name} flat files hold only {spans} bars{hint}")
         else:
             problems.append(f"{spec.name} has no flat files")
     if request.adjusted is True:
@@ -558,7 +570,7 @@ def choose_source(
         rest is not None
         and request.adjusted is True
         and len(flat) == 1
-        and isinstance(request.symbols, _All)
+        and isinstance(request.symbols, AllSymbols)
     ):
         # Only adjustment holds flat files back, and only dm.ALL holds REST back: say so.
         raise ValueError(
@@ -615,10 +627,19 @@ def warn_unfilled(
         choice: The `AUTO` choice.
         catalog: The session's catalog, which knows the columns each source fills.
         warnings: The session's once-per-session warnings (`SessionCore.warnings`).
+
+    Raises:
+        BrokenGuaranteeError: If the choice is neither `REST` nor `FLAT_FILES`, which `AUTO`
+            resolves to.
     """
     if choice.alternative is Alternative.UNAVAILABLE:
         return  # the result cannot change, and the caller cannot pick the other source
-    other = HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
+    if choice.source is HistorySource.REST:
+        other = HistorySource.FLAT_FILES
+    elif choice.source is HistorySource.FLAT_FILES:
+        other = HistorySource.REST
+    else:
+        raise BrokenGuaranteeError(library_bug(f"{spec.name} history() chose {choice.source}"))
     missing = catalog.history_columns(spec, HISTORY_TRANSPORTS[other]) - (
         catalog.history_columns(spec, HISTORY_TRANSPORTS[choice.source])
     )

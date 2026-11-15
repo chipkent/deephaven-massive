@@ -31,42 +31,30 @@ import logging
 import threading
 import weakref
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final, Self, cast
+from typing import TYPE_CHECKING, Final, Self
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from typing_extensions import override
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._economy as economy
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._options as options
+import deephaven_massive.namespaces._partners as partners
+import deephaven_massive.namespaces._reference as reference
+import deephaven_massive.namespaces._stock_filings as stock_filings
+import deephaven_massive.namespaces._stock_financials as stock_financials
+import deephaven_massive.namespaces._stocks as stocks
+from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._config import MassiveConfig, shown_setting
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
-from deephaven_massive._errors import MassiveError, raises_through
+from deephaven_massive._errors import ErrorSource, MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
-from deephaven_massive._namespaces import (
-    crypto,
-    economy,
-    forex,
-    futures,
-    indicators,
-    indices,
-    options,
-    partners,
-    reference,
-    snapshots,
-    stock_filings,
-    stock_financials,
-    stocks,
-)
-from deephaven_massive._namespaces.crypto import _Crypto
-from deephaven_massive._namespaces.economy import _Economy
-from deephaven_massive._namespaces.forex import _Forex
-from deephaven_massive._namespaces.futures import _Futures
-from deephaven_massive._namespaces.indicators import _Indicators
-from deephaven_massive._namespaces.indices import _Indices
-from deephaven_massive._namespaces.options import _Options
-from deephaven_massive._namespaces.partners import _Partners
-from deephaven_massive._namespaces.query_building import build_query, list_params, shows_call
-from deephaven_massive._namespaces.reference import _Reference
-from deephaven_massive._namespaces.stocks import _Stocks
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
@@ -75,14 +63,31 @@ from deephaven_massive._tables.execution_context import (
 )
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS
-from deephaven_massive._types import override
+from deephaven_massive.namespaces import (
+    CryptoNamespace,
+    EconomyNamespace,
+    ForexNamespace,
+    FuturesNamespace,
+    IndicatorsNamespace,
+    IndicesNamespace,
+    OptionsNamespace,
+    PartnersNamespace,
+    ReferenceNamespace,
+    StocksNamespace,
+)
+from deephaven_massive.namespaces._query_building import (
+    build_query,
+    list_params,
+)
+from deephaven_massive.queries import FetchQuery
+from deephaven_massive.queries._call import shows_call
 
 if TYPE_CHECKING:
     from types import TracebackType
 
+    from deephaven_massive._datasets.filters import FilterValue
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
-    from deephaven_massive._query import Query
-    from deephaven_massive._types import FilterValue, Symbols
 
 __all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 
@@ -105,7 +110,7 @@ NAMESPACE_MODULES: Final = (
 )
 """Every namespace module, each exporting `DATASETS`, imported statically, and `snapshots`, the
 module of the dataset the session serves itself. A test asserts that this tuple names every
-module of `_namespaces/` except `query_building`."""
+private module of `namespaces/` except `_query_building` and `_namespace`, and `_snapshots`."""
 
 CATALOG: Final = Catalog(spec for module in NAMESPACE_MODULES for spec in module.DATASETS)
 """Every dataset of every namespace module, built once, at import, and held by every session
@@ -203,7 +208,7 @@ def _register(core: SessionCore) -> None:
             return
 
 
-class MassiveSession:
+class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namespaces, cross-asset snapshots, four diagnostics tables, release/close and the context-manager protocol; each member delegates to the core
     """Your connection to Massive: its datasets and the live tables you make from them.
 
     Create a session inside a Deephaven server, in its console or an application script. Its
@@ -223,12 +228,14 @@ class MassiveSession:
 
     Messages name the session by its label, such as `MassiveSession #1`.
 
-    Use one session per API key. Massive allows your account one streaming connection per asset
-    class. Two sessions with the same key share it only when their streaming settings match, such
-    as `websocket_hosts` and `max_outage`. Otherwise each opens its own, and the newer connection
-    takes the older one's place. The live tables on the older one then fail, or reconnect if their
-    session's `MassiveConfig.connection_taken` is `RECONNECT`. A WARNING names the clash when you
-    create the second session.
+    You can open several sessions with the same API key, and they share Massive's limits for
+    that key. They share one request rate, and Massive allows your account one streaming
+    connection per asset class. Sessions share that connection when their streaming settings
+    match, such as `websocket_hosts` and `max_outage`. Otherwise each opens its own, and the newer
+    connection takes the older one's place. The live tables on the older one then fail, or
+    reconnect if their session's `MassiveConfig.connection_taken` is `RECONNECT`. A WARNING names
+    the clash when you create the second session. A session that no variable holds and that runs
+    no live table closes by itself, with no warning.
 
     Example:
         ::
@@ -289,7 +296,9 @@ class MassiveSession:
                 "MassiveSession must be created inside a Deephaven server: no Deephaven "
                 "ExecutionContext is active on this thread. Create it from the Deephaven "
                 "console or an application script, or enter a context first "
-                "(with deephaven.execution_context.get_exec_ctx(): ...)."
+                "(with deephaven.execution_context.get_exec_ctx(): ...).",
+                source=ErrorSource.USER,
+                is_bug=True,
             )
         refuse_update_graph_thread(exec_ctx)
         if not has_script_query_scope(exec_ctx):
@@ -298,7 +307,9 @@ class MassiveSession:
                 "session's own: the library's formulas call Python functions through it. A "
                 "context from make_user_exec_ctx(freeze_vars=[...]) has a frozen copy instead; "
                 "create the session from the console or an application script, or use "
-                "make_user_exec_ctx() without freeze_vars."
+                "make_user_exec_ctx() without freeze_vars.",
+                source=ErrorSource.USER,
+                is_bug=True,
             )
         configure_from_environment()
         number = _next_number()
@@ -310,16 +321,16 @@ class MassiveSession:
         core.attach(SessionClients(core))
         _register(core)
         self._core = core
-        self._stocks = _Stocks(core)
-        self._options = _Options(core)
-        self._futures = _Futures(core)
-        self._indices = _Indices(core)
-        self._forex = _Forex(core)
-        self._crypto = _Crypto(core)
-        self._reference = _Reference(core)
-        self._indicators = _Indicators(core)
-        self._economy = _Economy(core)
-        self._partners = _Partners(core)
+        self._stocks = StocksNamespace(self)
+        self._options = OptionsNamespace(self)
+        self._futures = FuturesNamespace(self)
+        self._indices = IndicesNamespace(self)
+        self._forex = ForexNamespace(self)
+        self._crypto = CryptoNamespace(self)
+        self._reference = ReferenceNamespace(self)
+        self._indicators = IndicatorsNamespace(self)
+        self._economy = EconomyNamespace(self)
+        self._partners = PartnersNamespace(self)
 
     @override
     def __repr__(self) -> str:
@@ -337,52 +348,52 @@ class MassiveSession:
         return f"<{core.label} {state}>"
 
     @property
-    def stocks(self) -> _Stocks:
+    def stocks(self) -> StocksNamespace:
         """US equities: trades, quotes, bars, snapshots, fundamentals, and filings."""
         return self._stocks
 
     @property
-    def options(self) -> _Options:
+    def options(self) -> OptionsNamespace:
         """US options: trades, quotes, bars, chains, snapshots, and contracts."""
         return self._options
 
     @property
-    def futures(self) -> _Futures:
+    def futures(self) -> FuturesNamespace:
         """US futures: trades, quotes, bars, snapshots, contracts, products, and schedules."""
         return self._futures
 
     @property
-    def indices(self) -> _Indices:
+    def indices(self) -> IndicesNamespace:
         """Indices: values, bars, and snapshots."""
         return self._indices
 
     @property
-    def forex(self) -> _Forex:
+    def forex(self) -> ForexNamespace:
         """Forex: quotes, bars, snapshots, movers, and currency conversion."""
         return self._forex
 
     @property
-    def crypto(self) -> _Crypto:
+    def crypto(self) -> CryptoNamespace:
         """Crypto: trades, quotes, bars, fair market value, snapshots, and movers."""
         return self._crypto
 
     @property
-    def reference(self) -> _Reference:
+    def reference(self) -> ReferenceNamespace:
         """Reference data: tickers, news, exchanges, conditions, market status, and holidays."""
         return self._reference
 
     @property
-    def indicators(self) -> _Indicators:
+    def indicators(self) -> IndicatorsNamespace:
         """Technical indicators: SMA, EMA, RSI, and MACD."""
         return self._indicators
 
     @property
-    def economy(self) -> _Economy:
+    def economy(self) -> EconomyNamespace:
         """US economic data: treasury yields, inflation, labor market, and funding conditions."""
         return self._economy
 
     @property
-    def partners(self) -> _Partners:
+    def partners(self) -> PartnersNamespace:
         """Datasets from Massive's partners: `benzinga`, `etf_global`, `tmx`, and `fable`."""
         return self._partners
 
@@ -390,13 +401,13 @@ class MassiveSession:
     @raises_through(build_query, list_params)
     def snapshots(
         self,
-        symbols: Symbols,
+        symbols: SymbolsLike,
         *,
         sort: str | None = None,
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
-    ) -> Query:
+    ) -> FetchQuery:
         """The current state of tickers of any asset class, from Massive's unified snapshot.
 
         Each row holds one ticker's latest trade, quote, and minute bar, and its session's open,
@@ -439,9 +450,10 @@ class MassiveSession:
                 "snapshots takes no type filter: Massive refuses type beside tickers, and each "
                 "ticker's prefix selects its class"
             )
-        query = build_query(
+        return build_query(
             self._core,
             snapshots.SNAPSHOTS,
+            query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
                 "use a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
@@ -451,7 +463,6 @@ class MassiveSession:
             filters=filters,
             limit=limit,
         )
-        return cast("Query", query)
 
     @raises_through(SessionCore.diagnostics_view)
     def connections(self) -> Table:
@@ -485,7 +496,9 @@ class MassiveSession:
               `channel:<n> rows dropped` counts rows whose symbol or time couldn't be read.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.connections, CONNECTIONS)
 
@@ -503,8 +516,8 @@ class MassiveSession:
             A live table keyed by `StreamId`, with these columns:
 
             - `Kind`: `stream` for a stream method's table, and `poll` for a `poll()` table. `read`
-              is a background read (`wait=False`), or a `history()` or `fetch()` that follows a
-              watchlist.
+              is a `history()` or `fetch()` that reads in the background (without `wait=True`)
+              or follows a watchlist.
             - `Dataset`: the dataset's name, such as `stocks.trades`.
             - `Query`: the call that built the query, such as `m.stocks.trades('AAPL')`.
             - `Symbols`: the symbols it reads now; empty for a dataset that takes none.
@@ -530,7 +543,9 @@ class MassiveSession:
               `connections()` describes, with each entry named by transport.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.streams, STREAMS)
 
@@ -559,7 +574,9 @@ class MassiveSession:
             - `PausedUntil`, `LastRefusal`, and `UpdatedAt`.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.rate_limits, RATE_LIMITS)
 
@@ -588,7 +605,8 @@ class MassiveSession:
               `CLOSED`. `DONE` can mean 0 rows, when Massive has no data for the symbol. `REMOVED`
               means its row left the watchlist, and `STOPPED` that the result was released.
             - `Transport`: `REST`, `flat files`, or `flat files and REST` when some days' files were
-              missing.
+              missing. A futures read that skipped exchanges Massive refused, under
+              `refused_venues`, names them: `flat files without NYMEX (refused)`.
             - `AddedAt`: when its row last joined the watchlist.
             - `ReadAt`: when the download behind its rows began.
             - `Rows`: its rows in the result.
@@ -599,7 +617,9 @@ class MassiveSession:
             - `UpdatedAt`: when the row last changed.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
 
         Example:
             ::
@@ -630,12 +650,10 @@ class MassiveSession:
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
             raise ValueError(
-                "table is not a live result of this session: release() takes a table that this "
-                "session returned from blink(), append_only(), ring(), last_by(), poll(), "
-                "fetch(wait=False), history(..., wait=False), history() or fetch() of a "
-                "refreshing symbol table, connections(), streams(), rate_limits(), or "
-                "symbol_reads(). For a table derived from one, release the live table it came "
-                "from; a static fetch() or history() table has nothing to release"
+                f"{self._core.label}: release() takes a live table that this session returned, "
+                "and this table is not one. For a table you made from a live table, release "
+                "the live table instead. A table of another session needs that session's "
+                "release(). A static table needs no release"
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)
@@ -668,7 +686,9 @@ class MassiveSession:
     def __enter__(self) -> Self:
         """Enter a `with` block; the session closes when the block ends.
 
-        Use it in a script whose results are static: its live tables fail when the block ends.
+        Use it in a script whose results are static: its live tables fail when the block ends,
+        and so does a `fetch()` or `history()` still reading in the background. Pass `wait=True`
+        to read the rows inside the block.
 
         Returns:
             The session.

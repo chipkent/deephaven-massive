@@ -12,24 +12,33 @@ import dataclasses
 import functools
 import gc
 import logging
+import re
 import threading
 import weakref
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from types import MethodType
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.update_graph import exclusive_lock
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import MassiveError, UnlistedPairError
+from deephaven_massive._errors import (
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    MassiveError,
+    UnlistedPairError,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
@@ -37,11 +46,11 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
     StreamRow,
-    StreamUpdate,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
 from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
+from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import (
     FailureKind,
@@ -50,10 +59,12 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
+from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
+    from _collections_abc import dict_values
+
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
@@ -136,9 +147,9 @@ class Script:
 
 
 @pytest.fixture
-def watchlist(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]:
+def watchlist(dh_input_table: Callable[..., InputTable]) -> Callable[..., InputTable]:
     # Makes a user's keyed watchlist holding the symbols.
-    def make(*symbols: str) -> Table:
+    def make(*symbols: str) -> InputTable:
         table = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
         if symbols:
             add(table, *symbols)
@@ -147,12 +158,12 @@ def watchlist(dh_input_table: Callable[..., InputTable]) -> Callable[..., Table]
     return make
 
 
-def add(table: Table, *symbols: str) -> None:
-    cast("Any", table).add(new_table([string_col("Symbol", list(symbols))]))
+def add(table: InputTable, *symbols: str) -> None:
+    table.add(new_table([string_col("Symbol", list(symbols))]))
 
 
-def delete(table: Table, *symbols: str) -> None:
-    cast("Any", table).delete(new_table([string_col("Symbol", list(symbols))]))
+def delete(table: InputTable, *symbols: str) -> None:
+    table.delete(new_table([string_col("Symbol", list(symbols))]))
 
 
 def follow(
@@ -255,7 +266,7 @@ def stream(m: dm.MassiveSession, drain: Callable[[], None], to_list: ToList) -> 
 
 
 def test_a_symbol_goes_queued_loading_done(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     clock: FakeClock,
@@ -290,11 +301,11 @@ def test_a_symbol_goes_queued_loading_done(
 
 
 def test_a_symbol_waits_queued_while_the_pool_is_busy(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(massive_session._core.follows, "_max_workers", 1)
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
     wl = watchlist("AAPL")
@@ -308,7 +319,7 @@ def test_a_symbol_waits_queued_while_the_pool_is_busy(
 
 
 def test_no_data_is_done_with_no_rows(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     script = Script(massive_session)
     script.answers["ZZZZ"] = [SymbolRows(rows_of(massive_session, "ZZZZ", 0))]
@@ -320,7 +331,7 @@ def test_no_data_is_done_with_no_rows(
 
 def test_a_permanent_failure_fails_only_its_symbol(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     dh_to_pylist: ToList,
@@ -341,7 +352,7 @@ def test_a_permanent_failure_fails_only_its_symbol(
 
 
 def test_a_transient_failure_retries_after_1_5_and_15_minutes_then_fails(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     assert RETRY_DELAYS == (60.0, 300.0, 900.0)
     script = Script(massive_session)
@@ -364,7 +375,7 @@ def test_a_transient_failure_retries_after_1_5_and_15_minutes_then_fails(
 
 
 def test_a_retry_that_succeeds_clears_the_error(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     script = Script(massive_session)
     script.answers["AAPL"] = [
@@ -382,7 +393,7 @@ def test_a_retry_that_succeeds_clears_the_error(
 
 def test_a_retry_wakes_the_coordinator_by_itself(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     clock: FakeClock,
@@ -410,7 +421,7 @@ def test_a_retry_wakes_the_coordinator_by_itself(
 
 
 def test_a_removal_cancels_a_pending_retry(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(503)]
@@ -429,7 +440,7 @@ def test_a_removal_cancels_a_pending_retry(
 
 
 def test_a_re_added_symbol_retries_on_its_new_schedule_alone(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     # The first failure's retry stays in the heap after the removal; when it comes due, the
     # symbol waits for its second failure's retry, so the stale one reads nothing.
@@ -456,7 +467,7 @@ def test_a_re_added_symbol_retries_on_its_new_schedule_alone(
 
 
 def test_a_retry_of_a_released_result_never_reads(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     # The released result is forgotten with its retry still in the heap; the retry, when it
     # comes due, finds no result and is dropped.
@@ -476,11 +487,11 @@ def test_a_retry_of_a_released_result_never_reads(
 
 
 def test_a_removal_cancels_a_queued_read(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(massive_session._core.follows, "_max_workers", 1)
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
     wl = watchlist("AAPL")
@@ -500,7 +511,7 @@ def test_a_removal_cancels_a_queued_read(
 
 
 def test_a_removal_during_a_read_drops_its_outcome(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -516,7 +527,7 @@ def test_a_removal_during_a_read_drops_its_outcome(
 
 
 def test_a_re_add_during_a_read_waits_for_it_and_reads_again(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     first, second = threading.Event(), threading.Event()
@@ -543,7 +554,7 @@ def test_a_re_add_during_a_read_waits_for_it_and_reads_again(
 
 
 def test_five_add_remove_cycles_before_the_first_read_land_one_read(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -564,14 +575,15 @@ def test_five_add_remove_cycles_before_the_first_read_land_one_read(
 
 
 def test_a_failed_symbol_is_read_again_on_re_add_under_both_members(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
 ) -> None:
     for reread in Reread:
         script = Script(massive_session)
         script.answers["AAPL"] = [refused(403), SymbolRows(rows_of(massive_session, "AAPL", 1))]
-        wl = watchlist("AAPL")
+        wl = watchlist()  # added after the call: a call-time symbol's failure would fail it
         result = follow(massive_session, wl, script, reread=reread)
+        add(wl, "AAPL")
         until(functools.partial(_latest_is, massive_session, SymbolReadState.FAILED))
         delete(wl, "AAPL")
         add(wl, "AAPL")
@@ -587,7 +599,7 @@ def _latest_is(m: dm.MassiveSession, expected: SymbolReadState) -> bool:
 
 
 def test_never_reuses_a_download_without_a_request(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -607,7 +619,7 @@ def test_never_reuses_a_download_without_a_request(
 
 
 def test_always_frees_a_removed_download_and_reads_it_again(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL")
@@ -630,7 +642,7 @@ def test_always_frees_a_removed_download_and_reads_it_again(
 
 
 def test_the_first_read_s_failures_retry_or_fail(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, clock: FakeClock
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
     first = FirstRead(
         {
@@ -654,7 +666,7 @@ def test_the_first_read_s_failures_retry_or_fail(
 
 
 def test_a_call_time_symbol_gone_by_the_watch_s_start_is_removed(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     first = FirstRead(
         {name: SymbolRows(rows_of(massive_session, name, 1)) for name in ("AAPL", "MSFT")},
@@ -671,7 +683,9 @@ def test_a_call_time_symbol_gone_by_the_watch_s_start_is_removed(
 
 
 def test_release_while_loading_stops_every_symbol(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, drain: Callable[[], None]
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -693,7 +707,7 @@ def test_release_while_loading_stops_every_symbol(
 
 
 def test_a_failed_table_stops_its_symbols(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["MSFT"] = threading.Event()
@@ -705,7 +719,7 @@ def test_a_failed_table_stops_its_symbols(
 
 
 def test_a_read_that_starts_as_its_table_stops_leaves_its_symbol_stopped(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -768,7 +782,7 @@ def test_a_read_that_starts_as_its_table_stops_leaves_its_symbol_stopped(
 
 
 def test_a_symbol_added_after_its_result_failed_is_stopped_not_queued(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -794,11 +808,11 @@ def test_a_symbol_added_after_its_result_failed_is_stopped_not_queued(
 
 
 def test_close_marks_every_unfinished_symbol_closed(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(massive_session._core.follows, "_max_workers", 1)
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
     script.answers["NVDA"] = [refused(403)]
@@ -821,7 +835,7 @@ def test_close_marks_every_unfinished_symbol_closed(
 
 def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     dh_to_pylist: ToList,
     drain: Callable[[], None],
@@ -832,7 +846,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     view = massive_session.symbol_reads()
     massive_session.close()
     until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
-    with pytest.raises(MassiveError, match=r"is closed$"):
+    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
         massive_session.symbol_reads()
     massive_session.release(view)
     del result
@@ -840,7 +854,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
 
 def test_two_results_of_one_table_keep_rows_of_their_own(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -864,7 +878,7 @@ def test_two_results_of_one_table_keep_rows_of_their_own(
 
 def test_the_streams_row_shows_loading_then_running(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -893,7 +907,7 @@ def test_the_streams_row_shows_loading_then_running(
 
 
 def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     clock: FakeClock,
@@ -924,7 +938,7 @@ def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
 
 def test_the_streams_error_names_at_most_three_causes(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -934,7 +948,8 @@ def test_the_streams_error_names_at_most_three_causes(
     for name, status in statuses.items():
         script.answers[name] = [refused(status, "x" * 300)]
     script.answers["B"] = [SymbolFailure(MassiveError("no status"), FailureKind.PERMANENT)]
-    result = follow(massive_session, watchlist(*statuses), script)
+    # One symbol with rows keeps the table: every call-time symbol failing would fail it.
+    result = follow(massive_session, watchlist(*statuses, "OK"), script)
     for name in statuses:
         wait_state(massive_session, name, SymbolReadState.FAILED)
     until(
@@ -948,7 +963,7 @@ def test_the_streams_error_names_at_most_three_causes(
 
 def test_the_flat_files_and_rest_label(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -972,7 +987,7 @@ def test_the_flat_files_and_rest_label(
 
 def test_the_streams_summary_agrees_with_the_symbol_reads(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -1011,11 +1026,11 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
 
 
 def test_one_coordinator_and_pool_serve_every_result(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(massive_session._core.follows, "_max_workers", 2)
+    monkeypatch.setattr(massive_session._core.reads, "_max_workers", 2)
     prefix = massive_session._core.thread_prefix
     results = [
         follow(massive_session, watchlist("AAPL", "MSFT"), Script(massive_session))
@@ -1024,7 +1039,7 @@ def test_one_coordinator_and_pool_serve_every_result(
     until(lambda: [r.state for r in reads(massive_session).values()] == [SymbolReadState.DONE] * 12)
     names = [t.name for t in threading.enumerate() if t.name.startswith(f"{prefix} follow")]
     assert names.count(f"{prefix} follow") == 1
-    assert len([n for n in names if n.startswith(f"{prefix} follow-read")]) <= 2
+    assert len([n for n in names if n.startswith(f"{prefix} read_")]) <= 2
     for result in results:
         massive_session.release(result)
     del results
@@ -1038,7 +1053,7 @@ def test_one_coordinator_and_pool_serve_every_result(
 
 def test_a_dying_coordinator_fails_every_followed_table(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1064,7 +1079,7 @@ def test_a_dying_coordinator_fails_every_followed_table(
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
-        errors = [w.row.error for w in massive_session._core._workers.values()]
+        errors = [w.row.error for w in massive_session._core.workers._workers.values()]
     assert all("the follow coordinator died" in (e or "") for e in errors)
 
 
@@ -1073,7 +1088,7 @@ def _holds_rows(to_list: ToList, table: Table, count: int) -> bool:
 
 
 def test_a_session_freed_while_following_needs_no_close(
-    watchlist: Callable[..., Table], dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], dh_to_pylist: ToList
 ) -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key"))
     result = follow(m, watchlist("AAPL"), Script(m))
@@ -1094,7 +1109,7 @@ def test_a_session_freed_while_following_needs_no_close(
 
 
 def test_a_session_never_closed_outlives_its_last_stop(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     dh_to_pylist: ToList,
     monkeypatch: pytest.MonkeyPatch,
@@ -1109,14 +1124,17 @@ def test_a_session_never_closed_outlives_its_last_stop(
     until(landed)
     del landed
     core = weakref.ref(m._core)
-    thread = cast("threading.Thread", m._core.follows.thread)
+    thread = m._core.follows.thread
+    assert thread is not None
     stopping, proceed = threading.Event(), threading.Event()
     stopped = follow_coordinator.FollowCoordinator._stopped
 
-    def held(coordinator: follow_coordinator.FollowCoordinator, *step: object) -> None:
+    def held(
+        coordinator: follow_coordinator.FollowCoordinator, result: follow_coordinator._Result
+    ) -> None:
         stopping.set()
         assert proceed.wait(TIMEOUT)
-        stopped(coordinator, cast("Any", step[0]))
+        stopped(coordinator, result)
 
     monkeypatch.setattr(follow_coordinator.FollowCoordinator, "_stopped", held)
     with caplog.at_level(logging.ERROR):
@@ -1133,7 +1151,7 @@ def test_a_session_never_closed_outlives_its_last_stop(
 
 
 def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
 ) -> None:
     # A console command may release a result: the shutdown and the stop never wait on it.
@@ -1146,7 +1164,7 @@ def test_the_coordinator_s_stop_runs_with_the_update_graph_lock_held(
 
 
 def test_sixteen_threads_editing_one_watchlist_while_four_results_follow_it(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession, dh_to_pylist: ToList
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, dh_to_pylist: ToList
 ) -> None:
     # The stress test the free-threaded build runs too: no lock but the library's own keeps
     # the coordinator's state consistent.
@@ -1197,7 +1215,7 @@ def test_sixteen_threads_editing_one_watchlist_while_four_results_follow_it(
 
 def test_rows_from_rest_and_from_flat_files_show_both_sources(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
@@ -1214,7 +1232,7 @@ def test_rows_from_rest_and_from_flat_files_show_both_sources(
 
 
 def test_a_late_outcome_of_a_stopped_result_is_dropped(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1235,14 +1253,14 @@ def test_a_late_outcome_of_a_stopped_result_is_dropped(
 
 def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     dh_to_pylist: ToList,
 ) -> None:
     # As a read by symbol fails a table without the dataset's columns: a defect, ERROR.
     defect = MassiveError(
-        "test.trades: AAPL's rows from REST lack Price", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "test.trades: AAPL's rows from REST lack Price", source=dm.ErrorSource.LIBRARY
     )
     script = Script(massive_session)
     script.answers["AAPL"] = [SymbolFailure(defect, FailureKind.PERMANENT)]
@@ -1252,13 +1270,14 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
         wait_state(massive_session, "MSFT", SymbolReadState.DONE)
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
     assert "This is a bug in deephaven-massive" in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None  # a bug, with its traceback
     assert not result.j_table.isFailed()
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
 
 def test_two_bad_rows_fail_the_table_once(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1275,7 +1294,7 @@ def test_two_bad_rows_fail_the_table_once(
 
 
 def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
 ) -> None:
     # The read sees the stop token and fails as reads do then; that failure is not the symbol's.
@@ -1295,7 +1314,7 @@ def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(
 
 
 def test_one_result_s_defect_leaves_the_others_following(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -1309,8 +1328,11 @@ def test_one_result_s_defect_leaves_the_others_following(
     broken_id = max(_calls(massive_session))
     membership = follow_coordinator.FollowCoordinator._membership
 
-    def fails(coordinator: follow_coordinator.FollowCoordinator, *event: object) -> None:
-        result, message = cast("tuple[Any, Any]", event)
+    def fails(
+        coordinator: follow_coordinator.FollowCoordinator,
+        result: follow_coordinator._Result,
+        message: follow_coordinator._Baseline | follow_coordinator._Changed,
+    ) -> None:
         if result.read.call == broken_id:
             raise RuntimeError("a defect")
         membership(coordinator, result, message)
@@ -1323,7 +1345,7 @@ def test_one_result_s_defect_leaves_the_others_following(
     assert "follow: handling _" in caplog.text  # its start's set, or the later change
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     with massive_session._core.registry_lock:
-        error = massive_session._core._workers[broken_id].row.error or ""
+        error = massive_session._core.workers._workers[broken_id].row.error or ""
     assert "RuntimeError: a defect" in error
     massive_session.release(healthy)
     massive_session.release(broken)
@@ -1332,7 +1354,7 @@ def test_one_result_s_defect_leaves_the_others_following(
 def _calls(m: dm.MassiveSession) -> set[int]:
     # The StreamIds of the session's worker tables now.
     with m._core.registry_lock:
-        return set(m._core._workers)
+        return set(m._core.workers._workers)
 
 
 @pytest.mark.parametrize(
@@ -1349,7 +1371,7 @@ def test_a_defect_in_any_step_fails_only_its_result(
     method: str,
     step: str,
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1368,7 +1390,8 @@ def test_a_defect_in_any_step_fails_only_its_result(
     def breaks(
         coordinator: follow_coordinator.FollowCoordinator, *step_args: object, **named: object
     ) -> None:
-        result = cast("Any", step_args[0])
+        result = step_args[0]
+        assert isinstance(result, follow_coordinator._Result)
         if result.read.call != healthy_id:
             raise RuntimeError(f"a defect in {method}")
         original(coordinator, *step_args, **named)
@@ -1387,7 +1410,7 @@ def test_a_defect_in_any_step_fails_only_its_result(
     broken_id = max(_calls(massive_session))
     assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
     with massive_session._core.registry_lock:
-        error = massive_session._core._workers[broken_id].row.error or ""
+        error = massive_session._core.workers._workers[broken_id].row.error or ""
     assert f"the followed read failed {step}: RuntimeError: a defect in {method}" in error
     add(healthy_list, "MSFT")
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
@@ -1398,7 +1421,7 @@ def test_a_defect_in_any_step_fails_only_its_result(
 
 
 def test_a_defect_while_failing_a_broken_result_is_logged_too(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -1411,8 +1434,9 @@ def test_a_defect_while_failing_a_broken_result_is_logged_too(
     healthy_id = max(_calls(massive_session))
     show = follow_coordinator.FollowCoordinator._show
 
-    def breaks(coordinator: follow_coordinator.FollowCoordinator, *step_args: object) -> None:
-        result = cast("Any", step_args[0])
+    def breaks(
+        coordinator: follow_coordinator.FollowCoordinator, result: follow_coordinator._Result
+    ) -> None:
         if result.read.call != healthy_id:
             raise RuntimeError("a defect in _show")
         show(coordinator, result)
@@ -1433,7 +1457,7 @@ def test_a_defect_while_failing_a_broken_result_is_logged_too(
 
 
 def test_a_result_handed_over_as_the_session_closes_never_starts(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1441,8 +1465,11 @@ def test_a_result_handed_over_as_the_session_closes_never_starts(
     start = follow_coordinator.FollowCoordinator._start
     started: list[bool] = []
 
-    def closing(self: follow_coordinator.FollowCoordinator, *event: object) -> None:
-        result, message = cast("tuple[Any, Any]", event)
+    def closing(
+        self: follow_coordinator.FollowCoordinator,
+        result: follow_coordinator._Result,
+        message: follow_coordinator._Follow,
+    ) -> None:
         with core.registry_lock:
             core._closed = True  # as a close does, between the hand-over and the start
         try:
@@ -1460,18 +1487,18 @@ def test_a_result_handed_over_as_the_session_closes_never_starts(
     assert script.calls == []
 
 
-def test_a_coordinator_that_dies_after_its_stop_has_no_pool_to_end(
+def test_a_coordinator_that_dies_after_its_stop_has_nothing_to_fail(
     massive_session: dm.MassiveSession,
 ) -> None:
     coordinator = massive_session._core.follows
     coordinator.stop()
-    coordinator._died(SystemExit("late"))  # nothing to fail, no pool to shut down
+    coordinator._died(SystemExit("late"))  # nothing to fail
     assert coordinator.thread is None
     assert coordinator.following == 0
 
 
 def test_a_flat_file_scan_fails_as_a_unit(
-    watchlist: Callable[..., Table], massive_session: dm.MassiveSession
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
@@ -1503,7 +1530,7 @@ def test_a_flat_file_scan_fails_as_a_unit(
     ],
 )
 def test_never_reuses_its_download_across_any_day_boundary(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -1538,7 +1565,7 @@ def test_never_reuses_its_download_across_any_day_boundary(
 
 
 def test_results_opened_and_released_on_many_threads_share_one_coordinator(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1571,7 +1598,7 @@ def test_results_opened_and_released_on_many_threads_share_one_coordinator(
 
 
 def test_an_outcome_after_the_stop_token_is_dropped(
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1580,8 +1607,11 @@ def test_an_outcome_after_the_stop_token_is_dropped(
     gate = script.gates["AAPL"] = threading.Event()
     result = follow(massive_session, watchlist("AAPL"), script)
     until(lambda: script.calls == [("AAPL",)])
-    (worker,) = massive_session._core._workers.values()
-    handle = cast("Any", worker.fail).__self__
+    (worker,) = massive_session._core.workers._workers.values()
+    fail = worker.fail
+    assert isinstance(fail, MethodType)
+    handle = fail.__self__
+    assert isinstance(handle, FollowedRead)
     handle.stop_token.set()
     with caplog.at_level(logging.DEBUG, logger=LOGGER):
         gate.set()
@@ -1592,23 +1622,27 @@ def test_an_outcome_after_the_stop_token_is_dropped(
 
 def test_a_read_scheduled_after_the_coordinator_stopped_is_dropped(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The session stops the coordinator while it still handles an add queued before the stop:
-    # the add's read finds no pool, and is dropped without killing the thread.
+    # the add's read finds the coordinator stopped, and is dropped without killing the thread.
     coordinator = massive_session._core.follows
     script = Script(massive_session)
     wl = watchlist()
     result = follow(massive_session, wl, script)
-    thread = cast("threading.Thread", coordinator.thread)
+    thread = coordinator.thread
+    assert thread is not None
     membership = follow_coordinator.FollowCoordinator._membership
     handling, go = threading.Event(), threading.Event()
 
-    def held(self: follow_coordinator.FollowCoordinator, *event: object) -> None:
-        followed, message = cast("tuple[Any, Any]", event)
+    def held(
+        self: follow_coordinator.FollowCoordinator,
+        followed: follow_coordinator._Result,
+        message: follow_coordinator._Baseline | follow_coordinator._Changed,
+    ) -> None:
         if isinstance(message, follow_coordinator._Changed):
             handling.set()
             assert go.wait(TIMEOUT)
@@ -1630,7 +1664,7 @@ def test_a_read_scheduled_after_the_coordinator_stopped_is_dropped(
 
 def test_a_follow_handed_to_a_dying_coordinator_fails_its_table(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1673,7 +1707,7 @@ def test_a_follow_handed_to_a_dying_coordinator_fails_its_table(
 
 def test_a_rest_read_takes_up_to_symbols_per_read_symbols(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     dh_to_pylist: ToList,
 ) -> None:
@@ -1696,7 +1730,7 @@ def unlisted() -> SymbolFailure:
 @pytest.mark.parametrize(("setting", "warns"), [(dm.OnError.LOG, True), (dm.OnError.IGNORE, False)])
 def test_an_unlisted_pair_fails_alone_and_warns_only_under_log(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1721,7 +1755,7 @@ def test_an_unlisted_pair_fails_alone_and_warns_only_under_log(
 
 def test_an_unlisted_pair_fails_the_result_under_raise(
     *,
-    watchlist: Callable[..., Table],
+    watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
     drain: Callable[[], None],
@@ -1739,6 +1773,105 @@ def test_an_unlisted_pair_fails_the_result_under_raise(
     assert "does not list it" in shown["Error"]
 
 
+# --- The call-time symbols of a call that did not wait ----------------------------------------
+
+
+def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+) -> None:
+    # A plan without the dataset refuses every symbol: the table fails with the first
+    # symbol's error, in name order, as a call that waits raises it.
+    script = Script(massive_session)
+    script.answers["MSFT"] = [refused(403, "MSFT not in the plan")]
+    script.answers["AAPL"] = [refused(403, "AAPL not in the plan")]
+    result = follow(massive_session, watchlist("MSFT", "AAPL"), script)
+    until(lambda: bool(result.j_table.isFailed()))
+    shown = stream(massive_session, drain, dh_to_pylist)
+    assert (shown["State"], shown["Error"]) == ("FAILED", "HTTP 403: AAPL not in the plan")
+    assert row(massive_session, "AAPL").state is SymbolReadState.FAILED
+
+
+def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # While AAPL is read again, the table waits; once its last retry fails, every call-time
+    # symbol has failed, and the table fails, as a call that waits would have raised.
+    failures: list[Exception] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        failures.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy")]
+    script.answers["MSFT"] = [refused(403, "not in the plan")]
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
+    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+        wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+        assert not result.j_table.isFailed()
+        clock.advance(delay)
+        massive_session._core.follows.wake()
+        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
+    until(lambda: bool(result.j_table.isFailed()))
+    # The table fails with AAPL's error, the first by name, but calling again cannot help
+    # MSFT, so the failure is not retryable, though AAPL's HTTP 503 alone would be.
+    (failure,) = failures
+    assert isinstance(failure, dm.MassiveError)
+    assert (failure.status, failure.is_retryable) == (503, False)
+
+
+def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
+) -> None:
+    # AAPL, still loading, is deleted: the user chose the symbols, so the check is settled.
+    # MSFT, the one call-time symbol left, then fails alone, and so does one added later.
+    script = Script(massive_session)
+    script.gates["AAPL"] = threading.Event()
+    script.gates["MSFT"] = threading.Event()
+    script.answers["MSFT"] = [refused(403, "not in the plan")]
+    script.answers["NVDA"] = [refused(403, "not in the plan")]
+    wl = watchlist("AAPL", "MSFT")
+    result = follow(massive_session, wl, script)
+    until(lambda: state(massive_session, "MSFT") is SymbolReadState.LOADING)
+    delete(wl, "AAPL")
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    script.gates["MSFT"].set()
+    wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
+    add(wl, "NVDA")
+    wait_state(massive_session, "NVDA", SymbolReadState.FAILED)
+    script.gates["AAPL"].set()
+    assert not result.j_table.isFailed()
+    massive_session.release(result)
+
+
+def test_deleting_a_failed_call_time_symbol_leaves_the_check_to_the_others(
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
+) -> None:
+    script = Script(massive_session)
+    script.gates["AAPL"] = threading.Event()
+    script.answers["AAPL"] = [refused(403, "not in the plan")]
+    script.answers["MSFT"] = [refused(403, "not in the plan")]
+    wl = watchlist("AAPL", "MSFT")
+    result = follow(massive_session, wl, script)
+    wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
+    delete(wl, "MSFT")
+    wait_state(massive_session, "MSFT", SymbolReadState.REMOVED)
+    assert not result.j_table.isFailed()
+    script.gates["AAPL"].set()  # the one call-time symbol left fails: the table fails
+    until(lambda: bool(result.j_table.isFailed()))
+
+
 # --- The coordinator's work grows with the symbols that change --------------------------------
 
 
@@ -1752,41 +1885,51 @@ class _CountedSymbol(follow_coordinator._Symbol):
         return super().__getattribute__(name)
 
 
-class _QuietCore:
-    # The core a followed read reports to, reduced to the calls the coordinator makes.
-    closed = False
-    config = dm.MassiveConfig(api_key="k")
-
-    def __init__(self) -> None:
-        self.progress: list[int | None] = []
-
-    def write_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
-        del rows
-
-    def update_followed_read(self, call: int, update: StreamUpdate, *, loading: bool) -> None:
-        del call, loading
-        self.progress.append(update.loading)
+def _stopped_pool() -> ReadPool:
+    # A pool that refuses every read, so a coordinator driven by hand reads nothing.
+    pool = ReadPool("stopped", 1)
+    pool.stop()
+    return pool
 
 
-class _QuietRead:
-    # A followed read with no table: it only takes the coordinator's partition rows.
-    call = 1
-    dataset = "test.trades"
-    reread = Reread.ALWAYS
-    built_step = 0
-    shut_down = False
+@dataclasses.dataclass(frozen=True)
+class _TwoRows:
+    # A download's rows, as the coordinator reads them: only their count.
+    size: int = 2
 
-    def __init__(self) -> None:
-        self.core = _QuietCore()
-        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
-        self.stop_token = threading.Event()
 
-    @staticmethod
-    def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
-        raise AssertionError(names, stop)  # the coordinator has no pool: nothing is read
+class _CountedScans(dict[str, MassiveError | None]):
+    # The call-time symbols' failures, counting each pass over them.
+    scans = 0
 
-    def publish(self, name: str, seq: int, table: object, *, decided_at_step: int) -> None:
-        del name, seq, table, decided_at_step
+    @override
+    def values(self) -> dict_values[str, MassiveError | None]:
+        _CountedScans.scans += 1
+        return super().values()
+
+
+def test_the_call_time_check_does_not_rescan_its_symbols(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: each final failure scanned every call-time symbol, so a plan without the
+    # dataset failing 20,000 symbols in name order cost 20,000 passes over a growing prefix.
+    count = 2_000
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "scan test", _stopped_pool())
+    read = QuietRead()
+    handle = coordinator._handle
+    names = [f"S{i:04}" for i in range(count)]
+    handle([follow_coordinator._Follow(read, None)])
+    result = coordinator._results[id(read)]
+    handle([follow_coordinator._Baseline(read, frozenset(names), 1)])
+    assert result.call_time is not None
+    result.call_time = _CountedScans(result.call_time)
+    monkeypatch.setattr(_CountedScans, "scans", 0)
+    for name in names:
+        outcome = refused(403, f"{name} not in the plan")
+        handle([follow_coordinator._Began(read, {name: 1})])
+        handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
+    assert str(read.failed) == "HTTP 403: S0000 not in the plan"
+    assert _CountedScans.scans <= 1
 
 
 def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
@@ -1796,39 +1939,28 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
     # to count the progress), so 10,000 symbols landing one by one cost 10,000 passes over all
     # 10,000. Now a batch looks at the symbols it changed, plus a constant few.
     count = 2_000
-    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "work test", 1)
-    read = _QuietRead()
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "work test", _stopped_pool())
+    read = QuietRead()
     handle = coordinator._handle
     names = [f"S{i:04}" for i in range(count)]
     monkeypatch.setattr(follow_coordinator, "_Symbol", _CountedSymbol)
     monkeypatch.setattr(_CountedSymbol, "looks", 0)
-    handle([follow_coordinator._Follow(cast("FollowedRead", read), None)])
+    handle([follow_coordinator._Follow(read, None)])
     result = coordinator._results[id(read)]
-    handle([follow_coordinator._Baseline(cast("FollowedRead", read), frozenset(names), 1)])
-    rows = SymbolRows(cast("Table", dataclasses.make_dataclass("Rows", [("size", int)])(2)))
+    handle([follow_coordinator._Baseline(read, frozenset(names), 1)])
+    two_rows: Table = _TwoRows()  # type: ignore[assignment]  # a fake table: only its size
+    rows = SymbolRows(two_rows)
     failure = refused(503)
     for i, name in enumerate(names):  # every tenth symbol retries once
-        handle([follow_coordinator._Began(cast("FollowedRead", read), {name: 1})])
+        handle([follow_coordinator._Began(read, {name: 1})])
         outcome = failure if i % 10 == 0 else rows
-        handle(
-            [
-                follow_coordinator._Outcome(
-                    cast("FollowedRead", read), {name: 1}, {name: outcome}, 0, 0.0
-                )
-            ]
-        )
+        handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
     assert read.core.progress[-1] == count // 10  # the retrying symbols still load
     clock.advance(RETRY_DELAYS[0])
     coordinator._retry_due()  # the retries come due, and each is read and lands
     for name in names[::10]:
-        handle([follow_coordinator._Began(cast("FollowedRead", read), {name: 1})])
-        handle(
-            [
-                follow_coordinator._Outcome(
-                    cast("FollowedRead", read), {name: 1}, {name: rows}, 0, 0.0
-                )
-            ]
-        )
+        handle([follow_coordinator._Began(read, {name: 1})])
+        handle([follow_coordinator._Outcome(read, {name: 1}, {name: rows}, 0, 0.0)])
     assert read.core.progress[-1] == 0
     assert result.progress.rows == 2 * count
     # About 60 field reads per symbol; one pass over every symbol per batch made it 54 million.
@@ -1841,8 +1973,10 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     # A pool thread queues a read's start, and the symbol leaves the table before the
     # coordinator takes it: the start is for an older generation, so the symbol stays REMOVED
     # and the attempt is not counted. The 16-thread stress test hits this only by chance.
-    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "late start test", 1)
-    read = cast("FollowedRead", _QuietRead())
+    coordinator = follow_coordinator.FollowCoordinator(
+        dh_exec_ctx, "late start test", _stopped_pool()
+    )
+    read = QuietRead()
     handle = coordinator._handle
     handle([follow_coordinator._Follow(read, None)])
     symbols = coordinator._results[id(read)].symbols
@@ -1852,3 +1986,30 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     handle([follow_coordinator._Began(read, {"AAPL": started})])
     assert symbols["AAPL"].state is SymbolReadState.REMOVED
     assert symbols["AAPL"].attempts == 0
+
+
+def test_a_bug_is_a_cause_of_its_own() -> None:
+    # A bug never shares the one WARNING of a failure that is none, so it logs its ERROR.
+    lost = dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK)
+    broken = dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY)
+    misuse = dm.MassiveError("your table failed", source=dm.ErrorSource.USER, is_bug=True)
+    refused = dm.EntitlementError("HTTP 403", status=403)
+    keys = [follow_coordinator._cause(e) for e in (lost, broken, misuse, refused)]
+    assert keys == [
+        "MassiveError network",
+        "MassiveError library bug",
+        "MassiveError user bug",
+        "EntitlementError massive 403",
+    ]
+
+
+def test_an_event_the_coordinator_has_no_rule_for_is_a_defect(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
+    # Every event kind has its rule; any other raises, never stops the result unseen.
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "rule test", _stopped_pool())
+    read = QuietRead()
+    coordinator._handle([follow_coordinator._Follow(read, None)])
+    result = coordinator._results[id(read)]
+    with pytest.raises(BrokenGuaranteeError, match=r"^no rule applies 'text' to a result\."):
+        coordinator._apply(result, "text")  # type: ignore[arg-type]  # the point: refused at run time

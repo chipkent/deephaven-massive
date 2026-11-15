@@ -44,7 +44,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.stocks.last_trade`](stocks.last_trade.md) | The latest trade of each US-listed stock. | `fetch()`, `poll()` |
 | [`m.stocks.quotes`](stocks.quotes.md) | National best bid and offer quotes of US-listed stocks, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.stocks.last_quote`](stocks.last_quote.md) | The latest national best bid and offer of each US-listed stock. | `fetch()`, `poll()` |
-| [`m.stocks.bars`](stocks.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed stocks. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.stocks.bars`](stocks.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed stocks. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.stocks.previous_day_bar`](stocks.previous_day_bar.md) | The previous trading day's bar (open, high, low, close, volume) of US stocks. | `fetch()`, `poll()` |
 | [`m.stocks.luld`](stocks.luld.md) | Limit up-limit down price bands of US-listed stocks, as they change. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.stocks.imbalances`](stocks.imbalances.md) | Net order imbalances of US-listed stocks ahead of opening and closing auctions. | `blink()`, `append_only()`, `ring()`, `last_by()` |
@@ -82,7 +82,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.options.trades`](options.trades.md) | Trades of US-listed options contracts (OPRA), tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.options.last_trade`](options.last_trade.md) | The latest trade of each US-listed options contract. | `fetch()`, `poll()` |
 | [`m.options.quotes`](options.quotes.md) | Quotes of US-listed options contracts (OPRA), tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.options.bars`](options.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed options contracts. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.options.bars`](options.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed options contracts. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.options.previous_day_bar`](options.previous_day_bar.md) | The previous trading day's open, high, low, close, and volume of options contracts. | `fetch()`, `poll()` |
 | [`m.options.fmv`](options.fmv.md) | Massive's fair market value of US-listed options contracts, streamed in real time. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, streamed in real time. | `blink()`, `append_only()`, `ring()` |
@@ -97,7 +97,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | --- | --- | --- |
 | [`m.futures.trades`](futures.trades.md) | Trades of futures contracts, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.futures.quotes`](futures.quotes.md) | Best bid and offer quotes of futures contracts, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.futures.bars`](futures.bars.md) | Open, high, low, close, and volume bars of futures contracts. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.futures.bars`](futures.bars.md) | Open, high, low, close, and volume bars of futures contracts. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.futures.snapshots`](futures.snapshots.md) | The latest trade, quote, minute bar, and session of each futures contract. | `fetch()`, `poll()` |
 | [`m.futures.contracts`](futures.contracts.md) | The specification of every listed futures contract. | `fetch()`, `poll()` |
 | [`m.futures.products`](futures.products.md) | The specification of every futures product. | `fetch()`, `poll()` |
@@ -110,7 +110,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | Dataset | Summary | Methods |
 | --- | --- | --- |
 | [`m.indices.values`](indices.values.md) | Index levels, tick by tick, as computed by the index providers. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.indices.bars`](indices.bars.md) | Open, high, low, and close index levels over fixed windows of time. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.indices.bars`](indices.bars.md) | Open, high, low, and close index levels over fixed windows of time. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.indices.previous_day_bar`](indices.previous_day_bar.md) | The previous trading day's open, high, low, and close of each index. | `fetch()`, `poll()` |
 | [`m.indices.snapshots`](indices.snapshots.md) | The current state of each index: its level, its session so far, and its status. | `fetch()`, `poll()` |
 | [`m.indices.daily_open_close`](indices.daily_open_close.md) | One day's opening, closing, high, and low levels of each index. | `fetch()`, `poll()` |
@@ -121,7 +121,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | --- | --- | --- |
 | [`m.forex.quotes`](forex.quotes.md) | Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.forex.last_quote`](forex.last_quote.md) | The latest best bid and ask of each currency pair. | `fetch()`, `poll()` |
-| [`m.forex.bars`](forex.bars.md) | Aggregate bars of currency pairs: open, high, low, close, and volume per window. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.forex.bars`](forex.bars.md) | Aggregate bars of currency pairs: open, high, low, close, and volume per window. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.forex.previous_day_bar`](forex.previous_day_bar.md) | The previous UTC day's open, high, low, close, and volume of each currency pair. | `fetch()`, `poll()` |
 | [`m.forex.fmv`](forex.fmv.md) | Massive's fair market value of each currency pair, streamed as it updates. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.forex.snapshots`](forex.snapshots.md) | The current state of currency pairs: today's bar, the last minute, and the last quote. | `fetch()`, `poll()` |
@@ -135,7 +135,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.crypto.trades`](crypto.trades.md) | Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.crypto.last_trade`](crypto.last_trade.md) | The latest trade of each crypto pair. | `fetch()`, `poll()` |
 | [`m.crypto.quotes`](crypto.quotes.md) | Quotes of crypto pairs: each exchange's best bid and ask, as they change. | `blink()`, `append_only()`, `ring()`, `last_by()` |
-| [`m.crypto.bars`](crypto.bars.md) | Open, high, low, close, and volume bars of crypto pairs, over any time window. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.crypto.bars`](crypto.bars.md) | Open, high, low, close, and volume bars of crypto pairs, over any time window. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.crypto.previous_day_bar`](crypto.previous_day_bar.md) | The previous UTC day's open, high, low, close, and volume of each crypto pair. | `fetch()`, `poll()` |
 | [`m.crypto.fmv`](crypto.fmv.md) | Massive's fair market value of crypto pairs, streamed as it updates. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.crypto.snapshots`](crypto.snapshots.md) | The current state of crypto pairs: today's, the last minute's, and yesterday's bars. | `fetch()`, `poll()` |
@@ -293,7 +293,7 @@ Any other parameter Massive documents for the dataset, as a `dict`. Write each d
 
 ### timespan
 
-The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or `dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, one-second and one-minute bars with `multiplier=1` also stream. Bars of other lengths are history only.
+The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or `dm.Timespan.DAY`. `SESSION`, a trading session, is for futures only; a futures `DAY` bar is one session. On a bars dataset, one-second and one-minute bars with `multiplier=1` also stream. Bars of other lengths are history only.
 
 <a id="multiplier"></a>
 
@@ -305,7 +305,23 @@ How many `timespan` units each bar spans, 1 by default. `timespan=dm.Timespan.MI
 
 ### venues
 
-The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members. The default is all four. Pass the ones your plan includes.
+The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. Each exchange's file of a day holds every contract it trades, so naming fewer exchanges downloads less.
+
+Massive refuses the files of an exchange your plan doesn't include. `history()` reads REST instead when REST can serve the read. When it must read flat files (`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):
+
+- Left out, the read tries every exchange and skips each one Massive refuses. It logs one warning naming them. The table's description names them too. For a watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.
+- An exchange you name follows [`refused_venues`](#refused_venues).
+- If Massive refuses every exchange, the read fails.
+
+<a id="refused_venues"></a>
+
+### refused_venues
+
+What a flat-file read does when Massive refuses the files of an exchange you name in [`venues`](#venues). It takes a `dm.OnError`. Left out, it follows `MassiveConfig.refused_venues`, which is `RAISE` unless you set it.
+
+- `RAISE` fails the read with `EntitlementError`, naming the exchange.
+- `LOG` skips each refused exchange for the whole range, logs one warning naming them, and lists them in the table's description.
+- `IGNORE` skips them too, logging only at DEBUG.
 
 ## Column types
 

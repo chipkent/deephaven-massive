@@ -5,6 +5,8 @@ The refusal reads the tests a run selected, so each case lists the ids a selecti
 
 from __future__ import annotations
 
+import pytest
+
 from tests._live import parallel
 
 _UNIT = "tests/namespaces/test_stocks.py::test_trades_columns"
@@ -49,3 +51,14 @@ def test_the_live_tests_an_empty_expression_selects_are_refused() -> None:
     message = parallel.refusal([_UNIT, _LIVE, _LIVE_NEEDS])
     assert message is not None
     assert "selects 2 of them (the first is " + _LIVE + ")" in message
+
+
+def test_the_hook_ends_a_run_that_selects_a_live_test() -> None:
+    with pytest.raises(pytest.exit.Exception) as ended:
+        parallel.pytest_xdist_node_collection_finished([_UNIT, _LIVE])
+    assert ended.value.returncode == pytest.ExitCode.USAGE_ERROR
+    assert ended.value.msg == parallel.refusal([_LIVE])
+
+
+def test_the_hook_lets_a_run_of_unit_tests_go_on() -> None:
+    parallel.pytest_xdist_node_collection_finished([_UNIT])

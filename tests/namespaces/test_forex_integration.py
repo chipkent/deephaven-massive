@@ -10,12 +10,16 @@ library's own answer to the same request is recorded beside them. How to run the
 The library's rule under test: a forex 1-day bar stamped at 00:00 UTC or at its UTC day's last
 millisecond is moved to 00:00 UTC of that day, whatever the source; any other stamp is moved the
 same way and logs a WARNING that the bar may cover other days.
+
+The conversion tests send values `m.forex.conversion` refuses (`tests/_live/bad_values.py`) and
+record whether Massive refuses them too.
 """
 
 from __future__ import annotations
 
 import time
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -23,12 +27,15 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
+from tests._live import bad_values
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from deephaven_massive._massive import RestClient
 
 pytestmark = pytest.mark.integration
 
@@ -216,11 +223,10 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         evidence("Currencies on Basic: the library's previous_day_bar is not read")
     else:
         prev_bar = live_session.forex.previous_day_bar(_PAIR)
-        evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
-    evidence(
-        "library history(REST): "
-        f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
-    )
+        prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
+        evidence(f"library previous_day_bar (/prev): {prev_rows}")
+    rest = partial(bars.history, day, day, source=dm.HistorySource.REST, wait=True)
+    evidence(f"library history(REST): {_library_rows(rest, table_rows)}")
     assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
     assert len(same_day) == 1, f"range bars of {day}: {same_day}"
@@ -357,7 +363,9 @@ def test_forex_day_bar_of_the_flat_file_and_its_stamp(
             )
     flat = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(
+            recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
+        ),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -471,7 +479,7 @@ def test_forex_week_bars_start_on_monday_or_sunday(
         evidence(line)
     first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.forex.bars(_PAIR, dm.Timespan.WEEK).history(
-        first, last, source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST, wait=True
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
@@ -518,3 +526,49 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
     assert quote_rows, f"no forex quote arrived in {_STREAM_WAIT:.0f} s of an open market"
     assert {row["Symbol"] for row in quote_rows} == {_PAIR}
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("87")
+@pytest.mark.requests(1)
+def test_massive_answers_a_conversion_precision_of_5(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion `precision` of 5, which its specification omits.
+
+    Massive's specification lists 0 to 4, and the library sends any `int`. It converts an
+    amount of 1.2345678, whose exact conversion has about 12 decimals. DATA counts the rows
+    whose `converted` is the amount times `last.bid` or `last.ask` rounded to 5 decimals,
+    the value honored, and the line before it names the decimals `converted` was rounded to:
+    2, Massive's default, means the value was ignored; 4, that it was capped (or that the
+    fifth decimal is 0, when the row matched).
+    """
+    assert bad_values.ask_all(live_rest, bad_values.PRECISION, evidence)
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("88")
+@pytest.mark.requests(2)
+def test_massive_answers_a_conversion_amount_of_0_or_below(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion `amount` of 0 and of -100, which the library sends.
+
+    DATA counts the conversions whose `converted` has the amount's sign: 0 for 0, negative for
+    -100.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.AMOUNT, evidence)
+
+
+@pytest.mark.needs("currencies:starter")
+@pytest.mark.settles("89")
+@pytest.mark.requests(1)
+def test_massive_answers_lower_case_currency_codes(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What Massive answers to a conversion from `aud` to `usd`, which the library sends.
+
+    DATA counts the conversions that name `AUD` and `USD`: those read the lower-case codes as
+    the upper-case ones.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.CURRENCY_CODE, evidence)

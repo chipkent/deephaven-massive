@@ -1,7 +1,6 @@
 """Tests for the key rename of one source for one dataset, its required keys, and widening."""
 
 import dataclasses
-from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -28,7 +27,7 @@ from deephaven_massive._massive import (
     WireUnit,
     source,
 )
-from deephaven_massive._namespaces import stocks
+from deephaven_massive.namespaces import _stocks as stocks
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
 
@@ -140,7 +139,7 @@ def test_the_date_key_becomes_the_date_column() -> None:
     columns = {c.column: c for c in rename(futures, source(*files))}
     assert {"Symbol", "Timestamp", "Date"} <= set(columns)
     assert "SessionEndDate" not in columns  # the vendor's column is not kept beside it
-    assert cast("Field", columns["Date"].field).wire_key == "session_end_date"
+    assert columns["Date"].wire_key == "session_end_date"
     assert KEY_COLUMNS == {
         "symbol": "Symbol",
         "time": "Timestamp",

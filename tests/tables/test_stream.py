@@ -15,24 +15,30 @@ import time
 import types
 import weakref
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
 from deephaven import dtypes
 from deephaven.arrow import to_arrow, to_table
 from deephaven.stream import blink_to_append_only
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import wire_symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
-from deephaven_massive._datasets.symbols import SymbolTable
+from deephaven_massive._datasets.symbols import ALL, SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+)
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, sources
-from deephaven_massive._namespaces.options import ADMIN_MESSAGES
 from deephaven_massive._tables import stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
@@ -45,7 +51,7 @@ from deephaven_massive._tables.stream import (
     open_stream_tables,
 )
 from deephaven_massive._tables.watchlist import skipped_rows_text
-from deephaven_massive._types import ALL, override
+from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -56,6 +62,7 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 
@@ -604,7 +611,7 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert sink.rows_published == 1
 
 
-def test_one_failure_of_many_streams_is_logged_once_at_the_level_of_its_cause(
+def test_one_failure_of_many_streams_is_logged_once_at_the_level_its_bug_flag_gives(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     core = massive_session._core
@@ -781,7 +788,11 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     with caplog.at_level(logging.DEBUG, logger=stream.__name__):
         gate.set()
         drain()
-    assert failures == ["the symbol table failed, so the result can no longer follow it"]
+    assert [str(e) for e in failures] == [
+        "the symbol table failed, so the result can no longer follow it"
+    ]
+    assert isinstance(failures[0], MassiveError)
+    assert failures[0].source is ErrorSource.USER  # the table is the user's to fix
     reported = (
         "test.trades stream 1 failed: the symbol table failed, so the result can no longer "
         "follow it"
@@ -789,14 +800,14 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.ERROR, reported)]
 
 
-def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[Exception]:
     # Records the error each `publish_failure` of the sink's publisher fails its table with.
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = sink.publisher
 
     class _Recording:
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
     monkeypatch.setattr(sink, "publisher", _Recording())
@@ -813,11 +824,12 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
         assert sink.fail(MassiveError("a failure that raced the close"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], SessionClosedError)
     assert not caplog.records
     assert not sink.fail(MassiveError("again"))  # once only
 
@@ -1677,13 +1689,32 @@ class _DyingFlusher(Flusher):
         raise _Fatal
 
 
-class _Stubborn:
-    # A routed stream whose failure raises.
-    stream_id = 2
-    plan = None  # read by the flush that forgets the plans no longer routed
+class _Unfailable:
+    # A stream's publisher whose failure raises; its stream is routed no rows.
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
 
-    def fail(self, error: MassiveError) -> bool:
+    def publish_failure(self, error: Exception) -> None:
         raise RuntimeError(f"cannot fail: {error}")
+
+
+class _FailureLog:
+    # A stream's publisher that records the errors its table is failed with; its stream is
+    # routed no rows.
+    def __init__(self) -> None:
+        self.errors: list[Exception] = []
+
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
+
+    def publish_failure(self, error: Exception) -> None:
+        self.errors.append(error)
+
+
+def _sink_of(core: SessionCore, stream_id: int, publisher: Publisher) -> StreamSink:
+    # A trades stream that publishes to `publisher`, outside the session's registry.
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    return StreamSink(stream_id, core=core, plan=plan, publisher=publisher, symbols=None)
 
 
 def test_a_dying_flush_thread_fails_its_streams(
@@ -1696,7 +1727,7 @@ def test_a_dying_flush_thread_fails_its_streams(
     core = massive_session._core
     healthy, _ = make_sink(core, ALL)
     f = _DyingFlusher(core.exec_ctx)
-    f.routes.add("T", cast("StreamSink", _Stubborn()))
+    f.routes.add("T", _sink_of(core, 2, _Unfailable()))
     f.routes.add("T", healthy)
     with caplog.at_level(logging.ERROR):
         f.start()
@@ -1717,18 +1748,6 @@ def test_a_dying_flush_thread_fails_its_streams(
     assert [args.exc_type for args in escaped] == [_Fatal]
 
 
-class _Recording:
-    # A routed stream that records the errors it is failed with.
-    def __init__(self, stream_id: int) -> None:
-        self.stream_id = stream_id
-        self.plan = None  # read by the flush that forgets the plans no longer routed
-        self.errors: list[MassiveError] = []
-
-    def fail(self, error: MassiveError) -> bool:
-        self.errors.append(error)
-        return True
-
-
 def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
@@ -1741,10 +1760,10 @@ def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     core = massive_session._core
     healthy, healthy_blink = make_sink(core, ALL)
     shown = blink_to_append_only(healthy_blink)
-    recording = _Recording(3)
+    recording = _FailureLog()
     flusher.routes.add("T", healthy)
-    flusher.routes.add("Q", cast("StreamSink", _Stubborn()))
-    flusher.routes.add("Q", cast("StreamSink", recording))
+    flusher.routes.add("Q", _sink_of(core, 2, _Unfailable()))
+    flusher.routes.add("Q", _sink_of(core, 3, recording))
     flusher.fail([2], MassiveError("refused"))
     flusher.fail([3], MassiveError("also refused"))
     flusher.rows("T", frame([trade("AAPL")]), generation=1)
@@ -1946,11 +1965,10 @@ def test_benchmark_symbol_split(
 
 def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
     # The JVM may report a listener's error after the stream's sink is gone.
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the sink was collected
 
-    gone = weakref.ref(_Gone())
-    stream._fail_later(cast("weakref.ref[StreamSink]", gone), "late")
+    stream._fail_later(gone, "late")
 
 
 def test_skipped_watchlist_rows_reach_the_streams_error(
@@ -1971,11 +1989,10 @@ def test_skipped_watchlist_rows_reach_the_streams_error(
 
 
 def test_skipped_watchlist_rows_of_a_finished_stream_do_nothing() -> None:
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the sink was collected
 
-    gone = weakref.ref(_Gone())
-    stream._show_skipped(cast("weakref.ref[StreamSink]", gone), ("msft",))
+    stream._show_skipped(gone, ("msft",))
 
 
 def test_streamed_rows_of_one_day_share_one_stored_date(

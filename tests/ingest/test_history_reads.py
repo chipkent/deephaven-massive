@@ -3,27 +3,28 @@
 The flat-file read and the REST transport are fakes here: the files answer a scripted
 `FlatFileRead` (or refusal), and REST records each call and returns no rows. The reads through
 the real transports are tested in `tests/ingest/test_flatfiles.py`, and through `history()` in
-`tests/test_query.py`.
+`tests/queries/test_history.py`.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 
 import deephaven_massive as dm
-from deephaven_massive import _session
+from deephaven_massive import _massive, _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import Timespan
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import (
@@ -116,7 +117,10 @@ class _Rest:
         # A row a symbol on the read's first and last day; a symbol in `failing` fails.
         self.by_symbol.append((request.start, request.end, tuple(symbols)))
         self.nows.append(window.now)
-        days = sorted({cast("date", request.start), cast("date", request.end)})
+        start, end = request.start, request.end
+        assert isinstance(start, date)
+        assert isinstance(end, date)
+        days = sorted({start, end})
         return {
             symbol: SymbolFailure(self.failing[symbol], FailureKind.TRANSIENT)
             if symbol in self.failing
@@ -149,7 +153,7 @@ def _read(
         request,
         window,
         core=session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         dates=(MONDAY, TUESDAY),
         call=1,
         stop=None,
@@ -222,7 +226,7 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
         request,
         window,
         core=massive_session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         dates=(MONDAY, TUESDAY),
         call=1,
         stop=None,
@@ -335,10 +339,11 @@ def _by_symbol(
         request,
         window,
         core=session._core,
-        files=cast("FlatFileHistory", _Files(answer)),
+        files=_Files(answer),
         symbols=["MSFT", "AAPL", "MSFT"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=forced,
     )
@@ -446,18 +451,39 @@ def test_the_flat_file_transport_reads_by_symbol_and_skips_an_empty_window(
         return _monday_files(massive_session)
 
     monkeypatch.setattr(FlatFileHistory, "history", scan)
-    files = FlatFileHistory(massive_session._core, cast("Any", None))
+    unread = _massive.FlatFileClient(  # never read: `history` is patched
+        access_key_id="k",
+        secret_access_key="s",  # noqa: S106  # fake credential
+        endpoint_url="http://127.0.0.1:9",
+        bucket="b",
+        max_pool=1,
+    )
+    files = FlatFileHistory(massive_session._core, unread)
     request = Request(start=MONDAY, end=MONDAY)
     window = history_window(TRADES, request, start=MONDAY, end=MONDAY)
     out = files.history_by_symbol(
-        TRADES, request, window, symbols=["MSFT", "AAPL"], dates=(MONDAY,), call=7, forced=False
+        TRADES,
+        request,
+        window,
+        symbols=["MSFT", "AAPL"],
+        dates=(MONDAY,),
+        call=7,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert scans == [("AAPL", "MSFT")]
     assert [_dates(o) for o in out.values()] == [["2025-03-03"], ["2025-03-03"]]
     instant = datetime(2025, 3, 3, 5, tzinfo=UTC)
     empty = history_window(TRADES, request, start=instant, end=instant, now=instant)
     nothing = files.history_by_symbol(
-        TRADES, request, empty, symbols=["AAPL"], dates=(), call=8, forced=False
+        TRADES,
+        request,
+        empty,
+        symbols=["AAPL"],
+        dates=(),
+        call=8,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert _dates(nothing["AAPL"]) == []
     assert len(scans) == 1
@@ -477,10 +503,11 @@ def test_a_missing_day_of_daily_bars_keeps_only_that_day_from_rest(
         request,
         window,
         core=massive_session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         symbols=["AAPL"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=False,
     )

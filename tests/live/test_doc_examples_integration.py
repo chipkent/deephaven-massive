@@ -10,14 +10,14 @@ running after the session that made it is no longer reachable.
 These tests assert what only Massive can show: that the tables fill with real data, with
 plausible counts; that Basic's rate limit and a delayed plan behave as the README says; and
 what each stock session sends. What the library does with the data, such as Example 2's ranking
-or Example 6's closed-session error, `tests/test_docs.py` checks against the fake servers. The
+or Example 13's closed-session error, `tests/test_docs.py` checks against the fake servers. The
 groups follow the README:
 
-- the hook and Examples 1 to 7, on a main key on Stocks Basic, or paced at Basic's rate on a
-  paid one;
-- Examples 8 to 13, which load the settings file Example 8 saves, checked against what the
+- the hook and Examples 1 to 6 and 13, on a main key on Stocks Basic, or paced at Basic's
+  rate on a paid one;
+- Examples 7 to 12, which load the settings file Example 7 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
-- Example 8 without its setting, on a delayed Stocks plan;
+- Example 7 without its setting, on a delayed Stocks plan;
 - the streaming example's crypto line, on Currencies Starter;
 - the tester guide's example 10, on a main key on Stocks Basic.
 
@@ -96,7 +96,7 @@ _DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
 """What the library's refusal of delayed data says about the setting that would accept it."""
 
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})
-"""The stocks Examples 3, 8, 9, 10, and 13 read."""
+"""The stocks Examples 3, 7, 8, 9, and 12 read."""
 
 _ON_BASIC: Final = "needs the main key on Stocks Basic, as a free tester's is"
 
@@ -192,7 +192,7 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
     return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 7 ---------------------------------------------------------------
+# --- The hook and Examples 1 to 6 and 13 ----------------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
@@ -206,7 +206,7 @@ def test_the_free_examples_fill_on_stocks_basic(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 7 fill on Stocks Basic, by a free reader's path.
+    """Whether the hook and Examples 1 to 6 and 13 fill on Stocks Basic, by a free reader's path.
 
     Runs them back to back in one console with the main key on Stocks Basic and no setting, as
     a free reader does. Their sessions get a rate governor of their own, as in a new server,
@@ -241,7 +241,7 @@ def test_the_free_examples_fill_back_to_back_at_basics_pace(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 7 fill with real data, at Basic's pace.
+    """Whether the hook and Examples 1 to 6 and 13 fill with real data, at Basic's pace.
 
     A check of their content on a paid Stocks key. Runs them back to back in one console while
     a session that declares Stocks Basic (`rest_basic_subscriptions`) holds the key's rate
@@ -267,13 +267,13 @@ def test_the_free_examples_fill_back_to_back_at_basics_pace(
 
 
 def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Run the hook and Examples 1 to 7 in one console, and check what Massive sent.
+    """Run the hook and Examples 1 to 6 and 13 in one console, and check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
-    each of its stocks, at most ten each, the limit Massive applies per ticker; Example 7's
-    four previous closes. Example 6 and Example 7's edit run as written; what they do is the
+    each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
+    four previous closes. Example 13 and Example 6's edit run as written; what they do is the
     library's, which `tests/test_docs.py` checks.
     """
     ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
@@ -288,45 +288,53 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
     _check_history_examples(ran, table_rows=table_rows, evidence=evidence)
     news = run.section("follow-the-news", "headlines")
     _check_news(news["headlines"], table_rows=table_rows, evidence=evidence)
-    run.section("stop-live-tables")
     opening, edit = doc_examples.section_blocks(README, "drive-with-a-watchlist")
     closes = run.paste([opening], "drive-with-a-watchlist", "closes")["closes"]
     first = {"AAPL", "MSFT", "AMZN", "GOOGL"}
     filled = _wait(lambda: _symbols(table_rows(closes)) == first, _FILL_WAIT)
-    evidence(f"example 7: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
-    assert filled, f"Example 7's closes did not fill within {_FILL_WAIT:.0f} s"
+    evidence(f"example 6: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
+    assert filled, f"Example 6's closes did not fill within {_FILL_WAIT:.0f} s"
     run.paste([edit], "drive-with-a-watchlist edit")
+    run.section("stop-live-tables")
 
 
 def _check_history_examples(
     ran: dict[str, Names], *, table_rows: TableRows, evidence: Evidence
 ) -> None:
-    """Check the hook and Examples 1 to 4: real bars, in plausible numbers."""
-    year = table_rows(ran["hook"]["apple"])
+    """Check the hook and Examples 1 to 4: real bars, in plausible numbers.
+
+    Each reads in the background, so each check first waits for its table to fill.
+    """
+
+    def when_filled(table: Table, enough: Callable[[int], bool]) -> list[dict[str, Any]]:
+        _wait(lambda: enough(len(table_rows(table))), _FILL_WAIT)
+        return table_rows(table)
+
+    year = when_filled(ran["hook"]["apple"], lambda rows: rows >= 240)
     evidence(f"hook: {len(year)} daily bars of AAPL")
     assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
 
     first = ran["read-daily-bars"]["apple"]
-    week = table_rows(first)
+    week = when_filled(first, lambda rows: rows == 5)
     evidence(f"example 1: {len(week)} bars, dates {[row['Date'] for row in week]}")
     assert len(week) == 5, "Example 1 reads five trading days"
     assert set(_BAR_COLUMNS) <= set(first.column_names)
 
     market = ran["whole-market-day"]
-    day = table_rows(market["day"])
+    day = when_filled(market["day"], lambda rows: rows > 1000)
     otc = [row["Symbol"] for row in day if row.get("Otc")]
     evidence(f"example 2: {len(day)} stocks, {len(otc)} over the counter")
     assert len(day) > 1000, "Example 2's day holds every listed US stock"
     assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
-    assert len(table_rows(market["busiest"])) == 20
+    assert len(when_filled(market["busiest"], lambda rows: rows == 20)) == 20
 
-    compared = ran["compare-stocks"]["returns"]  # read in the background (wait=False)
+    compared = ran["compare-stocks"]["returns"]
     filled = _wait(lambda: _symbols(table_rows(compared)) == _STOCKS, _FILL_WAIT)
     returns = table_rows(compared)
     evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}, filled: {filled}")
     assert filled, f"Example 3's returns did not fill within {_FILL_WAIT:.0f} s"
 
-    nvda = table_rows(ran["chart-closes"]["nvda"])
+    nvda = when_filled(ran["chart-closes"]["nvda"], lambda rows: rows >= 240)
     evidence(f"example 4: {len(nvda)} daily bars of NVDA")
     assert len(nvda) >= 240, "Example 4's year of Nvidia's daily bars is short"
 
@@ -342,7 +350,7 @@ def _check_news(headlines: Table, *, table_rows: TableRows, evidence: Evidence) 
     assert all(count <= 10 for count in counts.values()), f"more than ten for a stock: {counts}"
 
 
-# --- Examples 8 to 13, on a Stocks plan that streams --------------------------------------------
+# --- Examples 7 to 12, on a Stocks plan that streams --------------------------------------------
 
 
 @pytest.mark.needs("stocks:starter")
@@ -361,27 +369,27 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     stream_report: StreamReport,
     evidence: Evidence,
 ) -> None:
-    """Whether Examples 8 to 13 fill with what the stock session of the moment sends.
+    """Whether Examples 7 to 12 fill with what the stock session of the moment sends.
 
     Saves the settings file with the README's commands for the key's Stocks plan (delayed on
-    Starter and Developer), in a stand-in home folder, runs Examples 8 to 13 in one console,
+    Starter and Developer), in a stand-in home folder, runs Examples 7 to 12 in one console,
     in order, and collects whatever the console no longer reaches, such as the sessions each
     later example's `m` replaced. Then watches the streams across three minute boundaries.
 
-    Asserts at any hour: Example 8's snapshot of three stocks with its columns, except while
-    Massive's snapshots are empty (`doc_examples.snapshots_cleared`); Example 13's three topics
+    Asserts at any hour: Example 7's snapshot of three stocks with its columns, except while
+    Massive's snapshots are empty (`doc_examples.snapshots_cleared`); Example 12's three topics
     acknowledged and none of its streams failed. Then, by the session the plan's feed is in
     (`streams.stock_session`):
 
-    - pre-market, regular, or after hours: Example 9's minute bars; Example 11's bars of SPY;
-      bars reaching Example 13's chart. In the regular session, also: every stock has its
-      bar, Example 9's rows change each minute, the chart's stream grows each minute, and
-      Example 12's `spy` holds every minute REST has of the day so far across the seam with
+    - pre-market, regular, or after hours: Example 8's minute bars; Example 10's bars of SPY;
+      bars reaching Example 12's chart. In the regular session, also: every stock has its
+      bar, Example 8's rows change each minute, the chart's stream grows each minute, and
+      Example 11's `spy` holds every minute REST has of the day so far across the seam with
       the stream (`doc_examples.seam_gaps`). Outside it, REST may hold minutes made only of
       trades reported late, which no live bar had, so those minutes are recorded but not
       required.
-    - overnight: Example 9's `latest` and the other live tables stay empty, and `spy` holds
-      the bars REST has of the day Example 12 read, or none on a day the market is closed.
+    - overnight: Example 8's `latest` and the other live tables stay empty, and `spy` holds
+      the bars REST has of the day Example 11 read, or none on a day the market is closed.
 
     A run whose feed crosses from one session to another while it watches is skipped after
     the checks that hold at any hour.
@@ -413,7 +421,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
             acked = wait_acked(board, len(_STOCKS), time.monotonic() + _ACK_WAIT)
             for line in stream_report(board):
                 evidence(line)
-            assert acked >= len(_STOCKS), "Example 13's topics were not all acknowledged"
+            assert acked >= len(_STOCKS), "Example 12's topics were not all acknowledged"
             seen = [
                 _watch_minute(
                     ran, locked_rows=locked_rows, table_rows=table_rows, evidence=evidence
@@ -421,7 +429,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
                 for _ in range(_MINUTES_WATCHED)
             ]
             failed = [r["Error"] for r in table_rows(board.streams()) if r["State"] == "FAILED"]
-            assert not failed, f"Example 13's stream failed: {failed}"
+            assert not failed, f"Example 12's stream failed: {failed}"
             last_session = streams.stock_session(datetime.now(UTC), delay)
             evidence(f"stock session of the feed: {first_session}, then {last_session}")
             if first_session != last_session:
@@ -448,12 +456,13 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
 def _check_snapshot(
     snapshot: Table, delay: timedelta, *, table_rows: TableRows, evidence: Evidence
 ) -> None:
-    """Check Example 8: a snapshot of three stocks, with the columns its text names."""
+    """Check Example 7: a snapshot of three stocks, with the columns its text names."""
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
+    _wait(lambda: bool(table_rows(snapshot)), _FILL_WAIT)  # it reads in the background
     rows = table_rows(snapshot)
-    evidence(f"example 8: {[(r['Symbol'], r['DayClose']) for r in rows]}")
+    evidence(f"example 7: {[(r['Symbol'], r['DayClose']) for r in rows]}")
     if doc_examples.snapshots_cleared(datetime.now(UTC), delay):
-        evidence("example 8's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
+        evidence("example 7's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
         return
     assert _symbols(rows) == _STOCKS
 
@@ -499,22 +508,22 @@ def _watch_minute(
 
 
 def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evidence) -> None:
-    """Check Examples 9 to 13 while the stock market trades."""
+    """Check Examples 8 to 12 while the stock market trades."""
     last = seen[-1]
     evidence(f"checked in the {session} session")
-    assert last["latest"], f"no minute bar of Example 9 arrived in the {session} session"
-    assert last["since_start"], "Example 11's since_start holds no bar"
+    assert last["latest"], f"no minute bar of Example 8 arrived in the {session} session"
+    assert last["since_start"], "Example 10's since_start holds no bar"
     published = [minute["published"] for minute in seen]
-    assert published[-1] > 0, "Example 13's chart got no bar"
+    assert published[-1] > 0, "Example 12's chart got no bar"
     if session != streams.REGULAR:
         return
     assert _symbols(last["latest"]) == _STOCKS
     ends = {row["Symbol"]: row["TimestampEnd"] for row in seen[0]["latest"]}
     moved = [r["Symbol"] for r in last["latest"] if r["TimestampEnd"] != ends.get(r["Symbol"])]
-    assert moved, "no row of Example 9's latest changed as the minutes ended"
+    assert moved, "no row of Example 8's latest changed as the minutes ended"
     assert all(row["Close"] is not None for row in last["changes"]), last["changes"]
     grew = all(later > earlier for earlier, later in itertools.pairwise(published))
-    assert grew, f"Example 13's chart did not grow each minute: {published}"
+    assert grew, f"Example 12's chart did not grow each minute: {published}"
 
 
 def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: date) -> set[int]:
@@ -523,7 +532,9 @@ def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: d
     Returns:
         The starts.
     """
-    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(day.isoformat())
+    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(
+        day.isoformat(), wait=True
+    )
     return {int(row["TimestampStart"]) for row in table_rows(history)}
 
 
@@ -537,11 +548,11 @@ def _check_seam(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Example 12: every minute REST has of the day so far, none twice, across the seam.
+    """Check Example 11: every minute REST has of the day so far, none twice, across the seam.
 
     Args:
-        backfill: Example 12's `spy` and `live`.
-        day: The day Example 12 read.
+        backfill: Example 11's `spy` and `live`.
+        day: The day Example 11 read.
         live_session: The session that reads REST's minutes again.
         strict: Whether every REST minute must be in `spy`: in the regular session only, since
             outside it REST may hold minutes made only of trades reported late.
@@ -553,15 +564,15 @@ def _check_seam(
     spy_rows, live_rows = locked_rows(backfill["spy"], backfill["live"])
     spy = [int(row["TimestampStart"]) for row in spy_rows]
     live = [int(row["TimestampStart"]) for row in live_rows]
-    assert len(spy) == len(set(spy)), "Example 12's spy holds a minute twice"
-    assert live, "no live bar reached Example 12"
+    assert len(spy) == len(set(spy)), "Example 11's spy holds a minute twice"
+    assert live, "no live bar reached Example 11"
     missing, extra = doc_examples.seam_gaps(spy, live, _rest_minutes(live_session, table_rows, day))
     evidence(
-        f"example 12: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
+        f"example 11: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
         f"({len(missing)}); only in spy {extra[:5]}; required: {strict}"
     )
     if strict:
-        assert not missing, f"Example 12's spy lacks {len(missing)} minutes that REST has"
+        assert not missing, f"Example 11's spy lacks {len(missing)} minutes that REST has"
 
 
 def _check_overnight(
@@ -572,19 +583,19 @@ def _check_overnight(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Examples 9 to 12 between sessions: the live tables empty, `spy` only history."""
+    """Check Examples 8 to 11 between sessions: the live tables empty, `spy` only history."""
     evidence("checked overnight")
-    assert not last["latest"], "Example 9's latest filled overnight"
-    assert not last["since_start"], "Example 11's since_start filled overnight"
+    assert not last["latest"], "Example 8's latest filled overnight"
+    assert not last["since_start"], "Example 10's since_start filled overnight"
     assert all(row["Close"] is None for row in last["changes"]), last["changes"]
     spy = {int(row["TimestampStart"]) for row in last["spy"]}
     if not is_trading_day(day):
-        evidence(f"example 12 on {day}, a closed day: {len(spy)} rows")
-        assert not spy, "Example 12's spy holds bars on a day the market is closed"
+        evidence(f"example 11 on {day}, a closed day: {len(spy)} rows")
+        assert not spy, "Example 11's spy holds bars on a day the market is closed"
         return
     rest = _rest_minutes(live_session, table_rows, day)
-    evidence(f"example 12 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
-    assert spy == rest, "Example 12's spy does not hold the day's minutes from history"
+    evidence(f"example 11 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
+    assert spy == rest, "Example 11's spy does not hold the day's minutes from history"
 
 
 # --- Single examples on other plans ------------------------------------------------------------
@@ -598,15 +609,17 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
+    table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Example 8 raises `dm.EntitlementError` on a delayed plan without its setting.
+    """Whether Example 7's snapshot fails on a delayed plan without its setting.
 
     Saves the real-time plans' settings file, `delayed_subscriptions: []`, with the README's
-    own commands, then runs Example 8 with a delayed Stocks key (`MASSIVE_DELAYED_API_KEY`, or
-    the main key on Starter or Developer). Passes when the snapshot raises
-    `dm.EntitlementError` and its message says stocks are not in `delayed_subscriptions`, which
-    sets this refusal apart from one of a plan without snapshots, such as a Basic key's.
+    own commands, then runs Example 7 with a delayed Stocks key (`MASSIVE_DELAYED_API_KEY`, or
+    the main key on Starter or Developer). The snapshot reads in the background, so the refusal
+    fails its table. Passes when the read's row in `m.streams()` is `FAILED` and its `Error`
+    says stocks are not in `delayed_subscriptions`, which sets this refusal apart from one of a
+    plan without snapshots, such as a Basic key's.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("MASSIVE_API_KEY", delayed_key)
@@ -614,21 +627,23 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
     [block] = doc_examples.section_blocks(README, "what-your-plan-allows")
     script = tmp_path / "settings_example.py"
     script.write_text(block.code, encoding="utf-8")
-    raised: list[tuple[bool, str]] = []
+    ran: list[dict[str, Any]] = []
 
     def example() -> None:
-        try:
-            runpy.run_path(str(script))
-        except dm.MassiveError as error:
-            raised.append((isinstance(error, dm.EntitlementError), str(error)))
+        ran.append(runpy.run_path(str(script)))
+
+    def errors() -> list[str]:
+        streams = ran[0]["m"].streams()
+        return [str(r["Error"]) for r in table_rows(streams) if r["State"] == "FAILED"]
 
     with doc_examples.recorded_sessions():
         console_command(example, timeout=_CONSOLE_WAIT)
-    evidence(f"example 8 without the setting: {raised or 'no error'}")
-    assert raised, "Example 8 read the snapshot without its setting"
-    entitlement, message = raised[0]
-    assert entitlement, message
-    assert _DELAYED_REFUSAL in message, "the refusal does not name delayed_subscriptions"
+        _wait(lambda: bool(errors()), _FILL_WAIT)
+        failed = errors()
+        ran[0]["m"].close()
+    evidence(f"example 7 without the setting: {failed or 'no failure'}")
+    assert failed, "Example 7 read the snapshot without its setting"
+    assert _DELAYED_REFUSAL in failed[0], "the refusal does not name delayed_subscriptions"
 
 
 @pytest.mark.needs("currencies:starter")

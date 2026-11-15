@@ -1,6 +1,6 @@
 ---
 name: plan-parallel-prs
-description: "Use this skill whenever you coordinate work split across several agents or PRs at once: deciding which agent does what, writing their briefs, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks PRs that need each other's content in a planned merge order, reserves decision and verification-item numbers, writes short briefs, and holds every PR to its author's adversarial pre-push review. Not for an agent doing a single PR (AGENTS.md \"Working in parallel\" covers that) or for writing one PR description."
+description: "Use this skill whenever you coordinate work split across several agents or PRs at once, or hand any task to another agent: deciding which agent does what, writing a brief, setting a merge order, running their reviews, or telling the owner which PRs are ready. That includes \"start these issues in parallel\", \"fan this out\", \"spin up agents for #A, #B and #C\", \"should you also work on #N?\", \"work through the open issues\", and \"which PRs can merge?\". It maps overlap, groups work into PRs by content, stacks PRs that need each other's content in a planned merge order, reserves decision and verification-item numbers, writes briefs that quote the owner and the issue's acceptance list, holds every PR to its author's adversarial pre-push review, and checks each PR's diff against its request before calling it ready. Not for an agent doing a single PR (AGENTS.md, Workflow, covers that) or for writing one PR description."
 ---
 
 # Planning parallel PRs
@@ -35,15 +35,16 @@ reason features land slowly. A planned merge order limits it; stacking does not 
 - Stack a PR only when it needs the content of the PR below it. Use GitHub's native stacked
   PRs: each upper PR branches from the PR below it, opens with
   `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
-  top>` (`gh extension install github/gh-stack` once). Never run `gh stack submit`, `push`,
-  `sync`, or `rebase`, which rewrite pushed branches. A stack is one chain: when two PRs need
+  top>` (`gh extension install github/gh-stack` once), and names the merge order in its body.
+  `AGENTS.md` forbids the `gh stack` commands that rewrite pushed branches. A stack is one
+  chain: when two PRs need
   the same lower PR but not each other, stack one on it and start the other from `main` once
   the lower PR merges.
 - Plan the merge order now and tell the owner as one list ("merge #A, then #B"). The owner
   merges from the bottom up; after each merge GitHub re-targets and rebases the next PR, and its
   agent pulls it.
 - GitHub's rebase is not always clean: squash-merging the bottom PR can still leave the next
-  one conflicting with `main` (#495 and #497 on 2026-11-03, and the stack on #517). Budget one
+  one conflicting with `main`. Budget one
   merge of `main` per stacked PR after the PR below it merges, each a full check and a CI run.
 - PRs that do not need each other's content stay independent, each from `main`, even when they
   share files; the second to land merges `main` if it conflicts.
@@ -63,19 +64,31 @@ adds one its own next numbers, in merge order.
 
 ## 5. Launch
 
-Run at most about seven coding agents at once: each pre-push hook runs the full suite, and
+Run at most about seven coding agents at once: each agent's tests start Deephaven JVMs, and
 sixteen at once overloaded the machine until nothing merged. Read-only agents don't count.
 Prioritize what blocks the current goal.
 
 Each agent reads `AGENTS.md` and the project skills on its own, so a brief does not restate them.
-A brief says only what the agent cannot know:
+A brief is the agent's request, so it carries the owner's intent, not your summary of it. It
+says only what the agent cannot know:
 
-- the goal, the issue it closes, and what is out of scope;
+- the goal in the owner's own words, quoted from where the owner said it, and the issue it
+  closes;
+- the issue's acceptance lines, quoted, and the owner's comments on it, quoted with their dates
+  (`gh issue view <n> --comments`). The acceptance list is the requirement; the issue's
+  approach and steps are background;
+- for user-facing work (docs, an API, an error message), who reads the result and what they
+  need from it;
+- that review findings which add work go under Follow-ups with an issue, never into the diff;
 - the base branch (`origin/main`, or the branch below it in its stack) and the stack's PR
   numbers, bottom to top;
 - the reserved decision or verification-item numbers, or "none";
 - the files other agents are changing at the same time, and any rename in flight;
-- the owner decisions it must follow, quoted or linked, and anything only this task has learned;
+- every other owner decision it must follow, quoted verbatim with where the owner said it (a
+  brief relays decisions; it never grants an approval `AGENTS.md` reserves for the owner's own
+  message), and anything only this task has learned;
+- any conflict you see between the request and a rule or an issue's text, named as a question
+  for the owner, never settled in the brief;
 - whether to stop at a local commit and report, or open the PR (and when to push).
 - that it writes its PR-body file inside its own worktree, never under a shared scratchpad name
   such as `pr.md`, which another agent may overwrite.
@@ -88,16 +101,22 @@ A brief says only what the agent cannot know:
    brief.
 2. For a risky change (concurrency, connections, TLS, or the public contract) you may add a
    second, separate reviewer agent, in addition to the author's review and never instead of
-   it. It reports blockers only (wrong behavior, data loss, a crash, or a rule violation), as a
-   top-1% developer who flags design smells first. It answers from primary sources and builds a
-   probe only when a number decides the question, kept minimal and run once.
+   it. It reports blockers only (wrong behavior, data loss, a crash, a rule violation, or code
+   bent to satisfy a rule, which it raises as a question about the rule), as a top-1% developer
+   who flags design smells first. It answers from primary sources and builds a probe only when a
+   number decides the question, kept minimal and run once; a probe that needs Massive's API
+   with a key is the owner's to run (`AGENTS.md`, Limits).
 3. Low findings go into one follow-up issue, which is worked right away, never into another
    push of the PR under review. Re-review only the fix to a blocker.
 4. A PR is ready when its author's adversarial review is done and its findings fixed, CI is
    green, GitHub reports it mergeable, every review thread (the owner's included) has a reply,
-   its issue is in `closingIssuesReferences`, and any separate review left no blocker unfixed.
-   Check each live before saying so. Sweep recently merged PRs too: a bot finding posted after
-   the merge gets a reply, and a valid one gets a fix PR that the reply links.
+   its issue is in `closingIssuesReferences`, any separate review left no blocker unfixed, and
+   you have read its file list and diff (`gh pr diff <n> --name-only`, then `gh pr diff <n>`)
+   against the owner's request: every changed file serves the request, and nothing it needs is
+   missing. A large diff the request causes (a generator fix that regenerates every page) is
+   fine; a small file the request doesn't need is not. Check each live before saying so. Sweep
+   recently merged PRs too: a bot finding posted after the merge gets a reply, and a valid one
+   gets a fix PR that the reply links.
 5. Tell the owner the moment a PR is ready, so it merges before another PR conflicts with it,
    with the `writing-to-the-owner` skill.
 

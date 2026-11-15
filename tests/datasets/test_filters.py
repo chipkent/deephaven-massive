@@ -4,15 +4,17 @@ They run on synthetic specs over the real generated sources.
 """
 
 import dataclasses
-from collections.abc import Mapping
+import typing
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from deephaven_massive._datasets import filters
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.filters import check_filters, param_base
+from deephaven_massive._datasets.filters import FilterValue, check_filters, param_base
+from deephaven_massive._datasets.request import ParamValue
 from deephaven_massive._enums import AssetClass, ContractType
 from deephaven_massive._massive import (
     Field,
@@ -77,13 +79,8 @@ DIVIDENDS = DatasetSpec(
 )
 
 
-def change(spec: DatasetSpec, **changes: object) -> DatasetSpec:
-    return dataclasses.replace(spec, **cast("dict[str, Any]", changes))
-
-
-def check(spec: DatasetSpec, filters: Mapping[str, object]) -> dict[str, object]:
-    # The values pass through as given: the check itself must refuse what does not fit.
-    return dict(check_filters(Catalog((spec,)), spec, cast("Mapping[str, Any]", filters)))
+def check(spec: DatasetSpec, filters: Mapping[str, ParamValue]) -> dict[str, object]:
+    return dict(check_filters(Catalog((spec,)), spec, filters))
 
 
 def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
@@ -161,7 +158,7 @@ def test_filter_values_must_fit_their_kind() -> None:
     with pytest.raises(ValueError, match=r"takes one of \['recurring', 'special', .*\], not 'x'"):
         check(DIVIDENDS, {"distribution_type": "x"})
     # Without a time axis, the date parameter is an ordinary filter.
-    unaxed = change(DIVIDENDS, time_axis=None)
+    unaxed = dataclasses.replace(DIVIDENDS, time_axis=None)
     check(unaxed, {"ex_dividend_date": date(2025, 1, 2)})
     naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match=r"^ex_dividend_date=datetime\.datetime\(2025, 1, 2"):
@@ -180,7 +177,7 @@ INDICATOR = DatasetSpec(
     fetch_path="/v1/indicators/sma/{stockTicker}",
 )
 
-OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
+OPTION_CONTRACTS = dataclasses.replace(CONTRACTS, symbol_param=None)
 
 NEWS = DatasetSpec(
     name="reference.news",
@@ -254,7 +251,7 @@ NEWS = DatasetSpec(
     ],
 )
 def test_each_parameter_kind_keeps_the_value_it_sends(
-    *, spec: DatasetSpec, key: str, given: object, kept: object
+    *, spec: DatasetSpec, key: str, given: ParamValue, kept: object
 ) -> None:
     (value,) = check(spec, {key: given}).values()
     assert value == kept
@@ -281,16 +278,9 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             "takes whole ms since the epoch",
         ),
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
-        (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
-        (DIVIDENDS, "distribution_type_any_of", " ", "has an empty value in"),
-        # An item is taken exactly as written: a space after a comma is refused, not trimmed.
-        (
-            DIVIDENDS,
-            "distribution_type_any_of",
-            "a, b",
-            "has the item ' b' with surrounding whitespace in",
-        ),
-        (DIVIDENDS, "distribution_type_any_of", ("a", " b"), "has the item ' b'"),
+        # An all-empty list sends no value, so it would ask for no filter at all.
+        (DIVIDENDS, "distribution_type_any_of", "", "has no value in"),
+        (DIVIDENDS, "distribution_type_any_of", ",", "has no value in"),
         # ISO-8601 text of no documented precision cannot end a day exactly.
         (
             NEWS,
@@ -307,7 +297,7 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
     ],
 )
 def test_a_value_the_wire_cannot_send_is_refused_at_once(
-    *, spec: DatasetSpec, key: str, value: object, message: str
+    *, spec: DatasetSpec, key: str, value: ParamValue, message: str
 ) -> None:
     with pytest.raises(ValueError, match=rf"^{spec.name} filter '{key}'.*{message}"):
         check(spec, {key: value})
@@ -427,3 +417,52 @@ def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
     assert param_base("timestamp.gte") == "timestamp"
     assert param_base("ticker.any_of") == "ticker"
     assert param_base("date") == "date"
+
+
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [
+        ("a, b", ("a", " b")),
+        (("a", " b"), ("a", " b")),
+        (" ", (" ",)),
+        # An empty item is sent too, for Massive to read.
+        ("a,,b", ("a", "", "b")),
+    ],
+)
+def test_a_list_item_with_whitespace_or_none_is_sent_as_written(
+    value: ParamValue, sent: tuple[str, ...]
+) -> None:
+    # Massive reads the item it names: `ticker.any_of` of AAPL and " MSFT" returned MSFT's rows.
+    assert check(DIVIDENDS, {"distribution_type_any_of": value}) == {
+        "distribution_type_any_of": sent
+    }
+
+
+def test_an_enum_filter_value_the_parameter_does_not_list_is_refused() -> None:
+    # Massive answers it with no rows and no error (`market=equities` on the tickers list).
+    with pytest.raises(
+        ValueError,
+        match=r"^options\.contracts filter 'contract_type' takes one of \['call', 'put'\], "
+        r"not 'up'$",
+    ):
+        check(OPTION_CONTRACTS, {"contract_type": "up"})
+    assert check(OPTION_CONTRACTS, {"contract_type": "call"}) == {"contract_type": "call"}
+
+
+def test_date_text_writes_a_day_only_for_a_list_of_dates() -> None:
+    assert filters._date_text(date(2026, 10, 30), ParamKind.DATE, label="x") == "2026-10-30"
+    with pytest.raises(ValueError, match=r"^d filter 'k' takes no dates"):
+        filters._date_text(date(2026, 10, 30), None, label="d filter 'k'")
+
+
+def test_filter_value_alias() -> None:
+    assert set(typing.get_args(FilterValue)) == {
+        str,
+        int,
+        float,
+        bool,
+        date,
+        datetime,
+        np.datetime64,
+        Sequence[str | int | float | date | np.datetime64],
+    }

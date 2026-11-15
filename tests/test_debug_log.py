@@ -14,7 +14,7 @@ import re
 import sys
 import threading
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 LIBRARY = logging.getLogger("deephaven_massive")
-CHILD = logging.getLogger("deephaven_massive._query")
-# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive._query: a message`
+CHILD = logging.getLogger("deephaven_massive.queries._query")
+# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive.queries._query: a message`
 LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}Z (\w+) \[([^\]]+)\] ([\w.]+): (.*)$")
 
 
@@ -75,7 +75,8 @@ def test_enable_debug_logging_writes_every_level_to_stderr(
         "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
     )
     assert lines[1][3].startswith("deephaven-massive ")  # the process, described once
-    assert lines[2:] == [("DEBUG", "MainThread", "deephaven_massive._query", "call 7 start")]
+    queries = "deephaven_massive.queries._query"
+    assert lines[2:] == [("DEBUG", "MainThread", queries, "call 7 start")]
     # Records still reach the root's handlers, such as pytest's own.
     assert LIBRARY.propagate
 
@@ -87,7 +88,7 @@ def test_the_line_names_the_thread_that_logged_it(capsys: pytest.CaptureFixture[
     worker.start()
     worker.join()
     assert _lines(capsys.readouterr().err) == [
-        ("DEBUG", "massive #9 reaper", "deephaven_massive._query", "from a worker")
+        ("DEBUG", "massive #9 reaper", "deephaven_massive.queries._query", "from a worker")
     ]
 
 
@@ -110,7 +111,7 @@ def test_enable_debug_logging_appends_to_a_file(tmp_path: Path) -> None:
     assert _lines("\n".join(lines[1:]))[-1] == (
         "DEBUG",
         "MainThread",
-        "deephaven_massive._query",
+        "deephaven_massive.queries._query",
         "über AAPL",
     )
     assert f"to {path.resolve()} (from enable_debug_logging())" in lines[1]
@@ -283,7 +284,7 @@ def test_output_must_be_a_log_output_or_a_path() -> None:
     with pytest.raises(
         TypeError, match=r"^output must be a dm\.LogOutput or a file path, not int$"
     ):
-        dm.enable_debug_logging(cast("str", 3))
+        dm.enable_debug_logging(3)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize("proxy", [False, True])

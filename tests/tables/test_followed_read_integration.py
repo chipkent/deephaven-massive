@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
 pytestmark = pytest.mark.integration
 
@@ -63,9 +64,9 @@ def _wait_for(read: Callable[[], Reads], done: Callable[[Reads], bool]) -> Reads
         pause.wait(0.25)
 
 
-def _change(table: Table, *, add: str | None = None, delete: str | None = None) -> None:
+def _change(table: InputTable, *, add: str | None = None, delete: str | None = None) -> None:
     """Add a symbol to the watchlist, or delete one from it."""
-    editable = cast("Any", table)
+    editable = table
     if add is not None:
         editable.add(new_table([string_col("Symbol", [add])]))
     if delete is not None:
@@ -153,7 +154,9 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
     with shared_lock(get_exec_ctx().update_graph):  # created before any cycle can refresh it
         wl = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     query = m.stocks.bars(wl, dm.Timespan.DAY, adjusted=False)
-    never = query.history(_START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER)
+    never = query.history(
+        _START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER, wait=True
+    )
     seen = _Diagnostics(m, table_rows)
     held = [never, seen.streams, seen.symbol_reads]
     try:
@@ -191,7 +194,7 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
             assert back[column] == first["AAPL"][column], column
         assert back["ReadAt"] < back["AddedAt"]
 
-        always = query.history(_START, _END, source=dm.HistorySource.REST)
+        always = query.history(_START, _END, source=dm.HistorySource.REST, wait=True)
         held.append(always)
         always_id = seen.newest_read(never_id)
         before = _wait_for(

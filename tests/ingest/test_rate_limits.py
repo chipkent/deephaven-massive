@@ -223,7 +223,10 @@ def test_the_registry_counts_the_leases_not_yet_released() -> None:
 
 
 def _error(message: str) -> _massive.WireError:
-    return _massive.WireError(f"HTTP 429 from GET /v3/trades/AAPL (request_id r1): {message}")
+    return _massive.WireError(
+        f"HTTP 429 from GET /v3/trades/AAPL (request_id r1): {message}",
+        kind=_massive.WireFailure.REFUSED,
+    )
 
 
 def test_a_learned_basic_subscription_is_explained_once_per_session(
@@ -372,8 +375,8 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
             logging.WARNING,
             (
                 "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
-                "command will pause every live table on the server for at least 49 min: pass "
-                "wait=False to read in the background"
+                "command will pause every live table on the server for at least 49 min: leave "
+                "out wait=True to read in the background"
             ),
         )
     ]
@@ -493,8 +496,8 @@ def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock
         == CONSOLE_ADVICE
         == (
             "this read ran inside a Deephaven console command, which waits out only 90 s of "
-            "pauses; pass wait=False to fetch() or history() to read in the background, which "
-            "waits out 10 min"
+            "pauses; leave out wait=True to let fetch() or history() read in the background, "
+            "which waits out 10 min"
         )
     )
     assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
@@ -509,3 +512,8 @@ def test_the_pace_warning_counts_each_slot_for_61_seconds(
         PaceCheck("fits", 61.0).check(governor, {"stocks": 5})  # 5 per 61 s: just fits
         PaceCheck("late", 60.0).check(governor, {"stocks": 5})  # a minute is too short
     assert [record.getMessage().split(":")[0] for record in caplog.records] == ["late"]
+
+
+def test_every_shape_but_paged_says_how_it_counts() -> None:
+    # A paged read's notice adds nothing; a new shape must say how it counts, never say nothing.
+    assert set(rate_limits._SHAPE_WORDS) == set(ReadShape) - {ReadShape.PAGED}

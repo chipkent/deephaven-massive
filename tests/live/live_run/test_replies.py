@@ -9,13 +9,13 @@ from __future__ import annotations
 import json
 import time
 from datetime import date
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
 import deephaven_massive as dm
 from tests._fakes.rest import Reply, envelope
-from tests._live.live_run import replies
+from tests._live.live_run import replies, reply_examples
 from tests._live.plans import TIERS, LivePlans
 
 if TYPE_CHECKING:
@@ -38,8 +38,8 @@ def _plans(**tiers: str) -> LivePlans:
     return LivePlans({n: tiers.get(n, "basic") for n in TIERS}, s3=False, flat_files=(), source="t")
 
 
-def _example(name: str) -> replies.Example:
-    return next(e for e in replies.EXAMPLES if e.name == name)
+def _example(name: str) -> reply_examples.Example:
+    return next(e for e in reply_examples.EXAMPLES if e.name == name)
 
 
 @pytest.fixture
@@ -135,9 +135,13 @@ def test_an_example_without_a_reply_fails_naming_what_it_raised(
     def broken(m: MassiveSession, today: date) -> None:
         raise ValueError("no request made")
 
-    example = replies.Example("broken", broken)
     status, reason = replies.run_example(
-        example, open_session=open_session, folder=tmp_path, today=TODAY, hold=_never
+        reply_examples.Example("broken"),
+        broken,
+        open_session=open_session,
+        folder=tmp_path,
+        today=TODAY,
+        hold=_never,
     )
     assert (status, reason) == ("failed", "no reply was captured: ValueError: no request made")
 
@@ -148,11 +152,12 @@ def test_a_data_example_that_raises_after_a_reply_fails_with_the_error(
     fake_rest.reply("/v1/marketstatus/now", Reply({"market": "open"}))
 
     def fetch_then_fail(m: MassiveSession, today: date) -> None:
-        m.reference.market_status().fetch()
+        m.reference.market_status().fetch(wait=True)
         raise dm.MassiveError("after the reply")
 
     status, reason = replies.run_example(
-        replies.Example("late", fetch_then_fail),
+        reply_examples.Example("late"),
+        fetch_then_fail,
         open_session=open_session,
         folder=tmp_path,
         today=TODAY,
@@ -170,6 +175,7 @@ def test_an_example_expecting_any_reply_passes_on_an_unknown_ticker(
     )
     status, _ = replies.run_example(
         _example("unknown-ticker-details"),
+        replies.CALLS["unknown-ticker-details"],
         open_session=open_session,
         folder=tmp_path,
         today=TODAY,
@@ -200,47 +206,19 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
 
         fake_ws_server.wait_for(lambda _: failed())
 
-    example = replies.Example(
-        "refused-bars",
-        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
-        expects=replies.REFUSAL,
-        stream=True,
-    )
     status, reason = replies.run_example(
-        example, open_session=open_ws, folder=tmp_path, today=TODAY, hold=wait_failed
+        reply_examples.Example("refused-bars", expects=reply_examples.REFUSAL, stream=True),
+        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
+        open_session=open_ws,
+        folder=tmp_path,
+        today=TODAY,
+        hold=wait_failed,
     )
     assert (status, reason) == ("passed", "")
     lines = _lines(tmp_path / "refused-bars.jsonl")
     assert lines
     assert all(line["transport"] == "ws" for line in lines)
     assert any("not authorized" in str(line["text"]) for line in lines)
-
-
-@pytest.mark.parametrize(
-    ("name", "tiers", "reason"),
-    [
-        ("market-status", {}, None),
-        ("refusal-stocks-developer", {}, "not this tier: records the refusal on stocks starter"),
-        ("stream-forex-quotes", {}, "needs Currencies Starter ($49/month)"),
-        ("stream-forex-quotes", {"currencies": "starter"}, None),
-        (
-            "nvda-daily-2024-06-adjusted",
-            {},
-            "needs Stocks Starter ($29/month) (history back to 2024-06-03)",
-        ),
-        ("nvda-daily-2024-06-adjusted", {"stocks": "starter"}, None),
-        ("nvda-daily-2024-06-adjusted", {"stocks": "advanced"}, None),
-    ],
-)
-def test_an_example_is_skipped_with_what_it_needs(
-    name: str, tiers: dict[str, str], reason: str | None
-) -> None:
-    assert replies.skip_reason(_example(name), _plans(**tiers), TODAY) == reason
-
-
-def test_history_beyond_every_window_but_the_last_names_the_tier_that_keeps_all() -> None:
-    reason = replies.history_need("stocks", date(2000, 1, 3), TODAY)
-    assert reason == "needs Stocks Advanced ($199/month) (history back to 2000-01-03)"
 
 
 def test_a_skipped_example_is_reported_and_indexed(tmp_path: Path) -> None:
@@ -273,20 +251,25 @@ class _Recorder:
         return self
 
 
+def test_every_example_has_its_code_and_no_code_lacks_an_example() -> None:
+    assert list(replies.CALLS) == [e.name for e in reply_examples.EXAMPLES]
+
+
 def test_every_example_asks_through_the_public_verbs() -> None:
-    for example in replies.EXAMPLES:
+    for example in reply_examples.EXAMPLES:
         calls: list[str] = []
-        example.run(cast("MassiveSession", _Recorder(calls)), TODAY)
+        session: MassiveSession = _Recorder(calls)  # type: ignore[assignment]  # records the verbs
+        replies.CALLS[example.name](session, TODAY)
         verb = "append_only" if example.stream else ("history", "fetch")
         assert any(name in calls for name in ((verb,) if isinstance(verb, str) else verb))
     calls = []
-    daily = next(e for e in replies.EXAMPLES if e.name == "daily-bars-last-year")
-    daily.run(cast("MassiveSession", _Recorder(calls)), TODAY)
+    recorder: MassiveSession = _Recorder(calls)  # type: ignore[assignment]  # records the verbs
+    replies.CALLS["daily-bars-last-year"](recorder, TODAY)
     year = "datetime.date(2025, 11, 4), datetime.date(2026, 11, 3)"
     assert any(year in call and "HistorySource.REST" in call for call in calls)
 
 
-def test_the_default_hold_waits_its_seconds() -> None:
+def test_the_default_hold_waits_its_seconds(massive_session: MassiveSession) -> None:
     started = time.monotonic()
-    replies.hold_for(0.01)(cast("MassiveSession", None))
+    replies.hold_for(0.01)(massive_session)  # never read
     assert time.monotonic() - started >= 0.01

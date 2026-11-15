@@ -140,3 +140,11 @@ def test_a_machine_without_the_tools_is_not_ready(
     assert environment["java"] == ""
     assert not machine_checks.ready(items)
     assert machine_checks.ready([machine_checks.Item("x", WARN, "")])
+
+
+def test_the_java_checked_is_the_one_the_server_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert machine_checks.java_command({"JAVA_HOME": "/opt/jdk21"}) == "/opt/jdk21/bin/java"
+    assert machine_checks.java_command({"JAVA_HOME": " "}) == "/usr/bin/java"
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert machine_checks.java_command({}) == "java"

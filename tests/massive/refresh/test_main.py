@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.refresh import __main__ as command
 from deephaven_massive._massive.refresh import drift, fetch, generate, render, snapshot
@@ -75,7 +76,7 @@ def test_fetch_replaces_the_snapshot(
     assert calls == [snapshot.DIRECTORY]
     assert capsys.readouterr().out.splitlines() == [
         f"stored 2 files in {snapshot.DIRECTORY}",
-        "now run `python -m deephaven_massive._massive.refresh` to regenerate the schemas",
+        "now run `python scripts/refresh.py` to regenerate the schemas",
     ]
 
 
@@ -91,17 +92,23 @@ def test_a_failed_fetch_fails(
 
 
 @pytest.mark.parametrize("found", [False, True], ids=["no-drift", "drift"])
-def test_check_prints_the_report_and_exits_one_on_drift(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *, found: bool
+def test_check_writes_the_report_to_its_file_and_exits_one_on_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    tmp_path: Path,
+    found: bool,
 ) -> None:
     items = (drift.Drift(section=drift.Section.CHANGES, area="REST", item="/v1/x", detail="new"),)
     report = drift.Report(
         items=items if found else (), fetched=dt.date(2026, 10, 27), bucket_listed=True
     )
     monkeypatch.setattr(drift, "check", lambda: report)
-    assert command.main(["--check"]) == int(found)
-    output = capsys.readouterr()
-    assert (output.out, output.err) == (report.text(), "")
+    report_file = tmp_path / "drift.md"
+    report_file.write_text("an older report\n")
+    assert command.main(["--check", "--report", str(report_file)]) == int(found)
+    assert report_file.read_text(encoding="utf-8") == report.text()
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.parametrize(
@@ -109,22 +116,32 @@ def test_check_prints_the_report_and_exits_one_on_drift(
     [
         fetch.FetchError("GET https://api.massive.com/openapi answered HTTP 503"),
         RefreshError([Problem(gate=Gate.SNAPSHOT, source="", key="x", message="edited")]),
-        WireError("HTTP 403 for s3://flatfiles/ at https://files.massive.com", status=403),
+        WireError(
+            "HTTP 403 for s3://flatfiles/ at https://files.massive.com",
+            status=403,
+            kind=WireFailure.REFUSED,
+        ),
         RecursionError("maximum recursion depth exceeded"),
     ],
     ids=["download", "snapshot", "bucket", "recursion"],
 )
 def test_a_check_that_cannot_be_made_exits_two(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    tmp_path: Path,
+    error: Exception,
 ) -> None:
     def failed() -> drift.Report:
         raise error
 
     monkeypatch.setattr(drift, "check", failed)
-    assert command.main(["--check"]) == 2
+    report_file = tmp_path / "drift.md"
+    assert command.main(["--check", "--report", str(report_file)]) == 2
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == f"the drift check could not be made: {error}\n"
+    assert not report_file.exists()
 
 
 @pytest.mark.parametrize("damage", ["missing", "not-json"])
@@ -138,10 +155,22 @@ def test_a_check_against_a_damaged_snapshot_exits_two(
     # The vendored snapshot is read before anything is downloaded, so no network is needed.
     (tmp_path / snapshot.MANIFEST).write_text("{not json" if damage == "not-json" else "{}")
     monkeypatch.setattr(snapshot, "DIRECTORY", tmp_path)
-    assert command.main(["--check"]) == 2
+    report_file = tmp_path / "drift.md"
+    assert command.main(["--check", "--report", str(report_file)]) == 2
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err.startswith("the drift check could not be made: ")
+    assert not report_file.exists()
+
+
+@pytest.mark.parametrize(
+    "argv", [["--check"], ["--report", "drift.md"], ["--fetch", "--report", "drift.md"]]
+)
+def test_check_and_report_go_together(capsys: pytest.CaptureFixture[str], argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        command.main(argv)
+    assert caught.value.code == 2
+    assert "--check and --report go together" in capsys.readouterr().err
 
 
 def test_check_and_fetch_exclude_each_other(capsys: pytest.CaptureFixture[str]) -> None:

@@ -78,6 +78,9 @@ dependencies = [
     # without the GIL, so importing it leaves the GIL off on 3.14t. BaseLoader and the YAMLError
     # exceptions are much older.
     "pyyaml>=6.0.3",
+    # The library marks each method it overrides with `override`, which the standard library
+    # has only from Python 3.12; 4.4.0 is the first release that defines it.
+    "typing_extensions>=4.4.0",
 ]
 
 [project.optional-dependencies]
@@ -180,9 +183,9 @@ namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
 # Besides ALL: the preview rules selected by name. DOC201 and DOC501 check that docstring
-# Returns and Raises sections cover the code; PLR0904, PLR0914, and PLR0916 are the
-# pylint limits on public methods, local variables, and boolean expressions.
-select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916"]
+# Returns and Raises sections cover the code; PLR0904, PLR0914, PLR0916, and PLR1702 are the
+# pylint limits on public methods, local variables, boolean expressions, and nested blocks.
+select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916", "PLR1702"]
 # Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
 # every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
 # family, ...) to their preview behavior.
@@ -202,6 +205,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"src/**" = [
+    "S101",  # assert only states a fact the code has just established, never an input check
+]
 "tests/**" = [
     "S101",  # pytest uses bare assert statements
     "PLR2004",  # literal expected values in assertions are the point of a test
@@ -214,6 +220,9 @@ ignore = [
     "D102",  # test docstrings are optional (any that exist must be well formed)
     "D103",  # test docstrings are optional (any that exist must be well formed)
     "D107",  # test docstrings are optional (any that exist must be well formed)
+    # Complexity limits target library logic; a branchy test is split or parametrized by
+    # judgment, not by a count.
+    "C901",
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
@@ -226,14 +235,13 @@ ignore = [
 "massive".msg = "The library has its own clients; see deephaven_massive._massive"
 
 [tool.ruff.lint.mccabe]
-max-complexity = 12
+max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-positional-args = 3
-# A namespace class has one public factory method per dataset, so its size is the API's: the
-# stocks namespace holds 21, its two nested namespaces included. The limit still catches any
-# other class that grows past it.
-max-public-methods = 24
+# Ruff's default. Only a class whose size is the API's (`MassiveSession` and the stocks
+# namespace) passes it, through a `noqa` that says so; any other class splits instead.
+max-public-methods = 20
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -274,6 +282,11 @@ explicit_package_bases = true
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# jpy, Deephaven's bridge to Java, is a compiled module with no type information.
+module = ["jpy"]
+ignore_missing_imports = true
+
 
 # ---------------------------------------------------------------------------------------------
 # Pyright (non-gating second checker)
@@ -293,15 +306,18 @@ strict = true
 filterwarnings = ["error"]
 # The options every pytest run starts with, CI's included. `-ra` lists each skipped or failed
 # test at the end of the run. `--import-mode=importlib` imports test files without adding their
-# directories to sys.path. `-m` picks which tests run: it leaves out the live tests, which call
-# Massive's real servers, the benchmark sweep, which only prints timings, and the soak tests,
-# which run for minutes or hours. Pass your own `-m` to replace it: `uv run pytest -m
-# integration` runs only the live tests (each skips itself unless MASSIVE_API_KEY is set),
-# `uv run pytest -m benchmark` runs only the sweep, and `uv run pytest -m soak` runs only the
-# soak tests (docs/dev/soak-tests.md).
+# directories to sys.path. `-p tests.embedded_server` starts the embedded Deephaven server
+# before any conftest imports the library, which needs it. `-m` picks which tests run: it
+# leaves out the live tests, which call Massive's real servers, the benchmark sweep, which only
+# prints timings, and the soak tests, which run for minutes or hours. Pass your own `-m` to
+# replace it: `uv run pytest -m integration` runs only the live tests (each skips itself unless
+# MASSIVE_API_KEY is set), `uv run pytest -m benchmark` runs only the sweep, and
+# `uv run pytest -m soak` runs only the soak tests (docs/dev/soak-tests.md).
 addopts = [
     "-ra",
     "--import-mode=importlib",
+    "-p",
+    "tests.embedded_server",
     "-m",
     "not integration and not benchmark and not soak",
 ]

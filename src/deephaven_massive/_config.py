@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
 
 import yaml
+from typing_extensions import override
 
 from deephaven_massive._enums import (
     AssetClass,
@@ -57,14 +58,13 @@ from deephaven_massive._enums import (
     _require_enum,
     subscription_of,
 )
-from deephaven_massive._errors import AuthenticationError
+from deephaven_massive._errors import AuthenticationError, ErrorSource
 from deephaven_massive._massive import (
     check_api_key,
     check_rest_base_url,
     without_userinfo,
     without_userinfo_or_query,
 )
-from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -226,10 +226,10 @@ class MassiveConfig:
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
-            Leave a delayed subscription out, and a stream or a `fetch()` of its current data
-            raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
-            table of it fails with the same message. `history()` and other past data don't
-            depend on this setting.
+            Leave a delayed subscription out, and a stream of its current data raises
+            `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
+            `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+            `history()` and other past data don't depend on this setting.
         rest_basic_subscriptions: Lists the subscriptions on Massive's free Basic plan, so their
             requests keep to Basic's five a minute from the start. Defaults to an empty set.
 
@@ -323,8 +323,10 @@ class MassiveConfig:
             many flat files it reads at a time. Defaults to 8.
 
             Raise it to run more at once, or lower it to open fewer connections. Both limits
-            cover all the session's calls together. A Basic subscription still keeps to five
-            requests a minute.
+            cover all the session's calls together. It also sets how many downloads of
+            `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
+            the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
+            subscription still keeps to five requests a minute.
         flush_interval: Sets how many seconds pass between the batches of streamed rows added to
             live tables. Defaults to 0.05 seconds (50 ms).
 
@@ -368,8 +370,9 @@ class MassiveConfig:
 
             - `dm.OnError.LOG` skips the pair and logs a warning naming it.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes a stream or `fetch()` fail with `MassiveError` at the
-              call, and fails a `poll()` table, or a live table when such a pair is added later.
+            - `dm.OnError.RAISE` makes a stream fail with `MassiveError` at the call, and fails
+              a `fetch()` or `poll()` table, or a live table when such a pair is added later.
+              `fetch(wait=True)` raises it at the call.
 
             It applies to streams and to calls for a pair's last trade or daily open and close. A
             pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
@@ -378,8 +381,9 @@ class MassiveConfig:
             Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream keeps its other pairs. A
             stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
             until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
-            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
-            pairs are all skipped raises `MassiveError` at the call.
+            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream whose pairs are all
+            skipped raises `MassiveError` at the call, and a `fetch()` whose pairs are all
+            skipped fails its table, or raises with `wait=True`.
         unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
             can't read. Defaults to `LOG`.
 
@@ -402,15 +406,57 @@ class MassiveConfig:
             - `dm.OnError.LOG` leaves the symbol out, keeps the others, and logs a warning
               naming it.
             - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails a `poll()` table and makes a `fetch()` or `history()`
-              raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
-              symbol `FAILED` in `m.symbol_reads()` and reads the others.
+            - `dm.OnError.RAISE` fails a `poll()`, `fetch()`, or `history()` table with
+              `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
+              A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
+              `m.symbol_reads()` and reads the others.
 
             Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
             also one the poll can't read, such as a crypto pair in an indicator poll with
             `adjusted=False`. Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a `poll()` table
             lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
             a `dm.PollMode.REPLACE` poll drops its rows.
+        malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
+            readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
+            Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` when a `history()` read from flat files must have every row
+            of each file it reads.
+
+            - `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning
+              per file with the count of such lines and the first one's row number. The warning
+              never quotes the line.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
+              first such line's row. A `history()` of a live table instead marks every symbol
+              of the read `FAILED` in `m.symbol_reads()`.
+
+            Only a `history()` that reads flat files meets such a line. Under any setting, a
+            file whose every line is malformed fails the read.
+        refused_venues: Decides what a futures `history()` does when Massive refuses the flat
+            files of an exchange the call names in `venues`, as it does for an exchange the
+            plan doesn't include. A call's own `refused_venues` argument overrides it. Defaults
+            to `RAISE`.
+
+            It applies only to exchanges a call names. A call that leaves `venues` out reads
+            every exchange the plan allows: where only flat files can serve it, it skips each
+            one Massive refuses with a warning, whatever this setting says. Set
+            `dm.OnError.LOG` when your calls name exchanges your plan may not cover and should
+            read the ones it does.
+
+            - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
+              exchange, `venues=`, and `refused_venues=`.
+            - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
+              logs one warning with Massive's status and text, and names the exchanges in the
+              table's description. For a watchlist, each symbol's `Transport` in
+              `m.symbol_reads()` names them instead.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
+              description or `m.symbol_reads()` name them.
+
+            It applies only when REST can't serve the call: `dm.ALL`, or
+            `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive
+            refuses the flat files. Under any setting, a call whose every exchange is refused
+            raises `EntitlementError`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -434,14 +480,16 @@ class MassiveConfig:
     unlisted_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
     unavailable_symbols: OnError = OnError.LOG
+    malformed_rows: OnError = OnError.LOG
+    refused_venues: OnError = OnError.RAISE
 
     def __post_init__(self) -> None:
         """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
-        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, or
-        `unavailable_symbols` that is not a `dm.OnError`, a `connection_taken` that is not a
-        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a
-        `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
+        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
+        `unavailable_symbols`, `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
+        `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
+        not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
         `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
         number that is not positive raises `ValueError`, though `max_outage` may be zero.
@@ -468,7 +516,8 @@ class MassiveConfig:
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
         if not self.api_key.strip():
             raise AuthenticationError(
-                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY"
+                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY",
+                source=ErrorSource.USER,
             )
         if self.api_key != self.api_key.strip():
             raise ValueError(
@@ -511,6 +560,8 @@ class MassiveConfig:
         _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
+        _require_enum(self.malformed_rows, OnError, "malformed_rows")
+        _require_enum(self.refused_venues, OnError, "refused_venues")
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
         _check_url("rest_base_url", self.rest_base_url)
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
@@ -1198,7 +1249,10 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
 
 
 def _on_error(node: yaml.Node) -> OnError:
-    """Convert a symbol setting's word: `raise`, `log`, or `ignore` (`_word`).
+    """Convert the word of a setting of what to do on an error: `raise`, `log`, or `ignore`.
+
+    The settings are `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
+    `unavailable_symbols`, `malformed_rows`, and `refused_venues` (`_word`).
 
     Args:
         node: The value's node.
@@ -1206,7 +1260,7 @@ def _on_error(node: yaml.Node) -> OnError:
     Returns:
         The `OnError` member.
     """
-    return _word(node, OnError, "a symbol setting")
+    return _word(node, OnError, "an error setting")
 
 
 def _connection_taken(node: yaml.Node) -> ConnectionTaken:
@@ -1381,6 +1435,8 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "unlisted_symbols": _on_error,
     "unreadable_symbols": _on_error,
     "unavailable_symbols": _on_error,
+    "malformed_rows": _on_error,
+    "refused_venues": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""
@@ -1584,6 +1640,12 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "unavailable_symbols": _Example(
         OnError.LOG, "A symbol Massive answers as not found: log, ignore, or raise."
     ),
+    "malformed_rows": _Example(
+        OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
+    ),
+    "refused_venues": _Example(
+        OnError.RAISE, "A futures exchange you name that the plan lacks: log, ignore, or raise."
+    ),
     "websocket_hosts": _Example(
         {AssetClass.INDICES: BUSINESS_HOST},
         "The WebSocket host per asset class: index values stream only from business.massive.com.",
@@ -1764,7 +1826,7 @@ def _value_forms() -> dict[str, str]:
         as `4` `` for `max_concurrency`.
     """
     delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
-    symbol_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
+    error_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
     url = (
         "An `https` URL of a host alone, or `http` for your own machine, such as "
         "`https://api.massive.com`"
@@ -1778,10 +1840,12 @@ def _value_forms() -> dict[str, str]:
         "flush_interval": "A positive number of seconds, such as `0.1`",
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",
         "max_concurrency": "A positive whole number, such as `4`",
-        "noncanonical_symbols": symbol_words,
-        "unlisted_symbols": symbol_words,
-        "unreadable_symbols": symbol_words,
-        "unavailable_symbols": symbol_words,
+        "noncanonical_symbols": error_words,
+        "unlisted_symbols": error_words,
+        "unreadable_symbols": error_words,
+        "unavailable_symbols": error_words,
+        "malformed_rows": error_words,
+        "refused_venues": error_words,
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "

@@ -19,7 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from deephaven.table import Table
-    from deephaven.table_listener import TableUpdate
 
     from deephaven_massive import MassiveSession
     from tests._fakes.rest import FakeRestServer
@@ -371,8 +370,8 @@ def _chain_row(
 ) -> dict[str, Any]:
     return {
         "Symbol": symbol,
-        "DetailsExpirationDate": expiry,
-        "DetailsStrikePrice": strike,
+        "ExpirationDate": expiry,
+        "StrikePrice": strike,
         "UnderlyingAssetPrice": price,
     }
 
@@ -664,14 +663,10 @@ def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> Non
             queued.append((stream.name, len(columns["Symbol"])))
 
     stream = stream_capture.Stream("stocks-minute-bars", "stocks delayed", lambda _m: None)
-    copier = stream_capture.RowCopier(stream, cast("stream_capture.Recorder", Queue()))
-    copier.on_update(
-        cast("TableUpdate", _Update({"Symbol": np.array(["AAPL", "NVDA"])})), is_replay=False
-    )
-    copier.on_update(
-        cast("TableUpdate", _Update({"Symbol": np.array([], dtype=object)})), is_replay=False
-    )
-    copier.on_update(cast("TableUpdate", _Update({})), is_replay=False)
+    copier = stream_capture.RowCopier(stream, Queue())
+    copier.on_update(_Update({"Symbol": np.array(["AAPL", "NVDA"])}), is_replay=False)
+    copier.on_update(_Update({"Symbol": np.array([], dtype=object)}), is_replay=False)
+    copier.on_update(_Update({}), is_replay=False)
     assert queued == [("stocks-minute-bars", 2)]
 
 
