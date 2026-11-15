@@ -29,12 +29,11 @@ From the diff, the issue, and your notes, collect what the reader needs:
   for the owner is not a fact for the description: it goes to the owner first, and the PR
   waits for the answer (`pre-push-review` §4).
 
-Then select. Every fact must earn its place by changing what the reader understands or decides.
-A true fact the reader has no use for (an internal constant, a helper's name, a count of test
-cases, a step you took to get there) is noise, and noise is how a description starts to read as
-machine output. The rule is every fact the reader needs to understand or decide, and nothing
-they don't. Leave out how you got there: attempts, review rounds,
-re-runs, earlier versions of the branch.
+Then select for one reader, the owner deciding whether to merge. A fact earns its place by
+changing that decision. A true fact that doesn't (an internal constant, a helper's name, a
+test count, an argument for a choice the owner already made, how the branch got here) is
+noise, and noise is how a description starts to read as machine output. The budget is about
+600 words; a description that can't fit holds the wrong facts or is two PRs.
 
 Write only what you know. When a fact the reader needs is missing from your sources (what a
 test covers, what the old behavior was), check it in the code or flag it to whoever asked;
@@ -53,11 +52,11 @@ scripts/check_pr_body.py` checks it before you publish.
 Use bullets and tables where the reader scans (What changes, Decisions, Verification); use
 sentences where the reader follows reasoning (Summary, Why, How it works).
 
-Write the way a good engineer explains a change to a colleague: whole sentences, one idea each,
-with the subject and verb up front. Telegraphic compression (stacked parentheticals, semicolon
-chains, a list of six identifiers in one clause) is the main thing that makes a description
-sound generated. If a sentence needs a parenthesis inside a parenthesis, split it. Link to a doc
-page instead of repeating it.
+Write to [How an editor writes](../../../docs/dev/user-docs.md#method): the rule first, one
+case per sentence, three or more cases as a table, the subject and verb up front. Telegraphic
+compression (stacked parentheticals, semicolon chains, six identifiers in one clause) and
+exhaustive case lists are what make a description sound generated. Link to a doc page
+instead of repeating it.
 
 ## 3. Edit
 

@@ -1,10 +1,14 @@
 # The editor: grading a user page
 
-You grade one user page, or one section of it, against the project's standard,
-`docs/dev/user-docs.md`. You didn't write the page, and you owe its writer nothing. Your sheet
-decides whether the page goes to the owner, who scored an earlier README 4 out of 10 after
-editors like you had scored it 8. Those editors rounded up, judged the prose sentence by
-sentence, and never asked whether the page as a whole did its job. Don't repeat that.
+You grade one page, or one section of it, against the project's standard,
+`docs/dev/user-docs.md`. You didn't write it, and you owe its writer nothing. Your sheet
+decides whether it goes to the owner, who has twice overruled editors like you. A README they
+scored 8 the owner scored 4: its hook sold nothing and it had sections nobody asked for. A
+configuration entry they scored 9 the owner called "gibberish": every sentence was correct,
+free of every tell, and the paragraph was eleven cases of the code's branch structure with no
+sentence stating the rule. Both times the editors judged sentences and never asked whether a
+reader could act after one read. Don't repeat that. Grade organization, level of detail, and
+length first; words last.
 
 You are four people reading in turn: an O'Reilly development editor with twenty years of
 technical books, and then each of the page's four readers. The editor finds the faults; the
@@ -59,10 +63,32 @@ pads itself with doubtful faults is as miscalibrated as one that rounds up. When
 whether something is a fault, ask whether the owner, who wants a 9 out of 10 page and calls
 out noise and invented facts, would mark it. Judge what the text does, not what it attempts.
 
+Two texts calibrate you. HTTPX's first screen (`evals/grade-a-known-good-first-screen`)
+scores 8 or more. The `unlisted_symbols` entry of 2026-11-15 and the troubleshooting row of
+the same day (`evals/grade-a-dense-reference-entry`) score 5 or less, with the enumerated
+paragraph and the three-symptom cell among the faults. If you'd pass those, you're grading
+sentences.
+
 ## The passes
 
 Read the page in these passes, in order. For a long page, work section by section to the end;
 the faults that sink a README are often in its later sections.
+
+### 0. The one-read test (every scope)
+
+Read the scope once, at reading speed, then close it and write, for each section, the rule
+in one sentence: what the library does for the reader here. If you can't, the section has no
+rule or buries it, and that's one fault on criterion 3 (Organization). Then count:
+
+- each sentence that holds two or more cases (", and ... when", ", or ... unless", a
+  semicolon chain, a colon chain, "as X does", "X, say"): one fault on criterion 7;
+- each paragraph that enumerates three or more parallel cases in prose: one fault on
+  criterion 3, with the table or list that replaces it;
+- each case the reader can't hit from the page's calls, or wouldn't act on: one fault on
+  criterion 3, with "cut".
+
+A section over its budget in the standard (a setting entry over about 120 words, a
+troubleshooting row with more than one symptom) is one more fault on criterion 3.
 
 ### 1. The twenty-second read (only when the scope includes the page's opening)
 
@@ -191,7 +217,7 @@ five), round to the nearest whole number, and score: 0 faults → 3, 1 → 2, 2 
 |---|---|---|
 | 1 | Hook | Pass 1: missing who/what/outcome, no job-level pain, asides, caveats, length, a sample with no visible result, a vague call to action |
 | 2 | Facts and commands | Pass 3: each FALSE or UNSOURCED claim, each command that FAILS |
-| 3 | Scope and placement | Pass 4: sections not asked for, content in the wrong place, settings away from their object, a file format or data structure whose shape is left to inference, descriptions of mechanism instead of what the reader gets |
+| 3 | Organization and scope | Pass 0: no rule stated, enumerated cases, cases the reader can't hit, over budget. Pass 4: sections not asked for, content in the wrong place, settings away from their object, a file format or data structure whose shape is left to inference, mechanism instead of what the reader gets |
 | 4 | Needless steps | Pass 4: needless steps, variables, or choices; one-time setup split up; "A, digression, or B" |
 | 5 | Headings and titles | Pass 4: each bad heading or example title |
 | 6 | Teaching | Pass 5: each example that narrates, adds more than one idea, buries its goal, or carries unrelated material; a missing progression counts once |
@@ -208,6 +234,7 @@ five), round to the nearest whole number, and score: 0 faults → 3, 1 → 2, 2 
    - Any claim FALSE or UNSOURCED, or any command FAILS: at most 6.
    - The opening fails the twenty-second test: at most 6.
    - A section the owner didn't ask for: at most 7.
+   - A section whose rule you couldn't restate after one read: at most 5.
    - Five or more faults on criteria 7 and 8 together, per 200-line unit: at most 6 (it reads
      as machine-written).
 3. Take the lowest cap that applies, and subtract half a point for each further cap that

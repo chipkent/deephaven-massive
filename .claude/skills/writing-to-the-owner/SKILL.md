@@ -116,8 +116,9 @@ and a long list of questions goes unread.
    nothing that depends on it (`AGENTS.md`, Workflow, Design before code). This step is for
    any change beyond a small fix, public or not; a private design the critics accept, and
    that drops no protection, goes under Decisions in the PR, not to the owner.
-2. **Complete.** Each option covers every dataset and case it touches, defines every term, and
-   shows the calls a user writes.
+2. **Complete in the design, short in the message.** Each option covers every dataset and
+   case it touches, in a file the message links. The message itself states each option's
+   rule, the calls a user writes, and the one case that decides between them.
 3. **Researched, not assumed.** A choice of format, standard, or convention cites what widely
    used comparable tools do; convenience to us is not a reason. A rule about data correctness
    (a trading day, a time zone, a stamp) cites primary sources (Massive's docs and knowledge
@@ -223,6 +224,8 @@ confirm. Fix both before sending.
 
 ## 5. Words
 
+- [How an editor writes](../../../docs/dev/user-docs.md#method): the rule first, one case
+  per sentence, cases as a table.
 - Answer first. Background in a few sentences. No process narrative (which agent did what,
   which review round).
 - Plain words, short sentences, the user's view before the implementation. File and function
