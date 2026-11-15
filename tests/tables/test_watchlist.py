@@ -138,7 +138,8 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         match=r"^forex\.quotes: a symbol table holds 'EUR/USD' \('EUR/USD' is not Massive's "
         r"ticker; use 'C:EURUSD' .*\)\. Fix the row, or pass the table through "
         r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX\), "
-        r"which converts what it can and nulls the rest$",
+        r"which converts what it can and nulls the rest, "
+        r"or, given on_error=dm\.OnError\.RAISE, fails on the rest$",
     ):
         read_symbols(rule(), table, stream_id=7)
 

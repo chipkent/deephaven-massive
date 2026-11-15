@@ -45,6 +45,12 @@ value once; `dm.canonicalize_symbols` keeps its `LOG` default (decision 93) and 
 and effect from the same functions, so a value converts, or is refused with one reason, the same
 way in a cell and in `canonical_symbol`.
 
+Settled: a single-value converter (`dm.canonical_symbol` and every per-class and per-convention
+converter) defaults to `RAISE`. The owner, 2026-11-15: "By default a converter should raise, but
+there should be logging and silent modes that just return NULL." Only `dm.canonicalize_symbols`,
+which converts a whole table, defaults to `LOG`, so a skipped watchlist row's advice to run it
+also names `on_error=dm.OnError.RAISE` for a caller who fails on a bad row.
+
 A crypto pair that Massive's crypto ticker list does not hold is a pair Massive has no data for:
 it follows `unlisted_symbols` whether passed in code or in a table, the one place decision 66's
 rule that a `str` or list in code always raises no longer applies. Under `LOG`, the default, a
