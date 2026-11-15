@@ -2435,6 +2435,7 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     connections._change_pairs(999, frozenset({"X:DOTUSD"}), frozenset())
     assert lookups(ws_session) == []
     connections._retry_pairs(999)
+    connections._post_change(999, frozenset({"X:DOTUSD"}), frozenset())
     connections._schedule_retry(999, 0.0)
     connections._fail(999, dm.MassiveError("gone"))
     state = ws._PairState()

@@ -322,8 +322,8 @@ class CycleRows:
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
             `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted'])"` or
-            `"AAPL1 (HTTP 404: no data)"`, in the order found; empty for none. The row's
-            `Error` lists them (`NotePart.LEFT_OUT`).
+            `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
+            none. The row's `Error` lists them (`NotePart.LEFT_OUT`).
     """
 
     rows: pa.Table

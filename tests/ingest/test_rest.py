@@ -63,6 +63,7 @@ from deephaven_massive._ingest import (
     rest_requests,
     shared_lookup,
 )
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
@@ -4774,3 +4775,14 @@ def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSe
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
     unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
+
+
+def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The WebSocket transport's lookup reaches the session's one crypto ticker list.
+    serve_pairs(fake_rest)
+    ports = session._core._ports
+    assert isinstance(ports, SessionClients)
+    assert ports._crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    assert ports._crypto_pair("X:NOPEUSD") == NOT_LISTED

@@ -500,6 +500,7 @@ class FetchQuery(Query):
                 - no row of a table of symbols is Massive's exact ticker;
                 - an endpoint doesn't take one of the query's parameters or filters.
             SessionClosedError: If the session is closed.
+            MassiveError: If the call meets a bug in the library.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")
