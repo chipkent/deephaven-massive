@@ -540,14 +540,17 @@ each (`BACpL`, `BRK.B`); any other text, a plain ticker included, is returned un
 `U` is left unchanged in Yahoo's and CMS's spellings, since CQS writes units as `U`; Yahoo's
 bare `-P` is left unchanged, since it reads as a generic preferred and as class P alike."""
 
-_ANOTHER_INSTRUMENT: Final[dict[SymbolConvention, re.Pattern[str]]] = {
+_ANOTHER_INSTRUMENT: Final[dict[SymbolConvention, re.Pattern[str] | None]] = {
+    SymbolConvention.MASSIVE: None,
     SymbolConvention.YAHOO: re.compile(r"\."),
     SymbolConvention.NASDAQ: re.compile(r"\.U$"),
+    SymbolConvention.CMS: None,
 }
-"""The spellings of a convention that Massive reads as another instrument: Yahoo's dot names
+"""The spellings of each convention that Massive reads as another instrument: Yahoo's dot names
 a listing outside the US (`VOD.L`) where Massive's names a share class, and Nasdaq's `.U` is
 class U where Massive's is a unit. Returned unchanged, they would read that instrument's data
-with no error, so the converter refuses them."""
+with no error, so the converter refuses them. None for a convention with no such spelling known:
+Massive's own, and CMS's. Every convention has an entry, so a new one needs this decided."""
 
 
 def _refuse_another_instrument(text: str, convention: SymbolConvention) -> None:
@@ -561,7 +564,7 @@ def _refuse_another_instrument(text: str, convention: SymbolConvention) -> None:
         ValueError: If Massive reads the text as another instrument than the convention does
             (`_ANOTHER_INSTRUMENT`): a Yahoo ticker with a dot, or a Nasdaq class U.
     """
-    other = _ANOTHER_INSTRUMENT.get(convention)
+    other = _ANOTHER_INSTRUMENT[convention]
     if other is not None and other.search(text) is not None:
         raise ValueError(
             f"{text!r} names another instrument in Massive's spelling than in the "

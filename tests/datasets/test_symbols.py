@@ -14,6 +14,7 @@ from deephaven.dherror import DHError
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
     ALL,
     AllSymbols,
@@ -505,3 +506,9 @@ def test_a_class_with_a_prefix_needs_it_and_others_need_none() -> None:
     # A class no case names fails loudly, never passes unchecked.
     with pytest.raises(AssertionError):
         class_spelling_reason("bonds", "AAPL")  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_every_convention_decides_which_spellings_name_another_instrument() -> None:
+    # A new convention fails here until it says which of its spellings Massive reads as
+    # another instrument, so none is left unchecked by omission.
+    assert set(symbols._ANOTHER_INSTRUMENT) == set(dm.SymbolConvention)
