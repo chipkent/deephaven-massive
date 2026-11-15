@@ -1,6 +1,6 @@
 # The documentation site: the user pages and an API reference generated from the docstrings,
-# built by Zensical (https://zensical.org) with `uv run --only-group site zensical build`.
-# .github/workflows/docs-site.yml publishes it to GitHub Pages.
+# built by Zensical (https://zensical.org). docs/dev/docs-site.md explains how to build and
+# preview it, and how .github/workflows/docs-site.yml publishes it to GitHub Pages.
 
 [project]
 site_name = "deephaven-massive"
