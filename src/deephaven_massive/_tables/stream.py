@@ -120,6 +120,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import entered
@@ -518,7 +519,7 @@ class ChannelPlan:
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         # A decoded row holds its values in the order of the source's fields.
         position = {f.wire_key: i for i, f in enumerate(source.fields)}
-        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
+        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
         symbol_field = None if symbol is None else fields[key_column(spec, "symbol", symbol)][1]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
         span = next(span for span, name in spec.channels.items() if name == channel)

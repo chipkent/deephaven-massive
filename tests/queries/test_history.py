@@ -24,7 +24,6 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
 )
 from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery
@@ -727,8 +726,8 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {
-        "AAPL": SymbolFailure(refusal, FailureKind.PERMANENT),
-        "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other"), FailureKind.PERMANENT),
+        "AAPL": SymbolFailure(refusal),
+        "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other")),
     }
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03", wait=True)
@@ -747,11 +746,7 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest.outcomes = {
-        "MSFT": SymbolFailure(
-            dm.EntitlementError("HTTP 403: not in the plan"), FailureKind.PERMANENT
-        )
-    }
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: not in the plan"))}
     with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True

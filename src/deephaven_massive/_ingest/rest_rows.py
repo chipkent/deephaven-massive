@@ -47,9 +47,9 @@ from deephaven_massive._datasets.wire_symbols import (
     index_underlyings,
     unreadable_symbol_message,
 )
-from deephaven_massive._enums import OnError
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, DriftSample, to_batch
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
+    from deephaven_massive._enums import OnError
     from deephaven_massive._massive import RestPath
 
 __all__ = [
@@ -134,7 +135,7 @@ class RowConverter:
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
+        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.

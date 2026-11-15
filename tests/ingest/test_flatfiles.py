@@ -60,7 +60,6 @@ from deephaven_massive._tables import columns
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
@@ -816,7 +815,7 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
         assert "holds a malformed line" in str(failed.error)
-        assert failed.kind is FailureKind.PERMANENT
+        assert not failed.error.is_retryable
 
 
 def test_a_file_whose_every_line_is_malformed_fails_the_call(

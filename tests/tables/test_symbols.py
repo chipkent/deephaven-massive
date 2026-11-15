@@ -98,6 +98,20 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     assert messages[-1] == "20 values were reported; further ones are not logged"
 
 
+def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    table = new_table([string_col("Symbol", ["EUR/USD", "b00"])])
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.symbols"):
+        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.IGNORE)
+    assert values(result) == ["C:EURUSD", None]
+    message = (
+        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
+        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
+    )
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, message)]
+
+
 def test_canonicalize_a_refreshing_table(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:

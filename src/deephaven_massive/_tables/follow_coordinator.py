@@ -31,8 +31,8 @@ diagnostics show. It owns:
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
-`DONE`. A failure that may pass (`FailureKind.TRANSIENT`) makes it `RETRYING`, read again 1, 5, and
-15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
+`DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 1, 5,
+and 15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
 fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
 an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
 under `Reread.NEVER` its download is kept, so a re-add shows the
@@ -106,7 +106,7 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -1220,7 +1220,7 @@ class FollowCoordinator:
         symbol.error = failure_text(error)
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
-        if outcome.kind is FailureKind.TRANSIENT and attempts <= len(RETRY_DELAYS):
+        if error.is_retryable and attempts <= len(RETRY_DELAYS):
             delay = RETRY_DELAYS[attempts - 1]
             symbol.state = SymbolReadState.RETRYING
             symbol.due = CLOCK.monotonic() + delay
@@ -1255,7 +1255,7 @@ class FollowCoordinator:
             name,
             attempts,
             "attempt" if attempts == 1 else "attempts",
-            outcome.kind.value,
+            "retryable" if error.is_retryable else "not retryable",
             symbol.error,
             exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )

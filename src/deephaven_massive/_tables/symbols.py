@@ -27,6 +27,7 @@ from deephaven.table import Table
 from deephaven_massive._datasets.symbols import canonical_symbol
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
 from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -130,8 +131,9 @@ def canonicalize_symbols(
     resolved, chosen, mode = _arguments(
         table, asset_class=asset_class, column=column, convention=convention, on_error=on_error
     )
-    level = logging.WARNING if mode is OnError.LOG else logging.DEBUG
-    bad = BoundedLog(logger, limit=_LOGGED_VALUES, level=level)
+    effect = effect_of(mode)
+    # Under RAISE nothing logs to `bad`: a bad value raises below or fails the formula.
+    bad = BoundedLog(logger, limit=_LOGGED_VALUES, level=effect.level)
 
     def convert(text: str) -> str | None:
         return canonical_symbol(text, resolved, convention=chosen)
@@ -145,7 +147,7 @@ def canonicalize_symbols(
     # on a refreshing table would leave a hidden aggregation ticking for the caller's scope.
     values = {row[0] for row in table.iter_tuple(cols=column) if row[0] is not None}
     refused = _refused(values, convert)
-    if refused and mode is OnError.RAISE:
+    if refused and effect.fails:
         shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
             f"{len(refused)} value(s) of {column} do not convert to {resolved.value} symbols: "
@@ -223,11 +225,12 @@ def _row_converter(
     Returns:
         A function from a row's text (or None) to its canonical symbol (or None).
     """
+    fails = effect_of(mode).fails
 
     def massive_canonical_symbol(text: str | None) -> str | None:
         if text is None:
             return None
-        if mode is OnError.RAISE:
+        if fails:
             return convert(text)
         try:
             return convert(text)

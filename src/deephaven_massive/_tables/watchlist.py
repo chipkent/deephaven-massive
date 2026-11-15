@@ -65,8 +65,8 @@ from deephaven_massive._datasets.symbols import (
     symbol_class,
     unsendable_reason,
 )
-from deephaven_massive._enums import OnError
 from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ValueTable
-    from deephaven_massive._enums import AssetClass, ClassFromPrefix
+    from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 
 __all__ = [
     "CURRENT_STEP",
@@ -314,7 +314,8 @@ class SymbolRowRule:
                 read of the table before any stream exists (`fetch()`, or the check a live
                 verb makes first).
         """
-        rows = _logged_rows if self.unsendable is OnError.LOG else _ignored_rows
+        level = effect_of(self.unsendable).level
+        rows = _logged_rows if level > logging.DEBUG else _ignored_rows
         reader = "a call's read" if stream_id is None else f"stream {stream_id}"
         rows.log(
             f"{self.dataset}\0{symbol}",
@@ -370,7 +371,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     for symbol in found:
         if rule.accepts(symbol):
             good.append(symbol)
-        elif rule.unsendable is OnError.RAISE:
+        elif effect_of(rule.unsendable).fails:
             raise ValueError(rule.refusal(symbol))
         else:
             rule.skip(symbol, stream_id=stream_id)
@@ -615,7 +616,7 @@ class _SymbolCounter(TableListener):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
             counts = self._counts
             if not self._rule.accepts(symbol):
-                if self._rule.unsendable is OnError.RAISE:
+                if effect_of(self._rule.unsendable).fails:
                     if step > 0:
                         self._on_invalid(self._rule.refusal(symbol))
                     continue

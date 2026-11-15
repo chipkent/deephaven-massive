@@ -74,7 +74,6 @@ from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    ErrorSource,
     MassiveError,
     failure_text,
 )
@@ -618,11 +617,16 @@ class FuturesCalendar:
             except Exception as error:  # a defect or a malformed answer: the worker carries on
                 with self._lock:
                     closed = self._closed
+                why = f"looking it up failed: {error!r}"
                 if not closed:
                     logger.exception(
-                        "%s: futures schedules: a lookup failed. %s", self._label, LIBRARY_BUG
+                        "%s: futures schedules: %s (%s). %s",
+                        self._label,
+                        why,
+                        ", ".join(sorted(contracts | products)),
+                        LIBRARY_BUG,
                     )
-                self._failure(contracts | products, f"looking it up failed: {error!r}")
+                self._failure(contracts | products, why)
                 with self._lock:
                     unknown = {c: None for c in contracts if c not in self._products}
                     self._products = MappingProxyType({**self._products, **unknown})
@@ -715,31 +719,33 @@ class FuturesCalendar:
         `RELOAD_SPACING`. Nothing is logged once the calendar is closed: a lookup cut short by
         the session closing is no failure. The streams keep running, so an expected failure
         (a refusal, a network failure) logs a WARNING; a defect, such as an answer the library
-        cannot read, logs an ERROR saying whose it is.
+        cannot read, logs an ERROR saying whose it is. A failure that is no `MassiveError` is
+        logged by the caller, with its trace, and not again here.
 
         Args:
             keys: The contracts or products.
             why: The failure, for the log and the misses.
-            error: The `MassiveError` that failed the lookup, whose `is_bug` sets the level; None
-                for any other failure, which the caller has logged with its trace.
+            error: The `MassiveError` that failed the lookup, whose source the record names and
+                whose `is_bug` sets the level; None for any other failure, which the caller has
+                logged with its trace.
         """
         with self._lock:
             closed = self._closed
             for key in keys:
                 self._failed[key] = why
-        if not closed:
+        if not closed and error is not None:
             logger.log(
-                logging.ERROR if error is not None and error.is_bug else logging.WARNING,
+                logging.ERROR if error.is_bug else logging.WARNING,
                 "%s: futures schedules: %s",
                 self._label,
                 failure_text(
                     MassiveError(
                         f"{why} ({', '.join(sorted(keys))})",
-                        source=ErrorSource.MASSIVE if error is None else error.source,
-                        is_bug=error is not None and error.is_bug,
+                        source=error.source,
+                        is_bug=error.is_bug,
                     )
                 ),
-                exc_info=error if error is not None and error.is_bug else None,
+                exc_info=error if error.is_bug else None,
             )
 
 

@@ -43,7 +43,6 @@ from deephaven_massive._tables.liveness import (
 )
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
@@ -704,9 +703,7 @@ def test_a_failure_during_the_first_read_is_kept_for_the_coordinator(
     dh_to_pylist: ToList,
     drain: Callable[[], None],
 ) -> None:
-    failure = SymbolFailure(
-        MassiveError("HTTP 403: not in the plan", status=403), FailureKind.PERMANENT
-    )
+    failure = SymbolFailure(MassiveError("HTTP 403: not in the plan", status=403))
     first = FirstRead(
         {"AAPL": SymbolRows(rows_of(massive_session, "AAPL", 1)), "MSFT": failure}, 1, 0.1
     )

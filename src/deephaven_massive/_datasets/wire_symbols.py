@@ -45,6 +45,7 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -331,7 +332,7 @@ class WireSymbols:
         Returns:
             True under `OnError.LOG` and `IGNORE`; False under `RAISE`, which fails it.
         """
-        return self.unreadable is not OnError.RAISE
+        return not effect_of(self.unreadable).fails
 
     def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -362,7 +363,8 @@ class WireSymbols:
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
         kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
         if self.keeps:
-            spellings = _logged_spellings if self.unreadable is OnError.LOG else _ignored_spellings
+            level = effect_of(self.unreadable, level=logging.ERROR).level
+            spellings = _logged_spellings if level > logging.DEBUG else _ignored_spellings
             for text in unreadable:
                 spellings.log(
                     f"{self.dataset}\0{text}",

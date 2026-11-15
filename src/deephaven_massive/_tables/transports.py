@@ -13,11 +13,11 @@ never imports the code that does the I/O:
 - `StreamHandle`: a live stream as `StreamTransport.open_stream` hands it to the core.
 - `HostDecision`: which WebSocket host serves an (asset class, channel family), and why, as
   `RestTransport.resolve_host` decides it.
-- `SymbolRows`, `SymbolFailure`, and `FailureKind`: what a read by symbol
-  (`RestTransport.fetch_by_symbol`, `RestTransport.history_by_symbol`,
-  `FlatFileTransport.history_by_symbol`) returns for each symbol: its rows, or the failure that
-  ended its read and whether a later read may succeed. A table that follows a live symbol
-  table reads each symbol this way, so one symbol's failure never fails the others.
+- `SymbolRows` and `SymbolFailure`: what a read by symbol (`RestTransport.fetch_by_symbol`,
+  `RestTransport.history_by_symbol`, `FlatFileTransport.history_by_symbol`) returns for each
+  symbol: its rows, or the failure that ended its read, whose `is_retryable` says whether a
+  later read may succeed. A table that follows a live symbol table reads each symbol this way,
+  so one symbol's failure never fails the others.
 
 Everything here is a protocol or an immutable value: no I/O, no threads, and no Deephaven call.
 """
@@ -25,7 +25,6 @@ Everything here is a protocol or an immutable value: no I/O, no threads, and no 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 if TYPE_CHECKING:
@@ -51,7 +50,6 @@ if TYPE_CHECKING:
     from deephaven_massive._log_limits import LoggedKeys
 
 __all__ = [
-    "FailureKind",
     "FlatFileRead",
     "FlatFileTransport",
     "HostDecision",
@@ -132,28 +130,6 @@ class StreamHandle:
     recency: Recency = field(kw_only=True)
 
 
-class FailureKind(StrEnum):
-    """Whether a symbol's failed read may succeed if the same read is made again later.
-
-    Part of a `SymbolFailure`; the transport decides it from the error
-    (`_ingest/symbol_reads.py`), and the caller decides what to do with it, such as reading a
-    transient failure again after a pause.
-    """
-
-    TRANSIENT = "transient"
-    """The cause may pass: a rate limit that outlasted the read's patience (HTTP 429), a
-    server error that outlasted the client's retries (HTTP 5xx), a network failure, or a
-    symbol's later page that answered HTTP 404, so its data was cut short."""
-
-    PERMANENT = "permanent"
-    """The same read would fail again for this session's entitlements: the plan does not
-    include the data (`EntitlementError`; an upgrade of the plan lifts it, so a later read may
-    then succeed), Massive's rows break the dataset's schema (`RowDataError`), a crypto pair
-    Massive's ticker list does not hold, a parameter the symbol's path does not take, a table
-    without the dataset's columns (a defect of the library), or any other refusal, such as
-    the HTTP 404 of a path Massive retired."""
-
-
 @dataclass(frozen=True, slots=True)
 class SymbolRows:
     """One symbol's complete rows from a read by symbol.
@@ -176,18 +152,17 @@ class SymbolRows:
 
 @dataclass(frozen=True, slots=True)
 class SymbolFailure:
-    """Why one symbol's read from a read by symbol failed, and whether it may succeed later.
+    """Why one symbol's read from a read by symbol failed.
 
     Immutable. Every symbol of a batched read (one request that names several symbols, or one
     flat-file scan) that failed holds the same error object.
 
     Attributes:
-        error: The failure, as a static `fetch()` or `history()` of the symbol would raise it.
-        kind: Whether a later read may succeed (`FailureKind`).
+        error: The failure, as a static `fetch()` or `history()` of the symbol would raise it;
+            its `is_retryable` says whether the same read made later may succeed.
     """
 
     error: MassiveError
-    kind: FailureKind
 
 
 SymbolOutcome: TypeAlias = SymbolRows | SymbolFailure
@@ -341,8 +316,8 @@ class RestTransport(Protocol):
             call: The id of the verb call the read serves, which its log lines and thread
                 names carry.
             stop: A read's stop token (`IngestPorts.read_stop`): once set, the requests stop
-                waiting for the rate governor and the symbols not yet read fail as
-                `TRANSIENT`; the caller ignores the outcomes. None for a read only the
+                waiting for the rate governor and the symbols not yet read fail with a
+                retryable error; the caller ignores the outcomes. None for a read only the
                 session's close stops.
 
         Returns:

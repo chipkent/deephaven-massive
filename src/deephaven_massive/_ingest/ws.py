@@ -82,7 +82,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
+from deephaven_massive._enums import AssetClass, ChannelFamily
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
@@ -107,6 +107,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionStream,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list, mark_failure_logged
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
@@ -951,7 +952,7 @@ class WsConnections:
         reader = f"crypto stream {stream_id}"
         skipped, unreadable = self._split_pairs(added, reader=reader, delays=PAIR_RETRY_DELAYS)
         unread = {s: why for s, why in skipped.items() if why[0] is _SkipReason.LIST_UNREAD}
-        if unread or (skipped and self._unlisted is OnError.RAISE):
+        if unread or (skipped and effect_of(self._unlisted).fails):
             # A list that cannot be read affects every pair, so it fails the stream whatever
             # the setting; a pair the list does not hold fails it only under RAISE.
             hint = (
@@ -1075,13 +1076,13 @@ class WsConnections:
                 which is never skipped.
         """
         if isinstance(symbols, SymbolTable):
-            if self._unlisted is OnError.RAISE:
+            if effect_of(self._unlisted).fails:
                 rule = SymbolRowRule.of(spec, core.config.unsendable_symbols)
                 self.resolve_pairs(read_symbols(rule, symbols.table, stream_id=stream_id).symbols)
             return {}
         if isinstance(symbols, AllSymbols):
             return {}
-        if self._unlisted is OnError.RAISE:
+        if effect_of(self._unlisted).fails:
             self.resolve_pairs(symbols)
             return {}
         skipped: dict[str, tuple[_SkipReason, str]] = {}
@@ -1105,7 +1106,8 @@ class WsConnections:
             skipped: The skipped pairs, with why.
             reader: Who read them: `crypto stream <id>`, or the dataset's call.
         """
-        pairs = _logged_pairs if self._unlisted is OnError.LOG else _ignored_pairs
+        level = effect_of(self._unlisted).level
+        pairs = _logged_pairs if level > logging.DEBUG else _ignored_pairs
         for symbol, (_, why) in sorted(skipped.items()):
             pairs.log(
                 symbol,

@@ -53,7 +53,6 @@ from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, op
 from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
@@ -100,8 +99,7 @@ def rows_of(m: dm.MassiveSession, symbol: str, count: int) -> Table:
 
 
 def refused(status: int, text: str = "refused") -> SymbolFailure:
-    kind = FailureKind.TRANSIENT if status in (429, 500, 503) else FailureKind.PERMANENT
-    return SymbolFailure(MassiveError(f"HTTP {status}: {text}", status=status), kind)
+    return SymbolFailure(MassiveError(f"HTTP {status}: {text}", status=status))
 
 
 class Script:
@@ -346,7 +344,7 @@ def test_a_permanent_failure_fails_only_its_symbol(
     assert (failed.attempts, failed.next_attempt_at, failed.rows) == (1, None, 0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "AAPL failed after 1 attempt (permanent)" in warnings[0]
+    assert "AAPL failed after 1 attempt (not retryable)" in warnings[0]
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
@@ -947,7 +945,7 @@ def test_the_streams_error_names_at_most_three_causes(
     statuses = {"A": 400, "B": 401, "C": 403, "D": 404, "E": 409}
     for name, status in statuses.items():
         script.answers[name] = [refused(status, "x" * 300)]
-    script.answers["B"] = [SymbolFailure(MassiveError("no status"), FailureKind.PERMANENT)]
+    script.answers["B"] = [SymbolFailure(MassiveError("no status"))]
     # One symbol with rows keeps the table: every call-time symbol failing would fail it.
     result = follow(massive_session, watchlist(*statuses, "OK"), script)
     for name in statuses:
@@ -1263,7 +1261,7 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
         "test.trades: AAPL's rows from REST lack Price", source=dm.ErrorSource.LIBRARY
     )
     script = Script(massive_session)
-    script.answers["AAPL"] = [SymbolFailure(defect, FailureKind.PERMANENT)]
+    script.answers["AAPL"] = [SymbolFailure(defect)]
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
         wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
@@ -1500,9 +1498,7 @@ def test_a_flat_file_scan_fails_as_a_unit(
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
-    scan = SymbolFailure(
-        MassiveError("HTTP 403: the files are refused", status=403), FailureKind.PERMANENT
-    )
+    scan = SymbolFailure(MassiveError("HTTP 403: the files are refused", status=403))
     script.answers["MSFT"] = [scan]
     script.answers["NVDA"] = [scan]
     wl = watchlist("AAPL")
@@ -1722,7 +1718,7 @@ def unlisted() -> SymbolFailure:
     error = UnlistedPairError(
         "'X:DOTUSD' cannot be split: Massive's reference data does not list it"
     )
-    return SymbolFailure(error, FailureKind.PERMANENT)
+    return SymbolFailure(error)
 
 
 def test_an_unlisted_pair_fails_the_result_under_raise(

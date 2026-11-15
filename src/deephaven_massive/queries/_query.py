@@ -27,9 +27,6 @@ from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import (
-    OnError,
-)
 from deephaven_massive._errors import (
     MassiveError,
     UnlistedPairError,
@@ -37,6 +34,7 @@ from deephaven_massive._errors import (
     failure_text,
     raises_through,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -364,7 +362,7 @@ class Query:
         when the read reads the table.
         """
         in_code = not isinstance(self._request.symbols, SymbolTable)
-        return in_code and self._core.config.unlisted_symbols is OnError.RAISE
+        return in_code and effect_of(self._core.config.unlisted_symbols).fails
 
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.

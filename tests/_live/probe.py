@@ -9,8 +9,8 @@ in `.live-plans.json` for an hour (`CACHE_LIFETIME`), naming the credentials onl
 The plans themselves, what each covers, and their history windows are in `plans`.
 
 The probes send requests through the REST and flat-file clients the caller creates, so the
-`live_plans` fixture in `tests/conftest.py` controls their pacing and their credentials; the
-cache's reader and writer touch one file.
+run's source of plans in `tests/conftest.py` (`_plans_of_key`) controls their pacing and their
+credentials; the cache's reader and writer touch one file.
 """
 
 from __future__ import annotations
@@ -61,8 +61,9 @@ class PlanProbeError(RuntimeError):
     """A plan probe's answer that proves nothing, so the probe cannot name the plan.
 
     Raised by the probes for an empty answer where a liquid ticker always has rows, and for a
-    probe started during Massive's snapshot reset. The `live_plans` fixture turns it into a
-    usage error asking to declare the plans in `MASSIVE_LIVE_PLANS` instead.
+    probe started during Massive's snapshot reset. The run's source of plans in
+    `tests/conftest.py` turns it into a usage error asking to declare the plans in
+    `MASSIVE_LIVE_PLANS` instead.
     """
 
 

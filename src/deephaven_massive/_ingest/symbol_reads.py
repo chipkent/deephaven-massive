@@ -26,9 +26,9 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   option chain's underlying, a futures product code) is read value by value, each with the
   requests `fetch()` makes for that value alone, so every row belongs to the value whose
   request returned it, and one value's failure fails only that value.
-- **Classes of failure** (`failure_kind`): `TRANSIENT` when the cause may pass (a rate limit
-  beyond the read's patience, a server error after the client's retries, a network failure, a
-  symbol's later page that answered HTTP 404), `PERMANENT` otherwise: the same read would fail
+- **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
+  rate limit beyond the read's patience, a server error after the client's retries, a network
+  failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
   again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
   lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
   does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
@@ -39,7 +39,7 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
 - **Columns**: each symbol's table must have exactly the dataset's columns
   (`SessionCore.dataset_schema`), so tables of different symbols, and of reads made at
   different times, can be merged. A table that does not is a defect of the library: the symbol
-  fails `PERMANENT`, logged at ERROR.
+  fails with an error that is not retryable, logged at ERROR.
 
 Each symbol's outcome logs one DEBUG line (its rows and source); each failure is logged once
 at the level its `is_bug` gives (`_log_limits.log_failure`): DEBUG for an expected one, ERROR for
@@ -81,9 +81,10 @@ from deephaven_massive._ingest.rest_requests import (
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -103,7 +104,6 @@ if TYPE_CHECKING:
 __all__ = [
     "RestUnit",
     "UnsupportedParameterError",
-    "failure_kind",
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
@@ -133,25 +133,6 @@ class UnsupportedParameterError(PermanentError):
 
 _SYMBOL = "Symbol"
 """The column that names each row's symbol, by which a request of several symbols is split."""
-
-
-def failure_kind(error: MassiveError) -> FailureKind:
-    """Class a symbol's failure: may the same read succeed if it is made again later?
-
-    Args:
-        error: The failure, as the transport raised or returned it.
-
-    Returns:
-        `TRANSIENT` when the error `is_retryable`: a rate limit, a server error, a failure of
-        the network, a symbol's data cut short (`CutShortError`: a later page's 404), or S3's
-        `RequestTimeout`. `PERMANENT`, meaning the same read would fail again for this
-        session's entitlements, for everything else: a refusal of the plan (`EntitlementError`,
-        which an upgrade of the plan lifts), a failure a retry cannot fix (`PermanentError`:
-        rows that break the schema, a parameter the path does not take, a crypto pair Massive
-        does not list), any bug, and any other HTTP status, such as 400 or the 404 of a path
-        Massive retired.
-    """
-    return FailureKind.TRANSIENT if error.is_retryable else FailureKind.PERMANENT
 
 
 def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
@@ -395,7 +376,7 @@ def read_rest_by_symbol(
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
     # A crypto pair Massive's list does not hold has no data: under LOG and IGNORE it is no
     # failure, but a symbol with no rows, as a ticker Massive answers with no data is.
-    skips = reader.unlisted_symbols is not OnError.RAISE
+    skips = not effect_of(reader.unlisted_symbols).fails
     unlisted = {s: e for s, e in failed.items() if skips and isinstance(e, UnlistedPairError)}
     if unlisted:
         reader.skip_unlisted(spec, unlisted, verb="read", setting=reader.unlisted_symbols)
@@ -626,8 +607,7 @@ def symbol_outcomes(
             `"flat files and REST"` when REST served the days the files lack.
 
     Returns:
-        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`
-        classed by `failure_kind`;
+        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`;
         a table without exactly the dataset's columns fails its symbol as a library defect.
 
     Raises:
@@ -664,8 +644,7 @@ def symbol_outcomes(
                 library_bug(f"{spec.name}: {symbol}'s rows from {source} {problem}"),
                 source=ErrorSource.LIBRARY,
             )
-        kind = failure_kind(error)
-        outcomes[symbol] = SymbolFailure(error, kind)
+        outcomes[symbol] = SymbolFailure(error)
         log_failure(
             logger,
             error,
@@ -674,7 +653,7 @@ def symbol_outcomes(
             spec.name,
             symbol,
             source,
-            kind.value,
+            "retryable" if error.is_retryable else "not retryable",
             expected=logging.DEBUG,
         )
     return outcomes

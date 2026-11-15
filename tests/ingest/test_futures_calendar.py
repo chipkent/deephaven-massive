@@ -746,13 +746,19 @@ def test_the_worker_outlives_an_unexpected_error(
     *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
     # An answer the calendar cannot read (here a defect's ValueError) is a failed lookup: its
-    # rows are misses, and the worker keeps serving later lookups.
+    # rows are misses, and the worker keeps serving later lookups. It logs one ERROR record,
+    # with its trace, that names the library as the failure's source.
     fetch.answers[CONTRACTS_PATH] = ValueError("bad answer")
     with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
-    assert "futures schedules: a lookup failed. This is a bug in deephaven-massive." in caplog.text
-    assert logging.ERROR in {r.levelno for r in caplog.records}
+    [record] = [r for r in caplog.records if "futures schedules" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
+    assert record.getMessage() == (
+        "test: futures schedules: looking it up failed: ValueError('bad answer') (ESM4). "
+        f"{LIBRARY_BUG}"
+    )
     assert "not confirmed: looking it up failed: ValueError('bad answer')" in misses[0][1]
     fetch.answers[CONTRACTS_PATH] = list(CONTRACTS)
     clock.now += SPACING
