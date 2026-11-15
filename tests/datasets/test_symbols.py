@@ -824,6 +824,14 @@ def test_each_converter_runs_in_a_query_string(
     bad = new_table([string_col("P", ["X:BTC-USD" if "crypto" not in name else "C:EURUSD"])])
     with pytest.raises(DHError, match="ticker \\(prefix"):
         bad.update(["S = convert(P)"])
+    # A partial that binds on_error, in scope by a bare name, still makes a String column, and
+    # turns the bad row into a null instead of failing the formula.
+    lenient = functools.partial(convert, on_error=OnError.IGNORE)
+    assert lenient.keywords == {"on_error": OnError.IGNORE}  # the formula finds it as `lenient`
+    nulled = bad.update(["S = lenient(P)"])
+    (column,) = [c for c in nulled.columns if c.name == "S"]
+    assert column.data_type == dtypes.string
+    assert [row[0] for row in nulled.iter_tuple(cols="S")] == [None]
 
 
 def test_a_converter_called_through_the_module_needs_a_cast(dh_exec_ctx: object) -> None:

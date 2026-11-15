@@ -13,8 +13,8 @@ owns that grammar and two things built on it:
   (`canonical_symbol_stock`, `canonical_symbol_option`, `canonical_symbol_future`,
   `canonical_symbol_future_spread`, `canonical_symbol_index`, `canonical_symbol_forex`,
   `canonical_symbol_crypto`) plus one per stock convention (`canonical_symbol_stock_yahoo`,
-  `canonical_symbol_stock_nasdaq`, `canonical_symbol_stock_cms`) for Deephaven query strings, which
-  pass positional arguments only, so no `convention=` or `on_error=`. Each maps None to None,
+  `canonical_symbol_stock_nasdaq`, `canonical_symbol_stock_cms`) for Deephaven query strings (see
+  below). Each maps None to None,
   returns canonical text unchanged, converts the spellings its class or convention defines, and,
   for anything else, does what its `on_error` says: raises `ValueError` with a hint
   (`OnError.RAISE`, the default), or returns None and logs the value once (`LOG` at WARNING,
@@ -27,6 +27,14 @@ owns that grammar and two things built on it:
 Massive's transports write instead (`EUR/USD` in WebSocket forex frames, say) are read and
 written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANONICAL_GRAMMARS`,
 `read_forex_pair`, `read_crypto_pair`).
+
+In a Deephaven query string, a converter is called with positional arguments only, so a keyword
+argument (`convention=`, `on_error=`) is given by putting a `functools.partial` that binds it in
+scope under a bare name. How the call is written decides the column's type: a bare name in scope
+(`f(Ticker)`) gives a typed `String` column, while a scoped call (`dm.canonical_symbol(...)`, or
+any `obj.method(...)`) gives an `Object` column unless cast with `(String)`, because Deephaven
+ignores the type hints of an attribute call. An enum member passes only by attribute access
+(`dm.AssetClass.STOCKS`).
 
 | Class   | Canonical grammar                                  | Converters also accept         |
 |---------|----------------------------------------------------|--------------------------------|
@@ -1059,10 +1067,10 @@ def canonical_symbol(
     default, or comes back as None with one log record per distinct value, so a column of
     mixed spellings in Python can be converted without failing on the first bad one. The same
     verdict and `on_error` apply to every row of `dm.canonicalize_symbols`. A Deephaven query
-    string passes positional arguments only, so it can give neither `convention=` nor
-    `on_error=`: for a convention, call its function (`canonical_symbol_stock_yahoo`), and to
-    null a table's bad rows, convert it with `dm.canonicalize_symbols`. A function called through
-    the module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
+    string passes positional arguments only: call a convention's function
+    (`canonical_symbol_stock_yahoo`), or give `on_error=` through a `functools.partial` of the
+    function, imported under a bare name. A function called through the module
+    (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
     Thread-safe.
 
     Example:
@@ -1136,8 +1144,10 @@ def canonical_symbol_stock(text: str | None, *, on_error: OnError = OnError.RAIS
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1175,8 +1185,10 @@ def canonical_symbol_stock_yahoo(
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_yahoo, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1216,8 +1228,10 @@ def canonical_symbol_stock_nasdaq(
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_nasdaq, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1256,8 +1270,10 @@ def canonical_symbol_stock_cms(
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_cms, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1293,8 +1309,10 @@ def canonical_symbol_option(text: str | None, *, on_error: OnError = OnError.RAI
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_option, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         `O:` and the OCC symbol, or None for None or, under `OnError.LOG` and `IGNORE`, for text
@@ -1331,8 +1349,10 @@ def canonical_symbol_future(text: str | None, *, on_error: OnError = OnError.RAI
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_future, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1371,8 +1391,10 @@ def canonical_symbol_future_spread(
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_future_spread, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1407,8 +1429,10 @@ def canonical_symbol_index(text: str | None, *, on_error: OnError = OnError.RAIS
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_index, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         `I:` and the ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1450,8 +1474,10 @@ def canonical_symbol_forex(text: str | None, *, on_error: OnError = OnError.RAIS
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_forex, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         `C:` and the two codes, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
@@ -1488,8 +1514,10 @@ def canonical_symbol_crypto(text: str | None, *, on_error: OnError = OnError.RAI
             raises `ValueError`; `OnError.LOG` returns None and logs the value once at
             WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
             and logs it at DEBUG only. A query string passes positional arguments only, so
-            there `on_error` keeps its default and one bad value fails the whole formula; to
-            null the bad rows of a table instead, convert it with `dm.canonicalize_symbols`.
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_crypto, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
         `X:` and the joined pair, or None for None or, under `OnError.LOG` and `IGNORE`, for text
