@@ -70,10 +70,11 @@ When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/sp
 explains how the generated schemas and the reference follow.
 
 The owner's decisions behind the public contract, and why, are in
-[`docs/dev/decisions.md`](docs/dev/decisions.md). A change to a public signature, default,
-column, or failure behavior adds an entry there. The facts about Massive that the documentation
-does not settle, and the live tests that settle them, are in
-[`docs/dev/verification-items.md`](docs/dev/verification-items.md).
+[`docs/dev/decisions/`](docs/dev/decisions/README.md), one file each. A change that sets or
+changes a rule or contract, breaks code, or makes a design choice worth remembering adds one.
+The facts about Massive that the documentation does not settle, and the live tests that settle
+them, are in [`docs/dev/verification-items/`](docs/dev/verification-items/README.md). Each
+folder's README gives the format and the command that lists every entry with its status.
 
 ## Agent instructions and skills
 
