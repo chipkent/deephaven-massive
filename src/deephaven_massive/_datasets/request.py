@@ -91,10 +91,6 @@ class Request:
 
     Attributes:
         symbols: The normalized symbols, or None for datasets without instruments.
-        symbols_from_table: Whether `symbols` holds a static symbol table's rows, read when a
-            stream verb is called, rather than symbols passed in code. A stream opens without
-            such a crypto pair when a failed read of Massive's crypto ticker list left it
-            unsplit, but raises that read's error for one passed in code.
         timespan: The bar timespan (bars and indicators only).
         multiplier: The bar multiplier.
         venues: The futures venues whose flat-file prefixes `history()` reads, in
@@ -125,7 +121,6 @@ class Request:
     """
 
     symbols: NormalizedSymbols | None = None
-    symbols_from_table: bool = False
     timespan: Timespan | None = None
     multiplier: int = 1
     venues: tuple[FuturesVenue, ...] | None = None

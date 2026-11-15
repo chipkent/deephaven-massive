@@ -146,10 +146,7 @@ class StreamQuery(Query):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. The request
-        records that its symbols are a table's rows (`Request.symbols_from_table`). A crypto
-        pair that Massive's crypto ticker list does not hold follows `unlisted_symbols` when the
-        stream opens (`StreamTransport.open_stream`).
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
 
         Args:
             verb: The stream method called, such as `"blink"`, which a refusal names.
@@ -167,7 +164,7 @@ class StreamQuery(Query):
             return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
             read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
-            return replace(request, symbols=read, symbols_from_table=True)
+            return replace(request, symbols=read)
         return request
 
     def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
@@ -178,12 +175,8 @@ class StreamQuery(Query):
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
-        crypto ticker list when the stream starts (read once per session). A pair the list does
-        not hold, in code or in a table, at the call or added later, follows
-        `MassiveConfig.unlisted_symbols`: skipped and listed in `m.streams()` under `LOG` and
-        `IGNORE`, and raised as `MassiveError` before any topic is subscribed under `RAISE`. A
-        list that cannot be read at the call raises its error when it leaves a pair passed in
-        code, or every pair, unsplit.
+        crypto ticker list, read once per session, after the stream opens, wherever the pair
+        came from (`StreamTransport.open_stream`).
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -253,10 +246,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read when the call reads it;
-                - that list lacks a crypto pair, under `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
 
@@ -296,10 +286,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read when the call reads it;
-                - that list lacks a crypto pair, under `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(
             blink_to_append_only, self._stream_request("append_only"), verb="append_only"
@@ -345,10 +332,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read when the call reads it;
-                - that list lacks a crypto pair, under `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -465,10 +449,7 @@ class SymbolStreamQuery(StreamQuery):
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
                 change.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read when the call reads it;
-                - that list lacks a crypto pair, under `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request("last_by")

@@ -18,11 +18,8 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import (
-    HistorySource,
-    OnError,
     PollMode,
 )
-from deephaven_massive._errors import BrokenGuaranteeError, UnlistedPairError
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
@@ -41,11 +38,9 @@ from tests._fakes.queries import (
     Recorder,
     feed,
     follows,
-    join_reads,
     last_trade,
     make,
     news,
-    released,
     symbol_reads,
     trades,
     until,
@@ -177,30 +172,6 @@ def test_a_one_row_fetch_passes_its_symbols(
     ]
 
 
-@pytest.mark.parametrize(
-    ("setting", "split"), [(OnError.RAISE, [True, False, True]), (OnError.LOG, [False] * 3)]
-)
-def test_only_symbols_in_code_under_raise_have_their_crypto_pairs_split_at_the_call(
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    setting: OnError,
-    split: list[bool],
-) -> None:
-    # Under RAISE a pair in code Massive does not list raises at the call; otherwise, and for
-    # a table's pairs, the read leaves it out as MassiveConfig.unlisted_symbols says.
-    core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
-    in_code = news(massive_session).fetch()
-    table = new_table([string_col("Symbol", ["AAPL"])])
-    from_table = trades(massive_session, table).history("2025-03-03", source=HistorySource.REST)
-    listed = trades(massive_session).history("2025-03-03", source=HistorySource.REST)
-    join_reads(massive_session)
-    assert rest.split_pairs == split
-    released(massive_session, in_code, from_table, listed)
-
-
 def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
     # A symbol's static rows, as a read returns them: `count` rows of nulls.
     schema = m._core.dataset_schema(spec)
@@ -208,16 +179,12 @@ def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
         return SymbolRows(dh_arrow.to_table(schema.to_arrow([{}] * count)))
 
 
-def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
-    *, massive_session: dm.MassiveSession, rest: Recorder
-) -> None:
+def test_a_static_fetch_is_unchanged(*, massive_session: dm.MassiveSession, rest: Recorder) -> None:
     static = new_table([string_col("Symbol", ["AAPL"])])
     q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
     assert isinstance(q, FetchQuery)
     assert not q.fetch(wait=True).is_refreshing
     assert not last_trade(massive_session).fetch(wait=True).is_refreshing
-    # Crypto pairs follow the session's setting, in a table or in code.
-    assert rest.unlisted == [OnError.LOG, OnError.LOG]
     assert rest.fetched == []
 
 
@@ -354,43 +321,6 @@ def test_a_followed_fetch_whose_every_symbol_failed_is_retryable_only_when_each_
     assert mixed.value.__cause__ is busy
     rest.outcomes = {}  # the raised errors' tracebacks hold the session
     follows(massive_session)
-
-
-def test_a_followed_fetch_s_unlisted_pair_raises_under_raise(
-    *,
-    live: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Under LOG and IGNORE the read gives such a pair no rows instead, so it fails nothing.
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, unlisted_symbols=OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
-    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
-    rest.outcomes = {"DOT": SymbolFailure(error)}
-    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
-    assert isinstance(q, FetchQuery)
-    with pytest.raises(UnlistedPairError, match="does not list it"):
-        q.fetch(wait=True)
-    rest.outcomes = {}  # the raised error's traceback holds the session
-
-
-def test_a_followed_fetch_s_unlisted_pair_handed_on_under_log_is_a_defect(
-    *,
-    live: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-) -> None:
-    # Under LOG the read gives such a pair no rows, so one the first read hands on is the
-    # library's defect, never a failure the setting chose.
-    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
-    rest.outcomes = {"DOT": SymbolFailure(error)}
-    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
-    assert isinstance(q, FetchQuery)
-    with pytest.raises(BrokenGuaranteeError, match="under unlisted_symbols=LOG"):
-        q.fetch(wait=True)
-    rest.outcomes = {}  # the raised error's traceback holds the session
 
 
 def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> None:

@@ -59,7 +59,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
     NEW_SESSION,
     AuthenticationError,
@@ -67,7 +66,6 @@ from deephaven_massive._errors import (
     MassiveError,
     PermanentError,
     SessionClosedError,
-    UnlistedPairError,
     library_bug,
     required,
     required_instance,
@@ -81,7 +79,6 @@ from deephaven_massive._ingest.rest_requests import (
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
@@ -150,11 +147,11 @@ def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
 def _failure_recorder(
     reader: RestReader, failed: dict[str, MassiveError], cancel: Cancel | None
 ) -> CryptoSplit:
-    """Return a crypto split that records any pair it cannot split instead of raising.
+    """Return a crypto split that records a failed lookup instead of raising.
 
-    Each such pair fails alone, a failed read of the crypto ticker list included, while the
-    read goes on with the other symbols (`recording_split`). A pair the list does not hold has
-    no rows under `unlisted_symbols` `LOG` and `IGNORE` instead (`read_rest_by_symbol`).
+    A failed read of the crypto ticker list fails that pair alone, while the read goes on with
+    the other symbols (`recording_split`). A pair the list gives no split for is no failure:
+    it is planned as a call with no data, reported as HTTP 404 is (`RestReader.read_each`).
 
     Args:
         reader: The reader whose session's crypto ticker list splits each pair.
@@ -165,7 +162,7 @@ def _failure_recorder(
         The split.
     """
     pair = functools.partial(reader.crypto_pair, cancel=cancel)
-    return recording_split(pair, failed, catching=MassiveError)
+    return recording_split(pair, failed)
 
 
 def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveError]:
@@ -211,9 +208,8 @@ def fetch_units(
 
     Returns:
         The planned requests in plan order, and the symbols that failed before any request
-        with their errors: a crypto pair Massive's list does not hold (or the list's failed
-        read), and every symbol of a path that does not take a parameter the call set
-        (`UnsupportedParameterError`).
+        with their errors: a crypto pair whose lookup failed, and every symbol of a path that
+        does not take a parameter the call set (`UnsupportedParameterError`).
     """
     asked = tuple(sorted(_ordered(symbols)))
     alone = _SYMBOL not in columns
@@ -336,9 +332,7 @@ def read_rest_by_symbol(
         request: The normalized arguments.
         symbols: The canonical symbols, in the order the outcomes follow.
         units: The planned requests (`fetch_units`, `history_units`).
-        failed: The symbols that failed before any request, with their errors. A crypto pair
-            Massive's list does not hold is no failure under `unlisted_symbols` `LOG` and
-            `IGNORE`: it has no rows, as a ticker Massive answers with no data has.
+        failed: The symbols that failed before any request, with their errors.
         limit: The cap on each request's rows (`RestReader.read_each`).
         window: The `history()` window whose rows to keep, or None for `fetch()`.
         current: True when the pages are checked for a `DELAYED` label
@@ -374,14 +368,7 @@ def read_rest_by_symbol(
         patience.seconds,
     )
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
-    # A crypto pair Massive's list does not hold has no data: under LOG and IGNORE it is no
-    # failure, but a symbol with no rows, as a ticker Massive answers with no data is.
-    skips = not effect_of(reader.unlisted_symbols).fails
-    unlisted = {s: e for s, e in failed.items() if skips and isinstance(e, UnlistedPairError)}
-    if unlisted:
-        verb = "fetch()" if window is None else "history()"
-        reader.skip_unlisted(spec, unlisted, verb=verb, setting=reader.unlisted_symbols)
-    failures = {s: e for s, e in failed.items() if s not in unlisted}
+    failures = dict(failed)
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = own_symbols(spec, planned.symbol, planned.query)
         if isinstance(result, MassiveError):
@@ -453,7 +440,6 @@ def read_rest_by_value(
                 symbols=request.static_symbols,
                 cancel=cancel,
                 pauses_live_tables=pauses,
-                unlisted=OnError.RAISE,
             )
         except MassiveError as error:
             failures[value] = error

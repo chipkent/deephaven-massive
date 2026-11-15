@@ -476,38 +476,28 @@ class SymbolConvention(StrEnum):
 class OnError(StrEnum):
     """What a problem does: fail, or keep going with or without a log record.
 
-    One enum for every problem a caller may choose to skip, used in these places:
+    One bad symbol or row never stops a table by default. The members:
 
-    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The default
-      there is `LOG`. `canonical_symbol(on_error=)` and the per-class converters take it for text
-      that does not convert; their default is `RAISE`, and `LOG` and `IGNORE` return None.
-    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols` that
-      is not Massive's exact ticker. A `str` or a list you pass always raises, whatever the setting.
-      The default is `LOG`.
-    - `MassiveConfig.unlisted_symbols`, for a crypto pair, in code or in a table of symbols,
-      that Massive's crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`.
-      The default is `LOG`.
-    - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
-      cannot read. The default is `LOG`.
-    - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
-      `history()`, or `poll()`, or one a `poll()` table cannot read. The default is `LOG`.
-    - `MassiveConfig.malformed_rows`, for a line of a flat file that is not a readable row. The
-      default is `LOG`.
-    - The `refused_venues` argument of the futures `trades`, `quotes`, and `bars`, and
-      `MassiveConfig.refused_venues` for a call that leaves it out, for a futures exchange the
-      call names in `venues` whose flat files Massive refuses. The default is `RAISE`.
-
-    The members:
-
-    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`), and a
-      live table fails when the bad value arrives.
-    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at WARNING for
-      a value the user supplied, and at ERROR, as a library defect to report, for a spelling from
-      Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
-      bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
-      unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
-      A refused futures exchange's files are skipped, with one WARNING per call naming them.
+    - `RAISE`: fail whatever met the problem. A check at the call raises, and so does a call
+      with `wait=True`. A live table fails. A watchlist read marks only that symbol `FAILED` in
+      `m.symbol_reads()` and reads the others.
+    - `LOG`: skip the value and keep going. Each distinct value is logged once, a bounded number
+      of times: at WARNING, or at ERROR for a library defect to report. A live table names the
+      value in its `Error` in `m.streams()`.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
+
+    Each cause has its own setting, documented where it is taken:
+
+    - `MassiveConfig.noncanonical_symbols`: a table's row that isn't Massive's exact ticker.
+    - `MassiveConfig.unavailable_symbols`: a symbol Massive has no data for.
+    - `MassiveConfig.unreadable_symbols`: a symbol in Massive's data the library can't read.
+    - `MassiveConfig.malformed_rows`: a flat-file line that isn't a readable row.
+    - `MassiveConfig.refused_venues`, and the `refused_venues` argument of the futures `trades`,
+      `quotes`, and `bars`: a futures exchange the call names whose flat files Massive refuses.
+      The default is `RAISE`; every other setting's is `LOG`.
+    - The `on_error` argument of `canonicalize_symbols` (default `LOG`), and of
+      `canonical_symbol` and the per-class converters (default `RAISE`, where `LOG` and
+      `IGNORE` return None): a value that doesn't convert.
 
     Example:
         ::

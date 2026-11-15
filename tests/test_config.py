@@ -128,7 +128,6 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.s3_endpoint_url == "https://files.massive.com"
     assert base.s3_bucket == "flatfiles"
     assert base.noncanonical_symbols is dm.OnError.LOG
-    assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
     assert base.malformed_rows is dm.OnError.LOG
@@ -442,7 +441,6 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
 
 _ON_ERROR_SETTERS: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
     "noncanonical_symbols": lambda c, v: dataclasses.replace(c, noncanonical_symbols=v),
-    "unlisted_symbols": lambda c, v: dataclasses.replace(c, unlisted_symbols=v),
     "unreadable_symbols": lambda c, v: dataclasses.replace(c, unreadable_symbols=v),
     "unavailable_symbols": lambda c, v: dataclasses.replace(c, unavailable_symbols=v),
     "malformed_rows": lambda c, v: dataclasses.replace(c, malformed_rows=v),
@@ -687,7 +685,6 @@ rest_base_url: https://rest.example.com
 s3_endpoint_url: "https://files.example.com"
 s3_bucket: 'bucket'
 noncanonical_symbols: raise
-unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
 malformed_rows: ignore
@@ -714,7 +711,6 @@ connection_taken: reconnect
         s3_endpoint_url="https://files.example.com",
         s3_bucket="bucket",
         noncanonical_symbols=OnError.RAISE,
-        unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
         malformed_rows=OnError.IGNORE,
@@ -1319,7 +1315,7 @@ def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
     headings = [line[5:] for line in details.splitlines() if line.startswith("#### ")]
     assert headings == list(_config._EXAMPLE)
     # A list in the docstring stays a list, its members spelled as a file writes them.
-    assert "\n- `raise` raises `ValueError` for a bad row at the call, and fails a live\n" in (
+    assert "\n- `log` skips the line, keeps the file's other rows, and logs one warning\n" in (
         details
     )
     assert "Never list\n`currencies`, the one subscription for forex and crypto" in details
@@ -1358,15 +1354,14 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert "Defaults to" not in texts["reconnect_backoff"]
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["unavailable_symbols"] == (
-        "Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't "
-        "request with the arguments you gave it."
+        "Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its "
+        "crypto ticker list doesn't hold the pair."
     )
     details = _config._setting_details()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
     assert "EntitlementError" in details["delayed_subscriptions"][1]
-    assert details["noncanonical_symbols"][1].startswith(
-        "- `dm.OnError.LOG` skips the row and logs a warning naming the value.\n"
-        "- `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.\n"
+    assert details["malformed_rows"][1].startswith(
+        "- `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning\n"
     )
 
 

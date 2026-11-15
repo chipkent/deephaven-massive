@@ -19,7 +19,9 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
 Everything here is pure: it reads the catalog's generated paths and the call's arguments, makes
 no request, starts no thread, and keeps no state, so it is tested without a fake server. A
 crypto pair is split by the caller's `CryptoSplit` (the REST transport reads Massive's crypto
-ticker list), never by a guess. The REST transport (`rest.py`) runs the calls this module plans.
+ticker list), never by a guess; a pair it gives no split for is planned as a call with no data
+(`Call.no_data`), which is never sent. The REST transport (`rest.py`) runs the calls this module
+plans.
 """
 
 from __future__ import annotations
@@ -86,8 +88,9 @@ BARE_INDEX_PARAM: Final = "underlying_ticker"
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
 the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
 
-CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
-"""Splits a crypto ticker into its base and quote currencies (`RestReader.crypto_pair`)."""
+CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | str]"
+"""Splits a crypto ticker into its base and quote currencies, or says why Massive has no data for
+it (`RestReader.crypto_pair`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,11 +103,16 @@ class Call:
         symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
             from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
             None for a request that is not per symbol.
+        no_data: Why the call's symbol is known to have no data before any request, such as
+            a crypto pair Massive's crypto ticker list does not hold; the call is then never
+            sent, and its symbol is reported as Massive's HTTP 404 would be. None for a call
+            to send.
     """
 
     path_params: Mapping[str, object]
     query: Mapping[str, object]
     symbol: str | None = None
+    no_data: str | None = None
 
 
 def _date_bound(name: str, value: date, *, upper: bool) -> date:
@@ -227,7 +235,7 @@ def _filter_days(
     return sent
 
 
-def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]:
+def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str] | str:
     """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
 
     Args:
@@ -238,12 +246,13 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
             three letters each.
 
     Returns:
-        The base and quote currencies, such as `("EUR", "USD")`.
+        The base and quote currencies, such as `("EUR", "USD")`, or, for a crypto pair `split`
+        gives none for, why Massive has no data for it.
 
     Raises:
         ValueError: If the dataset's class has no currency pairs.
 
-    A crypto symbol `split` cannot split raises its `MassiveError`; no split is ever guessed.
+    A failed lookup raises the `MassiveError` of `split`; no split is ever guessed.
     """
     asset_class = spec.asset_class
     if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
@@ -321,7 +330,7 @@ def _symbol_parts(
     slot: str | None,
     pair: bool = False,
     split: CryptoSplit,
-) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
+) -> list[tuple[str | None, dict[str, object], dict[str, object], str | None]]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
@@ -344,9 +353,10 @@ def _symbol_parts(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
-        per-symbol request. Empty for an empty symbol tuple (a reactive table with no valid
-        row).
+        `(symbol, path parameters, query parameters, no data)` per request: `symbol` is set for
+        a per-symbol request, and `no data` says why a pair `split` gives no currencies for has
+        no data (`Call.no_data`). Empty for an empty symbol tuple (a reactive table with no
+        valid row).
 
     Raises:
         ValueError: If the path needs a symbol per request and the symbols are `dm.ALL` or
@@ -367,16 +377,19 @@ def _symbol_parts(
     if symbols is None or isinstance(symbols, AllSymbols):
         if spread is _Spread.PATH:
             raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
-        return [(None, {}, {})]
+        return [(None, {}, {}, None)]
     explicit = symbols
     if not explicit:
         return []
     if spread is _Spread.NONE:
-        return [(None, {}, {})]
+        return [(None, {}, {}, None)]
     if spread is _Spread.LIST:
         size = spec.symbols_per_request or len(explicit)
         listed = required(param, f"{rest_path.template}'s list parameter")
-        return [(None, {}, {listed: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
+        return [
+            (None, {}, {listed: explicit[i : i + size]}, None)
+            for i in range(0, len(explicit), size)
+        ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     return [
         _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
@@ -392,12 +405,14 @@ def _symbol_request(
     targets: Sequence[str],
     param: str | None,
     split: CryptoSplit,
-) -> tuple[str, dict[str, object], dict[str, object]]:
+) -> tuple[str, dict[str, object], dict[str, object], str | None]:
     """Return the parameters of one symbol's request.
 
     The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
     path placeholder or a query parameter the symbol itself. The symbol parameter, when the
-    path has one, takes the symbol too: as a one-symbol tuple when it takes a list.
+    path has one, takes the symbol too: as a one-symbol tuple when it takes a list. A crypto
+    pair `split` gives no currencies for leaves `{from}/{to}` unfilled and gets why it has no
+    data, so the call is never sent.
 
     Args:
         spec: The dataset, for messages.
@@ -409,21 +424,27 @@ def _symbol_request(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters)`.
+        `(symbol, path parameters, query parameters, no data)`: why the symbol has no data, or
+        None.
     """
     params = {p.name: p for p in rest_path.params}
     path: dict[str, object] = {}
     query: dict[str, object] = {}
+    no_data = None
     for name in targets:
         if name == "from" and "to" in params:
-            path["from"], path["to"] = _pair(spec, symbol, split)
+            currencies = _pair(spec, symbol, split)
+            if isinstance(currencies, str):
+                no_data = currencies
+            else:
+                path["from"], path["to"] = currencies
         elif params[name].in_path:
             path[name] = symbol
         else:
             query[name] = symbol
     if param is not None:
         query[param] = (symbol,) if params[param].kind is ParamKind.LIST else symbol
-    return symbol, path, query
+    return symbol, path, query, no_data
 
 
 def _caller_params(
@@ -679,11 +700,12 @@ def plan_calls(
     slot = empty[0] if len(empty) == 1 else None
     calls = []
     parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
-    for symbol, own_path, own_query in parts:
+    for symbol, own_path, own_query, no_data in parts:
         zone_class = day_class(spec, map(symbol_class, own_symbols(spec, symbol, own_query)))
         axis = axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
-        calls.append(Call({**path, **own_path}, {**sent, **(extra or {}), **own_query}, symbol))
+        sent_query = {**sent, **(extra or {}), **own_query}
+        calls.append(Call({**path, **own_path}, sent_query, symbol, no_data))
     return calls
 
 

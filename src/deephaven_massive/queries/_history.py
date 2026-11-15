@@ -425,7 +425,7 @@ class HistoryQuery(Query):
         spec = self._spec
         rest = self._core.rest_transport()
         if not window.empty:  # a parameter error raises now, with symbols or without
-            rest.check_history(spec, request, window, split_pairs=False)
+            rest.check_history(spec, request, window)
         return FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -487,7 +487,7 @@ class HistoryQuery(Query):
         if not forced and rest_history_problem(spec, request) is None:
             # REST may read the days the files lack: its parameter errors raise now, as a read
             # that waits raises them before it reads those days.
-            self._core.rest_transport().check_history(spec, request, window, split_pairs=False)
+            self._core.rest_transport().check_history(spec, request, window)
             # The description is written before the read: it can only say what may happen.
             note = f"{note} A day the flat files cannot serve is read from REST; the log names it."
         return self._result(
@@ -518,8 +518,8 @@ class HistoryQuery(Query):
         """
         spec = self._spec
         rest = self._core.rest_transport()
-        if not wait and not window.empty:  # a parameter error, and a pair under RAISE, raise now
-            rest.check_history(spec, request, window, split_pairs=self._splits_pairs_at_call)
+        if not wait and not window.empty:  # a parameter error raises now
+            rest.check_history(spec, request, window)
         return self._result(
             call,
             request,

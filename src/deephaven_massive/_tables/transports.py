@@ -42,7 +42,6 @@ if TYPE_CHECKING:
         AssetClass,
         ChannelFamily,
         FuturesVenue,
-        OnError,
         PollMode,
         Recency,
     )
@@ -204,11 +203,11 @@ class RestTransport(Protocol):
         """
         ...
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str]:
-        """Return a crypto ticker's base and quote, looking them up in Massive if needed.
+    def crypto_pair(self, symbol: str) -> tuple[str, str] | str:
+        """Return a crypto ticker's base and quote, or why Massive has no data for it.
 
-        Called by the WebSocket transport for each crypto ticker of a stream, before it starts
-        or on its `symbol changes` worker. The first such call of the session blocks while it
+        Called by the WebSocket transport for each crypto ticker of a stream, on its
+        `symbol changes` worker. The first such call of the session blocks while it
         reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page,
         listed and delisted pairs), which the session then keeps; a failed read is read again by
         the next call.
@@ -217,10 +216,10 @@ class RestTransport(Protocol):
             symbol: A canonical crypto ticker.
 
         Returns:
-            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
+            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`; or, for a ticker the list
+            gives no split for, why, such as `"Massive's crypto ticker list does not hold it"`.
 
-        A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
-        ticker.
+        A failed read raises a `MassiveError` naming the ticker.
         """
         ...
 
@@ -231,7 +230,6 @@ class RestTransport(Protocol):
         *,
         call: int,
         stop: threading.Event | None = None,
-        unlisted: OnError,
     ) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
@@ -244,10 +242,6 @@ class RestTransport(Protocol):
                 read's requests stop waiting for the rate governor and no new one starts, so
                 the call ends soon with an error the caller ignores. None for a call only the
                 session's close stops.
-            unlisted: What a crypto pair that Massive's crypto ticker list does not hold does,
-                on a path that takes the pair as two currencies: the session's
-                `MassiveConfig.unlisted_symbols`. `OnError.RAISE` raises; `LOG` and `IGNORE`
-                leave it out and log it once, at WARNING or at DEBUG.
 
         Returns:
             A static table with the dataset's columns, in its schema's order.
@@ -258,12 +252,12 @@ class RestTransport(Protocol):
             AuthenticationError: If Massive rejects the API key (HTTP 401).
             EntitlementError: If the plan does not include the endpoint (HTTP 403).
             MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
-                schema, a symbol's later page answers HTTP 404, a crypto pair cannot be split
-                under `RAISE`, or a request fails in any other way.
+                schema, a symbol's later page answers HTTP 404, Massive has no data for a
+                symbol under `unavailable_symbols=RAISE`, or a request fails in any other way.
         """
         ...
 
-    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         """Check that `fetch` can plan its requests for the request, before any data request.
 
         A background `fetch()` calls it on the caller thread, so a parameter a path does not
@@ -272,16 +266,9 @@ class RestTransport(Protocol):
         Args:
             spec: The dataset.
             request: The normalized arguments, with static symbols.
-            split_pairs: True for crypto pairs passed in code under
-                `unlisted_symbols=RAISE`: each is split by Massive's crypto ticker list, as the
-                read splits it, which may read that list once per session, so a pair the list
-                does not hold raises at the call. False otherwise: the read follows
-                `MassiveConfig.unlisted_symbols`, and nothing is requested here.
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
-            MassiveError: With `split_pairs`, Massive's crypto ticker list can't be read, or
-                does not hold a pair (`UnlistedPairError`).
         """
         ...
 
@@ -436,9 +423,7 @@ class RestTransport(Protocol):
         """
         ...
 
-    def check_history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
-    ) -> None:
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
         """Check that `history` can plan its REST requests over `window`, before any data request.
 
         The `check_fetch` of a background `history()` that REST serves or may serve: one that
@@ -449,12 +434,9 @@ class RestTransport(Protocol):
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
-            split_pairs: As `check_fetch` takes it.
 
         Raises:
             ValueError: The request sets a parameter a path of the call does not take.
-            MassiveError: With `split_pairs`, Massive's crypto ticker list can't be read, or
-                does not hold a pair (`UnlistedPairError`).
         """
         ...
 

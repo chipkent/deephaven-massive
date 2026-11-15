@@ -478,7 +478,6 @@ def test_a_background_flat_file_read_checks_the_rest_it_may_read_at_the_call(
     forced = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     join_reads(s3_session)
     assert [check[0] for check in rest.checks] == ["history"]
-    assert rest.split_pairs == [False]  # a parameter check: the files read the pairs whole
     assert [call[0] for call in flat.calls] == ["history", "history"]
 
     def refuse(*_: object, **__: object) -> None:

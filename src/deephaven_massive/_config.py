@@ -345,84 +345,37 @@ class MassiveConfig:
         s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
 
             Change it only with `s3_endpoint_url`.
-        noncanonical_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value that isn't Massive's exact ticker or futures product code: `SPX` for `I:SPX`,
-            say. Defaults to `LOG`.
+        noncanonical_symbols: Decides what happens to a row of a watchlist or other table you
+            pass whose value isn't Massive's exact ticker or futures product code, such as
+            `SPX` for `I:SPX`. Defaults to `LOG`.
 
-            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once.
+            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once. A row you fix is read
+            like a new one.
 
-            - `dm.OnError.LOG` skips the row and logs a warning naming the value.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` raises `ValueError` for a bad row at the call, and fails a live
-              table when one is added later.
+            A symbol you pass in code, as text or a list, is checked at the call instead: any
+            other spelling raises `ValueError`, whatever this setting says. So does a table
+            whose every row is bad.
+        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the
+            library can't read as Massive's ticker. Defaults to `LOG`.
 
-            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream or `poll()` table lists the
-            skipped values in its `m.streams()` row's `Error` until you fix or delete the row. A
-            fixed row is read like a new one.
-
-            Under any setting, a table whose rows are all bad raises `ValueError` at the call. So
-            does a symbol passed in code, as text or a list, that isn't Massive's exact ticker.
-        unlisted_symbols: Decides what happens when a crypto pair you pass, in code or in a
-            watchlist or other table, isn't on Massive's crypto ticker list, or is one the
-            library couldn't look up there. Defaults to `LOG`.
-
-            Set `dm.OnError.RAISE` when a stream must not run without every pair you asked for.
-
-            - `dm.OnError.LOG` skips the pair and logs a warning naming it.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes a stream fail with `MassiveError` at the call, and fails
-              a `fetch()` or `poll()` table, or a live table when such a pair is added later.
-              `fetch(wait=True)` raises it at the call.
-
-            It applies to streams and to calls for a pair's last trade or daily open and close. A
-            pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
-            `noncanonical_symbols` instead, or raises when passed in code.
-
-            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a pair the list doesn't hold is one
-            Massive has no data for: a stream keeps its other pairs and lists the skipped ones
-            in its `m.streams()` row's `Error`, until a live table's rows are deleted; a
-            `poll()` lists the pair in `Error`; and a `fetch()` of a live table shows it `DONE`
-            with 0 rows in `m.symbol_reads()`. A stream or `fetch()` whose pairs are all skipped
-            opens and gives no rows. A pair the library couldn't look up, because the list
-            couldn't be read, is not skipped when you pass it in code: a stream raises that
-            read's error at the call. From a table, it stays skipped in a stream, which looks it
-            up again when its row is added again, and a `fetch()` of a live table marks it
-            `FAILED`. When no pair of a
-            stream or static `fetch()` can be split because the list can't be read, a stream
-            raises that read's error at the call, and a `fetch()` fails its table, or raises
-            with `wait=True`.
-        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
-            can't read. Defaults to `LOG`.
-
-            Leave it at `dm.OnError.LOG` so the row stays and shows Massive's text, or set
-            `dm.OnError.RAISE` to stop at the first one. Such a symbol is a library bug; to
-            report it, see
+            Such a symbol is a library bug; to report it, see
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
+            Leave it at `dm.OnError.LOG` so the row stays, with a null `Symbol` and Massive's
+            text in a `RawSymbol` column. Under `dm.OnError.RAISE` the table has no `RawSymbol`
+            column.
 
-            - `dm.OnError.LOG` keeps the row with a null `Symbol`, puts Massive's text in a
-              `RawSymbol` column, and logs an error naming it.
-            - `dm.OnError.IGNORE` does the same without the error: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails the call or stream that received it, naming the text, and
-              the table has no `RawSymbol` column.
-        unavailable_symbols: Decides what happens to a symbol Massive answers as not found, or one a
-            `poll()` can't request with the arguments you gave it. Defaults to `LOG`.
+            A crypto pair that Massive lists with two currencies that don't join to its ticker
+            is unreadable too, and gets no rows.
+        unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
+            answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
+            `LOG`.
 
-            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong and the read
-            should stop.
+            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong.
 
-            - `dm.OnError.LOG` leaves the symbol out, keeps the others, and logs a warning
-              naming it.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails a `poll()`, `fetch()`, or `history()` table with
-              `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
-              A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
-              `m.symbol_reads()` and reads the others.
-
-            Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
-            also one the poll can't read, such as a crypto pair in an indicator poll with
-            `adjusted=False`. Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a `poll()` table
-            lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
-            a `dm.PollMode.REPLACE` poll drops its rows.
+            A symbol Massive answers with no rows and no error simply has no rows. In a
+            `poll()`, this setting also covers a symbol the poll can't request with the
+            arguments you gave it, such as a crypto pair in an indicator poll with
+            `adjusted=False`.
         malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
             readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
             Defaults to `LOG`.
@@ -484,7 +437,6 @@ class MassiveConfig:
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
     noncanonical_symbols: OnError = OnError.LOG
-    unlisted_symbols: OnError = OnError.LOG
     unreadable_symbols: OnError = OnError.LOG
     unavailable_symbols: OnError = OnError.LOG
     malformed_rows: OnError = OnError.LOG
@@ -493,8 +445,8 @@ class MassiveConfig:
     def __post_init__(self) -> None:
         """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
 
-        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
-        `unavailable_symbols`, `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
+        A `noncanonical_symbols`, `unreadable_symbols`, `unavailable_symbols`,
+        `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
         `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
         not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
         `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
@@ -564,7 +516,6 @@ class MassiveConfig:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
-        _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
         _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
         _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
         _require_enum(self.malformed_rows, OnError, "malformed_rows")
@@ -1258,8 +1209,8 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
 def _on_error(node: yaml.Node) -> OnError:
     """Convert the word of a setting of what to do on an error: `raise`, `log`, or `ignore`.
 
-    The settings are `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`,
-    `unavailable_symbols`, `malformed_rows`, and `refused_venues` (`_word`).
+    The settings are `noncanonical_symbols`, `unreadable_symbols`, `unavailable_symbols`,
+    `malformed_rows`, and `refused_venues` (`_word`).
 
     Args:
         node: The value's node.
@@ -1439,7 +1390,6 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "s3_endpoint_url": _text,
     "s3_bucket": _text,
     "noncanonical_symbols": _on_error,
-    "unlisted_symbols": _on_error,
     "unreadable_symbols": _on_error,
     "unavailable_symbols": _on_error,
     "malformed_rows": _on_error,
@@ -1637,15 +1587,12 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "noncanonical_symbols": _Example(
         OnError.RAISE, "A watchlist value that isn't Massive's exact ticker: log, ignore, or raise."
     ),
-    "unlisted_symbols": _Example(
-        OnError.LOG, "A watchlist crypto pair that Massive doesn't list: log, ignore, or raise."
-    ),
     "unreadable_symbols": _Example(
         OnError.LOG,
         "A symbol in Massive's data that the library can't read: log, ignore, or raise.",
     ),
     "unavailable_symbols": _Example(
-        OnError.LOG, "A symbol Massive answers as not found: log, ignore, or raise."
+        OnError.LOG, "A symbol Massive has no data for: log, ignore, or raise."
     ),
     "malformed_rows": _Example(
         OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
@@ -1848,7 +1795,6 @@ def _value_forms() -> dict[str, str]:
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",
         "max_concurrency": "A positive whole number, such as `4`",
         "noncanonical_symbols": error_words,
-        "unlisted_symbols": error_words,
         "unreadable_symbols": error_words,
         "unavailable_symbols": error_words,
         "malformed_rows": error_words,

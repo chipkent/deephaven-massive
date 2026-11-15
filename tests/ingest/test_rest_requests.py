@@ -507,7 +507,7 @@ def test_symbol_request_fills_a_pair_with_its_two_currencies() -> None:
     path = _rest_path(CRYPTO_LAST_PATH)
     assert rest_requests._symbol_request(
         CRYPTO_LAST, "X:BTCUSD", path, targets=["from"], param=None, split=split_pair
-    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {})
+    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {}, None)
 
 
 def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
@@ -521,4 +521,4 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     path = _rest_path("/v2/reference/news")
     assert rest_requests._symbol_request(
         news, "AAPL", path, targets=[], param="ticker", split=split_pair
-    ) == ("AAPL", {}, {"ticker": "AAPL"})
+    ) == ("AAPL", {}, {"ticker": "AAPL"}, None)

@@ -28,14 +28,11 @@ from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import (
-    BrokenGuaranteeError,
     MassiveError,
-    UnlistedPairError,
     every_symbol_failed,
     failure_text,
     raises_through,
 )
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -355,17 +352,6 @@ class Query:
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
 
-    @property
-    def _splits_pairs_at_call(self) -> bool:
-        """True when a crypto pair Massive's crypto ticker list does not hold raises at the call.
-
-        So it does for a pair passed in code under `MassiveConfig.unlisted_symbols=RAISE`;
-        under `LOG` and `IGNORE` the read leaves such a pair out, and a table's pair is split
-        when the read reads the table.
-        """
-        in_code = not isinstance(self._request.symbols, SymbolTable)
-        return in_code and effect_of(self._core.config.unlisted_symbols).fails
-
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
 
@@ -419,10 +405,7 @@ class Query:
     def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...], *, verb: str) -> FirstRead:
         """Read the call-time symbols of a followed `history()` or `fetch()` now, as one read.
 
-        The read of `wait=True`, on the caller thread. A crypto pair Massive's crypto ticker
-        list does not hold raises its error under `MassiveConfig.unlisted_symbols=RAISE`;
-        under `LOG` and `IGNORE` the read gives it no rows, as a ticker with no data, so it is
-        no failure here.
+        The read of `wait=True`, on the caller thread.
 
         Args:
             plan: How the symbols are read.
@@ -433,12 +416,9 @@ class Query:
             Each symbol's outcome, with when the read began and how long it took.
 
         Raises:
-            BrokenGuaranteeError: If the read hands on a pair its list does not hold under
-                `unlisted_symbols` `LOG` or `IGNORE`, a defect of the library.
             MassiveError: The first symbol's error, retryable only when every symbol's is,
-                when every symbol failed; under `unlisted_symbols=RAISE`, the first unlisted
-                pair's. A failure of every symbol alike (a rejected key, a closed
-                session) propagates from the read.
+                when every symbol failed. A failure of every symbol alike (a rejected key, a
+                closed session) propagates from the read.
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
@@ -448,18 +428,6 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        pairs = [
-            name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
-        ]
-        if pairs:
-            setting = self._core.config.unlisted_symbols
-            if not effect_of(setting).fails:
-                # Under LOG and IGNORE the read gives such a pair no rows instead of a failure.
-                raise BrokenGuaranteeError(
-                    f"the first read handed on a crypto pair its list does not hold under "
-                    f"unlisted_symbols={setting.name}: {failed[pairs[0]].error}"
-                ) from failed[pairs[0]].error
-            raise failed[pairs[0]].error
         if len(failed) == len(call_time):
             first = every_symbol_failed([failed[name].error for name in call_time])
             raise first from failed[call_time[0]].error
