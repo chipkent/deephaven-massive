@@ -9,26 +9,29 @@ against this standard. Docstrings follow the `writing-docstrings` skill, which h
 editor grade a public docstring as reference text. PR descriptions follow
 [`pull-requests.md`](pull-requests.md).
 
-The bar is a page an O'Reilly development editor would send to print, and that every reader
-finishes thinking the library is simple. The library is simple: one pattern, a session, a
-query, and a method that returns a Deephaven table. A reader who comes away thinking it's hard
-was misled by the page.
+The bar is a page an O'Reilly development editor would send to print. That editor checks
+organization, clarity, concision, level of detail for the reader, and length, in that order;
+correct sentences come last. Every reader finishes thinking the library is simple, because it
+is: a session, a query, and a method that returns a Deephaven table. A reader who comes away
+thinking it's hard was misled by the page. [How an editor writes](#method) is the method, and
+it applies to every text an agent writes, not only user pages.
 
 Contents:
 
 1. [This project](#this-project): readers, pains, owner requirements, page map, install facts,
    teaching plan
-2. [Facts need sources](#accuracy)
-3. [Scope: only what the reader needs here](#placement)
-4. [The hook](#hook)
-5. [Headings and example titles](#headings)
-6. [Teaching with examples](#teaching)
-7. [Sentences](#sentences)
-8. [AI tells](#ai-tells)
-9. [Terminology](#terminology)
-10. [Section models](#models)
-11. [Anchors](#anchors)
-12. [Grading and the pass bar](#rubric)
+2. [How an editor writes](#method): the eight rules and the budgets
+3. [Facts need sources](#accuracy)
+4. [Scope: only what the reader needs here](#placement)
+5. [The hook](#hook)
+6. [Headings and example titles](#headings)
+7. [Teaching with examples](#teaching)
+8. [Sentences](#sentences)
+9. [AI tells](#ai-tells)
+10. [Terminology](#terminology)
+11. [Section models](#models)
+12. [Anchors](#anchors)
+13. [Grading and the pass bar](#rubric)
 
 <a id="this-project"></a>
 
@@ -200,6 +203,111 @@ The owner's decisions behind it:
   making the live tables it stops, and says to open a new session after closing ("the close
   example could have a note about needing to recreate the session to run other examples").
 
+<a id="method"></a>
+
+## How an editor writes
+
+Correct sentences are not enough. A page can be free of every tell and still be unreadable,
+because it is organized for the code and not for the reader. These eight rules are what the
+grader checks first.
+
+### Eight rules
+
+1. **Write for the reader's next action.** Name the reader and what they will do after
+   reading: set a value, fix a row, decide to merge, call a method. Every sentence serves that
+   action. What the code does on the way is mechanism, and mechanism is cut unless the reader
+   acts on it.
+
+2. **Rule first, then the exception.** State the general rule in one short sentence. Then the
+   exception a reader can actually hit, in its own sentence. Never write out a decision tree
+   as prose: "A, and B when C, or D unless E" is a table or three sentences. A case that
+   belongs to another subject moves there, with a link. A case nobody hits is cut.
+
+3. **One case per sentence.** One subject, one verb, one case. Joins that smuggle a second
+   case into a sentence: ", and ... when", ", or ... unless", "; ", ": ", "as X does", "X,
+   say", "until Y". Each is a place to end the sentence.
+
+4. **Three or more parallel cases are a list or a table**, never a paragraph. Term and
+   definition: a list with the term first, as O'Reilly's variable list. Steps: a numbered
+   list. Symptom and fix, before and after, setting and effect: a table with one case per row.
+
+5. **Show, then tell.** Where a reader could misread a rule, give the example before the rule,
+   or the before-and-after. Say why, not only what: "so a table never fails over one bad row."
+
+6. **Use the reader's word, and define any other at first use.** Massive's word for its data,
+   Deephaven's for tables, Python's for Python, and code font for every value, `DEBUG`
+   included. No name coined inside a PR or a plan, no decision or item number in place of the
+   fact. If a term needs defining and the reader won't meet it again, don't use it.
+
+7. **Say it once.** A fact lives on one page, in one sentence. Say it again only through a
+   different channel: an example, a table, a comment in code.
+
+8. **Read it aloud.** If you'd stop for breath mid-sentence, or you wouldn't say it to a
+   colleague over coffee, rewrite it. Aim for sentences of 20 words or fewer on average, and
+   cut every sentence the reader wouldn't miss.
+
+### Budgets
+
+A length a text can't meet is a sign it holds the wrong facts, not a reason to compress.
+
+- A setting's reference entry: the rule, the values, where to see the effect, and the one
+  exception a user hits. About 120 words. It opens "Set `<value>` when ...", never "Change it
+  when ...".
+- A troubleshooting row: one symptom, one cause, one fix.
+- A verification item: three short sentences: what is unknown, what the library does
+  meanwhile, which test settles it.
+- A rule in `AGENTS.md`: the rule in one sentence, the reason in one.
+- A PR description: under about 600 words. The Summary is two to four sentences. "Check
+  before merging" is at most seven one-line items; an approval is a date and a quote of
+  fifteen words or fewer, plus the question it answers, in full. No history of the branch's earlier forms, and no table of
+  differences from `main`.
+
+### Examples
+
+Before, the entry for one setting (`docs/configuration.md`, 2026-11-15):
+
+> Under `log` or `ignore`, a pair the list doesn't hold is one Massive has no data for: a
+> stream keeps its other pairs and lists the skipped ones in its `m.streams()` row's `Error`,
+> until a live table's rows are deleted; a `poll()` lists the pair in `Error`; and a `fetch()`
+> of a live table shows it `DONE` with 0 rows in `m.symbol_reads()`. A stream or `fetch()`
+> whose pairs are all skipped opens and gives no rows. A pair the library couldn't look up,
+> because the list couldn't be read, is not skipped when you pass it in code: a stream raises
+> that read's error at the call. [...]
+
+Eleven cases in seven sentences, in the code's order, and no sentence states the rule. After:
+
+> A crypto pair that isn't on Massive's crypto ticker list is a pair Massive has no data
+> for. By default the library skips it and runs the rest of your pairs, so one bad pair never
+> stops a table. Set `raise` when a stream must not run without every pair you asked for.
+>
+> [the three values]
+>
+> To see which pairs were skipped, read the table's `Error` in `m.streams()`. [...]
+>
+> If Massive's ticker list itself can't be read, no pair can be checked, and the failed read
+> is the error. [...]
+
+The rule, then where to look, then the one exception, each its own paragraph.
+
+Before, a troubleshooting row:
+
+> The table skips a row that isn't Massive's exact ticker and lists it in `Error`. A crypto
+> stream does the same with a pair Massive doesn't list, and a `poll()` or `fetch()` gives that
+> pair no rows. In a watchlist made by `dm.canonicalize_symbols`, a row that didn't convert has
+> a null `Symbol`: every dataset skips it, and `Error` doesn't list it.
+
+After, as two rows, each with one symptom:
+
+> A symbol on your watchlist never appears | The row isn't Massive's exact ticker, so the
+> table skips it and names it in `Error`. | Fix the row. `symbols` shows Massive's spelling
+> for each asset class.
+>
+> A converted row never appears | `dm.canonicalize_symbols` couldn't convert it, so its
+> `Symbol` is null and every dataset skips it. | `watchlist.where("isNull(Symbol)")` lists
+> the rows to fix in the table you converted.
+
+The crypto case moved to its own row. The three symptoms stopped sharing one cell.
+
 <a id="accuracy"></a>
 
 ## Facts need sources
@@ -313,10 +421,11 @@ research (Sweller), Diátaxis tutorials, and the Rust book:
 
 ## Sentences
 
-- **Point first.** Open each section and paragraph with its point. A reader who reads only
-  first sentences should follow the page.
-- **One idea per sentence**, about 15 to 20 words on average. The subject and its verb sit
-  close together: more than about eight words between them is a digression.
+- **Rule first.** Open each section and paragraph with its rule, then the exception. A
+  reader who reads only first sentences should know what the library does.
+- **One case per sentence**, 20 words or fewer on average. The subject and its verb sit
+  close together. A second case joined by "and ... when", "or ... unless", a semicolon, or a
+  colon is a second sentence.
 - **State a choice up front.** "Create an environment with venv or uv:", then the two blocks
   side by side. Never "do A", other material, then "or you could do B".
 - **One topic per paragraph.** Every sentence's subject is about the paragraph's topic; a
@@ -329,18 +438,22 @@ research (Sweller), Diátaxis tutorials, and the Rust book:
 
 ## AI tells
 
-One tell proves nothing; readers hear a cluster. Structural tells are what made the owner call
-a page AI-written, and a word list can't see them, so check structure first:
+One tell proves nothing; readers hear a cluster. The owner calls two things AI-written: the
+lexical tells a word list finds, and precise, exhaustive prose that enumerates every case the
+code handles. The second passes every word check, so check structure first:
 
 | Tell | Test | Fix |
 |---|---|---|
 | Asides: appositives and parentheticals ("Massive (formerly Polygon.io)", "a watchlist, a table of symbols you edit,") | Delete the aside. Is the point intact? Does this reader need it here? | Delete it, or give it its own sentence where it's needed |
 | Stacked clauses: two or more of ", such as", ", which", ", including", "like" in one sentence | Count them | One per sentence |
+| Case stacking: "A, and B when C, or D unless E"; a semicolon or colon chain | Count the cases in the sentence | One case per sentence, or a table |
+| The code's order: cases listed in the order the implementation checks them, with no sentence stating the rule | Can the reader say the rule after the first sentence? | Rule first, then the exception a reader hits; cut the rest |
+| An enumerated paragraph: three or more parallel cases in prose | Count them | A list or a table |
 | A, digression, "or B" | Does an alternative come more than a sentence after its option? | State "A or B:" up front |
 | Topic drift | Underline each subject. Is each about the topic sentence? | Cut or move the sentence |
 | Repetition | A content word repeated in a heading or sentence; a phrase of four words or more reused on the page; a fact stated twice | Say it once |
 | Invented numbers | Can the number be traced to a source? | Cite it or cut it |
-| Caveat before the point | Does the paragraph open with "If", "On", "Once", or "Until"? | Point first |
+| Caveat before the point | Does the paragraph open with "If", "On", "Once", or "Until"? | Rule first |
 | Defensive justification | Would the reader act differently without the "because"? | Cut it |
 | Narrating code | Does the prose restate what the code says? | Say what to notice instead |
 

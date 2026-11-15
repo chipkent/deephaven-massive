@@ -35,9 +35,11 @@ The client follows the network rules the REST and WebSocket clients follow, from
   most `MAX_RETRIES` times, with every wait taken on the client's `Clock`: HTTP 500, 502,
   503 (S3's `SlowDown`), and 504, S3's `RequestTimeout` error (HTTP 400), a connection that
   cannot be made, is reset, or times out, and an error response whose body is cut short or
-  stalls. Each retry is logged at INFO and giving up at DEBUG. A TLS failure is never
-  retried, nor is a proxy's refusal of its credentials (HTTP 407: the same credentials would be
-  refused again, and a corporate proxy may lock the account).
+  stalls. Each retry is logged at INFO and giving up at DEBUG. A TLS certificate failure, a
+  certificate for another name included, is never retried; any other failed TLS handshake is
+  retried as a connection failure, as the REST and WebSocket clients retry it. Nor is a proxy's
+  refusal of its credentials retried (HTTP 407: the same credentials would be refused again, and
+  a corporate proxy may lock the account).
 - **Rereads.** A failure part-way through an object's body is not retried here: the reader has
   already handed blocks on, which the client cannot take back. The read fails and
   `FlatFile.dropped` says why; a caller that has kept the file's rows to itself can discard
@@ -105,8 +107,8 @@ from deephaven_massive._massive.net.errors import (
     WireEntitlementError,
     WireError,
     WireFailure,
+    is_certificate_failure,
     is_proxy_auth_failure,
-    is_tls_failure,
 )
 from deephaven_massive._massive.net.http import ca_file, https_proxy, proxy_credentials
 from deephaven_massive._massive.net.redaction import redact, without_userinfo
@@ -709,7 +711,7 @@ class FlatFileClient:
                 return _Retryable(refusal, cause)
             raise refusal from cause
         except BotoCoreError as error:
-            if is_tls_failure(error):
+            if is_certificate_failure(error):
                 raise WireError(
                     f"cannot {verb} {location}: TLS certificate verification failed for "
                     f"{self._host} ({self._clean(error)}); if a proxy or private CA signs it, set "
@@ -730,8 +732,9 @@ class FlatFileClient:
                     kind=WireFailure.LOCAL,
                 ) from error
             if isinstance(error, SSLError):
-                # Any other TLS failure (a protocol mismatch, a handshake the server ends) got
-                # no answer, as the REST client counts it, and is retried like one.
+                # Not a certificate failure, so it got no answer, as every client counts it, and
+                # is retried like one. This branch only words the message: botocore's `SSLError`
+                # is a `ConnectionError`, which the next branch would retry anyway.
                 return _Retryable(
                     WireError(
                         f"cannot {verb} {location}: TLS failed for {self._host} "

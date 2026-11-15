@@ -59,8 +59,8 @@ from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
     WireFailure,
+    is_certificate_failure,
     is_proxy_auth_failure,
-    is_tls_failure,
     linked_errors,
 )
 from deephaven_massive._massive.net.http import (
@@ -935,7 +935,7 @@ class RestClient:
                 refusal of its credentials (HTTP 407 to the tunnel request): neither changes
                 on a retry, and repeating refused credentials can lock a corporate account.
         """
-        if is_tls_failure(error):
+        if is_certificate_failure(error):
             raise WireError(
                 f"GET {request.target}: TLS certificate verification failed for "
                 f"{self._host} ({error}); if a proxy or private CA signs it, set "

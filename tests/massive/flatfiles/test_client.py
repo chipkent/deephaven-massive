@@ -1310,6 +1310,27 @@ def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
     assert (tls_server.requests, clock.waits) == ([], [])
 
 
+def test_a_certificate_for_another_name_fails_at_once_over_the_network(
+    *, tls_server: FakeRestServer, trusted: pytest.MonkeyPatch
+) -> None:
+    # The certificate is trusted but names 127.0.0.1, not localhost. botocore leaves the name
+    # check to urllib3, which raises its own error rather than Python's, and that must fail at
+    # once as a certificate failure does, not be retried as a handshake that got no answer.
+    clock = FakeClock()
+    endpoint_url = tls_server.url.replace("127.0.0.1", "localhost")
+    client = make_client(endpoint_url=endpoint_url, clock=clock)
+    try:
+        with pytest.raises(
+            WireError,
+            match=r"certificate verification failed for localhost \(.*\); .*SSL_CERT_FILE",
+        ) as info:
+            client.open(KEY)
+    finally:
+        client.close()
+    assert info.value.kind is WireFailure.LOCAL
+    assert (tls_server.requests, clock.waits) == ([], [])
+
+
 def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_network(
     *,
     tls_server: FakeRestServer,

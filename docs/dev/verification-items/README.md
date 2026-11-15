@@ -27,7 +27,9 @@ Date: YYYY-MM-DD
 
 Status: <status>
 
-<body: what is unverified, the handling until it is settled, and the live test that settles it>
+<body: three short paragraphs. "Unknown:" what is unverified. "Meanwhile" what the library
+does until it is settled. "Settled by" or "Verified by" the test, its file, and what it
+records>
 ```
 
 `Status:` is one of:
