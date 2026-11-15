@@ -1,20 +1,12 @@
 # Pull request titles and descriptions
 
-**Every PR description reads as if an O'Reilly technical editor wrote it, and a reader
-skimming only the headings, the first words of each bullet, and the table rows comes away with
-every fact that matters**: what changed, why, the decisions, how it was checked, and what is
-left. Nothing important hides in a paragraph. The description holds every fact the reader
-needs to understand or decide, and nothing they don't.
-
-An editor's text has:
-
-- precise, plain words;
-- every term defined, or avoided;
-- one name for each thing, used consistently;
-- active voice;
-- one idea per sentence and per bullet;
-- no filler, hype, or hedging;
-- correct grammar and parallel structure.
+**A PR description gives the owner what it takes to decide whether to merge, and nothing
+else**: what changes for a user, what the owner approved and where, the merge order, what
+was checked and what wasn't, and what is left. A reader skimming the headings, the first
+words of each bullet, and the table rows gets all five. It reads as an O'Reilly editor's
+work: [How an editor writes](user-docs.md#method) applies, and its budget is under about
+600 words. A description that can't fit holds facts the owner doesn't need, or describes two
+PRs.
 
 The owner reads every description to decide whether to merge; a reviewer with no context and a
 user reading months later must both understand it. Issue bodies and agents' reports meet the
@@ -67,14 +59,11 @@ Prefer scannable structure: short headings, bullets, numbered steps, and tables.
 one idea, short, and parallel to its neighbors. Use a paragraph only where prose reads better:
 the Summary, or one decision that needs a sentence of reasoning. No walls of text.
 
-Every fact the reader needs to understand or decide, and nothing they don't: cut padding,
-repetition, narration, and true details the reader has no use for.
-
 ### Sections
 
 | Section | Content |
 |---|---|
-| Summary | What the PR does and why, in its first sentences, for a reader with no context; then, if needed, a **Check before merging** list. No file or internal names. |
+| Summary | What the PR does and why, in two to four sentences, for a reader with no context; then, if needed, **Check before merging**: at most seven one-line items. An approval is the owner's date and a quote of fifteen words or fewer, plus the question it answers, in full. No file or internal names, no history of the branch, no table of differences from `main`. |
 | Why | The problem, with a concrete example a user would hit. |
 | What changes | One bullet per user-visible change, with before and after wherever the API or a result changes. |
 | Decisions | Each choice the PR makes or applies, and each departure from the plan, with its reason. A table works well. "None" when there are none. |
@@ -104,6 +93,9 @@ Then `Closes #<issue>` on its own line, then the required footer.
 | Restating the docs | The setup steps from the releasing page, pasted in. | "Steps: [releasing page](…)." |
 | Chained sentences | "It reads the version, refuses if malformed (a version is …), runs the tests, and …" | Separate sentences, or a numbered list. |
 | Undecodable references | Review labels (H1, M2), agent names, decision numbers, counts that will go stale. | The fact itself, in words. |
+| Branch history | "The earlier form of this PR removed the grammar; the owner's rulings restore each." | The description describes the branch as it is; what an earlier push did is not a fact about it. |
+| Quote walls | Three sentences of the owner's words under one bullet, repeated in a table below. | One quote per approval, fifteen words or fewer, once; a question it answers is quoted in full. |
+| Case stacking | "A stream raises at the call, and a `fetch()` fails its table, or raises with `wait=True`, unless no pair split." | One case per sentence, or a before-and-after table. |
 
 A bold label on a one-line bullet (`- **Dry run:** shows the notes without releasing.`) is
 fine. A bold label heading a paragraph is a wall in disguise.
@@ -147,21 +139,21 @@ Run it on every draft, and before every push that changes the PR:
 1. **Skim only the headings and the first words of each bullet: do you have every fact?** What
    changed, why, the decisions, how it was checked, what is left. Promote anything buried in a
    paragraph to a bullet or a row.
-2. **Read it as an O'Reilly technical editor would, and fix what they'd mark**: each item of
-   the list at the top of this page.
+2. **Read it as an O'Reilly technical editor would, and fix what they'd mark** under
+   [How an editor writes](user-docs.md#method) and [Sentences](user-docs.md#sentences).
 3. **Read the first three sentences alone.** A reader with no context can say what the PR does
    and why.
 4. **A reviewer new to the PR knows why it exists and can follow every section without
    asking.**
-5. **Every fact the reader needs, and nothing they don't.** Delete every sentence that is
-   padding, repetition, narration, or a detail the reader has no use for (a private name, a
-   test count); keep every fact the reader needs to understand or decide, however complex the
-   PR.
+5. **Only what the merge decision needs.** Delete every sentence that is padding, repetition,
+   narration, branch history, or a detail the owner has no use for (a private name, a test
+   count, an argument for a choice the owner already made). Over about 600 words, something
+   here doesn't belong, or this is two PRs.
 6. **Sweep for the banned patterns** above, starting with a grep for narration and hedges, and
    fix every hit that is one:
 
    ```bash
-   grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran' <file>
+   grep -nE '\b(I|we|We)\b|[Nn]ote that|should probably|might|[Ff]irst version|then re-?ran|earlier form|restored|back to .main.|, or [a-z]+ when|, unless' <file>
    ```
 
 7. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
