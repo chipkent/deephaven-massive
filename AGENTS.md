@@ -147,6 +147,16 @@ These protect the owner's repository, money, and secrets.
   and what the data is. The library owns everything between the user and Massive: building
   correct requests, connections, rate limits, retries, converting data faithfully into tables,
   and telling the user clearly what happened. So:
+  - **No code or live test knows Massive's plan tiers** (decision 114). None names, probes,
+    or branches on Basic, Starter, Developer, Advanced, or Business, and that includes test
+    markers, request caps, and messages. Everything works whatever plans the owner or a user
+    holds, and keeps working when they change plans. A request is sent, and an entitlement
+    refusal is Massive's answer, reported as Massive's. A live test that gets one skips and
+    quotes it. User docs may describe Massive's offerings when the text is easy to update.
+    Code written before this rule, namely the live-test harness's plan probe and tier markers
+    (`docs/live-tests.md`) and the settings whose docs name a tier, such as
+    `rest_basic_subscriptions`, changes only in a PR made for that purpose, with the owner's
+    approval of each public change. Copy none of it into new code.
   - **Massive's answer is the error.** The library sends the request and reports Massive's
     refusal as Massive's (its status and text), naming the call that caused it; it never
     reinterprets or guesses. A ticker Massive has no data for is not an error: it gives no
