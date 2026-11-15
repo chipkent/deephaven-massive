@@ -55,7 +55,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -317,8 +317,17 @@ def class_spelling_reason(
         none (stocks, futures); otherwise the reason, such as `lacks the O: prefix of every
         options contract ticker, such as 'O:AAPL250117C00150000'`.
     """
-    if not isinstance(asset_class, AssetClass) or asset_class not in _PREFIXED:
-        return None
+    if asset_class is None or asset_class is ClassFromPrefix.ANY:
+        return None  # a table of underlyings or product codes, or a dataset of every class
+    if asset_class is AssetClass.STOCKS or asset_class is AssetClass.FUTURES:
+        return None  # their tickers carry no prefix
+    if not (
+        asset_class is AssetClass.OPTIONS
+        or asset_class is AssetClass.INDICES
+        or asset_class is AssetClass.FOREX
+        or asset_class is AssetClass.CRYPTO
+    ):
+        assert_never(asset_class)  # a new class needs its spelling here
     prefix, name, example = _PREFIXED[asset_class]
     if not symbol.startswith(prefix):
         return f"lacks the {prefix} prefix of every {name} ticker, such as {example!r}"

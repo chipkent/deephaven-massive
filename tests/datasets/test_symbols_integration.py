@@ -254,10 +254,12 @@ def test_massive_answers_tickers_in_another_case(
     """What Massive answers to tickers in another case than its own.
 
     Sends the unified snapshot of `AAPL`, `aapl`, `KIMpL` (a Kimco preferred share), `kimpl`,
-    and `BRK.B` in one request, and the previous day bar of `aapl`. Reading it: three snapshot
-    rows, one per ticker as Massive writes it, and an empty or refused `aapl` bar mean Massive
-    reads case, so `aapl` names no ticker and gives no rows, as the library assumes; five
-    rows, or a bar for `aapl`, mean Massive folds case, and `aapl` reads AAPL's data.
+    and `BRK.B` in one request, and the previous day bar of `aapl`. The snapshot answers a
+    ticker it does not hold with a row carrying an `error` field, so the verdict counts only
+    rows without one. Reading it: three such rows, and an empty or refused `aapl` bar, mean
+    Massive reads case, so `aapl` names no ticker and gives no rows, as the library assumes;
+    five such rows, or a bar for `aapl`, mean Massive folds case, and `aapl` reads AAPL's
+    data.
     """
     assert bad_values.ask_all(live_rest, bad_values.TICKER_CASE, evidence)
 

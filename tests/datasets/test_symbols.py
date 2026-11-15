@@ -502,3 +502,6 @@ def test_a_class_with_a_prefix_needs_it_and_others_need_none() -> None:
     # Stocks, futures, a dataset of every class, and a table of underlyings need none.
     for none_needed in (STK, FUT, ClassFromPrefix.ANY, None):
         assert class_spelling_reason(none_needed, "AAPL") is None
+    # A class no case names fails loudly, never passes unchecked.
+    with pytest.raises(AssertionError):
+        class_spelling_reason("bonds", "AAPL")  # type: ignore[arg-type]  # the point: refused at run time

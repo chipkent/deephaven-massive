@@ -782,9 +782,13 @@ def _symbol_requests() -> dict[str, tuple[BadRequest, ...]]:
                 names={},
                 query={"ticker.any_of": list(_CASED)},
                 bucket="stocks",
-                match=lambda row: row.get("ticker") in _CASED,
-                matching="naming a ticker exactly as sent",
-                note=lambda row: f"row ticker {row.get('ticker')!r}",
+                # A ticker Massive does not hold comes back as a row with an `error` field.
+                match=lambda row: row.get("ticker") in _CASED and "error" not in row,
+                matching="naming a ticker exactly as sent, without an error",
+                note=lambda row: (
+                    f"row ticker {row.get('ticker')!r}, error {row.get('error')!r}, "
+                    f"message {row.get('message')!r}"
+                ),
             ),
             BadRequest(
                 label="previous day bar of aapl",
