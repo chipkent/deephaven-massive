@@ -85,6 +85,20 @@ write the values shown here. In code, pass the matching Python value: `{dm.Subsc
 for `[stocks]`, `dm.OnError.RAISE` for `raise`, and
 `{dm.AssetClass.INDICES: "business.massive.com"}` for the `websocket_hosts` mapping above.
 
+<a id="on-error"></a>
+
+### What `log`, `ignore`, and `raise` do
+
+Some settings decide what one bad symbol or row does. By default the library skips it and
+keeps going, so one problem never stops a table. Each such setting covers one cause and takes
+one of three values:
+
+| Value | What it does |
+|---|---|
+| `log` | Skips the symbol or row, keeps the rest, and logs a warning naming it once. A live table also names it in its `Error` in `m.streams()`. |
+| `ignore` | Does the same with no warning: only the `DEBUG` log names it. |
+| `raise` | Fails whatever met it. A call raises the error when it meets it at the call or with `wait=True`, and a live table fails. A watchlist read by `fetch()` or `history()` marks only that symbol `FAILED` in `m.symbol_reads()`. |
+
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
 <a id="example-settings-file"></a>
@@ -115,13 +129,10 @@ max_concurrency: 8  # the default
 # A watchlist value that isn't Massive's exact ticker: log, ignore, or raise.
 noncanonical_symbols: raise
 
-# A watchlist crypto pair that Massive doesn't list: log, ignore, or raise.
-unlisted_symbols: log  # the default
-
 # A symbol in Massive's data that the library can't read: log, ignore, or raise.
 unreadable_symbols: log  # the default
 
-# A symbol Massive answers as not found: log, ignore, or raise.
+# A symbol Massive has no data for: log, ignore, or raise.
 unavailable_symbols: log  # the default
 
 # A flat-file line that isn't a readable row: log, ignore, or raise.
@@ -170,10 +181,9 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
 | `max_concurrency` | Sets how many REST requests the session runs at a time, and separately how many flat files it reads at a time. | A positive whole number, such as `4` | `8` |
-| `noncanonical_symbols` | Decides what happens when a watchlist or other table you pass holds a value that isn't Massive's exact ticker or futures product code: `SPX` for `I:SPX`, say. | `log`, `ignore`, or `raise` | `log` |
-| `unlisted_symbols` | Decides what happens when a crypto pair you pass, in code or in a watchlist or other table, isn't on Massive's crypto ticker list, or is one the library couldn't look up there. | `log`, `ignore`, or `raise` | `log` |
-| `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read. | `log`, `ignore`, or `raise` | `log` |
-| `unavailable_symbols` | Decides what happens to a symbol Massive answers as not found, or one a `poll()` can't request with the arguments you gave it. | `log`, `ignore`, or `raise` | `log` |
+| `noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
+| `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read as Massive's ticker. | `log`, `ignore`, or `raise` | `log` |
+| `unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
 | `malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
 | `refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. A call's own `refused_venues` argument overrides it. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
@@ -260,79 +270,32 @@ subscription still keeps to five requests a minute.
 
 #### noncanonical_symbols
 
-Set `raise` to catch a typo in a watchlist at once.
+Set `raise` to catch a typo in a watchlist at once. A row you fix is read
+like a new one.
 
-- `log` skips the row and logs a warning naming the value.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` raises `ValueError` for a bad row at the call, and fails a live
-  table when one is added later.
-
-Under `log` or `ignore`, a stream or `poll()` table lists the
-skipped values in its `m.streams()` row's `Error` until you fix or delete the row. A
-fixed row is read like a new one.
-
-Under any setting, a table whose rows are all bad raises `ValueError` at the call. So
-does a symbol passed in code, as text or a list, that isn't Massive's exact ticker.
-
-#### unlisted_symbols
-
-Set `raise` when a stream must not run without every pair you asked for.
-
-- `log` skips the pair and logs a warning naming it.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` makes a stream fail with `MassiveError` at the call, and fails
-  a `fetch()` or `poll()` table, or a live table when such a pair is added later.
-  `fetch(wait=True)` raises it at the call.
-
-It applies to streams and to calls for a pair's last trade or daily open and close. A
-pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
-`noncanonical_symbols` instead, or raises when passed in code.
-
-Under `log` or `ignore`, a pair the list doesn't hold is one
-Massive has no data for: a stream keeps its other pairs and lists the skipped ones
-in its `m.streams()` row's `Error`, until a live table's rows are deleted; a
-`poll()` lists the pair in `Error`; and a `fetch()` of a live table shows it `DONE`
-with 0 rows in `m.symbol_reads()`. A stream or `fetch()` whose pairs are all skipped
-opens and gives no rows. A pair the library couldn't look up, because the list
-couldn't be read, is not skipped when you pass it in code: a stream raises that
-read's error at the call. From a table, it stays skipped in a stream, which looks it
-up again when its row is added again, and a `fetch()` of a live table marks it
-`FAILED`. When no pair of a
-stream or static `fetch()` can be split because the list can't be read, a stream
-raises that read's error at the call, and a `fetch()` fails its table, or raises
-with `wait=True`.
+A symbol you pass in code, as text or a list, is checked at the call instead: any
+other spelling raises `ValueError`, whatever this setting says. So does a table
+whose every row is bad.
 
 #### unreadable_symbols
 
-Leave it at `log` so the row stays and shows Massive's text, or set
-`raise` to stop at the first one. Such a symbol is a library bug; to
-report it, see
+Such a symbol is a library bug; to report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
+Leave it at `log` so the row stays, with a null `Symbol` and Massive's
+text in a `RawSymbol` column. Under `raise` the table has no `RawSymbol`
+column.
 
-- `log` keeps the row with a null `Symbol`, puts Massive's text in a
-  `RawSymbol` column, and logs an error naming it.
-- `ignore` does the same without the error: only the `DEBUG` log names it.
-- `raise` fails the call or stream that received it, naming the text, and
-  the table has no `RawSymbol` column.
+A crypto pair that Massive lists with two currencies that don't join to its ticker
+is unreadable too, and gets no rows.
 
 #### unavailable_symbols
 
-Set `raise` when a missing symbol means your list is wrong and the read
-should stop.
+Set `raise` when a missing symbol means your list is wrong.
 
-- `log` leaves the symbol out, keeps the others, and logs a warning
-  naming it.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
-- `raise` fails a `poll()`, `fetch()`, or `history()` table with
-  `MassiveError`, and makes `fetch(wait=True)` or `history(..., wait=True)` raise it.
-  A `fetch()` or `history()` of a live table instead marks the symbol `FAILED` in
-  `m.symbol_reads()` and reads the others.
-
-Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
-also one the poll can't read, such as a crypto pair in an indicator poll with
-`adjusted=False`. Under `log` or `ignore`, a `poll()` table
-lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
-a `dm.PollMode.REPLACE` poll drops its rows.
+A symbol Massive answers with no rows and no error simply has no rows. In a
+`poll()`, this setting also covers a symbol the poll can't request with the
+arguments you gave it, such as a crypto pair in an indicator poll with
+`adjusted=False`.
 
 #### malformed_rows
 

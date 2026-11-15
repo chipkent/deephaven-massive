@@ -147,23 +147,23 @@ These protect the owner's repository, money, and secrets.
   and what the data is. The library owns everything between the user and Massive: building
   correct requests, connections, rate limits, retries, converting data faithfully into tables,
   and telling the user clearly what happened. So:
-  - **Massive's answer is the error.** The library sends the request and reports Massive's
-    refusal as Massive's (its status and text), naming the call that caused it; it never
-    reinterprets or guesses. A ticker Massive has no data for is not an error: it gives no
-    rows, as Massive answered, and `m.symbol_reads()` shows it; the library never looks a
-    ticker up to second-guess it. Users check Massive's lists (`m.reference.tickers()`,
-    `m.options.contracts()`, `m.futures.contracts()`).
-  - **Symbols are Massive's canonical tickers** (decision 58): a symbol in code that is not
-    in Massive's canonical form for its class raises `ValueError` naming the form to write or
-    the converter that gives it, and such a table row follows `noncanonical_symbols`. Massive
-    answers a ticker it doesn't know with an empty 200, not an error (verification item 62),
-    and a flat-file read's filter for it matches nothing, so the library identifies a
-    non-canonical spelling as bad itself. The grammar is held to Massive's own ticker lists: a
-    listed form it refuses is a library defect to fix, never a reason to send unchecked text.
-  - **The library refuses any other value itself only** when it is the wrong Python type, when
-    the library cannot express it in a request, or when sending it would return wrong data
-    with no error (each such check says which, with its evidence). Beyond its tickers'
-    canonical forms, the library never encodes Massive's data particulars.
+  - **Massive's answer is the error.** The library reports Massive's refusal as Massive's: its
+    status, its text, and the call that caused it. It never reinterprets or guesses.
+  - **A ticker Massive has no data for gives no rows** (decision 104). It is not an error,
+    however the library learns it, so every transport and verb treats it alike under one
+    setting, `unavailable_symbols`. The library never looks a ticker up to second-guess it.
+    Users check Massive's own lists: `m.reference.tickers()`, `m.options.contracts()`, and
+    `m.futures.contracts()`.
+  - **A symbol is Massive's canonical ticker** (decision 58). In code, any other spelling
+    raises `ValueError` naming the form to write or the converter that gives it. In a table,
+    the row follows `noncanonical_symbols`. The library checks spelling itself because Massive
+    won't: it answers an unknown ticker with an empty 200 (verification item 62). The spelling
+    rules follow Massive's own ticker lists, so a listed form the library refuses is a library
+    defect.
+  - **The library refuses any other value only** when it is the wrong Python type, when the
+    library can't express it in a request, or when sending it would return wrong data with no
+    error. Each such check says which, with its evidence. Beyond ticker spelling, the library
+    never encodes Massive's data particulars.
   - **The library's own errors are its own:** a transport failure after retries, a closed
     session, a misuse of the API, or a library defect, each saying it is the library's.
 - **Supply Massive's data; never repair it.** Users must see what Massive sent: convert

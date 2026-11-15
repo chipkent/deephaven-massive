@@ -1,63 +1,31 @@
-# 104. A canonical ticker is sent as written; any other form is refused with the fix, and a ticker with no data gives no rows
+# 104. A symbol is Massive's canonical ticker or is refused, and a ticker with no data gives no rows
 
 Date: 2026-11-11
 
 Status: accepted
 
-The owner, on 2026-11-11: "I agree on not erroring on missing symbols. That should be a significant
-simplification." On 2026-11-14: "Shouldn't it accept validly specified Massive symbols, and isn't
-KIMpL such a valid symbol?", "crypto pair: do (a), refuse." for a pair written with a dash, and
-"a." for keeping the class-prefix check. On 2026-11-15, asked whether stock spellings such as
-`BRK-B`, `BRK/B`, `BRK B`, and `brk.b` should be refused or sent: "I bet that some of these forms
-are certainly not accepted formats by massive. If they are not caonical formats, they need to be
-rejected in the symbol validation. There could be an error scenario that indicates how they are
-handled, but they should be identified as bad. It seems like you are biasing to permitting known
-bad formats because you are not considering the response in the context of the error model." On
-the converters: "The converters should be strict, but they should possibly be part of the error
-model. Do they have an argument that indicates behavior on an error? Should they?", then "Q2: I
-think single-value converters should behave the same way. I don't see why you think it is a good
-API design if they are asymmetrical. Without the error handling option, you remove flexability for
-the end user.", and "By default a converter should raise, but there should be logging and silent
-modes that just return NULL. I think that is most consistent with the rest of the API." On a
-symbol Massive writes in a non-canonical form: "The tables this library publishes should have
-canonical names, even if that requires cleaning up what massive publishes. I should be told what
-they publish, if it is wrong so that a bug report can be submitted."
+The owner's intent: symbol handling follows a few general rules, and the same circumstances get
+the same behavior whatever the verb, the transport, or where the symbols came from.
 
-So decision 58 stands, as the owner set it on 2026-10-28: "only accept the cannonical form for
-everything". Every symbol in code or in a table is Massive's canonical ticker of its class, by its
-grammar, which case never folds (`KIMpL` passes; `kimpl`, `BRK-B`, `C:EUR-USD`, and `SPX` for
-an index are refused, each naming the ticker or the converter to write), and a listed form the
-grammar refuses is a library defect to fix (verification item 119). This amends the AGENTS.md
-rule decision 103 set, that the library refuses a value itself only with evidence that Massive
-answers it wrongly with no error: a ticker's spelling is refused by its class's canonical
-grammar, now a rule of its own in AGENTS.md ("Symbols are Massive's canonical tickers"), and
-decision 103 holds for every other value. A non-canonical value raises
-`ValueError` in code, and a table's row follows `MassiveConfig.noncanonical_symbols`. A canonical
-ticker is sent as written, and one Massive has no data for is no error: it gives no rows
-(verification item 62), the library never looks it up, and a watchlist read with `fetch()` or
-`history()` shows it in `m.symbol_reads()`. A `/` in a REST path is refused until item 115 is
-read. Every published `Symbol` is canonical: a row whose symbol the library cannot read back
-keeps a null `Symbol`, Massive's exact text in `RawSymbol`, and one WARNING naming that text, under
-`unreadable_symbols`, so the owner can report Massive's spelling (item 121 records the spellings
-Massive writes for share classes and preferreds). The converters are strict, and every one takes
-`on_error`: `RAISE`, the default, raises `ValueError`; `LOG` and `IGNORE` return None and log the
-value once; `dm.canonicalize_symbols` keeps its `LOG` default (decision 93) and takes its verdict
-and effect from the same functions, so a value converts, or is refused with one reason, the same
-way in a cell and in `canonical_symbol`.
+- **Form.** A symbol is Massive's canonical ticker for its class. Any other text is the user's
+  mistake: in code it raises `ValueError` naming the form to write or the converter, and in a
+  table the row follows `noncanonical_symbols`. The converters are strict: `RAISE` by default,
+  with `LOG` and `IGNORE` returning None (`dm.canonicalize_symbols` keeps `LOG`).
+- **Existence.** A canonical ticker Massive has no data for gives no rows, under one setting,
+  `unavailable_symbols`. A crypto pair Massive's crypto ticker list doesn't hold is the same
+  case as an HTTP 404: the list is only how the library learns it before sending.
+- **Reachability.** A request the library needs and cannot complete is a transport failure,
+  never "no data". An unreadable crypto ticker list fails a read as any failed request does,
+  and in a stream it is an outage: the pairs wait, retried on the reconnect backoff, until
+  `max_outage`.
+- **Read-back.** Every published `Symbol` is canonical; Massive's data the library can't read
+  is a library bug, under `unreadable_symbols`.
 
-Settled: a single-value converter (`dm.canonical_symbol` and every per-class and per-convention
-converter) defaults to `RAISE`. The owner, 2026-11-15: "By default a converter should raise, but
-there should be logging and silent modes that just return NULL." Only `dm.canonicalize_symbols`,
-which converts a whole table, defaults to `LOG`, so a skipped watchlist row's advice to run it
-also names `on_error=dm.OnError.RAISE` for a caller who fails on a bad row.
+Why: the library should not invent causes Massive doesn't have, and a user should be able to
+predict what happens from the cause alone.
 
-A crypto pair that Massive's crypto ticker list does not hold is a pair Massive has no data for:
-it follows `unlisted_symbols` whether passed in code or in a table, the one place decision 66's
-rule that a `str` or list in code always raises no longer applies. Under `LOG`, the default, a
-stream or read skips it and gives no rows, even when every pair is skipped; a followed read shows
-it `DONE` with 0 rows; a stream of a live table lists it in `m.streams()` `Error`. A list the
-library cannot read at all is not a missing pair: a stream keeps running without the unsplit
-pairs and looks them up again, as before. A call made while the list cannot be read raises the
-read's own error for any pair passed in code that it left unsplit, as before, so a passing
-failure never drops a pair for a stream's life, and for a table's rows when no pair could be
-split.
+Alternatives weighed: send any text and report Massive's answer (an unknown ticker gets an empty
+200, so a typo looks like a quiet day); convert common spellings such as `BRK-B` (a wrong guess
+serves another ticker's data); a separate `unlisted_symbols` setting for a pair missing from the
+crypto list, raising at the call for pairs in code (two settings for one cause, and behavior
+that depended on where the pair came from).
