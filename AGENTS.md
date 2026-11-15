@@ -147,6 +147,14 @@ These protect the owner's repository, money, and secrets.
   and what the data is. The library owns everything between the user and Massive: building
   correct requests, connections, rate limits, retries, converting data faithfully into tables,
   and telling the user clearly what happened. So:
+  - **The code never knows Massive's plans** (decision 114). Massive decides what each key
+    may read, how late, and how fast, and changes its plans over time. The library and its
+    tests learn these only from Massive's answers (an entitlement refusal, a rate-limit
+    answer) and from settings the user gives, never from a plan's name, a probe for a plan,
+    or a built-in table of what a plan includes. They work for whatever plans a user holds.
+    A live test sends its requests and, on an entitlement refusal, skips and quotes Massive.
+    User docs may still say which plans include a dataset, generated from Massive's spec so
+    they follow Massive's changes.
   - **Massive's answer is the error.** The library sends the request and reports Massive's
     refusal as Massive's (its status and text), naming the call that caused it; it never
     reinterprets or guesses. A ticker Massive has no data for is not an error: it gives no
