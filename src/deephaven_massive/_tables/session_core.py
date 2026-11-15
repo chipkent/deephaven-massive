@@ -79,7 +79,15 @@ from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+    library_bug,
+    source_of,
+)
 from deephaven_massive._log_limits import BoundedLog, bounded_list
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
@@ -246,6 +254,21 @@ def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> Non
             logger.exception("%s: a transport failed to close. %s", label, LIBRARY_BUG)
 
 
+def _unexpected(error: BaseException) -> bool:
+    """Tell whether an exception escaping a verb is a bug in the library.
+
+    Args:
+        error: What escaped the verb.
+
+    Returns:
+        True for an `Exception` that is neither a `MassiveError` nor the `TypeError` or
+        `ValueError` of a wrong argument; False for those, and for an interrupt.
+    """
+    return isinstance(error, Exception) and not isinstance(
+        error, MassiveError | TypeError | ValueError
+    )
+
+
 class SessionCore:
     """The internal engine of one `MassiveSession`, shared by its namespaces and queries.
 
@@ -405,7 +428,10 @@ class SessionCore:
         rate-limited key, logs one WARNING saying so, whether it returned or raised: once per
         pause, so one console command of several long verbs warns once, and the next command
         that pauses the tables again warns again. Any exception that escapes the verb, its
-        guard's included, is logged at DEBUG with the verb and re-raised.
+        guard's included, is logged at DEBUG with the verb and re-raised, except an unexpected
+        one: an `Exception` that is neither a `MassiveError` nor the `TypeError` or
+        `ValueError` of a wrong argument is a bug in the library, logged at ERROR with its
+        traceback and raised as a `MassiveError` (`ErrorSource.LIBRARY`) chained to it.
 
         Args:
             call: The verb, as the warning names it, such as
@@ -416,14 +442,21 @@ class SessionCore:
             What `body` returned.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the verb failed on an unexpected exception: a bug in the library,
+                whose message says how to report it, chained to the exception.
         """
         try:
             return self._guarded_verb(call, body)
         except BaseException as error:
-            # The caller receives the error; the log keeps which verb raised it, and why.
-            logger.debug("%s raised %s: %s", call, type(error).__name__, error)
-            raise
+            if not _unexpected(error):
+                # The caller receives the error; the log keeps which verb raised it, and why.
+                logger.debug("%s raised %s: %s", call, type(error).__name__, error)
+                raise
+            logger.exception("%s failed on an unexpected exception. %s", call, LIBRARY_BUG)
+            raise MassiveError(
+                library_bug(f"{call} failed: {error!r}"), source=ErrorSource.LIBRARY
+            ) from error
 
     def _guarded_verb(self, call: str, body: Callable[[], _T]) -> _T:
         """Run a verb's guard and body, timing it under the UG lock (`run_verb`).
@@ -436,11 +469,11 @@ class SessionCore:
             What `body` returned.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
-            raise MassiveError(f"{self.label} is closed")
+            raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
         if not holds_update_graph_lock(self.exec_ctx):
             return body()
         began = time.monotonic()
@@ -587,7 +620,7 @@ class SessionCore:
         if closed:
             closer()
 
-    def fail_stream(self, stream_id: int, error: str) -> str | None:
+    def fail_stream(self, stream_id: int, error: MassiveError) -> str | None:
         """Record that a stream failed and stop reusing it for new verbs.
 
         Called by the transport just before it fails the stream's table (`publish_failure`),
@@ -610,7 +643,8 @@ class SessionCore:
 
         Args:
             stream_id: The failed stream.
-            error: The failure text for the `Error` column.
+            error: The failure; its text fills the `Error` column, and a stream keeps it for a
+                later verb on the stream to raise.
 
         Returns:
             The close's text when the close came first, so the caller fails the table with it
@@ -624,7 +658,7 @@ class SessionCore:
             if current is not None and current.state is StreamState.CLOSED:
                 return current.error
             recorded = self.streams.record_failure(stream_id, error) or self.workers.change_row(
-                stream_id, functools.partial(replace, state=StreamState.FAILED, error=error)
+                stream_id, functools.partial(replace, state=StreamState.FAILED, error=str(error))
             )
         if not recorded:
             logger.debug(
@@ -743,14 +777,15 @@ class SessionCore:
             The view: the schema's columns of `table`, the same rows.
 
         Raises:
-            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), also when
-                the close ran while the view was built; if the diagnostics writer died and failed
-                the table (`"MassiveSession #1: its diagnostics tables failed when their writer
-                thread died (...)"`).
+            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`),
+                also when the close ran while the view was built.
+            MassiveError: If the diagnostics writer died and failed the table
+                (`"MassiveSession #1: its diagnostics tables failed when their writer thread died
+                (...)"`).
         """
         with self.registry_lock:
             if self._closed:
-                raise MassiveError(f"{self.label} is closed")
+                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
             self._views += 1
             live_set.sync(self)
         scope: LivenessScope | None = None
@@ -767,12 +802,13 @@ class SessionCore:
                 self._drop_view()
             died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
-                raise MassiveError(f"{self.label} is closed") from error
+                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}") from error
             if isinstance(error, DHError) and died is not None:
                 logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
                 raise MassiveError(
                     f"{self.label}: its diagnostics tables failed when their writer thread died "
-                    f"({died!r}); see the ERROR logged then"
+                    f"({died!r}); see the ERROR logged then; {NEW_SESSION}",
+                    source=source_of(died),
                 ) from error
             raise
         return result
@@ -784,7 +820,9 @@ class SessionCore:
             live_set.sync(self)
 
     @staticmethod
-    def _thread_died(core_ref: weakref.ref[SessionCore], what: str, death: BaseException) -> None:
+    def _thread_died(
+        core_ref: Callable[[], SessionCore | None], what: str, death: BaseException
+    ) -> None:
         """The `on_death` of a session's reaper or diagnostics writer: fail its live tables.
 
         Runs on the dying thread. A thread that dies leaves the session's tables frozen (no
@@ -793,7 +831,8 @@ class SessionCore:
         until the process ends; only an interrupt raised inside the reaper kills it.
 
         Args:
-            core_ref: The session's core, weakly: the thread must not keep it alive.
+            core_ref: Returns the session's core, or None once it is freed: a weak reference,
+                since the thread must not keep it alive.
             what: The thread, as the message names it (`"reaper"`).
             death: What ended the thread.
         """
@@ -902,7 +941,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
-        text = f"{self.label} was closed; this table no longer updates"
+        text = f"{self.label} was closed; this table no longer updates; {NEW_SESSION}"
         with self.registry_lock:
             if self._closed:
                 return
@@ -916,7 +955,7 @@ class SessionCore:
             self._close_symbol_reads()
         for ready in opening:  # waiting verbs wake and raise MassiveError
             ready.set()
-        failed = self._fail_all(fails, MassiveError(text))
+        failed = self._fail_all(fails, SessionClosedError(text))
         for closer in closers:
             try:
                 closer()

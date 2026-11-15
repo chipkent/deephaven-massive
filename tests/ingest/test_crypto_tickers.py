@@ -223,6 +223,16 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
     assert len(fake_rest.get_queries()) == 3  # the failed read, then both lists
 
 
+def test_a_failed_read_of_the_crypto_ticker_list_keeps_whether_it_may_pass(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/v3/reference/tickers", *[Reply({"status": "ERROR"}, status=503)] * 4)
+    reader = _endpoints(session)._reader("call-1")
+    with pytest.raises(dm.MassiveError, match=r"reading Massive's crypto") as raised:
+        reader.crypto_pair("X:DOTUSD")
+    assert (raised.value.status, raised.value.is_retryable) == (503, True)
+
+
 def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_waiter(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -248,6 +258,6 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
     (future,) = claimed
     with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
         future.result()  # the waiters get a MassiveError
-    assert waited.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert waited.value.source is dm.ErrorSource.LIBRARY
     assert str(waited.value).endswith(LIBRARY_BUG)
     assert reader.state.crypto._lookup._claim(LIST_KEY)[1]  # and the failure is forgotten

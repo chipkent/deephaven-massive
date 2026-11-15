@@ -110,14 +110,21 @@ from deephaven_massive._datasets.timestamps import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
 from deephaven_massive._enums import NotBars, OnError
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug, required
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+    library_bug,
+    required,
+)
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
 
@@ -133,6 +140,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass, Recency
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -771,7 +779,7 @@ class StreamSink:
         *,
         core: SessionCore,
         plan: ChannelPlan,
-        publisher: BlinkPublisher,
+        publisher: Publisher,
         symbols: frozenset[str] | None,
     ) -> None:
         """Create the sink.
@@ -951,7 +959,7 @@ class StreamSink:
         recorded too, and names it. When the session's close came first, the table fails with
         the close's error instead, so the table and its `CLOSED` row name the same cause, and
         nothing is logged (the close logs its count). Any other failure is logged once per
-        failure, however many streams it fails, at the level its cause gives (`log_failure`):
+        failure, however many streams it fails, at the level its `is_bug` gives (`log_failure`):
         ERROR for a defect, naming whose it is, and WARNING otherwise.
         The stream counts as failed even when `publish_failure` raises (the exception then
         propagates): its row already reads `FAILED`, so it publishes no more rows, and the
@@ -968,14 +976,14 @@ class StreamSink:
             if self.failed:
                 return False
             core = self._core()
-            closed = None if core is None else core.fail_stream(self.stream_id, str(error))
+            closed = None if core is None else core.fail_stream(self.stream_id, error)
             if closed is None:
                 log_failure(
                     logger, error, "%s stream %d failed: %s", self.plan.dataset, self.stream_id
                 )
             try:
                 self.publisher.publish_failure(
-                    error if closed in (None, str(error)) else MassiveError(closed)
+                    error if closed in (None, str(error)) else SessionClosedError(closed)
                 )
             finally:  # the row reads FAILED: the stream publishes nothing more either way
                 self.failed = True
@@ -993,7 +1001,7 @@ class StreamSink:
         Args:
             message: Why the stream cannot follow its watchlist, naming the fix.
         """
-        failure = MassiveError(message, cause=ErrorCause.USER_DEFECT)  # the symbol table's
+        failure = MassiveError(message, source=ErrorSource.USER, is_bug=True)  # the symbol table's
 
         def fail() -> None:
             self.fail(failure)
@@ -1376,7 +1384,7 @@ class Flusher:
 
         Anything else that escapes a flush ends the thread: it is logged at ERROR as a defect
         of the library, every routed stream is failed with a `MassiveError` naming the thread
-        (`ErrorCause.LIBRARY_DEFECT`, logged once), and it is re-raised.
+        (`ErrorSource.LIBRARY`, logged once), and it is re-raised.
         However the thread ends, it clears the routes last: nothing reads them any more, and a
         stream left there would be held by a connection that is gone.
         """
@@ -1391,7 +1399,7 @@ class Flusher:
                     f"the flush thread {self._thread.name} died ({death!r}); this table no "
                     "longer updates"
                 ),
-                cause=ErrorCause.LIBRARY_DEFECT,
+                source=ErrorSource.LIBRARY,
             )
             log_failure(logger, error, "%s", exc_info=death)
             with entered(self._exec_ctx):
@@ -1569,7 +1577,7 @@ class Flusher:
                     library_bug(
                         f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
                     ),
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                    source=ErrorSource.LIBRARY,
                 )
                 # Logged here, with the trace; each stream's failure then logs at DEBUG only.
                 mark_failure_logged(failure)
@@ -1599,7 +1607,7 @@ class Flusher:
         """
         converted = self._convert(plan, batch.rows, arrived=batch.arrived)
         if converted.unreadable:  # a spelling the library cannot read is its own defect
-            failure = MassiveError(converted.unreadable, cause=ErrorCause.LIBRARY_DEFECT)
+            failure = MassiveError(converted.unreadable, source=ErrorSource.LIBRARY)
             self._fail_each(readers, failure)
         drift = converted.drift
         if drift.fields_drifted or drift.dropped_rows:
@@ -1691,7 +1699,7 @@ class Flusher:
         client's and the conversion's, extend the run, and once it reaches `DROPPED_RUN_LIMIT`
         every stream of the dataset on the channel fails with a `MassiveError` naming the run's
         length and its first row's reason, a defect of the library to fix
-        (`ErrorCause.LIBRARY_DEFECT`), and the run starts over.
+        (`ErrorSource.LIBRARY`), and the run starts over.
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1719,7 +1727,7 @@ class Flusher:
                 "because a key could not be read, and none was published, so Massive's format "
                 f"has most likely changed; the first: {reason}"
             ),
-            cause=ErrorCause.LIBRARY_DEFECT,
+            source=ErrorSource.LIBRARY,
         )
         self._fail_each(readers, failure)
         return True
@@ -1739,7 +1747,7 @@ class Flusher:
         symbol therefore has a run of its own: a published row of the symbol ends it, and once
         `DROPPED_RUN_LIMIT` of its rows in a row have been dropped, every stream that holds the
         symbol by name fails with a `MassiveError` naming it, the run's length, and its first
-        row's reason (`ErrorCause.LIBRARY_DEFECT`), and the run starts over. A `dm.ALL` stream
+        row's reason (`ErrorSource.LIBRARY`), and the run starts over. A `dm.ALL` stream
         is never failed for one symbol, since it serves every other symbol; instead its
         `Error` names the symbol as possibly stale (`_write_notes`) until a row of the symbol
         is published again. A symbol becoming stale logs a WARNING (`_mark_stale`), and one
@@ -1774,7 +1782,7 @@ class Flusher:
                     f"{plan.channel} were dropped because a key could not be read, and none "
                     f"was published; the first: {first}"
                 ),
-                cause=ErrorCause.LIBRARY_DEFECT,
+                source=ErrorSource.LIBRARY,
             )
             self._fail_each([s for s in readers if s.holds(symbol)], failure)
             became[symbol] = first
@@ -1901,7 +1909,7 @@ def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:
         core.update_streams(changes)
 
 
-def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
+def _fail_later(sink_ref: Callable[[], StreamSink | None], message: str) -> None:
     """A watch's `on_invalid`: queue its stream's failure, if the stream still exists.
 
     The listener's callbacks are held from Java until the JVM collects the listener, so they
@@ -1909,7 +1917,7 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
     keep a finished session alive until the next JVM collection.
 
     Args:
-        sink_ref: The stream's sink, weakly.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
         message: Why the stream cannot follow its watchlist.
     """
     sink = sink_ref()
@@ -1917,7 +1925,7 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
         sink.fail_later(message)
 
 
-def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) -> None:
+def _show_skipped(sink_ref: Callable[[], StreamSink | None], values: tuple[str, ...]) -> None:
     """A watch's `on_skipped`: show the symbol-table values its stream skips in `m.streams()`.
 
     The text is kept apart from the transport's own warning (`StreamRow.skipped`), so neither
@@ -1928,7 +1936,7 @@ def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) ->
     The sink and its session are held weakly, as in `_fail_later`.
 
     Args:
-        sink_ref: The stream's sink, weakly.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
         values: The values skipped now, sorted; empty once every bad row is fixed or deleted,
             which clears the row's `Error`.
     """

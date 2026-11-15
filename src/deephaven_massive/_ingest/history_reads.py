@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pyarrow as pa
 from deephaven import arrow as dh_arrow
@@ -72,15 +72,48 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._ingest.flatfiles import FlatFileHistory
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import FlatFileRead, SymbolOutcome
 
-__all__ = ["read_history", "read_history_by_symbol"]
+__all__ = ["FlatFileScan", "read_history", "read_history_by_symbol"]
 
 logger = logging.getLogger(__name__)
 
 _ONE_DAY: Final = timedelta(days=1)
+
+
+class FlatFileScan(Protocol):
+    """The call's flat-file transport, as these reads scan it: a `FlatFileHistory`."""
+
+    def history(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        window: HistoryWindow,
+        /,
+        *,
+        dates: Sequence[date],
+        call: int,
+        infer_holidays: bool,
+        logged: LoggedKeys,
+        stop: threading.Event | None,
+    ) -> FlatFileRead:
+        """Return the rows of `window` from the dataset's flat files, and the days they lack.
+
+        Args:
+            spec: The dataset.
+            request: The request.
+            window: The call's window.
+            dates: The partition dates of the files the window needs.
+            call: The call id.
+            infer_holidays: True to take a missing weekday file for a holiday.
+            logged: The facts the call has logged, each logged once per call.
+            stop: A read's stop token, or None.
+
+        Returns:
+            The files' read (`FlatFileHistory.history`).
+        """
+        ...
 
 
 def read_history(
@@ -89,7 +122,7 @@ def read_history(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     dates: Sequence[date],
     call: int,
     stop: threading.Event | None,
@@ -170,7 +203,7 @@ def _scan(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     dates: Sequence[date],
     call: int,
     logged: LoggedKeys,
@@ -266,7 +299,8 @@ def _check_published(
         )
         raise MassiveError(
             f"{spec.name}: the flat file for {first} is not published yet. "
-            f"{PUBLICATION_NOTE}. {remedy}"
+            f"{PUBLICATION_NOTE}. {remedy}",
+            is_retryable=True,
         )
 
 
@@ -441,7 +475,7 @@ def read_history_by_symbol(
     window: HistoryWindow,
     *,
     core: SessionCore,
-    files: FlatFileHistory,
+    files: FlatFileScan,
     symbols: Sequence[str],
     dates: Sequence[date],
     call: int,

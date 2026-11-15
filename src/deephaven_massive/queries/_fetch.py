@@ -248,8 +248,8 @@ class FetchQuery(Query):
             EntitlementError: If Massive refuses your plan, including while the library reads
                 Massive's crypto ticker list, or delays current data whose subscription isn't in
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - Massive's crypto ticker list can't be read;
                 - a crypto pair is missing from that list, under
                   `unlisted_symbols=dm.OnError.RAISE`;
@@ -512,8 +512,9 @@ class FetchQuery(Query):
                 reads Massive's crypto ticker list.
             EntitlementError: If Massive refuses your plan, including while the library reads
                 Massive's crypto ticker list.
-            MassiveError: If the session is closed, Massive's crypto ticker list can't be read, or
-                a crypto pair is missing from that list under `unlisted_symbols=dm.OnError.RAISE`.
+            SessionClosedError: If the session is closed.
+            MassiveError: If Massive's crypto ticker list can't be read, or a crypto pair is
+                missing from that list under `unlisted_symbols=dm.OnError.RAISE`.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")

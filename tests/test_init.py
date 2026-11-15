@@ -26,7 +26,8 @@ EXPECTED_EXPORTS = [
     "MassiveError",
     "AuthenticationError",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
+    "SessionClosedError",
     "ALL",
     "AllSymbols",
     "AssetClass",
@@ -74,7 +75,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 45
+    assert len(EXPECTED_EXPORTS) == 46
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 

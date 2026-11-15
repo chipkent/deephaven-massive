@@ -53,7 +53,7 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._config import MassiveConfig, shown_setting
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
-from deephaven_massive._errors import MassiveError, raises_through
+from deephaven_massive._errors import ErrorSource, MassiveError, raises_through
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
@@ -296,7 +296,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 "MassiveSession must be created inside a Deephaven server: no Deephaven "
                 "ExecutionContext is active on this thread. Create it from the Deephaven "
                 "console or an application script, or enter a context first "
-                "(with deephaven.execution_context.get_exec_ctx(): ...)."
+                "(with deephaven.execution_context.get_exec_ctx(): ...).",
+                source=ErrorSource.USER,
+                is_bug=True,
             )
         refuse_update_graph_thread(exec_ctx)
         if not has_script_query_scope(exec_ctx):
@@ -305,7 +307,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 "session's own: the library's formulas call Python functions through it. A "
                 "context from make_user_exec_ctx(freeze_vars=[...]) has a frozen copy instead; "
                 "create the session from the console or an application script, or use "
-                "make_user_exec_ctx() without freeze_vars."
+                "make_user_exec_ctx() without freeze_vars.",
+                source=ErrorSource.USER,
+                is_bug=True,
             )
         configure_from_environment()
         number = _next_number()
@@ -492,7 +496,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               `channel:<n> rows dropped` counts rows whose symbol or time couldn't be read.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.connections, CONNECTIONS)
 
@@ -537,7 +543,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               `connections()` describes, with each entry named by transport.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.streams, STREAMS)
 
@@ -566,7 +574,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `PausedUntil`, `LastRefusal`, and `UpdatedAt`.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
         """
         return self._core.diagnostics_view(self._core.diagnostics.rate_limits, RATE_LIMITS)
 
@@ -607,7 +617,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `UpdatedAt`: when the row last changed.
 
         Raises:
-            MassiveError: If the session is closed.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
 
         Example:
             ::

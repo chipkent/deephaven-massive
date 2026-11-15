@@ -74,10 +74,12 @@ Enums:
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Errors from Massive, failed reads, and failed live tables are all `dm.MassiveError`s.
-    `dm.AuthenticationError` means Massive refused your keys. `dm.EntitlementError` means your
-    plan doesn't include the data. Each error's `cause` is a `dm.ErrorCause`, which says
-    whether the error is expected, a mistake in your code, or a bug in the library to report.
+    `dm.MassiveError` covers every error Massive reports and every failure inside a method of
+    a query, such as `fetch()`. `dm.AuthenticationError` means your API key is missing or Massive
+    refused your keys. `dm.EntitlementError` means your plan doesn't include the data.
+    `dm.SessionClosedError` means the session is closed. Each error's `source` says what
+    stopped the call, as a `dm.ErrorSource`. Its `is_retryable` says whether the same call may
+    succeed later, and its `is_bug` whether a bug caused it.
     A wrong argument raises `TypeError` or `ValueError` at the call instead.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 
@@ -150,8 +152,9 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    SessionClosedError,
 )
 from deephaven_massive._session import MassiveSession
 from deephaven_massive._tables.symbols import canonicalize_symbols
@@ -167,7 +170,7 @@ __all__ = [
     "DateLike",
     "Direction",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
     "FilterValue",
     "FuturesVenue",
     "HistorySource",
@@ -182,6 +185,7 @@ __all__ = [
     "PollMode",
     "Reread",
     "SeriesType",
+    "SessionClosedError",
     "Sip",
     "Subscription",
     "SymbolConvention",

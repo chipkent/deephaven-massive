@@ -251,8 +251,8 @@ class StreamQuery(Query):
                 the setting to change. For the options admin messages, which stream only in real
                 time, a delayed label means your plan lacks the dataset, and the message links the
                 page that lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's crypto ticker list can't be read when the call reads it;
                 - a crypto pair is missing from that list, under
@@ -296,8 +296,8 @@ class StreamQuery(Query):
                 the setting to change. For the options admin messages, which stream only in real
                 time, a delayed label means your plan lacks the dataset, and the message links the
                 page that lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's crypto ticker list can't be read when the call reads it;
                 - a crypto pair is missing from that list, under
@@ -347,8 +347,8 @@ class StreamQuery(Query):
                 the setting to change. For the options admin messages, which stream only in real
                 time, a delayed label means your plan lacks the dataset, and the message links the
                 page that lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's crypto ticker list can't be read when the call reads it;
                 - a crypto pair is missing from that list, under
@@ -469,8 +469,8 @@ class SymbolStreamQuery(StreamQuery):
                 crypto ticker list, or Massive's data for this dataset is delayed and its
                 subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
                 the setting to change.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's crypto ticker list can't be read when the call reads it;
                 - a crypto pair is missing from that list, under

@@ -36,7 +36,7 @@ from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency, SymbolConvention
-from deephaven_massive._errors import LIBRARY_BUG, RowDataError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, RowDataError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -954,7 +954,8 @@ def test_a_failed_open_returns_its_lease(
         raise RuntimeError("no tables")
 
     monkeypatch.setattr(ws, "open_stream_tables", broken)
-    with pytest.raises(RuntimeError, match="no tables"):
+    # An unexpected exception is a bug in the library, raised as one.
+    with pytest.raises(dm.MassiveError, match="no tables"):
         ws_session.query(TRADES, ["AAPL"]).blink()
     assert ws_session.connection().leases == 0
     assert ws_session.connections.group.streams == {}
@@ -970,7 +971,7 @@ def test_a_watch_that_cannot_start_releases_the_stream(
 
     monkeypatch.setattr(SymbolWatch, "start", broken)
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    with pytest.raises(RuntimeError, match="no watch"):
+    with pytest.raises(dm.MassiveError, match="no watch"):
         ws_session.query(TRADES, watchlist).blink()
     assert ws_session.connection().leases == 0
 
@@ -1312,7 +1313,7 @@ def test_a_verb_never_sees_a_failed_table_before_its_failure(
     proceed = threading.Event()
     real = core.fail_stream
 
-    def gated(stream_id: int, error: str) -> None:
+    def gated(stream_id: int, error: dm.MassiveError) -> None:
         recording.set()
         assert proceed.wait(TIMEOUT)
         real(stream_id, error)
@@ -1673,7 +1674,9 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
     name = other._core.label
-    assert all(f"{name} is closed" in t or f"{name} was closed" in t for t in closed_errors)
+    assert all(
+        f"{name} is closed; " + NEW_SESSION in t or f"{name} was closed" in t for t in closed_errors
+    )
     core = ws_session.session._core
     drained = threading.Event()
     core.defer(drained.set)
@@ -1685,12 +1688,9 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
 
 def test_a_java_held_callback_of_a_freed_session_does_nothing() -> None:
     # The JVM may run a publisher's shutdown callback after the session's connections are gone.
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the session's connections were freed
 
-    freed: ws.WsConnections = _Gone()  # type: ignore[assignment]  # a fake: a session, freed below
-    gone = weakref.ref(freed)
-    del freed
     ws._weakly(gone, "_shut_down", 1)
 
 
@@ -1846,7 +1846,9 @@ def test_a_first_futures_stream_failing_in_its_schedule_wait_leaves_a_working_co
         real(self, contracts, stream_id=stream_id, holding_lock=holding_lock)
 
     monkeypatch.setattr(ws.WsConnections, "_load_schedules", interrupted)
-    with pytest.raises(error, match="interrupted"):
+    # An interrupt passes through; any other exception is a bug in the library, raised as one.
+    expected = error if not issubclass(error, Exception) else dm.MassiveError
+    with pytest.raises(expected, match="interrupted"):
         ws_session.query(FUTURES, ["ESZ5"]).blink()
     result = ws_session.query(FUTURES, ["ESZ5"]).blink()
     ws_session.subscribed("T.ESZ5")
@@ -2014,15 +2016,35 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     (stream_id,) = ws_session.connections.group.streams
 
     def closed() -> futures_calendar.FuturesCalendar:
-        raise dm.MassiveError("MassiveSession #1 is closed")
+        raise dm.SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        "is closing (MassiveSession #1 is closed)"
+        f"is closing (MassiveSession #1 is closed; {NEW_SESSION})"
     ) in caplog.text
+    ws_session.session.release(result)
+
+
+@pytest.mark.parametrize("step", ["_symbols_changed", "_change_contracts"])
+def test_a_futures_watchlist_change_that_meets_a_library_bug_raises_it(
+    ws_session: WsSession, *, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    # Only a closing session drops a change quietly: a bug is never taken for one.
+    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
+    (stream_id,) = ws_session.connections.group.streams
+    bug = dm.MassiveError("the calendar broke", source=dm.ErrorSource.LIBRARY)
+
+    def broken() -> futures_calendar.FuturesCalendar:
+        raise bug
+
+    with monkeypatch.context() as patched:
+        patched.setattr(ws_session.connections, "futures_calendar", broken)
+        with pytest.raises(dm.MassiveError) as raised:
+            getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
+    assert raised.value is bug
     ws_session.session.release(result)
 
 
@@ -2049,7 +2071,7 @@ def test_a_futures_watchlist_change_whose_schedule_wait_a_close_ends_is_dropped(
     assert waits == [frozenset({"NQZ5"})]
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        f"is closing ({ws_session.session._core.label} is closed)"
+        f"is closing ({ws_session.session._core.label} is closed; {NEW_SESSION})"
     ) in caplog.text
     ws_session.session.release(result)
 
@@ -2428,7 +2450,7 @@ def test_a_change_defect_after_its_stream_ended_fails_nothing(
 
 
 def test_a_defect_in_a_pair_lookup_is_never_retried_or_skipped(ws_session: WsSession) -> None:
-    defect = dm.MassiveError("the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT)
+    defect = dm.MassiveError("the split broke", source=dm.ErrorSource.LIBRARY)
     ws_session.pair_answers["X:DOTUSD"] = defect
     with pytest.raises(dm.MassiveError, match="the split broke") as raised:
         ws_session.connections._split_pairs(
@@ -2436,7 +2458,7 @@ def test_a_defect_in_a_pair_lookup_is_never_retried_or_skipped(ws_session: WsSes
             reader="crypto stream 1",
             delays=(3600.0,),  # would hang
         )
-    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert raised.value.source is dm.ErrorSource.LIBRARY
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
 
 
@@ -2444,14 +2466,14 @@ def test_a_defect_in_a_pair_lookup_at_the_call_raises_to_the_verb(
     ws_session: WsSession, dh_input_table: Callable[..., InputTable]
 ) -> None:
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "the split broke", source=dm.ErrorSource.LIBRARY
     )
     watchlist = crypto_watchlist(
         ["X:BTCUSD", "X:DOTUSD"], reactive=False, dh_input_table=dh_input_table
     )
     with pytest.raises(dm.MassiveError, match="the split broke") as raised:
         ws_session.query(CRYPTO, watchlist).append_only()
-    assert raised.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert raised.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_a_permanent_defect_in_a_pair_lookup_at_the_call_is_never_a_skipped_pair(
@@ -2473,7 +2495,7 @@ def test_a_defect_in_a_pair_lookup_on_the_worker_fails_the_stream(
     # Not a skipped pair: the stream fails with the defect's own message, asking once for a
     # bug report, and the lookup is not tried again.
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "the split broke", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "the split broke", source=dm.ErrorSource.LIBRARY
     )
     watchlist = crypto_watchlist(["X:BTCUSD"], reactive=True, dh_input_table=dh_input_table)
     assert isinstance(watchlist, InputTable)
@@ -2607,6 +2629,22 @@ def test_a_symbol_table_whose_pairs_are_all_unlisted_streams_nothing(
     wait_for(lambda: stream_error(ws_session, dh_to_pylist) == UNLISTED_ERROR)
     assert not any("ETHT" in json.loads(f)["params"] for f in ws_session.server.frames())
     ws_session.session.release(result)
+
+
+def test_a_symbol_table_whose_pairs_the_unread_list_left_unsplit_keeps_the_reads_failure(
+    make_ws_session: Callable[..., WsSession], dh_input_table: Callable[..., InputTable]
+) -> None:
+    ws_session = make_ws_session(unlisted_symbols=dm.OnError.LOG)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    watchlist = crypto_watchlist(["X:DOTUSD"], reactive=False, dh_input_table=dh_input_table)
+    # A list that cannot be read affects every pair, so its error raises under any setting.
+    with pytest.raises(
+        dm.MassiveError, match=r"^cannot stream 'X:DOTUSD': HTTP 503: busy$"
+    ) as unread:
+        ws_session.query(CRYPTO, watchlist).append_only()
+    # The list may be read on the next call: the error keeps the read's status and flags.
+    assert (unread.value.status, unread.value.is_retryable) == (503, True)
+    assert ws_session.urls == []
 
 
 @pytest.mark.parametrize("reactive", [True, False], ids=["reactive", "static"])
@@ -3567,7 +3605,9 @@ def close_under_load(harness: WsSession, round_: int) -> float:
                 result = harness.query(TRADES, [SOAK_SYMBOLS[(worker * 3 + step) % 40]], other)
                 other.release(result.blink())
             except dm.MassiveError as error:  # a verb that races the close may find it closed
-                if " is closed" not in str(error) and " was closed" not in str(error):
+                if " is closed; " + NEW_SESSION not in str(error) and " was closed" not in str(
+                    error
+                ):
                     errors.append(str(error))
                 return
 

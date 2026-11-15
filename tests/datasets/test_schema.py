@@ -18,7 +18,7 @@ from deephaven_massive._datasets.schema import (
     dataset_schema,
 )
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorSource, MassiveError
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.columns import col_defs
@@ -97,8 +97,12 @@ def test_to_arrow_round_trips_through_deephaven(dh_exec_ctx: object) -> None:
 
 
 def test_to_arrow_reports_schema_mismatches() -> None:
-    with pytest.raises(MassiveError, match=r"schema mismatch in all\.Double \(expected double\)"):
+    with pytest.raises(
+        MassiveError, match=r"schema mismatch in all\.Double \(expected double\)"
+    ) as mismatch:
         ALL_TYPES.to_arrow([{"Double": "x"}])
+    # The rows are the library's own, so a value that does not fit is a bug in it.
+    assert mismatch.value.source is ErrorSource.LIBRARY
     with pytest.raises(MassiveError, match=r"schema mismatch in all\.String"):
         ALL_TYPES.to_arrow([{"String": {"a": {1, 2}}}])  # JSON cannot encode a set
 

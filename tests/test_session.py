@@ -6,6 +6,7 @@ import gc
 import itertools
 import logging
 import pkgutil
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,6 +28,7 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._tables import session_core as _core
@@ -226,8 +228,9 @@ def test_config_must_be_a_massive_config() -> None:
 
 def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
     frozen = make_user_exec_ctx(freeze_vars=["dm"])
-    with frozen, pytest.raises(dm.MassiveError, match="frozen copy"):
+    with frozen, pytest.raises(dm.MassiveError, match="frozen copy") as misuse:
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
+    assert (misuse.value.source, misuse.value.is_bug) == (dm.ErrorSource.USER, True)
     with make_user_exec_ctx():  # an unfrozen user context shares the script session's scope
         dm.MassiveSession(dm.MassiveConfig(api_key="k")).close()
 
@@ -247,6 +250,8 @@ def test_construction_without_an_execution_context_fails_fast() -> None:
     assert len(errors) == 1
     assert "must be created inside a Deephaven server" in str(errors[0])
     assert "ExecutionContext" in str(errors[0])
+    assert isinstance(errors[0], dm.MassiveError)
+    assert (errors[0].source, errors[0].is_bug) == (dm.ErrorSource.USER, True)
 
 
 def test_construction_on_the_update_graph_thread_fails() -> None:
@@ -471,9 +476,10 @@ def test_close_marks_streams_closed_and_warns_once(
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
+    assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
     massive_session.release(live)  # release() keeps working after close()
 
 
@@ -609,7 +615,7 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     streams = massive_session.streams()
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
     wait_until(lambda: bool(derived.j_table.isFailed()))
@@ -633,7 +639,7 @@ def test_close_with_no_live_tables_logs_info(
 def test_after_close(massive_session: dm.MassiveSession) -> None:
     q = stream_query(massive_session)
     massive_session.close()
-    message = f"^{label(massive_session)} is closed$"
+    message = f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$"
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.connections()
     with pytest.raises(dm.MassiveError, match=message):
@@ -710,7 +716,7 @@ def test_a_session_closed_while_a_stream_opens(
 
     closing = transport_of(open_stream)()
     monkeypatch.setattr(massive_session._core, "stream_transport", lambda: closing)
-    with pytest.raises(dm.MassiveError, match="was closed while a stream was opening"):
+    with pytest.raises(dm.SessionClosedError, match="was closed while a stream was opening"):
         stream_query(massive_session).blink()
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -864,7 +870,7 @@ def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
     rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
     writer = massive_session._core.diagnostics.thread
     console_command(massive_session.close)
-    closed = f"{label(massive_session)} was closed; this table no longer updates"
+    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
     rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
     writer.join(TIMEOUT)
     assert not writer.is_alive()

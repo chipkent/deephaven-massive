@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -26,9 +27,10 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     CutShortError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     RowDataError,
     UnlistedPairError,
@@ -184,8 +186,15 @@ def _monday() -> HistoryWindow:
     [
         (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
         (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
-        (MassiveError("connection reset"), FailureKind.TRANSIENT),
+        (MassiveError("connection reset", source=ErrorSource.NETWORK), FailureKind.TRANSIENT),
+        # A certificate this machine does not trust fails alike until its settings change.
+        (MassiveError("TLS failed", source=ErrorSource.USER), FailureKind.PERMANENT),
         (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        # S3's RequestTimeout on a flat-file scan: an HTTP 400 that means try again.
+        (
+            MassiveError("HTTP 400 (RequestTimeout)", status=400, is_retryable=True),
+            FailureKind.TRANSIENT,
+        ),
         # Any other 404, such as one for a request of several symbols or of none (a path
         # Massive retired), would answer the same again.
         (MassiveError("HTTP 404 from GET /v1/retired", status=404), FailureKind.PERMANENT),
@@ -193,11 +202,11 @@ def _monday() -> HistoryWindow:
         (RowDataError("every row was dropped"), FailureKind.PERMANENT),
         (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
         (UnlistedPairError("X:NOPEUSD is not listed"), FailureKind.PERMANENT),
-        (MassiveError("unreadable", cause=ErrorCause.LIBRARY_DEFECT), FailureKind.PERMANENT),
+        (MassiveError("unreadable", source=ErrorSource.LIBRARY), FailureKind.PERMANENT),
         (MassiveError("HTTP 400", status=400), FailureKind.PERMANENT),
     ],
 )
-def test_a_failure_is_transient_only_when_its_cause_may_pass(
+def test_a_failure_is_transient_only_when_it_is_retryable(
     error: MassiveError, kind: FailureKind
 ) -> None:
     assert failure_kind(error) is kind
@@ -378,7 +387,10 @@ def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request
     aapl, msft = _failure(out["AAPL"]), _failure(out["MSFT"])
     assert aapl.error is msft.error
     assert isinstance(aapl.error, UnsupportedParameterError)
-    assert str(aapl.error) == "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']"
+    assert str(aapl.error) == (
+        "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']; leave that "
+        "parameter out, or read these symbols in a call without it"
+    )
     assert aapl.kind is FailureKind.PERMANENT
     assert fake_rest.get_queries() == []
 
@@ -402,7 +414,9 @@ def test_a_rejected_key_while_splitting_a_pair_fails_the_whole_read(
 def test_a_session_closed_during_the_read_fails_it(session: dm.MassiveSession) -> None:
     rest = session._core.rest_transport()
     session.close()
-    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
+    with pytest.raises(
+        dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
+    ):
         rest.fetch_by_symbol(DIVIDENDS, Request(), symbols=["AAPL"], call=7)
 
 
@@ -576,7 +590,7 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
         )
     failure = _failure(out["AAPL"])
     assert failure.kind is FailureKind.PERMANENT
-    assert failure.error.cause is ErrorCause.LIBRARY_DEFECT
+    assert failure.error.source is ErrorSource.LIBRARY
     assert str(failure.error) == (
         "stocks.trades: AAPL's rows from flat files lack Price; have Extra, which the dataset "
         f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"
@@ -631,5 +645,8 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
     out = _by_value(rest_session, ["ES"], adjusted=False)
     error = _failure(out["ES"]).error
     assert isinstance(error, UnsupportedParameterError)
-    assert str(error) == "futures.products: /futures/v1/products does not take ['adjusted']"
+    assert str(error) == (
+        "futures.products: /futures/v1/products does not take ['adjusted']; leave that "
+        "parameter out, or read these symbols in a call without it"
+    )
     assert fake_rest.get_queries() == []

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._config import delayed_fix
-from deephaven_massive._errors import EntitlementError
+from deephaven_massive._errors import EntitlementError, ErrorSource
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -141,7 +141,12 @@ class DelayedDataError(EntitlementError):
     Internal, raised as the public `EntitlementError` it is: its own class lets a caller tell
     this refusal from Massive's other refusals, as the stream of a real-time-only dataset does
     (`host_decision.require_real_time`), whose plan then does not include it at all.
+
+    Its source is `ErrorSource.USER`: the session's settings refuse the data, and listing the
+    subscription in `MassiveConfig.delayed_subscriptions` lets it through.
     """
+
+    default_source = ErrorSource.USER
 
 
 def delayed_refusal(

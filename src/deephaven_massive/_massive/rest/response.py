@@ -36,6 +36,7 @@ library, `net`, and `spec`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from http import HTTPStatus
 from typing import TYPE_CHECKING, TypedDict
 
 from deephaven_massive._massive.net import codec
@@ -43,6 +44,7 @@ from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 from deephaven_massive._massive.spec.types import ENVELOPE_KEYS, DriftReport
 
@@ -213,7 +215,6 @@ def http_error(status: int, data: bytes | bytearray, request: RequestTarget) -> 
         `WireAuthError` for 401, `WireEntitlementError` for 403, and `WireError` otherwise,
         quoting the envelope's `message` (or `error`) when the body is one, else the body.
     """
-    kind = {401: WireAuthError, 403: WireEntitlementError}.get(status, WireError)
     try:
         body = codec.loads(data)
     except ValueError:
@@ -225,7 +226,12 @@ def http_error(status: int, data: bytes | bytearray, request: RequestTarget) -> 
         if isinstance(message, str) and message:
             detail = message[:_EXCERPT]
         request_id = _request_id(body.get("request_id"))
-    return kind(**request.context(f"HTTP {status}", detail, status=status, request_id=request_id))
+    context = request.context(f"HTTP {status}", detail, status=status, request_id=request_id)
+    if status == HTTPStatus.UNAUTHORIZED:
+        return WireAuthError(**context)
+    if status == HTTPStatus.FORBIDDEN:
+        return WireEntitlementError(**context)
+    return WireError(**context, kind=WireFailure.REFUSED)
 
 
 def _as_rows(value: object, request: RequestTarget) -> list[dict[str, object]]:
@@ -248,13 +254,13 @@ def _as_rows(value: object, request: RequestTarget) -> list[dict[str, object]]:
             **request.context(
                 "HTTP 200", "the rows are neither a JSON object nor a list", status=200
             ),
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
     for index, row in enumerate(value):
         if not isinstance(row, dict):
             raise WireError(
                 **request.context("HTTP 200", f"row {index} is not a JSON object", status=200),
-                unreadable=True,
+                kind=WireFailure.UNREADABLE,
             )
     return value
 
@@ -303,7 +309,7 @@ def _envelope(body: dict[str, object], request: RequestTarget) -> tuple[str, str
     if not isinstance(status, str):
         raise WireError(
             **request.context("HTTP 200", "the envelope's status is not text", status=200),
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
     if status in {"NOT_AUTHORIZED", "ERROR"}:
         message = body.get("message") or body.get("error") or "no message"
@@ -315,7 +321,7 @@ def _envelope(body: dict[str, object], request: RequestTarget) -> tuple[str, str
         )
         if status == "NOT_AUTHORIZED":
             raise WireEntitlementError(**context)
-        raise WireError(**context)
+        raise WireError(**context, kind=WireFailure.REFUSED)
     return status, request_id
 
 
@@ -367,14 +373,14 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
                 f"the body is not JSON ({error}): {bytes(data[:_EXCERPT])!r}",
                 status=200,
             ),
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         ) from error
     if isinstance(body, list) and rest_path.result_key is None:
         return Page(status="", request_id=None, rows=_as_rows(body, request), body=body)
     if not isinstance(body, dict):
         raise WireError(
             **request.context("HTTP 200", "the body is not a JSON object", status=200),
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
     status, request_id = _envelope(body, request)
     drift = DriftReport(statuses=frozenset({status} - GOOD_STATUSES - {""}))
@@ -394,6 +400,6 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
                 status=200,
                 request_id=request_id,
             ),
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
     return Page(status=status, request_id=request_id, rows=rows, body=body, drift=drift)

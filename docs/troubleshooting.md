@@ -68,6 +68,53 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
 | A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
 
+<a id="handle-errors"></a>
+
+## Handle errors in code
+
+In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
+failing the table. `dm.MassiveError` covers every error Massive reports and every failure
+inside a method of a query, such as `fetch()` or `last_by()`. A wrong argument raises
+`TypeError` or `ValueError` at the call. Branch on these attributes of a `dm.MassiveError`,
+never on its message:
+
+| Attribute | What it says |
+|---|---|
+| `is_retryable` | `True` when the same call may succeed later, such as after a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection that kept failing, or a flat file Massive has not published yet. `False` when it can't, such as for a plan that lacks the data, a refused key, a closed session, or a bug. |
+| `is_bug` | `True` for a defect: a bug in the library, or a problem the library caught in your code, such as a watchlist table that failed. The message says how to report the bug, or how to fix your code. |
+| `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came, such as from a connection that kept failing), `USER` (your code or settings), or `LIBRARY` (a library bug). Later versions may add sources, so handle values you don't know. |
+| `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
+
+This example reads Apple's dividends, up to three times, a minute apart:
+
+```python
+import time
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+for attempt in range(3):
+    try:
+        dividends = m.stocks.dividends("AAPL").fetch(wait=True)
+        break
+    except dm.MassiveError as e:
+        if e.is_bug:
+            print(f"Report or fix this: {e}")
+        if not e.is_retryable or attempt == 2:
+            raise
+        time.sleep(60)
+```
+
+Before it raises a rate limit, a server failure, or a connection that kept failing, the library
+has already retried, so wait before you call again.
+
+`fetch()` and every other query method raise `dm.SessionClosedError` once you call
+`m.close()`, and so does `m.streams()`. Create a new session to read again.
+
+A `fetch()` or `history()` of a watchlist fails when Massive rejects the API key, or when every
+symbol on the watchlist at the call failed. When only some fail, such as when Massive refuses one
+symbol's request, the log reports them and `m.symbol_reads()` shows each one's error.
+
 <a id="diagnostics"></a>
 
 ## Read the diagnostics tables

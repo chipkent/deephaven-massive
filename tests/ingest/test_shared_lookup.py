@@ -66,7 +66,7 @@ def test_a_failure_tells_waiters_to_copy_it_or_try_again(
     assert isinstance(held, shared_lookup._AbandonedError) is abandoned
     if isinstance(error, RuntimeError):
         assert isinstance(held, dm.MassiveError)
-        assert held.cause is dm.ErrorCause.LIBRARY_DEFECT
+        assert held.source is dm.ErrorSource.LIBRARY
         assert str(held).startswith("the read failed: RuntimeError('bug')")
     assert lookup._claim("k")[1]  # forgotten
 
@@ -79,6 +79,14 @@ def test_waiters_get_a_copy_of_the_makers_error() -> None:
         shared_lookup._outcome(future)
     assert info.value is not error
     assert (info.value.status, info.value.request_id) == (403, "r1")
+
+
+def test_a_waiters_copy_keeps_whether_the_call_may_succeed_later() -> None:
+    future: Future[Any] = Future()
+    future.set_exception(dm.MassiveError("connection reset", is_retryable=True))
+    with pytest.raises(dm.MassiveError) as info:
+        shared_lookup._outcome(future)
+    assert info.value.is_retryable
 
 
 def test_a_value_is_retired_only_when_old_and_current(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1515,6 +1515,8 @@ _WIRE_VOCABULARY = frozenset(
         "WireError",
         "WireAuthError",
         "WireEntitlementError",
+        "RETRYABLE_STATUSES",
+        "WireFailure",
         "DriftReport",
         "DriftSample",
         "Field",

@@ -348,11 +348,12 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
 ) -> None:
     # The indicator timestamps take whole milliseconds, as their ISO-8601 text does.
     instant = to_j_instant("2025-01-02T14:30:00.001Z")
+    assert instant is not None
     filters = build(
         massive_session,
         INDICATOR,
         filters={
-            "timestamp_gte": instant,  # type: ignore[dict-item]  # a Java time, which the types do not name
+            "timestamp_gte": instant,
             "timestamp_lt": pd.Timestamp("2025-01-02T14:30:00.002Z"),
         },
     )._request.filters
@@ -361,15 +362,17 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
         ("timestamp_lt", datetime(2025, 1, 2, 14, 30, 0, 2000, tzinfo=UTC)),
     )
     assert all(type(value) is datetime for _, value in filters)
-    for day in (to_j_local_date("2025-01-02"), np.datetime64("2025-01-02")):
+    java_day = to_j_local_date("2025-01-02")
+    assert java_day is not None
+    for day in (java_day, np.datetime64("2025-01-02")):
         assert build(
             massive_session,
             INDICATOR,
-            filters={"timestamp_gte": day},  # type: ignore[dict-item]  # a Java time, which the types do not name
+            filters={"timestamp_gte": day},
         )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
     # A Java day in a list is a day; the next element is the first the list refuses.
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
-        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})  # type: ignore[list-item]  # a Java time, which the types do not name; 1 is refused
+        build(massive_session, DIVIDENDS, filters={"a": [java_day, 1]})
     # An instant between two microseconds rounds outward: an upper bound up, any other down,
     # whether the name is a filter key or a wire name.
     between = to_j_instant("2025-01-02T14:30:00.000001001Z")
@@ -1098,7 +1101,7 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
     # A streaming dataset declared as a REST one would lie to its caller.
     with pytest.raises(dm.MassiveError) as info:
         build_query(massive_session._core, TRADES_SPEC, query_type=FetchQuery, symbols=["AAPL"])
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
     assert str(info.value).startswith(
         "m.stocks.trades gives a SymbolStreamQuery, not the FetchQuery it declares. "
     )
