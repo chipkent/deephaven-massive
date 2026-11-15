@@ -27,7 +27,6 @@ from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolRows,
 )
@@ -302,7 +301,7 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
-    rest.outcomes = {"AAPL": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    rest.outcomes = {"AAPL": SymbolFailure(refusal)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, FetchQuery)
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
@@ -329,15 +328,15 @@ def test_a_followed_fetch_whose_every_symbol_failed_is_retryable_only_when_each_
     busy = dm.MassiveError("HTTP 503: busy", status=503)
     refusal = dm.EntitlementError("HTTP 403: not in the plan", status=403)
     rest.outcomes = {
-        "AAPL": SymbolFailure(busy, FailureKind.TRANSIENT),
-        "MSFT": SymbolFailure(busy, FailureKind.TRANSIENT),
+        "AAPL": SymbolFailure(busy),
+        "MSFT": SymbolFailure(busy),
     }
     both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
     assert isinstance(both, FetchQuery)
     with pytest.raises(dm.MassiveError, match="busy") as retried:
         both.fetch(wait=True)
     assert retried.value.is_retryable
-    rest.outcomes["MSFT"] = SymbolFailure(refusal, FailureKind.PERMANENT)
+    rest.outcomes["MSFT"] = SymbolFailure(refusal)
     with pytest.raises(dm.MassiveError, match="busy") as mixed:
         both.fetch(wait=True)
     # AAPL's error, the first, but calling again cannot help MSFT.
@@ -360,7 +359,7 @@ def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
     core = massive_session._core
     monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
     error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
-    rest.outcomes = {"DOT": SymbolFailure(error, FailureKind.PERMANENT)}
+    rest.outcomes = {"DOT": SymbolFailure(error)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
     assert isinstance(q, FetchQuery)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
@@ -543,7 +542,7 @@ def test_a_static_table_of_values_fails_when_one_value_fails(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
-    rest.outcomes = {"NQ": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    rest.outcomes = {"NQ": SymbolFailure(refusal)}
     codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         massive_session.futures.products(product_code=codes).fetch(wait=True)

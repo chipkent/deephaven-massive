@@ -28,7 +28,6 @@ from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import (
-    FailureKind,
     FlatFileRead,
     SymbolFailure,
     SymbolOutcome,
@@ -122,7 +121,7 @@ class _Rest:
         assert isinstance(end, date)
         days = sorted({start, end})
         return {
-            symbol: SymbolFailure(self.failing[symbol], FailureKind.TRANSIENT)
+            symbol: SymbolFailure(self.failing[symbol])
             if symbol in self.failing
             else SymbolRows(_rows(self.session, [symbol], *days, spec=spec))
             for symbol in symbols
