@@ -12,5 +12,5 @@ null `Date`. Unverified: whether a combo's product code is one `/futures/v1/prod
 whether `/futures/v1/schedules` serves sessions for it that hold the combo's trades, and whether
 `/futures/v1/contracts` answers the calendar's lookup (`ticker.any_of`) for a combo at all.
 Until settled, combo rows keep a null `Date`. Settled by
-`tests/namespaces/test_futures_integration.py::test_products_schedules_and_contracts_of_futures_combos`,
+`tests/ingest/test_futures_calendar_integration.py::test_products_schedules_and_contracts_of_futures_combos`,
 which records Massive's answers for a few CL and GC combos traded in the last 7 days.

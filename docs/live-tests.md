@@ -19,6 +19,7 @@ checkout's root. Each pytest marker selects one set of tests:
 | `integration_smoke` | Every dataset and method once, checked automatically |
 | `integration_rate_limits` | The three rate-limit tests, which go over Basic's 5 requests a minute on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |
+| `integration_all_symbols` | The test that streams every futures trade for 10 minutes, taking over your key's futures connection the whole time |
 
 `-m integration` leaves out the tests that also carry another of these markers.
 
@@ -59,6 +60,13 @@ The connection-limit tests run last and alone, because they disturb the key's co
    ```bash
    uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
    uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
+   ```
+
+4. When you want it, run the all-symbols test while futures trade. It streams for 10 minutes
+   and skips at once while the futures market is closed:
+
+   ```bash
+   uv run pytest -m integration_all_symbols tests/ingest/test_futures_calendar_integration.py 2>&1 | tee -a live-checks.log
    ```
 
 Every command adds its output to `live-checks.log`, the file to attach to an issue.
