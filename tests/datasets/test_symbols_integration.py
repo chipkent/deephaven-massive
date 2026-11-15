@@ -1,12 +1,12 @@
-"""Live checks of the symbol rule against Massive's own tickers, and of how Massive reads case.
+"""Live checks of the symbol grammar against Massive's own tickers, and of how Massive reads case.
 
-The library sends every ticker as written, in any case. It refuses only text no request can
-carry (empty, whitespace at either end, a control character, `,`, or `*`), a symbol without its
-class's prefix (`O:`, `I:`, `C:`, `X:`), and a forex or crypto pair written with `-` or `/`.
-These tests page Massive's own list of each class and check that the rule accepts every ticker
-on it, and that each converts to and from each transport unchanged. They also record what
-Massive answers to a ticker in another case, and to a forex pair written with a dash. Each
-test records what Massive sent (`evidence`). How to run these tests is in `docs/live-tests.md`.
+The library sends a ticker in Massive's canonical form for its class as written, and refuses any
+other form, naming the form to write. These tests page Massive's own list of each class and
+check that the grammar accepts every ticker on it, and that each converts to and from each
+transport unchanged: a listed form the grammar refuses is a library defect to fix. They also
+record what Massive answers to a ticker in another case, and to a forex pair written with a
+dash. Each test records what Massive sent (`evidence`). A test the key's plan does not cover
+skips on Massive's refusal, quoting it. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._datasets.symbols import check_symbol, class_spelling_reason
+from deephaven_massive._datasets.symbols import check_symbol
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings, ws_symbol
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import RestClient, Transport, source
@@ -115,13 +115,10 @@ def _problems(
     found = []
     for ticker in tickers:
         try:
-            check_symbol(ticker)
+            check_symbol(asset_class, ticker)
         except ValueError as error:
             found.append(f"{ticker!r}: refused: {error}")
             continue
-        reason = class_spelling_reason(asset_class, ticker)
-        if reason is not None:
-            found.append(f"{ticker!r}: refused: {reason}")
         if dm.canonical_symbol(ticker, asset_class) != ticker:
             found.append(
                 f"{ticker!r}: canonical_symbol gives {dm.canonical_symbol(ticker, asset_class)!r}"
@@ -146,7 +143,6 @@ def _problems(
             _TICKERS,
             ({"market": "stocks", "limit": _PAGE},),
             "stocks",
-            marks=pytest.mark.needs("stocks:starter"),
             id="stocks",
         ),
         pytest.param(
@@ -154,7 +150,6 @@ def _problems(
             _TICKERS,
             ({"market": "indices", "limit": _PAGE},),
             "indices",
-            marks=pytest.mark.needs("indices:starter"),
             id="indices",
         ),
         pytest.param(
@@ -162,7 +157,6 @@ def _problems(
             _TICKERS,
             ({"market": "fx", "limit": _PAGE},),
             "currencies",
-            marks=pytest.mark.needs("currencies:starter"),
             id="forex",
         ),
         pytest.param(
@@ -170,7 +164,6 @@ def _problems(
             _TICKERS,
             ({"market": "crypto", "limit": _PAGE},),
             "currencies",
-            marks=pytest.mark.needs("currencies:starter"),
             id="crypto",
         ),
         pytest.param(
@@ -178,7 +171,6 @@ def _problems(
             _OPTION_CONTRACTS,
             tuple({"underlying_ticker": u, "limit": _PAGE} for u in _OPTION_UNDERLYINGS),
             "options",
-            marks=pytest.mark.needs("options:starter"),
             id="options",
         ),
         pytest.param(
@@ -189,7 +181,6 @@ def _problems(
                 {"type": "combo", "date": _TODAY, "active": True, "limit": _PAGE},
             ),
             "futures",
-            marks=pytest.mark.needs("futures:starter"),
             id="futures",
         ),
     ],
@@ -203,26 +194,27 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     bucket: str,
     evidence: Evidence,
 ) -> None:
-    """Whether the rule accepts every ticker of Massive's own list of a class.
+    """Whether the grammar accepts every ticker of Massive's own list of a class.
 
     Reads every page, following `next_url`: the ticker list of the market for stocks,
     indices, forex, and crypto; every futures contract, single and combo, tradeable today;
     and, since the options contracts list holds millions of contracts, a sample: every current
     contract of 14 underlyings, share classes (`BRK.B`, `BF.B`, `GOOGL`), the common stocks
     behind listed preferreds (`BAC`, `KIM`, `WFC`), and index options (`SPX`, `NDX`, `VIX`,
-    `RUT`). For every ticker, asserts that the library sends it as written (no refusal, its
-    class's prefix present, a forex or crypto pair joined), that `canonical_symbol` keeps it,
-    that a flat-file filter holds a spelling that reads back as it, and that its stream topic
-    reads back as it. Records each list's size, the requests it took, and the characters its
-    tickers use, so a lower-case letter, a space, or a separator Massive writes shows up.
+    `RUT`). For every ticker, asserts that the grammar accepts it as written, that
+    `canonical_symbol` keeps it, that a flat-file filter holds a spelling that reads back as
+    it, and that its stream topic reads back as it. Records each list's size, the requests it
+    took, and the characters its tickers use, so a lower-case letter, a space, or a separator
+    Massive writes shows up.
 
-    Cost: a paid plan of each class, since Basic paces 5 requests a minute and these lists
-    take more. Estimated, not yet measured: about 30 requests for stocks, 15 for indices, 2
-    each for forex and crypto, 60 for the options sample, and 30 for futures, about 140 in
-    all, unpaced, so about 5 minutes. Each case records the count it took.
+    Cost, estimated, not yet measured: about 30 requests for stocks, 15 for indices, 2 each
+    for forex and crypto, 60 for the options sample, and 30 for futures, about 140 in all, so
+    about 5 minutes unpaced; a class the run paces stays within the timeout. Each case records
+    the count it took.
 
-    Reading it: no problem line confirms the rule for that class; each problem line is a
-    ticker Massive lists that the library would refuse or misread.
+    Reading it: no problem line confirms the grammar for that class; each problem line is a
+    ticker Massive lists that the library would refuse or misread, a defect to fix in the
+    grammar.
     """
     rows: list[dict[str, Any]] = []
     requests = 0
@@ -244,10 +236,8 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     assert not found, f"{len(found)} tickers the library refuses or misreads: {found[:_SHOWN]}"
 
 
-@pytest.mark.needs("stocks:starter")
 @pytest.mark.settles("120")
-@pytest.mark.requests(2)
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(300)
 def test_massive_answers_tickers_in_another_case(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
@@ -257,17 +247,15 @@ def test_massive_answers_tickers_in_another_case(
     and `BRK.B` in one request, and the previous day bar of `aapl`. The snapshot answers a
     ticker it does not hold with a row carrying an `error` field, so the verdict counts only
     rows without one. Reading it: three such rows, and an empty or refused `aapl` bar, mean
-    Massive reads case, so `aapl` names no ticker and gives no rows, as the library assumes;
-    five such rows, or a bar for `aapl`, mean Massive folds case, and `aapl` reads AAPL's
-    data.
+    Massive reads case, so `aapl` names no ticker, and the grammar's refusal of it, naming
+    `AAPL`, spares the user a silent empty answer; five such rows, or a bar for `aapl`, mean
+    Massive folds case, and the refusal could be relaxed.
     """
     assert bad_values.ask_all(live_rest, bad_values.TICKER_CASE, evidence)
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("120")
-@pytest.mark.requests(1)
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(300)
 def test_massive_answers_a_forex_pair_written_with_a_dash(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
@@ -275,6 +263,7 @@ def test_massive_answers_a_forex_pair_written_with_a_dash(
 
     The library refuses it, naming `C:EURUSD`, because a flat-file filter and a stream topic
     match only the joined ticker. Reading it: an error or no rows means REST agrees; quotes
-    mean REST reads the dash as EUR/USD, and a REST-only read of it would have worked.
+    mean REST reads the dash as EUR/USD, and the refusal still stands on the flat-file and
+    stream silence.
     """
     assert bad_values.ask_all(live_rest, bad_values.PAIR_SEPARATOR, evidence)

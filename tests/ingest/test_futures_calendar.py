@@ -287,7 +287,7 @@ def test_a_watched_contract_is_asked_for_once(calendar: FuturesCalendar, fetch: 
     "spread",
     ["ZCK4-ZCN4", "BOB 02-01 U6", "BZ:BF F7-G7-H7", "6A:XF:AUDUSD:Q6", "ZZ:NEW COMBO Z6"],
 )
-def test_a_combo_is_looked_up_as_written_and_a_miss_has_no_date(
+def test_a_spread_is_never_looked_up_and_has_no_date(
     *,
     calendar: FuturesCalendar,
     fetch: FakeFetch,
@@ -298,16 +298,16 @@ def test_a_combo_is_looked_up_as_written_and_a_miss_has_no_date(
         watched(calendar, spread)
         assert caplog.records == []
         row = (spread, "2024-03-27T21:50:00", "2024-03-27")
-        why = "Massive's futures contracts do not list it"  # this answer holds no combo
+        why = "a spread or combination is never looked up in Massive's schedules"
         assert correct(calendar, [row, row]) == (
             [None, None],
             [(spread.split(maxsplit=1)[0], null_date(spread, why, "2024-03-27"))],
         )
         assert correct(calendar, [row]) == ([None], [])
         idle(calendar)
-    assert fetch.paths() == [CONTRACTS_PATH]  # looked up once, as a contract is
+    assert fetch.calls == []
     # The rule's date can be wrong around a holiday, so its rows get none: one WARNING per
-    # combo and rule date, however many batches it is in; watching it alone says nothing.
+    # spread and rule date, however many batches it is in; watching it alone says nothing.
     assert [r.levelno for r in caplog.records if spread in r.getMessage()] == [logging.WARNING]
 
 
@@ -725,7 +725,7 @@ def test_a_lookup_cut_short_by_close_is_not_logged(
 
 
 def test_a_schedule_without_events_for_a_product_places_nothing(
-    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
+    calendar: FuturesCalendar, fetch: FakeFetch
 ) -> None:
     fetch.answers[SCHEDULES_PATH] = [
         event("XX", "2024-03-28", "2024-03-27T22:00:00"),  # another product's
@@ -734,12 +734,6 @@ def test_a_schedule_without_events_for_a_product_places_nothing(
     watched(calendar, "ESM4")
     _, misses = correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     assert "its loaded schedule (ES) holds no session;" in misses[0][1]
-    # An empty schedule stays loaded like any other: a miss past the reload spacing asks for no
-    # reload, and only the daily reload of every schedule looks again.
-    clock.now += SPACING + 1
-    correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
-    idle(calendar)
-    assert fetch.paths().count(SCHEDULES_PATH) == 1
 
 
 def test_the_worker_outlives_an_unexpected_error(

@@ -147,7 +147,9 @@ class RowConverter:
             arrow_schema=schema.arrow_schema(),
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
-            symbols=WireSymbols(spec.name, spec.asset_class, unreadable_symbols),
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
+            ),
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
         )

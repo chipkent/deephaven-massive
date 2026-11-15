@@ -6,7 +6,7 @@
   delayed_subscriptions: [stocks]
   rest_basic_subscriptions: [indices, currencies, futures]
 2:
-  unsendable_symbols: raise
+  noncanonical_symbols: raise
 3:
   rest_basic_subscriptions: [options, currencies, futures]
   websocket_hosts:

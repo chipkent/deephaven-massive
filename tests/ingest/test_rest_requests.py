@@ -522,16 +522,3 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     assert rest_requests._symbol_request(
         news, "AAPL", path, targets=[], param="ticker", split=split_pair
     ) == ("AAPL", {}, {"ticker": "AAPL"})
-
-
-def test_a_forex_symbol_without_its_prefix_is_sent_whole() -> None:
-    # Codes are derived only from Massive's `C:` form; other text goes on the wire as written,
-    # and Massive answers it.
-    spec = DatasetSpec(
-        name="forex.last_quote",
-        summary="A dataset for the tests.",
-        asset_class=AssetClass.FOREX,
-        fetch_path="/v1/last_quote/currencies/{from}/{to}",
-    )
-    assert rest_requests._pair(spec, "C:EURUSD", split_pair) == ("EUR", "USD")
-    assert rest_requests._pair(spec, "EURUSD", split_pair) == ("EURUSD", "")

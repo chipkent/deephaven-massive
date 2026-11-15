@@ -21,8 +21,8 @@ Deephaven:
 - `futures_sessions`: the 17:00 Chicago rule of the futures trading session, for one instant
   and for a column;
 - `bar_periods`: which bars of a timespan lie wholly inside a range, and the days a bar covers;
-- `symbols`: the `symbols` argument and its check, the public converters to Massive's
-  spellings, and the pair readers the transports use;
+- `symbols`: Massive's canonical ticker grammar, the public converters, and the check of the
+  symbols a query takes;
 - `wire_symbols`: the spellings each transport sends and takes, read and written;
 - `history_source`: the window of a `history()` call, its partition dates, when a flat file
   is published, and the choice between flat files and REST.

@@ -439,17 +439,15 @@ class SymbolConvention(StrEnum):
 
     Massive writes a share class as `.B` (`BRK.B`) and a preferred as a lower-case `p` and its
     series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. The
-    other members name one other US stock convention: `YAHOO` and `CMS` convert its share
-    classes and preferreds, and `NASDAQ` its preferreds, whose classes Nasdaq writes as Massive
-    does. None converts warrants, units, rights, or when-issued shares, for which Massive
-    documents no spelling. Other text comes back unchanged, except a spelling Massive reads as
-    another instrument (Yahoo's `VOD.L`, Nasdaq's `ABC.U`), which raises `ValueError`.
+    other members name the exact grammar of one other US stock convention; only plain
+    tickers, share classes, and preferreds convert, because Massive documents no spelling for
+    warrants, units, rights, or when-issued shares.
 
-    - `MASSIVE`: Massive's own spelling, the default. A forex, crypto, index, or option symbol in
-      another unambiguous spelling of its class converts (`EUR/USD` to `C:EURUSD`, `SPX` to
-      `I:SPX` for the indices class), and any other text comes back unchanged. So does a stock
-      ticker in another convention's spelling, since `-` means a class to Yahoo and a preferred
-      to Nasdaq. It is the only member every class takes.
+    - `MASSIVE`: Massive's own spelling, the default. A canonical ticker comes back unchanged;
+      a forex, crypto, index, or option symbol in another unambiguous spelling of its class
+      converts (`EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` for the indices class); a stock
+      ticker in another convention's spelling raises, since `-` means a class to Yahoo and a
+      preferred to Nasdaq. It is the only member every class takes.
     - `YAHOO`: Yahoo Finance; a class is `-B` (`BRK-B`), a preferred `-P` and its series
       (`BAC-PL`).
     - `NASDAQ`: the Nasdaq Integrated Platform symbology (the "NASDAQ Symbol" column of
@@ -480,17 +478,15 @@ class OnError(StrEnum):
 
     One enum for every problem a caller may choose to skip, used in these places:
 
-    - `canonicalize_symbols(on_error=)`, for a value Massive would read as another
-      instrument, such as Yahoo's `VOD.L`. The default there is `LOG`.
-    - `MassiveConfig.unsendable_symbols`, for a row of a table of symbols passed as `symbols` that
-      the library refuses: an empty value; one with whitespace at either end, a control
-      character, `,`, or `*`; an options, index, forex, or crypto symbol without its class's
-      prefix; or a forex or crypto pair written with `-` or `/`. Such a `str` or list value you
-      pass always raises, whatever the setting.
+    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The default
+      there is `LOG`. `canonical_symbol(on_error=)` and the per-class converters take it for text
+      that does not convert; their default is `RAISE`, and `LOG` and `IGNORE` return None.
+    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols` that
+      is not Massive's exact ticker. A `str` or a list you pass always raises, whatever the setting.
       The default is `LOG`.
-    - `MassiveConfig.unlisted_symbols`, for a crypto pair that Massive's crypto ticker list does
-      not hold, in a stream, `fetch()`, or `poll()`. The default is
-      `LOG`.
+    - `MassiveConfig.unlisted_symbols`, for a crypto pair, in code or in a table of symbols,
+      that Massive's crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`.
+      The default is `LOG`.
     - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
       cannot read. The default is `LOG`.
     - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
@@ -519,7 +515,7 @@ class OnError(StrEnum):
             import deephaven_massive as dm
 
             assert dm.OnError("log") is dm.OnError.LOG
-            strict = dm.MassiveConfig(unsendable_symbols=dm.OnError.RAISE)
+            strict = dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)
     """
 
     RAISE = "raise"

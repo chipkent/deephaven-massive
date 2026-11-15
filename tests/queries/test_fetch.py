@@ -22,7 +22,7 @@ from deephaven_massive._enums import (
     OnError,
     PollMode,
 )
-from deephaven_massive._errors import UnlistedPairError
+from deephaven_massive._errors import BrokenGuaranteeError, UnlistedPairError
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
@@ -376,6 +376,23 @@ def test_a_followed_fetch_s_unlisted_pair_raises_under_raise(
     rest.outcomes = {}  # the raised error's traceback holds the session
 
 
+def test_a_followed_fetch_s_unlisted_pair_handed_on_under_log_is_a_defect(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    # Under LOG the read gives such a pair no rows, so one the first read hands on is the
+    # library's defect, never a failure the setting chose.
+    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
+    rest.outcomes = {"DOT": SymbolFailure(error)}
+    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(BrokenGuaranteeError, match="under unlisted_symbols=LOG"):
+        q.fetch(wait=True)
+    rest.outcomes = {}  # the raised error's traceback holds the session
+
+
 def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> None:
     batched = dataclasses.replace(LAST_TRADE_SPEC, symbols_per_request=250)
     assert _symbols_per_read(batched) == 250
@@ -569,11 +586,11 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
     empty = new_table([string_col("ProductCode", [None])])
     with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
         massive_session.futures.products(product_code=empty).fetch(wait=True)
-    unsendable = new_table([string_col("Symbol", ["AAPL,MSFT"])])
-    q = massive_session.options.chain(unsendable)
-    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
+    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
+    q = massive_session.options.chain(options)
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
         q.fetch(wait=True)
-    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
         q.poll(5)
     assert rest.valued == []
 

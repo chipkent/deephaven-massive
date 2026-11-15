@@ -406,9 +406,6 @@ class DatasetSpec:
             argument of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
-        library_params: Query parameters the library sets itself on some requests only, by wire
-            name, such as the options snapshot's `type`, which only `dm.ALL` sends; they have no
-            argument of their own. Each is reserved, with its whole family, from `filters`.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);
             `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
             `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
@@ -417,6 +414,12 @@ class DatasetSpec:
             dataset, by column, where the column's meaning depends on the query in a way no
             vendor text says, such as the split adjustment of a bar's prices. Empty by
             default.
+        symbols_as_written: True for a dataset whose symbols are a third party's global
+            tickers rather than Massive's US-market ones (the TMX corporate events, a global
+            calendar): `symbols=`, the rows of a symbol table, and the rows' symbols are then
+            taken exactly as Massive writes them (`symbols.is_canonical`), not through the
+            asset class's grammar. Only a REST dataset may set it: a stream's topics and a
+            flat file's filter follow the class's spellings.
         option_rows: True for a dataset of every class (`ClassFromPrefix.ANY`) whose rows
             include options contracts beside other classes' tickers (the unified snapshot): it
             gets the derived `OptionRoot` column every options dataset has, null on a row
@@ -482,9 +485,9 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
-    library_params: frozenset[str] = frozenset()
     row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
+    symbols_as_written: bool = False
     option_rows: bool = False
     serves_current_data: bool = False
     latest_is_current: bool = False
@@ -551,12 +554,13 @@ class DatasetSpec:
     def _check_class_requirements(self) -> None:
         """Check the fields that need the dataset to be of one asset class, or of every class.
 
-        A stream, a dataset in a kind, and a flat-file dataset are of one class; `option_rows` is
-        for a dataset of every class.
+        A stream, a dataset in a kind, and a flat-file dataset are of one class; symbols kept
+        as written are for REST datasets only; `option_rows` is for a dataset of every class.
 
         Raises:
             ValueError: If a dataset with channels, flat files, or a kind has no `asset_class`
-                (`ClassFromPrefix.ANY`), or a dataset of one class sets `option_rows`.
+                (`ClassFromPrefix.ANY`); a dataset that keeps its symbols as written has
+                channels or flat-file prefixes; or a dataset of one class sets `option_rows`.
         """
         if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
@@ -565,6 +569,9 @@ class DatasetSpec:
         if self.flat_file_prefixes and self.asset_class is ClassFromPrefix.ANY:
             # A file filter looks for the spellings of one class (`wire_symbols.wire_spellings`).
             raise ValueError(f"{self.name}: a flat-file dataset needs a class")
+        if self.symbols_as_written and (self.channels or self.flat_file_prefixes):
+            # A stream subscribes and a flat file filters by the class's spellings.
+            raise ValueError(f"{self.name}: symbols kept as written are for REST datasets only")
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")

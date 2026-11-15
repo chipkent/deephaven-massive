@@ -127,7 +127,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
     assert base.s3_bucket == "flatfiles"
-    assert base.unsendable_symbols is dm.OnError.LOG
+    assert base.noncanonical_symbols is dm.OnError.LOG
     assert base.unlisted_symbols is dm.OnError.LOG
     assert base.unreadable_symbols is dm.OnError.LOG
     assert base.unavailable_symbols is dm.OnError.LOG
@@ -441,7 +441,7 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
 
 
 _ON_ERROR_SETTERS: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
-    "unsendable_symbols": lambda c, v: dataclasses.replace(c, unsendable_symbols=v),
+    "noncanonical_symbols": lambda c, v: dataclasses.replace(c, noncanonical_symbols=v),
     "unlisted_symbols": lambda c, v: dataclasses.replace(c, unlisted_symbols=v),
     "unreadable_symbols": lambda c, v: dataclasses.replace(c, unreadable_symbols=v),
     "unavailable_symbols": lambda c, v: dataclasses.replace(c, unavailable_symbols=v),
@@ -686,7 +686,7 @@ flush_interval: 0.25
 rest_base_url: https://rest.example.com
 s3_endpoint_url: "https://files.example.com"
 s3_bucket: 'bucket'
-unsendable_symbols: raise
+noncanonical_symbols: raise
 unlisted_symbols: raise
 unreadable_symbols: ignore
 unavailable_symbols: raise
@@ -713,7 +713,7 @@ connection_taken: reconnect
         rest_base_url="https://rest.example.com",
         s3_endpoint_url="https://files.example.com",
         s3_bucket="bucket",
-        unsendable_symbols=OnError.RAISE,
+        noncanonical_symbols=OnError.RAISE,
         unlisted_symbols=OnError.RAISE,
         unreadable_symbols=OnError.IGNORE,
         unavailable_symbols=OnError.RAISE,
@@ -969,9 +969,9 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
     [
         # The error settings: an exact word.
         (
-            "unsendable_symbols: Raise\n",
+            "noncanonical_symbols: Raise\n",
             (
-                ", line 1, column 21: unsendable_symbols 'Raise' "
+                ", line 1, column 23: noncanonical_symbols 'Raise' "
                 "is not an error setting; write one of raise, log, ignore, exactly as shown"
             ),
         ),
@@ -1364,7 +1364,7 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     details = _config._setting_details()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
     assert "EntitlementError" in details["delayed_subscriptions"][1]
-    assert details["unsendable_symbols"][1].startswith(
+    assert details["noncanonical_symbols"][1].startswith(
         "- `dm.OnError.LOG` skips the row and logs a warning naming the value.\n"
         "- `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.\n"
     )

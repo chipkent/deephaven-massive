@@ -249,8 +249,8 @@ class NotePart(StrEnum):
     STALE_SYMBOLS = "stale_symbols"
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
     SKIPPED_PAIRS = "skipped_pairs"
-    """Crypto pairs a symbol table added that the stream skips: Massive's crypto ticker list
-    does not split them, or could not be read."""
+    """Crypto pairs, passed in code or added by a symbol table, that the stream skips:
+    Massive's crypto ticker list does not split them, or could not be read."""
     POLL_CYCLE = "poll_cycle"
     """A `poll()` cycle failed; the next one runs as scheduled."""
     LEFT_OUT = "left_out"
@@ -492,8 +492,8 @@ class StreamRow:
             (`transport:field+` for an extra field, `transport:field-` for a missing one,
             `transport:field?` for one that held a value that does not fit); null while there
             is none. Separate from `error`, so drift never hides a failure.
-        skipped: The symbol-table values the stream or poll skips because no request
-            can carry them (`skipped_rows_text` in `_tables/watchlist.py`); null while none
+        skipped: The symbol-table values the stream or poll skips because they are not
+            Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
             is. Not a column of its own: the `Error` column shows it after `notes` while the
             stream runs (`as_row`).
         notes: The current warnings that leave the stream running, each a named part, in

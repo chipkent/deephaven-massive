@@ -150,22 +150,22 @@ def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
 def _failure_recorder(
     reader: RestReader, failed: dict[str, MassiveError], cancel: Cancel | None
 ) -> CryptoSplit:
-    """Return a crypto split that records a pair Massive's list does not hold instead of raising.
+    """Return a crypto split that records any pair it cannot split instead of raising.
 
-    Such a pair fails alone, or has no rows under `unlisted_symbols` `LOG` and `IGNORE`
-    (`read_rest_by_symbol`), while the read goes on with the other symbols (`recording_split`).
-    A failed read of the list affects every pair, so it raises and fails the read.
+    Each such pair fails alone, a failed read of the crypto ticker list included, while the
+    read goes on with the other symbols (`recording_split`). A pair the list does not hold has
+    no rows under `unlisted_symbols` `LOG` and `IGNORE` instead (`read_rest_by_symbol`).
 
     Args:
         reader: The reader whose session's crypto ticker list splits each pair.
-        failed: Receives each pair the list does not hold, with its error.
+        failed: Receives each pair that cannot be split, with its error.
         cancel: The read's stop token, which the list's read listens to.
 
     Returns:
         The split.
     """
     pair = functools.partial(reader.crypto_pair, cancel=cancel)
-    return recording_split(pair, failed, catching=UnlistedPairError)
+    return recording_split(pair, failed, catching=MassiveError)
 
 
 def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveError]:
@@ -211,9 +211,9 @@ def fetch_units(
 
     Returns:
         The planned requests in plan order, and the symbols that failed before any request
-        with their errors: a crypto pair Massive's list does not hold, and every symbol of a
-        path that does not take a parameter the call set (`UnsupportedParameterError`). A failed
-        read of the crypto ticker list raises its `MassiveError`.
+        with their errors: a crypto pair Massive's list does not hold (or the list's failed
+        read), and every symbol of a path that does not take a parameter the call set
+        (`UnsupportedParameterError`).
     """
     asked = tuple(sorted(_ordered(symbols)))
     alone = _SYMBOL not in columns
@@ -379,7 +379,8 @@ def read_rest_by_symbol(
     skips = not effect_of(reader.unlisted_symbols).fails
     unlisted = {s: e for s, e in failed.items() if skips and isinstance(e, UnlistedPairError)}
     if unlisted:
-        reader.skip_unlisted(spec, unlisted, verb="read", setting=reader.unlisted_symbols)
+        verb = "fetch()" if window is None else "history()"
+        reader.skip_unlisted(spec, unlisted, verb=verb, setting=reader.unlisted_symbols)
     failures = {s: e for s, e in failed.items() if s not in unlisted}
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = own_symbols(spec, planned.symbol, planned.query)

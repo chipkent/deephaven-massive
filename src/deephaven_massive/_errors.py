@@ -385,7 +385,7 @@ class PermanentError(MassiveError):
 
     Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
     errors whose cause is settled for the session or the request: a row that breaks its
-    dataset's schema (`RowDataError`), a symbol table's row no request can carry
+    dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), a crypto pair missing from the session's ticker list
     (`UnlistedPairError`), a symbol Massive has no data for under
     `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`, `_ingest/rest.py`), and, in
@@ -746,11 +746,11 @@ class UnlistedPairError(PermanentError):
     `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
     data gives; the session's crypto ticker list, read again on a miss at most once an hour,
     does not list the ticker, or gives currencies that do not join to it
-    (`RestReader.crypto_pair` in `_ingest/rest.py`). Such a pair is one Massive has
-    no data for, and follows `MassiveConfig.unlisted_symbols`, whether passed in code or in a
-    table: under `LOG` and `IGNORE`, `fetch()` and each `poll()` cycle leave it out, and a
-    followed read gives it no rows, `DONE`; under `RAISE`, a `fetch()`, `poll()`, or followed
-    table fails with it, and `fetch(wait=True)` raises it.
+    (`RestReader.crypto_pair` in `_ingest/rest.py`). Such a pair, in code or in a symbol
+    table, follows `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE`, `fetch()` and
+    each `poll()` cycle leave it out, and a followed read gives it no rows (`DONE`); under
+    `RAISE`, a `fetch()`, `poll()`, or followed table fails with it, `fetch(wait=True)` raises
+    it, and a pair passed in code raises it at the call.
     """
 
 

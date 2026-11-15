@@ -2359,6 +2359,39 @@ def own_governors(rest_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> Gov
 
 
 @pytest.fixture
+def futures_spread_reads(
+    classes_on_basic: frozenset[str],
+) -> Callable[[Sequence[Mapping[str, Any]]], tuple[list[ticker_lists.SpreadRead], list[str]]]:
+    """Return a function that chooses the reads of futures combo contracts, one per venue.
+
+    With Futures on Basic it keeps 4 reads, the four exchanges' (CME, CBOT, NYMEX, COMEX), so
+    the products read and the contracts reads make 5 requests (`ticker_lists.spread_reads`).
+
+    Args:
+        classes_on_basic: The classes on Basic.
+
+    Returns:
+        A function taking the combo products and returning the reads and the venues left out.
+    """
+    reads = 4 if "futures" in classes_on_basic else None
+    return functools.partial(ticker_lists.spread_reads, reads=reads)
+
+
+@pytest.fixture
+def futures_spread_report() -> Callable[
+    [Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]
+]:
+    """Return a function that describes the futures spread tickers read, by venue and form.
+
+    Returns:
+        A function taking the combo products and the combo contracts by venue, and returning
+        evidence lines (`ticker_lists.spread_report`) judged by the library's
+        `canonical_symbol_future_spread`.
+    """
+    return functools.partial(ticker_lists.spread_report, spread=dm.canonical_symbol_future_spread)
+
+
+@pytest.fixture
 def crypto_report() -> Callable[..., list[str]]:
     """Return a function that describes Massive's crypto ticker list and its unsplittable rows.
 

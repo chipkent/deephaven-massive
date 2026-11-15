@@ -23,14 +23,16 @@ keys of a keyed `poll()` table, and the page size, which is each endpoint's docu
 Columns, types, and descriptions come from the generated schemas, never from this module.
 
 Instruments. The Benzinga datasets that take tickers and the ETF Global datasets take Massive's
-stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS`. Their rows each
-describe one instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its
-`composite_ticker`; a Benzinga row's `ticker`; for a TMX event or a Benzinga row without a
-ticker, null). Benzinga news names several tickers per article, so it keeps its `Tickers` column
-(a `String[]`), and an article is listed under each ticker it was read for, in `Symbol`.
-Benzinga analysts and firms, and both Fable datasets, take no symbols at all. Every dataset
-sends its tickers and keeps the rows' tickers exactly as written, so the TMX corporate events,
-from Wall Street Horizon's global calendar, take its non-US tickers too.
+stock tickers (`AAPL`, `BRK.B`), so their specs carry `AssetClass.STOCKS` and a symbol with another
+class's prefix (`X:BTCUSD`) is rejected when the query is built. Their rows each describe one
+instrument, which becomes the `Symbol` column (an ETF Global row's ETF, its `composite_ticker`; a
+Benzinga row's `ticker`; for a TMX event or a Benzinga row without a ticker, null). Benzinga news
+names several tickers per article, so it keeps its `Tickers` column (a `String[]`), and an article
+is listed under each ticker it was read for, in `Symbol`. Benzinga analysts and firms, and both
+Fable datasets, take no symbols at all. The TMX corporate events come from Wall Street Horizon's
+global calendar, whose tickers are not US-market ones (each event names its venue's MIC and an
+ISIN), so that dataset takes and keeps its tickers exactly as Massive writes them
+(`DatasetSpec.symbols_as_written`).
 
 The module is one subject although it runs past 1,000 lines: it is one namespace and its four
 partner sub-namespaces, and every dataset is a REST list endpoint built the same way
@@ -94,6 +96,7 @@ def _list_spec(
     time_axis: tuple[str, str] | None = None,
     poll_mode: PollMode = PollMode.REPLACE,
     per_symbol: bool = False,
+    symbols_as_written: bool = False,
     ticker_list: str | None = None,
     nullable_poll_keys: Mapping[str, str] | None = None,
 ) -> DatasetSpec:
@@ -117,6 +120,8 @@ def _list_spec(
         time_axis: The wire parameter pair behind `start` and `end`, or None.
         poll_mode: The default `poll()` mode.
         per_symbol: True when the path takes one ticker per request.
+        symbols_as_written: True when the symbols are a third party's global tickers, kept
+            as Massive writes them (`DatasetSpec.symbols_as_written`).
         ticker_list: The column listing each row's tickers, from which the library fills
             `Symbol` (`DatasetSpec.ticker_list`); None, the default, for any other dataset.
         nullable_poll_keys: The poll keys whose null is a value, each with its reason; None,
@@ -142,6 +147,7 @@ def _list_spec(
         poll_keys=poll_keys,
         per_symbol=per_symbol,
         page_size=page_size,
+        symbols_as_written=symbols_as_written,
         ticker_list=ticker_list,
         nullable_poll_keys={} if nullable_poll_keys is None else nullable_poll_keys,
     )
@@ -311,6 +317,9 @@ TMX_CORPORATE_EVENTS: Final = _list_spec(
     symbol_param="ticker.any_of",
     time_axis=("date.gte", "date.lte"),
     poll_keys=("TmxRecordId",),
+    # Wall Street Horizon's calendar is global (each event names its venue's MIC and an
+    # ISIN), so its tickers are not US-market ones: they are kept as Massive writes them.
+    symbols_as_written=True,
 )
 
 FABLE_MERCHANT_AGGREGATES: Final = _list_spec(
@@ -470,7 +479,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -523,7 +532,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -567,7 +576,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, `dm.ALL`, or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
@@ -616,7 +625,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -669,7 +678,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -723,7 +732,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -827,7 +836,7 @@ class PartnersBenzingaNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - a bound isn't a date or a time with a time zone;
                 - the range ends before it starts;
                 - `limit` isn't positive;
@@ -910,7 +919,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -962,7 +971,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1015,7 +1024,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1067,7 +1076,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
@@ -1118,7 +1127,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a ticker isn't Massive's exact ticker;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 

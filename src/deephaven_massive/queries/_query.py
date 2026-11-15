@@ -28,6 +28,7 @@ from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import (
+    BrokenGuaranteeError,
     MassiveError,
     UnlistedPairError,
     every_symbol_failed,
@@ -124,13 +125,13 @@ def _read_symbol_table(
 
     The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
     on the caller thread, inside the session's execution context, with no library lock held.
-    A row no request can carry follows `MassiveConfig.unsendable_symbols`:
+    A row that is not Massive's exact ticker follows `MassiveConfig.noncanonical_symbols`:
     under `RAISE` it fails the call; under `LOG` and `IGNORE` it is skipped (and logged once).
     Every live verb calls it before it starts; a static verb (`fetch()`, `history()`) uses the
     symbols it returns.
 
     Args:
-        core: The session core, for its execution context and its `unsendable_symbols`.
+        core: The session core, for its execution context and its `noncanonical_symbols`.
         spec: The dataset, whose asset class the rows must follow.
         symbols: The boxed table, static or refreshing.
         query: The `repr` of the query whose verb reads it, which the messages name.
@@ -138,22 +139,23 @@ def _read_symbol_table(
             it as rows arrive.
 
     Returns:
-        The table's symbols, sorted and de-duplicated; null and skipped rows are
+        The table's canonical symbols, sorted and de-duplicated; null and skipped rows are
         left out.
 
     Raises:
-        ValueError: If the table has rows and none of them can be sent, so the result
+        ValueError: If the table has rows and none of them is Massive's ticker, so the result
             would follow nothing (`LOG` and `IGNORE`), or, for a static verb, if the table
             holds no symbol at all, as an empty symbol list does.
 
-    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names the row.
+    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names
+    `dm.canonicalize_symbols`.
     """
-    rule = SymbolRowRule.of(spec, core.config.unsendable_symbols)
+    rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, symbols.table, stream_id=None)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the symbol table can be sent, so the result "
+            f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
             f"would follow nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
@@ -355,7 +357,7 @@ class Query:
 
     @property
     def _splits_pairs_at_call(self) -> bool:
-        """True when a crypto pair Massive does not list raises at the call.
+        """True when a crypto pair Massive's crypto ticker list does not hold raises at the call.
 
         So it does for a pair passed in code under `MassiveConfig.unlisted_symbols=RAISE`;
         under `LOG` and `IGNORE` the read leaves such a pair out, and a table's pair is split
@@ -431,6 +433,8 @@ class Query:
             Each symbol's outcome, with when the read began and how long it took.
 
         Raises:
+            BrokenGuaranteeError: If the read hands on a pair its list does not hold under
+                `unlisted_symbols` `LOG` or `IGNORE`, a defect of the library.
             MassiveError: The first symbol's error, retryable only when every symbol's is,
                 when every symbol failed; under `unlisted_symbols=RAISE`, the first unlisted
                 pair's. A failure of every symbol alike (a rejected key, a closed
@@ -447,7 +451,14 @@ class Query:
         pairs = [
             name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
         ]
-        if pairs:  # only under RAISE: otherwise such a pair has no rows, and no failure
+        if pairs:
+            setting = self._core.config.unlisted_symbols
+            if not effect_of(setting).fails:
+                # Under LOG and IGNORE the read gives such a pair no rows instead of a failure.
+                raise BrokenGuaranteeError(
+                    f"the first read handed on a crypto pair its list does not hold under "
+                    f"unlisted_symbols={setting.name}: {failed[pairs[0]].error}"
+                ) from failed[pairs[0]].error
             raise failed[pairs[0]].error
         if len(failed) == len(call_time):
             first = every_symbol_failed([failed[name].error for name in call_time])

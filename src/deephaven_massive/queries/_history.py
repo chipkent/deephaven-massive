@@ -207,7 +207,8 @@ class HistoryQuery(Query):
                 - a bound is a `datetime` without a time zone, unreadable text, or `NaT`;
                 - one bound is a date and the other a time;
                 - `start` is after `end`, or in the future when `end` is left out;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - no source can serve the request; the message gives each reason;
                 - the endpoint doesn't take one of the query's parameters or filters.
             AuthenticationError: With `wait=True`, if Massive or its flat-file server rejects your
@@ -403,7 +404,7 @@ class HistoryQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=symbols.table,
-            rule=SymbolRowRule.of(spec, core.config.unsendable_symbols),
+            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
             reread=reread,
             plan=plan,
             note=f"Follows its symbol table over {span}. {note}",
@@ -517,7 +518,7 @@ class HistoryQuery(Query):
         """
         spec = self._spec
         rest = self._core.rest_transport()
-        if not wait and not window.empty:  # a parameter error and a pair in code raise now
+        if not wait and not window.empty:  # a parameter error, and a pair under RAISE, raise now
             rest.check_history(spec, request, window, split_pairs=self._splits_pairs_at_call)
         return self._result(
             call,

@@ -14,7 +14,6 @@ import functools
 import inspect
 import json
 import logging
-import re
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -398,12 +397,16 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
         assert type(q) is cls
         assert q._request.symbols == ("O:AAPL250117C00150000", "O:AAPL250117P00150000")
         assert factory(dm.ALL)._request.symbols is dm.ALL
-        # Massive answers any text with the O: prefix: the library judges no other part of it.
-        for text in ("O:AAPL", "O:BRK.B250117C00400000"):
-            assert factory(text)._request.symbols == (text,)
-        for text in ("AAPL250117C00150000", "AAPL", "X:BTCUSD"):
-            with pytest.raises(ValueError, match=r"lacks the O: prefix of every options contract"):
-                factory(text)
+        with pytest.raises(
+            ValueError, match=r"use 'O:AAPL250117C00150000' .*canonical_symbol_option"
+        ):
+            factory("AAPL250117C00150000")
+        with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
+            factory("AAPL")
+        with pytest.raises(ValueError, match=r"is a crypto ticker; this dataset takes option"):
+            factory("X:BTCUSD")
+        with pytest.raises(ValueError, match="not an OCC option symbol with a real expiry"):
+            factory("O:BRK.B250117C00400000")  # an OCC root has no dot
 
 
 def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
@@ -517,12 +520,12 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
         chain(1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match=r"^cannot send the symbol '' to Massive"):
-        chain("")
-    with pytest.raises(ValueError, match="starts or ends with whitespace"):
+    with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
-    for text in ("aapl", "i:SPX"):  # Massive answers them
-        assert request_of(chain(text))["params"]["underlyingAsset"] == text
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        chain("aapl")
+    with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
+        chain("i:SPX")
     # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
     assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
     assert request_of(chain("X:BTCUSD"))["params"]["underlyingAsset"] == "X:BTCUSD"
@@ -552,9 +555,9 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
     assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
-    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
+    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
         snapshots(dm.ALL, filters={"type": "stocks"})
-    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
+    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
         snapshots([CONTRACT], filters={"type": "options"})
     with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
@@ -591,20 +594,6 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
     assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
 
 
-def test_contracts_refuse_a_ticker_without_the_options_prefix(
-    massive_session: dm.MassiveSession,
-) -> None:
-    for text in ("AAPL", "I:SPX", "o:AAPL250117C00150000"):
-        with pytest.raises(
-            ValueError,
-            match=rf"^options\.contracts: '{re.escape(text)}' lacks the O: prefix of every options "
-            r"contract ticker, such as 'O:AAPL250117C00150000'; pass Massive's ticker$",
-        ):
-            massive_session.options.contracts(text)
-    # Only the prefix is checked: Massive answers the rest.
-    assert massive_session.options.contracts("O:AAPL")._request.symbols == ("O:AAPL",)
-
-
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
     # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
@@ -616,6 +605,18 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     assert request_of(contracts(underlying=contract))["params"]["underlying_ticker"] == contract
     with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
         contracts(symbols=dm.ALL)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
+            r"m\.options\.contracts\(underlying='AAPL'\)$"
+        ),
+    ):
+        contracts("AAPL")
+    with pytest.raises(ValueError, match=r"'I:SPX' is an underlying"):
+        contracts("I:SPX")
+    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
+        contracts("aapl")  # not canonical: the symbol check explains it
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
         contracts(underlying=dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
@@ -1135,23 +1136,6 @@ def test_a_table_of_index_underlyings_lists_each_one_s_contracts_by_its_bare_tic
         ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
     ]
     assert {r["Underlying"] for r in listed} == {"I:SPX"}
-
-
-def test_a_table_of_underlyings_skips_a_pair_row_of_the_contracts_list(
-    *,
-    rest_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    load_fixture: Callable[[str, str], bytes],
-) -> None:
-    # The contracts list answers a pair with no error and no rows, so a pair row is skipped
-    # under the default `unsendable_symbols`, as a pair passed alone is refused.
-    reply = Reply(body(load_fixture, "contracts_index.json"))
-    fake_rest.reply("/v3/reference/options/contracts", reply)
-    underlyings = new_table([string_col("Symbol", ["I:SPX", "C:EURUSD", "X:BTCUSD"])])
-    rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
-    assert fake_rest.get_queries() == [
-        ("/v3/reference/options/contracts", {"underlying_ticker": ["SPX"], "limit": ["1000"]})
-    ]
 
 
 def test_a_table_of_underlyings_reads_each_one_s_chain(
@@ -1684,17 +1668,3 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     for name in ("LastTradePrice", "LastTradeExchange"):
         assert snapshots[name].description == chain[name].description
     assert "AAPL" not in snapshots["LastTradeId"].description
-
-
-def test_a_options_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # Under the default `unsendable_symbols`, a row without the O: prefix is skipped and
-    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
-    fake_rest.reply("/v3/snapshot", Reply({"status": "OK", "results": []}))
-    table = new_table([string_col("Symbol", ["AAPL", "O:NODATA260117C00100000"])])
-    out = rest_session.options.snapshots(table).fetch(wait=True)
-    assert out.size == 0
-    assert [query["ticker.any_of"] for _, query in fake_rest.get_queries()] == [
-        ["O:NODATA260117C00100000"]
-    ]

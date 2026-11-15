@@ -603,18 +603,25 @@ print(dm.canonical_symbol("EUR/USD", dm.AssetClass.FOREX))
 print(dm.canonical_symbol("btc-usd", dm.AssetClass.CRYPTO))
 print(dm.canonical_symbol("SPX", dm.AssetClass.INDICES))
 print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO))
-print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS))
 
-yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "VOD.L"])])
+try:
+    dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS)
+except ValueError as error:
+    print(f"ValueError: {error}")
+print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, on_error=dm.OnError.LOG))
+
+yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
     yahoo_symbols, dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
 )
 ```
 
-You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, `BRK.B`, and `BRK-B`, each on its own line. With
-no convention named, a stock ticker comes back as written. `converted` holds `BRK.B`, `AAPL`, and
-a null `Symbol` for `VOD.L`, since Yahoo's dot marks a listing outside the US and Massive's marks
-a share class. The debug log records a `WARNING` for `VOD.L`.
+You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line, then a line
+that starts `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another convention's
+separators`, then `None`: with `on_error=dm.OnError.LOG` the converter returns `None` for a
+value it cannot convert and logs it once, as `dm.canonicalize_symbols` does by default.
+`converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no convention could
+convert. The debug log records a `WARNING` for each.
 
 #### 12. Check the debug log for your key
 
@@ -892,9 +899,12 @@ of `streams`:
 1. Add `X:SOLUSD`. An `X:SOLUSD` row joins `latest_trades` with its first trade, and the
    stream's `Symbols` lists it.
 2. Delete `X:SOLUSD`. Its row leaves `latest_trades` at once, and `Symbols` drops it.
-3. Add `X:BTCUSD`. An `X:BTCUSD` row arrives with its first trade.
-4. Add `X:ZZZZUSD`, a pair that isn't on Massive's crypto ticker list. No row appears, the
-   `Error` names it, and the other pairs keep streaming. Delete it, and the `Error` clears.
+3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` among the
+   values it skips. The other pairs keep streaming.
+4. Delete `btcusd` and add `X:BTCUSD`. The `Error` clears, and an `X:BTCUSD` row arrives with
+   its first trade.
+5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and the `Error` names it. Delete
+   it, and the `Error` clears.
 
 #### 22. Stream the trades of the top gainers
 

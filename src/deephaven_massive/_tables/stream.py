@@ -527,7 +527,9 @@ class ChannelPlan:
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
-            symbols=WireSymbols(spec.name, asset_class, unreadable_symbols),
+            symbols=WireSymbols(
+                spec.name, asset_class, unreadable_symbols, spec.symbols_as_written
+            ),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -993,7 +995,7 @@ class StreamSink:
     def fail_later(self, message: str) -> None:
         """Queue the stream's failure on its session's reaper: its watchlist cannot be followed.
 
-        The watchlist's listener reports a row no request can carry, or the failure of the
+        The watchlist's listener reports a row that is not canonical, or the failure of the
         watchlist itself, on an update-graph thread, where failing a table (a Deephaven call
         that takes the publish lock) is not allowed, so the failure is only queued here; it
         never blocks. The reaper, unlike a connection's flush thread, runs as long as the
@@ -2055,7 +2057,7 @@ def open_stream_tables(
     (`SymbolWatch.keep_alive_with`), so it follows the watchlist for as long as anything keeps
     the stream alive, and the handle holds it until the session's record of the stream goes;
     the caller starts it once the stream's topics can receive its changes. A watchlist row that
-    no request can carry, or a failure of the watchlist itself, queues the stream's failure
+    is not canonical, or a failure of the watchlist itself, queues the stream's failure
     (`StreamSink.fail_later`). If anything raises, even
     `KeyboardInterrupt`, the scope is released (which shuts the blink table down and runs
     `on_shutdown`) and the exception propagates.
@@ -2097,7 +2099,10 @@ def open_stream_tables(
             )
             if isinstance(symbols, SymbolTable):
                 rule = SymbolRowRule(
-                    plan.dataset, core.config.unsendable_symbols, asset_class=plan.asset_class
+                    plan.dataset,
+                    plan.asset_class,
+                    plan.symbols.as_written,
+                    core.config.noncanonical_symbols,
                 )
                 watch = SymbolWatch(
                     rule,

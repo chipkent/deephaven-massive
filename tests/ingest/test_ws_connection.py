@@ -1119,8 +1119,7 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
         _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
         for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
     ]
-    # Every ticker counts as written; a missing one counts under none.
-    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1, "not a symbol": 1}
+    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1}
     del result
 
 

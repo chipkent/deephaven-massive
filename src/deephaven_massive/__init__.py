@@ -62,12 +62,11 @@ Settings:
     `help(dm.MassiveConfig)` lists every setting.
 
 Symbols:
-    Datasets send each symbol as written, so spell Massive's tickers: `AAPL`, `BRK.B`,
-    `O:SPY271217C00700000`, `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. A ticker Massive has
-    no data for gives no rows. `dm.ALL` means every symbol, in the datasets that take it. A
-    table with a `Symbol` column works too. A live one is a watchlist, which the library
-    follows as you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols`
-    convert other spellings, such as Yahoo's `BRK-B`.
+    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
+    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. `dm.ALL` means every symbol, in the datasets
+    that take it. A table with a `Symbol` column works too. A live one is a watchlist, which
+    the library follows as you add and delete rows. `dm.canonical_symbol` and
+    `dm.canonicalize_symbols` convert other spellings, such as Yahoo's `BRK-B`.
 
 Enums:
     An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.
@@ -120,8 +119,11 @@ from deephaven_massive._datasets.symbols import (
     canonical_symbol,
     canonical_symbol_crypto,
     canonical_symbol_forex,
+    canonical_symbol_future,
+    canonical_symbol_future_spread,
     canonical_symbol_index,
     canonical_symbol_option,
+    canonical_symbol_stock,
     canonical_symbol_stock_cms,
     canonical_symbol_stock_nasdaq,
     canonical_symbol_stock_yahoo,
@@ -197,8 +199,11 @@ __all__ = [
     "canonical_symbol",
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
+    "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_option",
+    "canonical_symbol_stock",
     "canonical_symbol_stock_cms",
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",

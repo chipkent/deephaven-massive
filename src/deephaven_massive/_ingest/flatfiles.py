@@ -603,7 +603,9 @@ class _Transform:
             prefix=prefix,
             times=time_rule(spec, request, asset_class=file_class, warnings=warnings),
             time_name=time_name,
-            symbols=WireSymbols(spec.name, spec.asset_class, unreadable_symbols),
+            symbols=WireSymbols(
+                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
+            ),
             bars=window.bars,
         )
 

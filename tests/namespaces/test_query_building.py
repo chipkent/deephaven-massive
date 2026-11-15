@@ -179,7 +179,8 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     # Indicators, reference data, and the unified snapshot span asset classes.
     q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
-    assert build(massive_session, INDICATOR, symbols=["i:spx"])._request.symbols == ("i:spx",)
+    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+        build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
@@ -213,9 +214,7 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
     assert q._request.timespan is Timespan.DAY
 
 
-def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
-    massive_session: dm.MassiveSession,
-) -> None:
+def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
     fx = DatasetSpec(
         name="forex.quotes",
         summary="A dataset for the tests.",
@@ -223,11 +222,12 @@ def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
         channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
-    with pytest.raises(ValueError, match=r"^cannot send the symbol 'EUR,USD' to Massive"):
-        build(massive_session, fx, symbols="EUR,USD")
-    # Every ticker is sent as written, whatever its shape: Massive answers it.
+    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+        build(massive_session, fx, symbols="EUR/USD")
+    # A dataset without an asset class reads the class from each prefix; none is a stock.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
-    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("aapl",)
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        build(massive_session, INDICATOR, symbols="aapl")
 
 
 def test_none_is_refused_where_the_dataset_needs_symbols(
@@ -549,23 +549,13 @@ def test_a_column_of_tickers_or_codes_must_hold_text(
     with pytest.raises(
         ValueError, match=r"^the ProductCode column of a table passed as product_code must be a"
     ):
-        value_table(
-            numbers,
-            argument="product_code",
-            parameter="product_code",
-            underlying=False,
-            pairs_refused=False,
-        )
+        value_table(numbers, argument="product_code", parameter="product_code", underlying=False)
     # A pandas Series of tickers is a sequence of str, so it reads as a list does.
     texts = new_table([string_col("Symbol", ["AAPL"])])
     assert build(massive_session, TRADES_SPEC, symbols=pd.Series(["AAPL"])) == build(
         massive_session, TRADES_SPEC, symbols=["AAPL"]
     )
-    boxed = value_table(
-        texts, argument="underlying", parameter="u", underlying=True, pairs_refused=True
-    )
-    assert boxed.table is texts
-    assert boxed.pairs_refused
+    assert value_table(texts, argument="underlying", parameter="u", underlying=True).table is texts
 
 
 # The query class of a dataset.)
@@ -1131,55 +1121,3 @@ def test_bar_periods_are_left_to_massive() -> None:
 def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
     with pytest.raises(TypeError, match="multiplier must be an int"):
         _check_bar_period(Timespan.DAY, multiplier)
-
-
-# --- the symbol rule -----------------------------------------------------------------------------
-
-_BY_CLASS: dict[str, Callable[[dm.MassiveSession, str], Query]] = {
-    "stocks": lambda m, text: m.stocks.trades(text),
-    "options": lambda m, text: m.options.trades(text),
-    "futures": lambda m, text: m.futures.trades(text),
-    "forex": lambda m, text: m.forex.quotes(text),
-    "crypto": lambda m, text: m.crypto.trades(text),
-}
-"""A streaming dataset of each class, taking one symbol."""
-
-
-@pytest.mark.parametrize(
-    ("asset_class", "text"),
-    [
-        ("stocks", "KIMpL"),  # Kimco's series L preferred: Massive's case is meaningful
-        ("stocks", "aapl"),  # any case is sent; Massive answers it
-        ("stocks", "BRK.B"),
-        ("stocks", "NE.WS.A"),
-        ("stocks", "BRK/B"),  # a path sends it as BRK%2FB
-        ("options", "O:AAPL211022C000150000"),
-        ("futures", "CL:BF Q6-U6-V6"),  # a combo's inner spaces are part of its ticker
-    ],
-)
-def test_a_ticker_massive_writes_is_sent_as_written(
-    massive_session: dm.MassiveSession, asset_class: str, text: str
-) -> None:
-    assert _BY_CLASS[asset_class](massive_session, text)._request.symbols == (text,)
-
-
-@pytest.mark.parametrize(
-    ("asset_class", "text", "reason"),
-    [
-        ("stocks", "", "an empty symbol names no ticker"),
-        ("stocks", " AAPL", "starts or ends with whitespace"),
-        ("stocks", "AAPL\n", "starts or ends with whitespace"),
-        ("stocks", "AA\x00PL", r"holds the control character '\\x00'"),
-        ("stocks", "A,B", "holds ','"),
-        ("stocks", "*", "holds '\\*'"),
-        ("options", "AAPL", "lacks the O: prefix of every options contract ticker"),
-        ("forex", "C:EUR-USD", "writes a forex pair with '-'; .* as 'C:EURUSD'"),
-        ("forex", "C:EUR/USD", "writes a forex pair with '/'; .* as 'C:EURUSD'"),
-        ("crypto", "X:BTC-USD", "writes a crypto pair with '-'; .* as 'X:BTCUSD'"),
-    ],
-)
-def test_a_ticker_the_library_cannot_send_as_written_is_refused(
-    *, massive_session: dm.MassiveSession, asset_class: str, text: str, reason: str
-) -> None:
-    with pytest.raises(ValueError, match=reason):
-        _BY_CLASS[asset_class](massive_session, text)

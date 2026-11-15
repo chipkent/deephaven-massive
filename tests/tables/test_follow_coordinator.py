@@ -187,7 +187,7 @@ def follow(
         call=core.next_stream_id(),
         query="m.test.trades(<table>)",
         symbol_table=table,
-        rule=SymbolRowRule.of(SPEC, core.config.unsendable_symbols),
+        rule=SymbolRowRule.of(SPEC, core.config.noncanonical_symbols),
         reread=reread,
         plan=plan,
         note="Follows a test.",
@@ -1279,12 +1279,14 @@ def test_two_bad_rows_fail_the_table_once(
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = dataclasses.replace(massive_session._core.config, unsendable_symbols=dm.OnError.RAISE)
+    config = dataclasses.replace(
+        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
+    )
     monkeypatch.setattr(massive_session._core, "config", config)
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, Script(massive_session))
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    add(wl, "MSFT,X", "NVDA,X")  # two refusals in one update: the second finds the table failed
+    add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
     until(lambda: bool(result.j_table.isFailed()))
     wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
 
@@ -1739,6 +1741,29 @@ def test_an_unlisted_pair_fails_the_result_under_raise(
     shown = stream(massive_session, drain, dh_to_pylist)
     assert shown["State"] == "FAILED"
     assert "does not list it" in shown["Error"]
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_an_unlisted_pair_handed_on_under_log_fails_the_result_as_a_defect(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+    setting: dm.OnError,
+) -> None:
+    # Under LOG and IGNORE the read gives such a pair no rows, so one reaching the coordinator
+    # is the library's defect, never a failure the setting chose.
+    core = massive_session._core
+    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
+    script = Script(massive_session)
+    script.answers["DOT"] = [unlisted()]
+    result = follow(massive_session, watchlist("DOT"), script)
+    until(lambda: bool(result.j_table.isFailed()))
+    shown = stream(massive_session, drain, dh_to_pylist)
+    assert shown["State"] == "FAILED"
+    assert f"under unlisted_symbols={setting.name}, which gives it no rows" in shown["Error"]
 
 
 # --- The call-time symbols of a call that did not wait ----------------------------------------

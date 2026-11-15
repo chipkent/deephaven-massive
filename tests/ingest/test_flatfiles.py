@@ -583,10 +583,9 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
 
 
 def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
-    # Only a forex or crypto pair can be unreadable: every other ticker is kept as written.
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
-        dataclasses.replace(SYNTHETIC, asset_class=AssetClass.FOREX),
+        SYNTHETIC,
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
@@ -895,7 +894,20 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
 
 
-def test_a_stock_ticker_of_any_spelling_is_kept_as_written(
+def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with dm.MassiveSession(dataclasses.replace(CONFIG, unreadable_symbols=dm.OnError.RAISE)) as m:
+        every = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(
+            dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+        ):
+            every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+
+
+def test_a_ticker_the_library_cannot_read_is_kept_by_default(
     *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
@@ -904,7 +916,7 @@ def test_a_stock_ticker_of_any_spelling_is_kept_as_written(
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
         )
-        assert pick(t, "Symbol", "RawSymbol", "Id") == [("BRK/B", None, "1"), ("AAPL", None, "2")]
+        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])

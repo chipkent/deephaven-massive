@@ -2483,16 +2483,16 @@ class RestEndpoints:
         """Plan `fetch`'s requests with no data request, so a parameter error raises now.
 
         A background `fetch()` calls it on the caller thread before its table exists. With
-        `split_pairs`, for crypto pairs passed in code, each pair is split by the session's
-        crypto ticker list (`RestReader.crypto_pair`), as `poll()` splits it at the call, so a
-        pair Massive does not list raises its `UnlistedPairError` now; otherwise pairs are not
-        split (`_unsplit`), and a table's pair follows `MassiveConfig.unlisted_symbols` in the
-        read.
+        `split_pairs`, for crypto pairs passed in code under `unlisted_symbols=RAISE`, each
+        pair is split by the session's crypto ticker list (`RestReader.crypto_pair`), as
+        `poll()` splits it at the call, so a pair Massive does not list raises its
+        `UnlistedPairError` now; otherwise pairs are not split (`_unsplit`), and a pair follows
+        `MassiveConfig.unlisted_symbols` in the read.
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols.
-            split_pairs: True for symbols passed in code.
+            split_pairs: True for symbols passed in code under `unlisted_symbols=RAISE`.
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
@@ -2690,8 +2690,9 @@ class RestEndpoints:
             spec: The dataset; `history()` has checked that REST can serve the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window.
-            split_pairs: True for symbols passed in code, whose crypto pairs are split by the
-                session's crypto ticker list now, as `check_fetch` splits them.
+            split_pairs: True for symbols passed in code under `unlisted_symbols=RAISE`,
+                whose crypto pairs are split by the session's crypto ticker list now, as
+                `check_fetch` splits them.
 
         A parameter the path does not take raises the `ValueError` of `shared_params`.
         """

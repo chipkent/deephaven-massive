@@ -378,8 +378,7 @@ def _declared(
         position in each, in path order.
     """
     symbols = () if spec.symbol_param is None else symbol_family(spec.symbol_param)
-    library = (*spec.fixed_params, *spec.library_params)
-    fixed = (form for name in library for form in param_family(name))
+    fixed = (form for name in spec.fixed_params for form in param_family(name))
     families = (form for name in typed for form in param_family(name))
     reserved = {*_LIBRARY_PARAMS, *spec.axis_params, *symbols, *families, *fixed}
     params: dict[str, list[tuple[RestPath, int]]] = {}
@@ -427,9 +426,9 @@ def check_filters(
     parameter of any of the dataset's REST paths, except the ones the library sets itself:
     the equality forms of the symbol parameter (`symbol_family`: its base, `.any_of`, and
     `.all_of`), the whole family of the time axis (`param_family`: its base and every
-    suffixed form), the whole family of each of the dataset's `fixed_params` and
-    `library_params`, `limit`, `sort`, `order`, and `adjusted`. None of these is accepted or
-    named among the valid keys.
+    suffixed form), the whole family of each of the dataset's `fixed_params`, `limit`,
+    `sort`, `order`, and `adjusted`. None of these is accepted or named among the valid
+    keys.
 
     Every path that declares the key checks it, and all of them must read it alike, since
     any of them may send it. Each value is first put in the form that is sent

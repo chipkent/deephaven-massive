@@ -2,7 +2,7 @@
 
 Date: 2026-10-28
 
-Status: partly superseded: its failure defaults by [66](0066-bad-symbol-onerror-raise-log-ignore-default-log.md), and its refusal of non-canonical symbols by [104](0104-ticker-sent-as-written-prefix-pair-separator-padding-refused.md)
+Status: partly superseded: its failure defaults by [66](0066-bad-symbol-onerror-raise-log-ignore-default-log.md)
 
 Every symbol in and out is Massive's exact REST ticker; a non-canonical one raises `ValueError`
 naming the canonical form. `canonical_symbol`, per-class and per-convention converters, and

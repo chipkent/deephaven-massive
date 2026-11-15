@@ -12,19 +12,18 @@ the namespace's `DatasetSpec`s, exported as `DATASETS` and composed into the dat
 (`CATALOG` in `_session.py`). A spec names the dataset's sources and key columns, never its columns:
 those come from the generated wire schemas.
 
-Option symbols are Massive's tickers: `O:` and the OCC symbol (`O:AAPL250117C00150000`).
-Every method that takes contracts sends what it is given (`check_symbol` in
+Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL250117C00150000`).
+Every method that takes contracts takes only that form (`check_symbol` in
 `_datasets/symbols.py`), and `dm.canonical_symbol_option` converts the bare or space-padded OCC
 forms. Every options dataset whose rows name a contract also has `OptionRoot`, the OCC root read
 from the symbol (`SPXW`, `AAPL1`). The admin messages name none: Massive sends them per exchange,
 so the stream subscribes every exchange (`AD.*`), its rows have no `Symbol`, and their text is
 kept as OPRA sends it. The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
-contract to as `Underlying`, Massive's ticker: it names the linked instrument, not the
+contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
-of it. Neither column is ever mapped to the other. `underlying=` takes a ticker, sent
-as written, or a table of them in a `Symbol` column (`value_table`), each row sent as written; the
-contracts list refuses a currency or crypto pair, passed alone or as a row.
+of it. Neither column is ever mapped to the other. `underlying=` takes the canonical ticker
+too, or a table of them in a `Symbol` column (`value_table`), each read as if passed alone.
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
@@ -45,13 +44,15 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import (
     ALL,
-    PAIR_CLASSES,
+    UNDERLYING_CLASSES,
     check_symbol,
+    is_canonical,
     symbol_class,
 )
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
+    ClassFromPrefix,
     ContractType,
     NotBars,
     Order,
@@ -287,8 +288,6 @@ SNAPSHOTS: Final = DatasetSpec(
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     revision_keys=_SNAPSHOT_REVISION,
-    # Massive refuses `type` beside tickers, so the library sends it for dm.ALL only.
-    library_params=frozenset({"type"}),
 )
 
 CONTRACTS: Final = DatasetSpec(
@@ -337,10 +336,10 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
 
 @raises_through(check_symbol)
 def _chain_underlying(value: object) -> str:
-    """Check the chain's `underlying` argument: a ticker, sent as written.
+    """Check the chain's `underlying` argument: Massive's exact ticker of an instrument.
 
     Massive judges the instrument: it answers HTTP 400 ("Invalid ticker.") to the chain of a
-    currency or crypto pair, so any ticker is sent, an option contract included.
+    currency or crypto pair, so any canonical ticker is sent, an option contract included.
 
     Args:
         value: The `underlying` argument as passed, such as `"AAPL"` or `"I:SPX"`.
@@ -350,12 +349,16 @@ def _chain_underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` can't be sent (`check_symbol`).
+        ValueError: If `value` is not canonical (`check_symbol`).
     """
     if not isinstance(value, str):
         kind = "dm.ALL" if value is ALL else type(value).__name__
         raise TypeError(f"underlying must be one ticker, a str, not {kind}")
-    return check_symbol(value)
+    return check_symbol(ClassFromPrefix.ANY, value)
+
+
+_PAIR_CLASSES: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
+"""The classes whose tickers the contracts list answers with no error and no rows."""
 
 
 @raises_through(_chain_underlying)
@@ -364,7 +367,7 @@ def _underlying(value: object) -> str:
 
     A currency or crypto pair is refused, because Massive answers it with no error: sent
     `underlying_ticker=C:EURUSD` or `X:BTCUSD`, the contracts list answered HTTP 200 with no
-    rows, which would read as a pair with no options listed. Every other ticker is
+    rows, which would read as a pair with no options listed. Every other canonical ticker is
     sent for Massive to judge, an option contract included.
 
     Args:
@@ -376,10 +379,10 @@ def _underlying(value: object) -> str:
 
     Raises:
         TypeError: If `value` is not a `str`.
-        ValueError: If `value` can't be sent (`check_symbol`), or is a currency or crypto pair.
+        ValueError: If `value` is not canonical, or is a currency or crypto pair.
     """
     ticker = _chain_underlying(value)
-    if symbol_class(ticker) in PAIR_CLASSES:
+    if symbol_class(ticker) in _PAIR_CLASSES:
         raise ValueError(
             f"underlying={value!r} is a currency or crypto pair, which has no listed options; "
             "pass a ticker such as 'AAPL' or 'I:SPX'"
@@ -467,8 +470,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -502,8 +504,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -539,8 +540,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -585,8 +585,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -626,8 +625,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -667,8 +665,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` is of another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column.
 
         Example:
@@ -720,12 +717,13 @@ class OptionsNamespace(Namespace):
         the standard ones. `contracts()` tells them apart: a standard contract has
         `SharesPerContract` of 100.
 
-        A table of underlyings is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed underlying fails the call.
+        A table of underlyings is read value by value. A row that isn't a stock or index ticker
+        follows `MassiveConfig.noncanonical_symbols`, which skips and logs it by default. A live
+        table is followed. In a static table, one failed underlying fails the call.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
-                table of them in a `Symbol` column works too. `dm.ALL` is
+                table of stock or index tickers in a `Symbol` column works too. `dm.ALL` is
                 refused; use `snapshots(dm.ALL)` for every contract.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             sort: `"ticker"`, `"expiration_date"`, or `"strike_price"`.
@@ -741,7 +739,7 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` is `dm.ALL`, is empty or padded, or holds `,` or `*`;
+                - `underlying` is `dm.ALL`, or isn't Massive's exact ticker;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -760,11 +758,7 @@ class OptionsNamespace(Namespace):
             )
         values = (
             value_table(
-                underlying,
-                argument="underlying",
-                parameter="underlyingAsset",
-                underlying=True,
-                pairs_refused=False,
+                underlying, argument="underlying", parameter="underlyingAsset", underlying=True
             )
             if isinstance(underlying, Table)
             else None
@@ -816,8 +810,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit;
@@ -880,10 +873,8 @@ class OptionsNamespace(Namespace):
             symbols: Option contracts to describe; leave it out to list contracts. `dm.ALL` is
                 refused; leave `symbols` out instead.
             underlying: Only contracts of this underlying's exact Massive ticker, such as `"AAPL"`
-                or `"I:SPX"`. A table of them in a `Symbol` column is read value by value, each row
-                sent as written but a currency or crypto pair, which follows
-                `MassiveConfig.unsendable_symbols` (skipped and logged by default). A live table is
-                followed. In a static table, one failed value fails the call.
+                or `"I:SPX"`. A table of them in a `Symbol` column is read value by value. A live
+                table is followed. In a static table, one failed value fails the call.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True lists only expired contracts; False, the default, those still trading.
@@ -901,11 +892,10 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker in `symbols` is empty, padded, or holds `,`, `*`, or a control character;
-                - a ticker in `symbols` lacks `O:`;
+                - a ticker in `symbols` isn't Massive's exact ticker of an option contract; a stock
+                  or index ticker's message says to pass it as `underlying=`;
                 - a table has no `Symbol` column;
-                - `underlying` is empty or padded, holds `,` or `*`, or is a currency or crypto
-                  pair;
+                - `underlying` isn't Massive's exact ticker, or is a currency or crypto pair;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -915,13 +905,20 @@ class OptionsNamespace(Namespace):
 
                 listed = m.options.contracts(underlying="NVDA", expired=True).fetch()
         """
+        if (
+            isinstance(symbols, str)
+            and symbol_class(symbols) in UNDERLYING_CLASSES
+            and is_canonical(ClassFromPrefix.ANY, symbols)
+        ):
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.contracts refused: symbols=%r is an underlying", symbols)
+            raise ValueError(
+                f"{symbols!r} is an underlying, not an options contract: list its contracts "
+                f"with m.options.contracts(underlying={symbols!r})"
+            )
         values = (
             value_table(
-                underlying,
-                argument="underlying",
-                parameter="underlying_ticker",
-                underlying=True,
-                pairs_refused=True,
+                underlying, argument="underlying", parameter="underlying_ticker", underlying=True
             )
             if isinstance(underlying, Table)
             else None
@@ -972,8 +969,7 @@ class OptionsNamespace(Namespace):
             TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a tickerNone is empty, padded, or holds `,`, `*`, or a control character;
-                - a tickerNone lacks `O:`;
+                - a ticker isn't Massive's exact ticker of an option contract;
                 - a table has no `Symbol` column;
                 - `date` is a `datetime` or isn't a date.
 

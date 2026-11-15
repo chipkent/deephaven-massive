@@ -38,10 +38,16 @@ def test_a_value_table_compares_by_its_wrapper_and_sends_each_value_alone(
     dh_exec_ctx: object,
 ) -> None:
     codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
-    values = ValueTable("product_code", "product_code", "ProductCode", table=codes)
-    assert values == ValueTable("product_code", "product_code", "ProductCode", table=codes)
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=codes
+    )
+    assert values == ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=codes
+    )
     other = new_table([string_col("ProductCode", ["ES", "NQ"])])
-    assert values != ValueTable("product_code", "product_code", "ProductCode", table=other)
+    assert values != ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=other
+    )
     request = Request(params=(("date", "2026-11-02"),), limit=5, value_table=values)
     # One value is the request the method builds for it alone, its parameter in name order.
     assert request.for_value("ES") == Request(

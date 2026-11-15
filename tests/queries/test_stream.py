@@ -168,36 +168,36 @@ def test_a_static_symbol_table_without_symbols_opens_no_stream(
 
 
 @pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
-def test_a_static_symbol_table_row_no_request_can_carry_opens_no_stream_under_raise(
+def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream_under_raise(
     massive_session: dm.MassiveSession,
     *,
     fake_streams: FakeStreams,
     verb: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Refused, as the same text in a list always is: never sent and never dropped.
+    # Refused, as the same text in a list always is: never canonicalized and never dropped.
     strict(massive_session, monkeypatch)
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA"])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
     call = getattr(q, verb)
     with pytest.raises(
         ValueError,
-        match=r"^stocks\.trades: a symbol table holds 'MSFT,NVDA', which no request",
+        match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
     ):
         call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
 
 
 @pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
-def test_a_static_symbol_table_row_no_request_can_carry_is_skipped(
+def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
 ) -> None:
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA"])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
     call = getattr(q, verb)
     massive_session.release(call(3) if verb == "ring" else call())
     assert len(fake_streams.opened) == 1
-    only_bad = trades(massive_session, new_table([string_col("Symbol", ["MSFT,NVDA"])]))
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     call = getattr(only_bad, verb)
-    with pytest.raises(ValueError, match=r"^m\.stocks\.trades\(\): no row of the symbol table can"):
+    with pytest.raises(ValueError, match=r"^m\.stocks\.trades\(\): no row of the symbol table is"):
         call(3) if verb == "ring" else call()
     assert len(fake_streams.opened) == 1
 
@@ -245,16 +245,16 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     massive_session.release(current)
 
 
-def test_a_live_verb_refuses_a_symbol_table_row_no_request_can_carry_under_raise(
+def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     strict(massive_session, monkeypatch)
-    watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR,USD"])])
+    watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, SymbolStreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
         with pytest.raises(
-            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR,USD', which no request"
+            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"
         ):
             verb()
     assert fake_streams.publishers == {}

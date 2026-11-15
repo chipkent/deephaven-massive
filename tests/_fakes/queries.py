@@ -383,7 +383,7 @@ def feed(session: dm.MassiveSession) -> FetchQuery:
 
 def strict(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> None:
     # The session's rule for symbol-table rows becomes RAISE.
-    config = dataclasses.replace(session._core.config, unsendable_symbols=dm.OnError.RAISE)
+    config = dataclasses.replace(session._core.config, noncanonical_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(session._core, "config", config)
 
 

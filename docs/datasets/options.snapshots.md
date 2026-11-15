@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`sort`](README.md#sort) | `"ticker"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
-| [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ticker_gte": "O:AAPL"}`. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ticker_gte": "O:AAPL"}`. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `type`. |
 
 ## Plans
 

@@ -2,7 +2,7 @@
 
 Date: 2026-10-29
 
-Status: partly superseded: `noncanonical_symbols` by [104](0104-ticker-sent-as-written-prefix-pair-separator-padding-refused.md)
+Status: partly superseded: a crypto pair passed in code that Massive's crypto ticker list does not hold, and a table whose pairs are all such, by [104](0104-canonical-ticker-refused-with-fix-unlisted-pair-no-rows.md)
 
 `MassiveConfig.noncanonical_symbols`, `unreadable_symbols`, and `unavailable_symbols` use it. A bad
 row is skipped (or kept with a null `Symbol` and its `RawSymbol`) and listed in `m.streams()`

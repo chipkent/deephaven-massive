@@ -52,12 +52,7 @@ from deephaven_massive._datasets.filters import (
     takes_instants,
 )
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.symbols import (
-    AllSymbols,
-    SymbolTable,
-    check_symbols,
-    class_spelling_reason,
-)
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, OnError, Order, Timespan, _require_enum
 from deephaven_massive._errors import ErrorSource, MassiveError, library_bug, required
 from deephaven_massive._massive import ParamKind
@@ -279,9 +274,7 @@ def _require_text_column(table: Table, column: str, *, what: str) -> None:
         )
 
 
-def value_table(
-    table: Table, *, argument: str, parameter: str, underlying: bool, pairs_refused: bool
-) -> ValueTable:
+def value_table(table: Table, *, argument: str, parameter: str, underlying: bool) -> ValueTable:
     """Box a table passed where a dataset takes one value, after checking its column.
 
     `underlying=` reads its values from a `Symbol` column, as a symbol table does, and
@@ -294,8 +287,6 @@ def value_table(
         parameter: The wire parameter each value is sent as, such as `"underlyingAsset"`.
         underlying: True for a table of underlyings, read from `Symbol`; False for product
             codes, read from `ProductCode`.
-        pairs_refused: True where the method refuses a currency or crypto pair passed alone,
-            so a pair row is refused too (`ValueTable.pairs_refused`).
 
     Returns:
         The boxed table (`ValueTable`).
@@ -314,7 +305,7 @@ def value_table(
             f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
         )
     _require_text_column(table, column, what=f"a table passed as {argument}")
-    return ValueTable(argument, parameter, column, table, pairs_refused)
+    return ValueTable(argument, parameter, column, underlying, table)
 
 
 def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
@@ -480,11 +471,7 @@ def _filters(
     reserved = {
         filter_key(form): arguments.get(name, name) for name in typed for form in param_family(name)
     }
-    library = {
-        filter_key(form)
-        for name in (*spec.fixed_params, *spec.library_params)
-        for form in param_family(name)
-    }
+    library = {filter_key(form) for name in spec.fixed_params for form in param_family(name)}
     symbol_keys = (
         set()
         if spec.symbol_param is None
@@ -667,9 +654,8 @@ def _normalized_symbols(
         ValueError: If `symbols` is None for a dataset that needs symbols, a table lacks a
             `Symbol` column, or `dm.ALL` is given to a dataset that refuses it.
 
-    A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, a
-    ticker `check_symbols` refuses its error, and a ticker without its class's prefix the
-    `ValueError` of `_require_class_spelling`.
+    A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, and
+    a ticker `check_symbols` refuses its error.
     """
     normalized: NormalizedSymbols | None = None
     if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
@@ -698,34 +684,10 @@ def _normalized_symbols(
         _require_text_column(symbols, "Symbol", what="a symbol table")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
-        normalized = check_symbols(symbols)
-        _require_class_spelling(spec, normalized)
+        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     return normalized
-
-
-def _require_class_spelling(spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols) -> None:
-    """Refuse a ticker passed in code that its dataset's class does not spell that way.
-
-    Args:
-        spec: The dataset, whose class names the prefix: `O:`, `I:`, `C:`, or `X:`, or none
-            for stocks, futures, and a dataset of every class.
-        symbols: The checked tickers, or `ALL`, which needs no prefix.
-
-    Raises:
-        ValueError: If a ticker lacks the prefix, naming the prefix and an example, or is a
-            forex or crypto pair written with `-` or `/`, naming the joined ticker
-            (`class_spelling_reason`).
-    """
-    if isinstance(symbols, AllSymbols):
-        return
-    for symbol in symbols:
-        reason = class_spelling_reason(spec.asset_class, symbol)
-        if reason is not None:
-            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
-            logger.debug("%s refused: %r %s", spec.name, symbol, reason)
-            raise ValueError(f"{spec.name}: {symbol!r} {reason}; pass Massive's ticker")
 
 
 def _typed_params(

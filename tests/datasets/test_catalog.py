@@ -290,6 +290,23 @@ def test_spec_validation() -> None:
     with pytest.raises(ValueError, match=r"^stocks\.trades: option_rows is for a dataset of every"):
         dataclasses.replace(STOCK_TRADES, option_rows=True)
     assert dataclasses.replace(EXCHANGES, option_rows=True).option_rows
+    as_written = r"^test\.x: symbols kept as written are for REST datasets only$"
+    with pytest.raises(ValueError, match=as_written):
+        DatasetSpec(
+            name="test.x",
+            summary="A dataset for the tests.",
+            asset_class=AssetClass.STOCKS,
+            symbols_as_written=True,
+            channels={NotBars.ANY: "T"},
+        )
+    with pytest.raises(ValueError, match=as_written):
+        DatasetSpec(
+            name="test.x",
+            summary="A dataset for the tests.",
+            asset_class=AssetClass.STOCKS,
+            symbols_as_written=True,
+            flat_file_prefixes={NotBars.ANY: "us/x"},
+        )
     with pytest.raises(ValueError, match=r"test\.x: a dataset in a kind needs a class"):
         DatasetSpec(
             name="test.x",

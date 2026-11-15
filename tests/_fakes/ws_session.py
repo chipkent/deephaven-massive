@@ -143,7 +143,7 @@ class WsSession:
         subscription_confirmation_timeout: float = _DEFAULTS.subscription_confirmation_timeout,
         connection_taken: dm.ConnectionTaken = _DEFAULTS.connection_taken,
         max_outage: float = _DEFAULTS.max_outage,
-        unsendable_symbols: dm.OnError = _DEFAULTS.unsendable_symbols,
+        noncanonical_symbols: dm.OnError = _DEFAULTS.noncanonical_symbols,
         unlisted_symbols: dm.OnError = _DEFAULTS.unlisted_symbols,
         unreadable_symbols: dm.OnError = _DEFAULTS.unreadable_symbols,
         delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
@@ -160,7 +160,7 @@ class WsSession:
             subscription_confirmation_timeout: As `MassiveConfig` takes it.
             connection_taken: As `MassiveConfig` takes it.
             max_outage: As `MassiveConfig` takes it.
-            unsendable_symbols: As `MassiveConfig` takes it.
+            noncanonical_symbols: As `MassiveConfig` takes it.
             unlisted_symbols: As `MassiveConfig` takes it.
             unreadable_symbols: As `MassiveConfig` takes it.
             delayed_subscriptions: As `MassiveConfig` takes it.
@@ -186,7 +186,7 @@ class WsSession:
             subscription_confirmation_timeout=subscription_confirmation_timeout,
             connection_taken=connection_taken,
             max_outage=max_outage,
-            unsendable_symbols=unsendable_symbols,
+            noncanonical_symbols=noncanonical_symbols,
             unlisted_symbols=unlisted_symbols,
             unreadable_symbols=unreadable_symbols,
             delayed_subscriptions=delayed_subscriptions,

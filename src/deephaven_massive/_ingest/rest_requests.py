@@ -238,8 +238,7 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
             three letters each.
 
     Returns:
-        The base and quote currencies, such as `("EUR", "USD")`; for a forex symbol without
-        the `C:` prefix, the symbol and an empty quote.
+        The base and quote currencies, such as `("EUR", "USD")`.
 
     Raises:
         ValueError: If the dataset's class has no currency pairs.
@@ -251,10 +250,7 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
         raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
     if asset_class is AssetClass.CRYPTO:
         return split(symbol)
-    codes = forex_codes(symbol)
-    # A symbol without the `C:` prefix has no codes to derive: it goes on the wire as written,
-    # whole, and Massive answers it.
-    return (symbol, "") if codes is None else codes
+    return forex_codes(symbol)
 
 
 def own_symbols(

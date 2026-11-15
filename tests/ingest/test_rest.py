@@ -1866,27 +1866,25 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     watch = new_table([string_col("Symbol", ["I:SPX", "I:NDX", None])])
     fetch(session, INDEX_SNAPSHOTS, symbols=watch)
     assert fake_rest.get_queries()[0][1]["ticker.any_of"] == ["I:NDX,I:SPX"]
-    # A row no request can carry is skipped, so the request names only the others.
-    rows = ["I:SPX,I:NDX", "I:VIX"]
-    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", rows)]))
+    # A row that is not Massive's ticker is skipped, so the request names only the others.
+    fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX", "I:VIX"])]))
     assert fake_rest.get_queries()[1][1]["ticker.any_of"] == ["I:VIX"]
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table can be sent, so the result "
-        r"would follow nothing: skipping 1 symbol-table value the library refuses: "
-        r"'I:SPX,I:NDX'; fix or delete that row$",
+        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
+        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
+        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
     ):
-        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", rows[:1])]))
+        fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unsendable_symbols=dm.OnError.RAISE
+        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
     )
     with dm.MassiveSession(config) as strict:
-        bad = new_table([string_col("Symbol", rows)])
+        bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
         with pytest.raises(
-            ValueError,
-            match=r"^indices\.snapshots: a symbol table holds 'I:SPX,I:NDX', which no request",
+            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
         ):
             fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
@@ -4646,7 +4644,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     # One poll() cycle of futures products over a table of product codes, read as it holds them.
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
-    boxed = ValueTable("product_code", "product_code", "ProductCode", table=table)
+    boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
     reader = _endpoints(m)._reader("poll")
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(
@@ -4782,14 +4780,3 @@ def test_page_recency_passes_a_listed_subscription_and_collects_unknown_labels()
 def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
     found = _recency([{"timeframe": "DELAYED"}, {"ticker": "AAPL"}])
     assert found == rest._PageRecency(delayed=False, real_time=False, refused={}, unknown=())
-
-
-def test_a_path_ticker_holding_a_slash_is_sent_encoded_and_massive_answers_it(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # The `/` stays inside the ticker's segment, so no other endpoint is reached, and
-    # Massive's 404 on the symbol's first request gives no rows.
-    fake_rest.reply("/v3/trades/BRK%2FB", Reply(envelope(status="NOT_FOUND"), status=404))
-    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["BRK/B"])
-    assert out == []
-    assert [r.target.partition("?")[0] for r in fake_rest.requests] == ["/v3/trades/BRK%2FB"]

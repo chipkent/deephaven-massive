@@ -59,9 +59,9 @@ table.
 page whose every row was dropped because a key could not be read, or a row that, in any mode,
 has a null poll key, which would merge unrelated rows; one odd row is dropped and counted, or
 its odd value read as null, and the table goes on), `SymbolRowError` (a symbol table's row
-no request can carry, under `unsendable_symbols=RAISE`; under `LOG` and `IGNORE` the
+that is not Massive's ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the
 row is skipped and the cycle's `Error` lists it), and `UnlistedPairError`
-(a crypto pair of a symbol table Massive's reference data does not split, under
+(a crypto pair, in code or in a symbol table, Massive's reference data does not split, under
 `unlisted_symbols=RAISE`; under `LOG` and `IGNORE` the cycle leaves it out). The failure is
 logged at the level its `is_bug` gives (`log_failure`): ERROR for a defect, naming whose it is,
 and WARNING otherwise.
@@ -216,13 +216,13 @@ their place. Hidden like `LIVE_COLUMN`, and dropped from the result."""
 
 
 class SymbolRowError(PermanentError):
-    """A row of a `poll()` table's reactive symbol table that no request can carry.
+    """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
 
-    Raised only under `MassiveConfig.unsendable_symbols=OnError.RAISE` (under `LOG` and
+    Raised only under `MassiveConfig.noncanonical_symbols=OnError.RAISE` (under `LOG` and
     `IGNORE` the row is skipped and listed in the row's `Error`), or for a symbol table that
     has failed. The table fails with it, since every later cycle would read the same row; its
-    message names the row. The table is the caller's, so its source is `ErrorSource.USER`,
-    and it is a bug.
+    message names `dm.canonicalize_symbols`, which converts such a table. The table is the
+    caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 
     default_source = ErrorSource.USER
@@ -651,11 +651,13 @@ class Poller:
         self._key_names = key_columns(spec, self._schema)
         self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
-        self._rule = SymbolRowRule.of(spec, core.config.unsendable_symbols)
+        self._rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
         self._value_rule = (
             None
             if request.value_table is None
-            else SymbolRowRule.for_values(spec, request.value_table, core.config.unsendable_symbols)
+            else SymbolRowRule.for_values(
+                spec, request.value_table, core.config.noncanonical_symbols
+            )
         )
         self._interval = interval.total_seconds()
         self._mode = mode
@@ -953,8 +955,8 @@ class Poller:
     def _symbols(self) -> tuple[tuple[str, ...] | AllSymbols | None, tuple[str, ...]]:
         """Return the cycle's symbols, reading a reactive table once.
 
-        A row of a reactive table that no request can carry follows the session's
-        `MassiveConfig.unsendable_symbols` (`read_symbols`): under `RAISE` it fails the table;
+        A row of a reactive table that is not Massive's exact ticker follows the session's
+        `MassiveConfig.noncanonical_symbols` (`read_symbols`): under `RAISE` it fails the table;
         under `LOG` and `IGNORE` it is skipped, and returned so the cycle can list it.
 
         Returns:
@@ -963,7 +965,7 @@ class Poller:
             a reactive table under `LOG` or `IGNORE`).
 
         Raises:
-            SymbolRowError: If a row of the reactive table cannot be sent under
+            SymbolRowError: If a row of the reactive table is not Massive's exact ticker under
                 `RAISE`, or the table has failed; the poll's table fails with it.
         """
         symbols = self._request.symbols
@@ -979,7 +981,7 @@ class Poller:
         """Return the values a value table holds now, read once for the cycle.
 
         A row that is not a value the dataset takes (an underlying that is not a stock or index
-        ticker) follows `MassiveConfig.unsendable_symbols`, as a symbol table's row does.
+        ticker) follows `MassiveConfig.noncanonical_symbols`, as a symbol table's row does.
 
         Returns:
             None and no skipped value for a request without a value table; else the table's

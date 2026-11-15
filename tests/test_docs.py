@@ -671,7 +671,7 @@ def test_the_settings_pages_complete_example_sets_every_setting(
     assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == settings
     assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
     assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
-    assert config.unsendable_symbols is dm.OnError.RAISE
+    assert config.noncanonical_symbols is dm.OnError.RAISE
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM

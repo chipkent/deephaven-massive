@@ -336,15 +336,17 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     assert "returned from /v2/reference/news for no symbol name none" in caplog.text
 
 
-@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+@pytest.mark.parametrize("setting", list(dm.OnError))
 def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_raise(
     *,
     session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
     setting: dm.OnError,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A pair Massive has no data for: no rows under LOG, its own failure under RAISE.
+    # A pair Massive has no data for: no rows under LOG and IGNORE, logged once at WARNING or
+    # DEBUG, naming the user's verb; its own failure under RAISE.
     core = session._core
     monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
     listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
@@ -355,11 +357,29 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
         "last": {"price": 90000.5, "timestamp": 1741000000000},
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
-    out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
-    if setting is dm.OnError.LOG:
-        assert _rows(out["X:NOPEUSD"]) == []
+    skipped = [
+        (r.levelno, r.getMessage()) for r in caplog.records if "it is left out" in r.getMessage()
+    ]
+    if setting is dm.OnError.RAISE:
+        assert skipped == []
     else:
+        assert _rows(out["X:NOPEUSD"]) == []
+        level = logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG
+        assert skipped == [
+            (
+                level,
+                (
+                    "crypto.last fetch(): 'X:NOPEUSD' cannot be split into its two currencies: "
+                    "Massive's reference data does not list it; it is left out, as a pair "
+                    "Massive has no data for, and the other symbols are read. Set "
+                    "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
+                ),
+            )
+        ]
+    if setting is dm.OnError.RAISE:
         nope = _failure(out["X:NOPEUSD"])
         assert isinstance(nope.error, UnlistedPairError)
         assert not nope.error.is_retryable
@@ -367,17 +387,6 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
         "/v1/last/crypto/BTC/USD"
     ]
-
-
-def test_a_crypto_ticker_list_that_cannot_be_read_fails_the_read(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # The list affects every pair, so it fails the read rather than one pair after another.
-    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
-    fake_rest.reply(TICKERS_PATH, refusal)
-    with pytest.raises(EntitlementError):
-        _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
-    assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == []
 
 
 def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request(
@@ -613,7 +622,9 @@ def _by_value(
     # Reads futures products for each code of a table of product codes.
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", codes)])
-    values = ValueTable("product_code", "product_code", "ProductCode", table=table)
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=table
+    )
     request = Request(adjusted=adjusted, value_table=values)
     rest = m._core.rest_transport()
     return rest.fetch_by_value(futures.PRODUCTS, request, values=codes, call=7)
