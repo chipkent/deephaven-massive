@@ -307,7 +307,7 @@ def test_trades_send_their_tickers_as_written(massive_session: dm.MassiveSession
     q = massive_session.crypto.trades(["X:ETHUSD", "X:BTCUSD", "X:BTCUSD"])
     assert type(q) is StreamHistoryQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
-    for spelling in ("X:BTC-USD", "X:btcusd"):  # Massive answers any text with the X: prefix
+    for spelling in ("X:BTCPYUSD", "X:btcusd"):  # Massive answers any joined text after X:
         assert request_of(massive_session.crypto.trades(spelling)).symbols == (spelling,)
     with pytest.raises(ValueError, match=r"^cannot send the symbol 'BTC,USD' to Massive"):
         massive_session.crypto.trades("BTC,USD")

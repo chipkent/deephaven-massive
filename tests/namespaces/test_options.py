@@ -519,7 +519,9 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
         chain(1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^cannot send the symbol '' to Massive"):
         chain("")
-    for text in ("aapl", "i:SPX", "  "):  # Massive answers them
+    with pytest.raises(ValueError, match="starts or ends with whitespace"):
+        chain("  ")
+    for text in ("aapl", "i:SPX"):  # Massive answers them
         assert request_of(chain(text))["params"]["underlyingAsset"] == text
     # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
     assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"

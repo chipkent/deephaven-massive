@@ -218,7 +218,7 @@ def test_conversion_keeps_the_vendor_symbol() -> None:
 # --- factories ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("symbols", ["C:eur-usd", "C:EUR/USD", "C:eurusd"])
+@pytest.mark.parametrize("symbols", ["C:eurusd", "C:EURUSDX", "C:XAUUSD"])
 def test_any_pair_spelling_with_the_forex_prefix_is_sent_as_written(
     massive_session: dm.MassiveSession, symbols: str
 ) -> None:

@@ -355,7 +355,7 @@ class FuturesNamespace(Namespace):
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
                 - a table has no `Symbol` column.
 
         Example:
@@ -405,7 +405,7 @@ class FuturesNamespace(Namespace):
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
                 - a table has no `Symbol` column.
 
         Example:
@@ -466,7 +466,7 @@ class FuturesNamespace(Namespace):
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
                 - a table has no `Symbol` column.
 
         Example:
@@ -526,7 +526,7 @@ class FuturesNamespace(Namespace):
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
                 a `str`, a sequence of `str`, or a table.
             ValueError: If:
-                - `symbols` holds None, or a ticker that is empty or holds `,` or `*`;
+                - `symbols` holds None, or a ticker that is empty, padded, or holds `,` or `*`;
                 - `order` is given without `sort`;
                 - `product_code` is empty, or a table without a `ProductCode` column;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

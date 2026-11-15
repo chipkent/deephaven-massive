@@ -21,10 +21,10 @@ from deephaven_massive._datasets.symbols import (
     SymbolTable,
     check_symbol,
     check_symbols,
+    class_spelling_reason,
     forex_codes,
     is_forex_currency,
     is_sendable,
-    missing_prefix,
     option_roots,
     symbol_class,
     unsendable_reason,
@@ -55,7 +55,10 @@ SENT_AS_WRITTEN = [
     "esz5",
     "GCQ6-GCZ6",
     "BOB 02-01 U6",
-    " ESZ5 ",
+    "CL:BF Q6-U6-V6",
+    "NE.WS.A",
+    "BRK/B",
+    "O:AAPL211022C000150000",
     "I:SPX",
     "SPX",
     "C:EURUSD",
@@ -86,6 +89,10 @@ def test_a_symbol_is_sent_as_written_whatever_its_shape(text: str) -> None:
         ("", "an empty symbol names no ticker"),
         ("AAPL,MSFT", "split on commas, so it would be sent as several tickers"),
         ("*", "reads '\\*' as every ticker"),
+        (" ESZ5 ", "starts or ends with whitespace"),
+        (" AAPL", "starts or ends with whitespace"),
+        ("AAPL\t", "starts or ends with whitespace"),
+        ("AA\x00PL", r"holds the control character '\\x00'"),
     ],
 )
 def test_text_no_request_can_carry_is_refused(text: str, reason: str) -> None:
@@ -466,21 +473,32 @@ def test_all_is_an_instance_of_the_symbols_like_member() -> None:
 
 
 def test_a_class_with_a_prefix_needs_it_and_others_need_none() -> None:
-    assert missing_prefix(OPT, "AAPL") == (
+    assert class_spelling_reason(OPT, "AAPL") == (
         "lacks the O: prefix of every options contract ticker, such as 'O:AAPL250117C00150000'"
     )
-    assert (
-        missing_prefix(IDX, "SPX") == "lacks the I: prefix of every index ticker, such as 'I:SPX'"
+    assert class_spelling_reason(IDX, "SPX") == (
+        "lacks the I: prefix of every index ticker, such as 'I:SPX'"
     )
-    assert missing_prefix(FX, "X:EURUSD") == (
+    assert class_spelling_reason(FX, "X:EURUSD") == (
         "lacks the C: prefix of every forex ticker, such as 'C:EURUSD'"
     )
-    assert missing_prefix(CRY, "x:btcusd") == (
+    assert class_spelling_reason(CRY, "x:btcusd") == (
         "lacks the X: prefix of every crypto ticker, such as 'X:BTCUSD'"
     )
-    # Only the prefix is checked: any text after it passes.
-    for asset_class, symbol in ((OPT, "O:"), (IDX, "I:spx"), (FX, "C:EUR-USD"), (CRY, "X:?")):
-        assert missing_prefix(asset_class, symbol) is None
+    # A pair written with a separator is refused, naming Massive's joined ticker.
+    assert class_spelling_reason(FX, "C:EUR-USD") == (
+        "writes a forex pair with '-'; Massive's ticker joins the two currencies, as "
+        "'C:EURUSD', which flat files and streams match"
+    )
+    assert class_spelling_reason(CRY, "X:BTC/USD") == (
+        "writes a crypto pair with '/'; Massive's ticker joins the two currencies, as "
+        "'X:BTCUSD', which flat files and streams match"
+    )
+    # Nothing else is checked: any other text after the prefix passes, in any case.
+    for asset_class, symbol in ((OPT, "O:"), (IDX, "I:spx"), (FX, "C:eurusd"), (CRY, "X:?")):
+        assert class_spelling_reason(asset_class, symbol) is None
+    # A dash is part of a futures combo's or an option's ticker, never a pair's separator.
+    assert class_spelling_reason(FUT, "GCQ6-GCZ6") is None
     # Stocks, futures, a dataset of every class, and a table of underlyings need none.
     for none_needed in (STK, FUT, ClassFromPrefix.ANY, None):
-        assert missing_prefix(none_needed, "AAPL") is None
+        assert class_spelling_reason(none_needed, "AAPL") is None

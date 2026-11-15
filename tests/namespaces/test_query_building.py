@@ -1131,3 +1131,55 @@ def test_bar_periods_are_left_to_massive() -> None:
 def test_bar_multiplier_must_be_an_int(multiplier: object) -> None:
     with pytest.raises(TypeError, match="multiplier must be an int"):
         _check_bar_period(Timespan.DAY, multiplier)
+
+
+# --- the symbol rule -----------------------------------------------------------------------------
+
+_BY_CLASS: dict[str, Callable[[dm.MassiveSession, str], Query]] = {
+    "stocks": lambda m, text: m.stocks.trades(text),
+    "options": lambda m, text: m.options.trades(text),
+    "futures": lambda m, text: m.futures.trades(text),
+    "forex": lambda m, text: m.forex.quotes(text),
+    "crypto": lambda m, text: m.crypto.trades(text),
+}
+"""A streaming dataset of each class, taking one symbol."""
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "text"),
+    [
+        ("stocks", "KIMpL"),  # Kimco's series L preferred: Massive's case is meaningful
+        ("stocks", "aapl"),  # any case is sent; Massive answers it
+        ("stocks", "BRK.B"),
+        ("stocks", "NE.WS.A"),
+        ("stocks", "BRK/B"),  # a path sends it as BRK%2FB
+        ("options", "O:AAPL211022C000150000"),
+        ("futures", "CL:BF Q6-U6-V6"),  # a combo's inner spaces are part of its ticker
+    ],
+)
+def test_a_ticker_massive_writes_is_sent_as_written(
+    massive_session: dm.MassiveSession, asset_class: str, text: str
+) -> None:
+    assert _BY_CLASS[asset_class](massive_session, text)._request.symbols == (text,)
+
+
+@pytest.mark.parametrize(
+    ("asset_class", "text", "reason"),
+    [
+        ("stocks", "", "an empty symbol names no ticker"),
+        ("stocks", " AAPL", "starts or ends with whitespace"),
+        ("stocks", "AAPL\n", "starts or ends with whitespace"),
+        ("stocks", "AA\x00PL", r"holds the control character '\\x00'"),
+        ("stocks", "A,B", "holds ','"),
+        ("stocks", "*", "holds '\\*'"),
+        ("options", "AAPL", "lacks the O: prefix of every options contract ticker"),
+        ("forex", "C:EUR-USD", "writes a forex pair with '-'; .* as 'C:EURUSD'"),
+        ("forex", "C:EUR/USD", "writes a forex pair with '/'; .* as 'C:EURUSD'"),
+        ("crypto", "X:BTC-USD", "writes a crypto pair with '-'; .* as 'X:BTCUSD'"),
+    ],
+)
+def test_a_ticker_the_library_cannot_send_as_written_is_refused(
+    *, massive_session: dm.MassiveSession, asset_class: str, text: str, reason: str
+) -> None:
+    with pytest.raises(ValueError, match=reason):
+        _BY_CLASS[asset_class](massive_session, text)

@@ -126,6 +126,11 @@ _SENT: dict[str, list[tuple[str, dict[str, str]]]] = {
         ),
     ],
     bad_values.START_AFTER_NOW: [(f"{_AGGS}/1/day/2026-11-21/2026-12-01", {"limit": "5"})],
+    bad_values.TICKER_CASE: [
+        ("/v3/snapshot", {"ticker.any_of": "AAPL,aapl,KIMpL,kimpl,BRK.B"}),
+        ("/v2/aggs/ticker/aapl/prev", {}),
+    ],
+    bad_values.PAIR_SEPARATOR: [("/v3/quotes/C:EUR-USD", {"limit": "5"})],
 }
 """What each check sends, as the fake server decodes it, for requests built on `_DAY`."""
 

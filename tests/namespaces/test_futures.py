@@ -1273,10 +1273,12 @@ def test_futures_datasets_send_their_tickers_as_written(massive_session: dm.Mass
     # A contract, a combo of any form, or any other text: Massive answers each.
     q = massive_session.futures.trades(["ESZ5", "GCQ6-GCZ6", "CL:BZ U6-V6", "ZZ:NEW COMBO Z6"])
     assert q._request.symbols == ("CL:BZ U6-V6", "ESZ5", "GCQ6-GCZ6", "ZZ:NEW COMBO Z6")
-    for text in (" ESZ5", "X:ESZ5", "esz5", "ESZ"):
+    for text in ("X:ESZ5", "esz5", "ESZ"):
         assert massive_session.futures.trades(text)._request.symbols == (text,)
     with pytest.raises(ValueError, match=r"^cannot send the symbol '' to Massive"):
         massive_session.futures.trades("")
+    with pytest.raises(ValueError, match="starts or ends with whitespace"):
+        massive_session.futures.trades(" ESZ5")
 
 
 def utc_ns(day: str) -> int:

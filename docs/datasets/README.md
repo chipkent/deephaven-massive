@@ -228,10 +228,10 @@ Write each symbol as Massive's ticker:
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
 - A live table works as a watchlist. Symbols you add are read, and symbols you delete stop being read.
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
-- An options, index, forex, or crypto symbol needs its class's prefix: `O:`, `I:`, `C:`, or `X:`. Without it, text or a list raises `ValueError` naming the prefix, and a table's row is skipped and logged by default, as [`unsendable_symbols`](../configuration.md#unsendable_symbols) says.
-- Beyond the prefix, each symbol is sent as you write it, and Massive decides whether it names an instrument. A symbol Massive has no data for gives no rows.
+- Each symbol is sent as you write it, in any case, and Massive decides whether it names an instrument: `KIMpL` is a Kimco preferred share. A symbol Massive has no data for gives no rows.
+- An options, index, forex, or crypto symbol needs its class's prefix: `O:`, `I:`, `C:`, or `X:`. A forex or crypto pair joins its two currencies, as `C:EURUSD`, never `C:EUR-USD` or `C:EUR/USD`, since flat files and streams match only the joined ticker.
 - A crypto stream, last trade, or daily open and close reads only pairs on Massive's crypto ticker list. By default, any other pair gives no rows; [`unlisted_symbols`](../configuration.md#unlisted_symbols) changes that.
-- A symbol that is empty or holds `,` or `*` can't be sent: in text or a list it raises `ValueError`. In a table its row is skipped and logged by default, and [`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.
+- A symbol that is empty, starts or ends with whitespace, holds a control character, `,`, or `*`, or breaks the rule above can't be sent: in text or a list it raises `ValueError`. In a table its row is skipped and logged by default, and [`unsendable_symbols`](../configuration.md#unsendable_symbols) changes that.
 - To convert another source's tickers, use `dm.canonical_symbol`. For a stock, also pass the source's convention: `convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`.
 
 <a id="start"></a>

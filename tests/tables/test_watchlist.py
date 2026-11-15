@@ -109,9 +109,9 @@ def test_read_symbols_sends_any_row_a_request_can_carry(dh_exec_ctx: object) -> 
     table = new_table([string_col("Symbol", ["ERIC B", "7203", "eurusd", "X:BTCUSD"])])
     got = read_symbols(spanning(), table, stream_id=7)
     assert got == CurrentSymbols(("7203", "ERIC B", "X:BTCUSD", "eurusd"))
-    forex_rows = new_table([string_col("Symbol", ["C:eurusd", "C:EUR-USD", "C:XYZ"])])
+    forex_rows = new_table([string_col("Symbol", ["C:eurusd", "C:EURUSD", "C:XYZ"])])
     got = read_symbols(rule(), forex_rows, stream_id=7)
-    assert got == CurrentSymbols(("C:EUR-USD", "C:XYZ", "C:eurusd"))
+    assert got == CurrentSymbols(("C:EURUSD", "C:XYZ", "C:eurusd"))
 
 
 @pytest.mark.parametrize(
@@ -915,3 +915,22 @@ def test_a_watchlist_filter_takes_one_failure_when_both_of_its_tables_fail(
     for pin in pins:
         release_scope(dh_exec_ctx, pin)
     release_scope(dh_exec_ctx, scope)
+
+
+def test_a_padded_row_or_a_pair_row_with_a_separator_is_skipped(dh_exec_ctx: object) -> None:
+    # Whitespace at either end never reaches Massive's confirmed topics, and a flat file or a
+    # stream reads only the joined pair; any case is sent.
+    stocks = SymbolRowRule("stocks.trades", unsendable=OnError.LOG)
+    table = new_table([string_col("Symbol", [" AAPL", "KIMpL", "aapl"])])
+    assert read_symbols(stocks, table, stream_id=None) == CurrentSymbols(
+        ("KIMpL", "aapl"), (" AAPL",)
+    )
+    pairs = new_table([string_col("Symbol", ["C:EUR-USD", "C:EURUSD"])])
+    got = read_symbols(rule(FOREX, OnError.LOG), pairs, stream_id=None)
+    assert got == CurrentSymbols(("C:EURUSD",), ("C:EUR-USD",))
+    with pytest.raises(
+        ValueError,
+        match=r"^forex\.quotes: a symbol table holds 'C:EUR-USD', which writes a forex pair "
+        r"with '-'; Massive's ticker joins the two currencies, as 'C:EURUSD'",
+    ):
+        read_symbols(rule(FOREX), pairs, stream_id=None)

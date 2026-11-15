@@ -434,7 +434,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, `dm.ALL`, or empty;
-                - a ticker is empty or holds `,` or `*`, or a table has no `Symbol` column;
+                - a ticker is empty, padded, or holds `,`, `*`, or a control character;
+                - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - `filters` holds `type`, a key the endpoint doesn't take, or a value that doesn't
                   fit.

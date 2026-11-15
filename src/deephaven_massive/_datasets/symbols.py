@@ -2,16 +2,17 @@
 
 Every symbol the library takes is sent to Massive as written, and Massive decides whether it
 names an instrument: a ticker Massive has no data for gives no rows, and `m.symbol_reads()`
-shows it. The library judges no ticker's shape beyond its class's prefix; this module owns
-three things around that:
+shows it. Case is never folded or judged (`KIMpL` is a Massive ticker). The library judges
+a ticker's shape only by its class's spelling; this module owns three things around that:
 
 - **The argument.** `check_symbols` reads a `symbols` argument other than a table (`dm.ALL`, one
   `str`, or a sequence of them) and `check_symbol` one value of it. A value of the wrong Python
   type raises `TypeError`, and a value the library cannot put in a request raises `ValueError`
-  (`is_sendable`): empty text, or text holding `,` or `*`, each of which Massive's
-  requests read as a separator or a wildcard instead of a ticker. A dataset of a class whose
-  tickers carry a prefix (`O:`, `I:`, `C:`, `X:`) also refuses a symbol without it
-  (`missing_prefix`), the one part of a ticker's shape the library checks.
+  (`is_sendable`): empty text; whitespace at either end, which Massive's WebSocket drops from
+  the topics it confirms; a control character; or `,` or `*`, which Massive's requests read as
+  a separator or a wildcard instead of a ticker. A dataset of a class whose tickers carry a
+  prefix (`O:`, `I:`, `C:`, `X:`) also refuses a symbol without it, and a forex or crypto
+  dataset a pair written with `-` or `/` (`class_spelling_reason`).
 - **The converters**, the public way to turn another spelling into Massive's:
   `canonical_symbol(text, asset_class, convention=)` for Python code, and one function per class
   that has another spelling (`canonical_symbol_option`, `canonical_symbol_index`,
@@ -50,6 +51,7 @@ type checking only.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -84,10 +86,10 @@ __all__ = [
     "canonical_symbol_stock_yahoo",
     "check_symbol",
     "check_symbols",
+    "class_spelling_reason",
     "forex_codes",
     "is_forex_currency",
     "is_sendable",
-    "missing_prefix",
     "option_roots",
     "read_crypto_pair",
     "read_forex_pair",
@@ -206,6 +208,10 @@ _PREFIXED: Final[dict[AssetClass, tuple[str, str, str]]] = {
 """The classes whose every ticker carries a prefix: each prefix, the ticker's name for a message,
 and an example. Stocks and futures have none."""
 
+_PAIR_SEPARATORS: Final = "-/"
+"""The separators another source writes between a pair's currencies, which Massive's tickers
+join (`C:EURUSD`, `X:BTCUSD`)."""
+
 _UNSENDABLE: Final[dict[str, str]] = {
     ",": "Massive's list parameters and WebSocket subscriptions split on commas, so it would "
     "be sent as several tickers",
@@ -258,10 +264,19 @@ def unsendable_reason(text: str) -> str | None:
 
     Returns:
         None for text the library can send; otherwise the reason, such as `'A,B' holds ',':
-        Massive's list parameters ... several tickers`.
+        Massive's list parameters ... several tickers`: empty text, whitespace at either end,
+        a control character, `,`, or `*`.
     """
     if not text:
         return "an empty symbol names no ticker, and a request without one asks for no ticker"
+    if text != text.strip():
+        return (
+            f"{text!r} starts or ends with whitespace, which Massive's WebSocket drops from the "
+            "topics it confirms, so a stream of it would never be confirmed"
+        )
+    control = next((char for char in text if unicodedata.category(char) == "Cc"), None)
+    if control is not None:
+        return f"{text!r} holds the control character {control!r}, which no ticker holds"
     for char, reason in _UNSENDABLE.items():
         if char in text:
             return f"{text!r} holds {char!r}: {reason}"
@@ -280,12 +295,17 @@ def is_sendable(text: str) -> bool:
     return unsendable_reason(text) is None
 
 
-def missing_prefix(asset_class: AssetClass | ClassFromPrefix | None, symbol: str) -> str | None:
-    """Say how a symbol lacks the prefix every ticker of its dataset's class carries, if it does.
+def class_spelling_reason(
+    asset_class: AssetClass | ClassFromPrefix | None, symbol: str
+) -> str | None:
+    """Say how a symbol is not spelled as its dataset's class writes tickers, if it is not.
 
-    The one check of a ticker's shape the library makes: an options, index, forex, or crypto
+    The two checks of a ticker's shape the library makes. An options, index, forex, or crypto
     dataset refuses a symbol without `O:`, `I:`, `C:`, or `X:`, so `AAPL` passed to an options
-    dataset fails with the prefix to add instead of reading nothing.
+    dataset fails with the prefix to add instead of reading nothing. A forex or crypto dataset
+    also refuses a pair written with `-` or `/` after its prefix (`C:EUR-USD`): REST would send
+    it as written, but a flat-file filter and a WebSocket topic read Massive's joined ticker
+    (`C:EURUSD`), so they would drop it silently.
 
     Args:
         asset_class: The dataset's class; `ClassFromPrefix.ANY` (a dataset of every class) or
@@ -293,16 +313,25 @@ def missing_prefix(asset_class: AssetClass | ClassFromPrefix | None, symbol: str
         symbol: The symbol.
 
     Returns:
-        None when the symbol has the prefix or the class has none (stocks, futures); otherwise
-        the reason, such as `lacks the O: prefix of every options contract ticker, such as
-        'O:AAPL250117C00150000'`.
+        None when the symbol has the prefix (and, for a pair, no separator) or the class has
+        none (stocks, futures); otherwise the reason, such as `lacks the O: prefix of every
+        options contract ticker, such as 'O:AAPL250117C00150000'`.
     """
     if not isinstance(asset_class, AssetClass) or asset_class not in _PREFIXED:
         return None
     prefix, name, example = _PREFIXED[asset_class]
-    if symbol.startswith(prefix):
-        return None
-    return f"lacks the {prefix} prefix of every {name} ticker, such as {example!r}"
+    if not symbol.startswith(prefix):
+        return f"lacks the {prefix} prefix of every {name} ticker, such as {example!r}"
+    separator = next((char for char in _PAIR_SEPARATORS if char in symbol[len(prefix) :]), None)
+    if asset_class in PAIR_CLASSES and separator is not None:
+        joined = prefix + "".join(
+            char for char in symbol[len(prefix) :] if char not in _PAIR_SEPARATORS
+        )
+        return (
+            f"writes a {name} pair with {separator!r}; Massive's ticker joins the two "
+            f"currencies, as {joined!r}, which flat files and streams match"
+        )
+    return None
 
 
 def symbol_class(symbol: str) -> AssetClass:

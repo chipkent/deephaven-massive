@@ -57,12 +57,14 @@ __all__ = [
     "INDICATOR_TIMESPAN",
     "LIMIT",
     "MULTIPLIER",
+    "PAIR_SEPARATOR",
     "PRECISION",
     "SESSION_OUTSIDE_FUTURES",
     "SORT_FIELD",
     "SORT_WHITESPACE",
     "START_AFTER_END",
     "START_AFTER_NOW",
+    "TICKER_CASE",
     "TRAILING_BALANCE_SHEET",
     "UNDERLYING_CHAIN",
     "UNDERLYING_CHAIN_CONTRACT",
@@ -101,6 +103,15 @@ UNDERLYING_CONTRACTS_CONTRACT: Final = "option contracts of an option contract"
 CONTRACT_SYMBOL: Final = "option contract details of a stock ticker"
 START_AFTER_END: Final = "start after end"
 START_AFTER_NOW: Final = "start after now"
+TICKER_CASE: Final = "tickers in another case"
+PAIR_SEPARATOR: Final = "forex pair written with a dash"
+
+_CASED: Final = ("AAPL", "aapl", "KIMpL", "kimpl", "BRK.B")
+"""Tickers Massive writes (`AAPL`, `KIMpL`, a Kimco preferred, and `BRK.B`) and two in another
+case: the unified snapshot's rows show whether Massive reads case."""
+
+_DASHED_PAIR: Final = "C:EUR-USD"
+"""A forex pair written with a dash, where Massive's ticker is `C:EURUSD`."""
 
 _NEW_YORK: Final = ZoneInfo("America/New_York")
 
@@ -206,6 +217,7 @@ def bad_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
         **_list_requests(today),
         **_option_requests(),
         **_bar_requests(today),
+        **_symbol_requests(),
     }
 
 
@@ -751,6 +763,47 @@ def _option_requests() -> dict[str, tuple[BadRequest, ...]]:
                 bucket="options",
                 match=partial(_field_is, "ticker", "AAPL"),
                 matching="describing the ticker AAPL",
+            ),
+        ),
+    }
+
+
+def _symbol_requests() -> dict[str, tuple[BadRequest, ...]]:
+    """Return the symbol requests: tickers in another case, and a forex pair with a dash.
+
+    Returns:
+        The requests by check.
+    """
+    return {
+        TICKER_CASE: (
+            BadRequest(
+                label=f"unified snapshot of {', '.join(_CASED)}",
+                path="/v3/snapshot",
+                names={},
+                query={"ticker.any_of": list(_CASED)},
+                bucket="stocks",
+                match=lambda row: row.get("ticker") in _CASED,
+                matching="naming a ticker exactly as sent",
+                note=lambda row: f"row ticker {row.get('ticker')!r}",
+            ),
+            BadRequest(
+                label="previous day bar of aapl",
+                path="/v2/aggs/ticker/{stocksTicker}/prev",
+                names={"stocksTicker": "aapl"},
+                query={},
+                bucket="stocks",
+                match=partial(_field_is, "T", "aapl"),
+                matching="with T aapl",
+                note=lambda row: f"row T {row.get('T')!r}",
+            ),
+        ),
+        PAIR_SEPARATOR: (
+            BadRequest(
+                label=f"quotes of {_DASHED_PAIR}",
+                path="/v3/quotes/{fxTicker}",
+                names={"fxTicker": _DASHED_PAIR},
+                query={"limit": 5},
+                bucket="currencies",
             ),
         ),
     }

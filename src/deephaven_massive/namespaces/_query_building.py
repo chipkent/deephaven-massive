@@ -56,7 +56,7 @@ from deephaven_massive._datasets.symbols import (
     AllSymbols,
     SymbolTable,
     check_symbols,
-    missing_prefix,
+    class_spelling_reason,
 )
 from deephaven_massive._enums import FuturesVenue, OnError, Order, Timespan, _require_enum
 from deephaven_massive._errors import ErrorSource, MassiveError, library_bug, required
@@ -669,7 +669,7 @@ def _normalized_symbols(
 
     A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, a
     ticker `check_symbols` refuses its error, and a ticker without its class's prefix the
-    `ValueError` of `_require_prefixes`.
+    `ValueError` of `_require_class_spelling`.
     """
     normalized: NormalizedSymbols | None = None
     if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
@@ -699,14 +699,14 @@ def _normalized_symbols(
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = check_symbols(symbols)
-        _require_prefixes(spec, normalized)
+        _require_class_spelling(spec, normalized)
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
     return normalized
 
 
-def _require_prefixes(spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols) -> None:
-    """Refuse a ticker passed in code without the prefix of its dataset's class (`missing_prefix`).
+def _require_class_spelling(spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols) -> None:
+    """Refuse a ticker passed in code that its dataset's class does not spell that way.
 
     Args:
         spec: The dataset, whose class names the prefix: `O:`, `I:`, `C:`, or `X:`, or none
@@ -714,12 +714,14 @@ def _require_prefixes(spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols) 
         symbols: The checked tickers, or `ALL`, which needs no prefix.
 
     Raises:
-        ValueError: If a ticker lacks the prefix, naming the prefix and an example.
+        ValueError: If a ticker lacks the prefix, naming the prefix and an example, or is a
+            forex or crypto pair written with `-` or `/`, naming the joined ticker
+            (`class_spelling_reason`).
     """
     if isinstance(symbols, AllSymbols):
         return
     for symbol in symbols:
-        reason = missing_prefix(spec.asset_class, symbol)
+        reason = class_spelling_reason(spec.asset_class, symbol)
         if reason is not None:
             # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
             logger.debug("%s refused: %r %s", spec.name, symbol, reason)

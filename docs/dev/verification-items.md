@@ -159,6 +159,19 @@ settles it.
 - **118.** What Massive answers to a filter list with an empty item (`ticker.any_of=AAPL,,MSFT`).
   Sent as written; if Massive reads the empty item as no filter, the library should refuse it.
   Settled by `tests/datasets/test_filters_integration.py` (Stocks Basic).
+- **119.** Whether the library's symbol rule accepts every ticker Massive itself lists, and
+  converts it to and from each transport unchanged. The rule refuses only text with whitespace
+  at either end, a control character, `,`, `*`, a missing class prefix, or a forex or crypto
+  pair written with `-` or `/`; any case is sent. Verified by
+  `tests/datasets/test_symbols_integration.py` (Stocks, Indices, Currencies, Options, and
+  Futures Basic; one request per class, two for futures), which pages one list of each class
+  and records the characters its tickers use.
+- **120.** Whether Massive reads tickers case-sensitively, and what it answers to a forex pair
+  written with a dash. Any case is sent as written, and `C:EUR-USD` is refused, naming
+  `C:EURUSD`, until read. Settled by `tests/datasets/test_symbols_integration.py` (Stocks
+  Starter, and Currencies Starter for the pair; three requests), which records the unified
+  snapshot of `AAPL`, `aapl`, `KIMpL`, `kimpl`, and `BRK.B`, the previous day bar of `aapl`,
+  and the quotes of `C:EUR-USD`.
 
 ## Settled
 

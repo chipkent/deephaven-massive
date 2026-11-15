@@ -565,10 +565,18 @@ forex, `I:` for indices), and the error names the expected prefix. Nothing else 
 ticker's shape is checked. A ticker with the right prefix that Massive has no data for still
 gives no rows instead of an error." An options, index, forex, or crypto dataset refuses a symbol
 without its prefix, naming the prefix and an example; stocks and futures have none, and a
-dataset of every class routes by the prefix instead. A ticker Massive has no data for is no
+dataset of every class routes by the prefix instead. On 2026-11-14 the owner also asked,
+"Shouldn't it accept validly specified Massive symbols, and isn't KIMpL such a valid symbol?",
+so case is never folded or judged, and answered "crypto pair: do (a), refuse." for a pair
+written with a dash: a forex or crypto dataset refuses a pair with `-` or `/` after its prefix
+(`C:EUR-USD`), naming the joined ticker (`C:EURUSD`), because a flat-file filter and a
+WebSocket topic match only the joined one and would drop it with no error. A symbol with
+whitespace at either end or a control character is refused too: Massive's WebSocket strips
+the topics it confirms, so a padded topic is never confirmed. A ticker Massive has no data for is no
 error: it gives no rows, and a watchlist read with `fetch()` or `history()` shows it in
-`m.symbol_reads()`. The library refuses only a value of the wrong Python type, a symbol without
-its class's prefix, and one no request can carry: an empty symbol, or one holding `,`
+`m.symbol_reads()`. The library refuses only a value of the wrong Python type, a symbol its
+class does not spell that way, and one no request can carry: an empty or padded symbol, a
+control character, or one holding `,`
 (Massive's list parameters and WebSocket subscriptions split on it) or `*` (the WebSocket's
 every-ticker wildcard). Such a value raises `ValueError` in code, and a table's row follows
 `MassiveConfig.unsendable_symbols`, which replaces
