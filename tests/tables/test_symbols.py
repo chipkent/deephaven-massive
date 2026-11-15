@@ -101,15 +101,17 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
 def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    table = new_table([string_col("Symbol", ["EUR/USD", "b00"])])
+    # A converter refuses only a spelling Massive reads as another instrument.
+    table = new_table([string_col("Symbol", ["BRK-B", "IGN.L"])])
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.symbols"):
-        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.IGNORE)
-    assert values(result) == ["C:EURUSD", None]
-    message = (
-        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
-        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
-    )
-    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, message)]
+        result = dm.canonicalize_symbols(
+            table, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.IGNORE
+        )
+    assert values(result) == ["BRK.B", None]
+    [(level, message)] = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert level == logging.DEBUG
+    assert message.startswith("canonicalize_symbols: 'IGN.L' names another instrument")
+    assert message.endswith("; its rows get a null Symbol")
 
 
 def test_canonicalize_a_refreshing_table(
