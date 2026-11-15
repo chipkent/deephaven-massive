@@ -21,8 +21,8 @@ the public `MassiveError`, `AuthenticationError`, or `EntitlementError` with the
 
 The clients classify what their HTTP libraries raise before they wrap it, and those libraries
 nest the root cause as an argument, a `__cause__`, or a `__context__`. `linked_errors` walks
-that whole chain, and `is_tls_failure` and `is_proxy_auth_failure` find the two failures no
-client retries in it: a certificate that did not verify, and a proxy that refused the
+that whole chain, and `is_certificate_failure` and `is_proxy_auth_failure` find the two failures
+no client retries in it: a certificate that did not verify, and a proxy that refused the
 credentials.
 
 `LIBRARY_BUG_REPORT` is the sentence that ends the wire clients' own ERROR records about a
@@ -30,15 +30,17 @@ defect: the same text as `deephaven_massive._errors.LIBRARY_BUG`, which the rest
 uses, repeated here because the wire package imports nothing else of the library (a test keeps
 the two equal). It stays inside the package: the rest of the library uses its own copy.
 
-This module imports only the standard library. It is part of `net`, the layer every client
-shares. Its functions are pure, so they are safe from any thread.
+This module imports only the standard library and urllib3's `CertificateError`. It is part of
+`net`, the layer every client shares. Its functions are pure, so they are safe from any thread.
 """
 
 from __future__ import annotations
 
 import enum
-import sys
+import ssl
 from typing import TYPE_CHECKING, Final
+
+from urllib3.util.ssl_match_hostname import CertificateError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -49,8 +51,8 @@ __all__ = [
     "WireEntitlementError",
     "WireError",
     "WireFailure",
+    "is_certificate_failure",
     "is_proxy_auth_failure",
-    "is_tls_failure",
     "linked_errors",
 ]
 
@@ -295,24 +297,35 @@ class WireEntitlementError(WireError):
         )
 
 
-def is_tls_failure(error: BaseException) -> bool:
+_CERTIFICATE_FAILURES: Final = (ssl.SSLCertVerificationError, CertificateError)
+"""What Python and urllib3 raise for a server certificate that failed verification."""
+
+
+def is_certificate_failure(error: BaseException) -> bool:
     """Return whether `error` is, or wraps, a failed TLS certificate verification.
 
-    HTTP libraries wrap `ssl.SSLCertVerificationError` in their own exceptions, as an argument
-    (urllib3's `SSLError`) or as the cause or context of a later one, so the search follows all
-    three.
+    This is the one test every client (REST, WebSocket, flat files) applies to a failed TLS
+    handshake. A certificate verification failure (a certificate that is untrusted, expired,
+    self-signed, or issued for another name) fails the request at once, as the user's to fix
+    with `SSL_CERT_FILE`: the certificate will not change between attempts. Every other TLS
+    failure is not one, and each client retries it as a request that got no answer, because
+    Python's exceptions cannot tell a settings mismatch from a transient alert by the server.
+
+    Two exceptions mean a certificate failed. When OpenSSL checks the server's name (the REST
+    and WebSocket clients), any failure is an `ssl.SSLCertVerificationError`. botocore turns
+    OpenSSL's name check off, and urllib3 then checks the name itself and raises its own
+    `CertificateError`. The HTTP libraries wrap either one in their own exceptions, as an
+    argument (urllib3's `SSLError`) or as the cause or context of a later one, so the search
+    follows all three.
 
     Args:
         error: The exception a request raised.
 
     Returns:
-        True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
-        `__cause__`, and its `__context__`, recursively.
+        True when an `ssl.SSLCertVerificationError` or urllib3's `CertificateError` is found
+        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
     """
-    # The class is looked up, not imported: naming the errors must load no network module, and
-    # no instance of it can exist before `ssl` is loaded (an empty tuple matches nothing).
-    verification = getattr(sys.modules.get("ssl"), "SSLCertVerificationError", ())
-    return any(isinstance(item, verification) for item in linked_errors(error))
+    return any(isinstance(item, _CERTIFICATE_FAILURES) for item in linked_errors(error))
 
 
 _PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "

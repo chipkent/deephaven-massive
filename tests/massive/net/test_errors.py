@@ -4,6 +4,7 @@ import ssl
 from collections.abc import Callable
 
 import pytest
+from urllib3.util.ssl_match_hostname import CertificateError
 
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._massive.net import errors
@@ -88,28 +89,39 @@ def test_the_hierarchy() -> None:
 
 def test_a_certificate_failure_is_recognised_however_it_is_wrapped() -> None:
     cert = ssl.SSLCertVerificationError(1, "certificate verify failed")
-    assert errors.is_tls_failure(cert)
+    assert errors.is_certificate_failure(cert)
     as_argument = OSError(cert)
-    assert errors.is_tls_failure(as_argument)
+    assert errors.is_certificate_failure(as_argument)
     as_cause = ConnectionError("wrapped")
     as_cause.__cause__ = cert
-    assert errors.is_tls_failure(as_cause)
+    assert errors.is_certificate_failure(as_cause)
     as_context = RuntimeError("during handling")
     as_context.__context__ = as_argument
-    assert errors.is_tls_failure(as_context)
+    assert errors.is_certificate_failure(as_context)
 
 
-def test_other_failures_are_not_tls_failures() -> None:
-    assert not errors.is_tls_failure(ConnectionResetError("reset"))
-    assert not errors.is_tls_failure(ssl.SSLError("handshake failure"))
-    assert not errors.is_tls_failure(ValueError(ValueError("nested"), "text"))
+def test_urllib3s_own_name_mismatch_is_a_certificate_failure() -> None:
+    # botocore turns OpenSSL's name check off, so urllib3 checks the name and raises its own
+    # error. urllib3 passes it to its `SSLError`, and botocore raises its `SSLError` while
+    # handling that one, so the mismatch is an argument of the context.
+    mismatch = CertificateError("hostname 'localhost' doesn't match '127.0.0.1'")
+    botocore_error = ConnectionError("SSL validation failed")
+    botocore_error.__context__ = OSError(mismatch)
+    assert errors.is_certificate_failure(botocore_error)
+
+
+def test_other_failures_are_not_certificate_failures() -> None:
+    assert not errors.is_certificate_failure(ConnectionResetError("reset"))
+    assert not errors.is_certificate_failure(ssl.SSLError("handshake failure"))
+    assert not errors.is_certificate_failure(ssl.SSLEOFError(8, "EOF occurred"))
+    assert not errors.is_certificate_failure(ValueError(ValueError("nested"), "text"))
 
 
 def test_a_cycle_of_exceptions_ends_the_search() -> None:
     first = ValueError("first")
     second = ValueError(first)
     first.__context__ = second
-    assert not errors.is_tls_failure(first)
+    assert not errors.is_certificate_failure(first)
     assert not errors.is_proxy_auth_failure(first)
 
 

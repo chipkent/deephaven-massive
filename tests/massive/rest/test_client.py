@@ -618,6 +618,29 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
     assert tls_server.requests == []
 
 
+def test_a_certificate_for_another_name_is_never_retried(
+    tls_server: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+) -> None:
+    # The certificate is trusted but names 127.0.0.1, not localhost.
+    no_proxy_env.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
+    clock = FakeClock()
+    rest = RestClient(
+        _KEY,
+        base_url=tls_server.url.replace("127.0.0.1", "localhost"),
+        max_concurrency=1,
+        governor=_governor(clock),
+    )
+    try:
+        with pytest.raises(
+            WireError, match=r"TLS certificate verification failed for localhost .*SSL_CERT_FILE"
+        ) as caught:
+            rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    finally:
+        rest.close()
+    assert caught.value.kind is WireFailure.LOCAL
+    assert (tls_server.requests, clock.waits) == ([], [])
+
+
 def test_ssl_cert_file_supplies_the_trusted_certificates(
     tls_server: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

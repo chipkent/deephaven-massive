@@ -14,8 +14,10 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   (`rate_limit_wait`): what the response's `Retry-After` header asks, in either of its forms
   (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
   by the number of refusals in the run.
-- **TLS certificate failures** are never retried: the certificate will not change between
-  attempts. `net.errors.is_tls_failure` recognises one however deeply a library wrapped it.
+- **TLS certificate failures**, a certificate for another name included, are never retried:
+  the certificate will not change between attempts. Any other failed TLS handshake is retried
+  as a connection failure. `net.errors.is_certificate_failure` tells the two apart for every
+  client.
 - **Proxy credential refusals** (a proxy answering a tunnel request with HTTP 407) are never
   retried either: the same credentials would be refused again, and a corporate proxy may lock
   the account after a few refusals. `net.errors.is_proxy_auth_failure` recognises one.
