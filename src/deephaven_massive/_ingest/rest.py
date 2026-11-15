@@ -191,6 +191,7 @@ from deephaven_massive._ingest.symbol_reads import (
 )
 from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
@@ -824,7 +825,7 @@ class RestReader:
             for (rest_path, _), outcome in zip(units, done, strict=True)
             if isinstance(outcome, _Outcome)
         ]
-        refused = self.unavailable_symbols is OnError.RAISE
+        refused = effect_of(self.unavailable_symbols).fails
         for template in converters:
             missing = [o.missing for t, o in answered if t == template and o.missing is not None]
             if missing and not refused:
@@ -916,12 +917,11 @@ class RestReader:
         Raises:
             UnavailableSymbolError: Under `RAISE` (`_missing_error`).
         """
-        setting = self.unavailable_symbols
-        if setting is OnError.RAISE:
+        effect = effect_of(self.unavailable_symbols)
+        if effect.fails:
             error = _missing_error(spec, template, missing)
             raise error
-        level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
-        self._warn_missing(spec, template, missing, level=level)
+        self._warn_missing(spec, template, missing, level=effect.level)
 
     def _warn_missing(
         self, spec: DatasetSpec, template: str, missing: Sequence[str], *, level: int
@@ -1710,7 +1710,7 @@ class RestReader:
                 )
                 absent.append(f"{value} (HTTP 404: no data)")
         schema = self.catalog.dataset_schema(
-            spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
+            spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
         )
         return poll.CycleRows(
             pa.concat_tables([one.rows for one in reads])
@@ -1815,8 +1815,7 @@ class RestReader:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
                 and the setting.
         """
-        setting = self.unavailable_symbols
-        if setting is OnError.RAISE:
+        if effect_of(self.unavailable_symbols).fails:
             raise UnavailableSymbolError(
                 f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
                 "the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
@@ -1825,12 +1824,12 @@ class RestReader:
                 is_bug=not missing,
             )
         if missing:
-            level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
+            level = effect_of(self.unavailable_symbols).level
             self._warn_missing(spec, template, symbols, level=level)
             return
         new = [name for name in symbols if self.state.first("refused", spec.name, template, name)]
         logger.log(
-            logging.WARNING if new and setting is OnError.LOG else logging.DEBUG,
+            effect_of(self.unavailable_symbols, first=bool(new)).level,
             "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error and "
             "polls the other symbols",
             spec.name,
@@ -1878,7 +1877,7 @@ class RestReader:
         left_out: list[str] = []
         unlisted: dict[str, UnlistedPairError] = {}
         skips = (
-            isinstance(request.symbols, SymbolTable) and self.unlisted_symbols is not OnError.RAISE
+            isinstance(request.symbols, SymbolTable) and not effect_of(self.unlisted_symbols).fails
         )
         split = self._unlisted_recorder(unlisted, cancel) if skips else None
         for template, own in fetch_paths(spec, symbols):
@@ -1943,7 +1942,7 @@ class RestReader:
         for symbol, error in sorted(unlisted.items()):
             first = self.state.first("unlisted", spec.name, symbol)
             logger.log(
-                logging.WARNING if first and setting is OnError.LOG else logging.DEBUG,
+                effect_of(setting, first=first).level,
                 "%s %s: %s; it is left out and the table's other symbols are read. Delete its "
                 "row, or set dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead",
                 spec.name,
@@ -2110,7 +2109,7 @@ class RestReader:
         `ValueError` of `shared_params`.
         """
         found: dict[str, UnlistedPairError] = {}
-        skips = unlisted is not OnError.RAISE
+        skips = not effect_of(unlisted).fails
         split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
@@ -2211,7 +2210,7 @@ class RestReader:
             requests += made
         if not tables:
             schema = self.catalog.dataset_schema(
-                spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
+                spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
