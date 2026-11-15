@@ -118,6 +118,7 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
 
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
     from deephaven_massive._massive import Reject, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
@@ -134,6 +135,7 @@ __all__ = [
     "Connection",
     "ConnectionGroup",
     "ConnectionStream",
+    "GroupSession",
 ]
 
 logger = logging.getLogger(__name__)
@@ -224,6 +226,28 @@ class _Client(Sender, Protocol):
         self, channel: str, keys: frozenset[str], *, symbol: str | None = None
     ) -> None:
         """Declare a channel's required key columns and its symbol column."""
+        ...
+
+
+class GroupSession(Protocol):
+    """A session of a connection group, as the group reads through it: a `WsConnections`."""
+
+    @property
+    def closed(self) -> bool:
+        """True once the session's `close` has run."""
+        ...
+
+    def core(self) -> SessionCore | None:
+        """Return the session's core, or None once it has been freed.
+
+        Returns:
+            The core.
+        """
+        ...
+
+    @property
+    def fetch_rows(self) -> RowFetch:
+        """Returns every row of a REST path for a query, through the session's REST transport."""
         ...
 
 
@@ -1987,7 +2011,7 @@ class ConnectionGroup:
         self.connections: dict[str, Connection] = {}
         self.streams: dict[int, Connection] = {}
         self.owners: dict[int, WsConnections] = {}
-        self.sessions: set[WsConnections] = set()
+        self.sessions: set[GroupSession] = set()
         self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.

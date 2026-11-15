@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from deephaven.table import Table
-    from deephaven.table_listener import TableUpdate
 
     from deephaven_massive import MassiveSession
     from tests._fakes.rest import FakeRestServer
@@ -664,14 +663,10 @@ def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> Non
             queued.append((stream.name, len(columns["Symbol"])))
 
     stream = stream_capture.Stream("stocks-minute-bars", "stocks delayed", lambda _m: None)
-    recorder: stream_capture.Recorder = Queue()  # type: ignore[assignment]  # records the puts
-    copier = stream_capture.RowCopier(stream, recorder)
-    two: TableUpdate = _Update({"Symbol": np.array(["AAPL", "NVDA"])})  # type: ignore[assignment]  # a fake update
-    none: TableUpdate = _Update({"Symbol": np.array([], dtype=object)})  # type: ignore[assignment]  # a fake update
-    empty: TableUpdate = _Update({})  # type: ignore[assignment]  # a fake update
-    copier.on_update(two, is_replay=False)
-    copier.on_update(none, is_replay=False)
-    copier.on_update(empty, is_replay=False)
+    copier = stream_capture.RowCopier(stream, Queue())
+    copier.on_update(_Update({"Symbol": np.array(["AAPL", "NVDA"])}), is_replay=False)
+    copier.on_update(_Update({"Symbol": np.array([], dtype=object)}), is_replay=False)
+    copier.on_update(_Update({}), is_replay=False)
     assert queued == [("stocks-minute-bars", 2)]
 
 

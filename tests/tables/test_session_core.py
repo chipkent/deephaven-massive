@@ -58,8 +58,6 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._tables.publisher import BlinkPublisher
-    from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import StreamHandle
     from tests._fakes.stream import FakeStreamTransport
 
@@ -720,7 +718,7 @@ class _FatalPublisher:
         self.go = threading.Event()
         self.failures: list[Exception] = []
 
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         assert self.go.wait(TIMEOUT)
         raise _Fatal
 
@@ -739,8 +737,7 @@ def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     core = massive_session._core
     writer = core.diagnostics.thread
     publisher = _FatalPublisher()
-    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
-    core.diagnostics._streams.publisher = fatal
+    core.diagnostics._streams.publisher = publisher
     result = stream_query(massive_session).append_only()  # its row waits for `go`
     publisher.go.set()  # the row kills the writer only now, after the call returned
     writer.join(TIMEOUT)
@@ -765,8 +762,7 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     writer = core.diagnostics.thread
     publisher = _FatalPublisher()
     publisher.go.set()
-    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
-    core.diagnostics._streams.publisher = fatal
+    core.diagnostics._streams.publisher = publisher
     require_unfailed = core.streams._require_unfailed
 
     def after_the_death(spec: DatasetSpec, stream_id: int) -> None:
@@ -802,8 +798,7 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     diagnostics = core.diagnostics
     writer = diagnostics.thread
     publisher = _FatalPublisher()
-    fatal: BlinkPublisher = publisher  # type: ignore[assignment]  # a fake that kills the writer
-    diagnostics._streams.publisher = fatal
+    diagnostics._streams.publisher = publisher
     handed: list[LivenessScope] = []
     hand = diagnostics._release_later
 
@@ -844,6 +839,9 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
 
 class _UnfailablePublisher:
     # A diagnostics publisher whose failure raises.
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)  # the writer is releasing its tables: it adds no rows
+
     def publish_failure(self, error: Exception) -> None:
         raise RuntimeError(f"cannot fail: {error}")
 
@@ -872,8 +870,7 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
         release_later=handed.append,
         on_death=deaths.append,
     )
-    unfailable: BlinkPublisher = _UnfailablePublisher()  # type: ignore[assignment]  # cannot fail
-    diagnostics._connections.publisher = unfailable
+    diagnostics._connections.publisher = _UnfailablePublisher()
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.diagnostics"):
         diagnostics.release()
     assert [type(death) for death in deaths] == [_Fatal]
@@ -920,11 +917,10 @@ def test_the_reaper_outlives_the_diagnostics_writer_of_a_collected_session(
 
 
 def test_a_thread_of_a_freed_session_dies_quietly() -> None:
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the core was collected
 
-    ref: weakref.ref[SessionCore] = weakref.ref(_Gone())  # type: ignore[arg-type]  # already dead
-    _core.SessionCore._thread_died(ref, "reaper", _Fatal())
+    _core.SessionCore._thread_died(gone, "reaper", _Fatal())
 
 
 def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(

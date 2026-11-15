@@ -173,7 +173,7 @@ class _SkipReason(enum.Enum):
     """Massive's crypto ticker list could not be read."""
 
 
-def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -> None:
+def _weakly(owner_ref: Callable[[], WsConnections | None], method: str, *args: object) -> None:
     """Call a session's `WsConnections` method through a weak reference, if it still exists.
 
     The blink table's shutdown callback and a watchlist's change callback are held from Java
@@ -184,7 +184,8 @@ def _weakly(owner_ref: weakref.ref[WsConnections], method: str, *args: object) -
     only the session, from waiting for the JVM.
 
     Args:
-        owner_ref: The session's `WsConnections`, weakly.
+        owner_ref: Returns the session's `WsConnections`, or None once it is freed: a weak
+            reference.
         method: The method's name, `"_shut_down"` or `"_symbols_changed"`.
         *args: Its arguments.
     """

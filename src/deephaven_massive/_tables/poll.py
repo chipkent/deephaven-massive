@@ -179,6 +179,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._datasets.symbols import AllSymbols
     from deephaven_massive._massive import DriftReport
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -611,7 +612,7 @@ class Poller:
         read: CycleReader,
         pollers: Pollers,
         clock: PollClock,
-        publisher: BlinkPublisher,
+        publisher: Publisher,
         stop: threading.Event,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
@@ -637,7 +638,8 @@ class Poller:
         """
         if mode not in _PUBLISHED_MODES:
             raise BrokenGuaranteeError(library_bug(f"{spec.name} poll() has no rule for {mode}"))
-        self._core = weakref.ref(core)
+        # Returns the core, or None once it is freed: a weak reference.
+        self._core: Callable[[], SessionCore | None] = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
         # The poller thread's name; its fan-out pool's threads add " rest_<n>".
         self._thread_name = f"{core.thread_prefix} poll-{stream_id}"

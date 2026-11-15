@@ -440,14 +440,14 @@ class _RowsLanded(TableListener):
     state under `registry_lock` (`WorkerTables.finish_read`), which never blocks.
     """
 
-    def __init__(self, core_ref: weakref.ref[SessionCore], call: int) -> None:
+    def __init__(self, core_ref: Callable[[], SessionCore | None], call: int) -> None:
         """Wait for the read's rows.
 
         Args:
-            core_ref: The session's core, weakly. The read's record keeps the session in the
-                live set while the read loads; a close marks a read that has published `DONE`
-                before its rows land, and once its result is released too the session may be
-                freed before the listener runs.
+            core_ref: Returns the session's core, or None once it is freed: a weak reference.
+                The read's record keeps the session in the live set while the read loads; a
+                close marks a read that has published `DONE` before its rows land, and once
+                its result is released too the session may be freed before the listener runs.
             call: The read's `StreamId`.
         """
         self._core_ref = core_ref

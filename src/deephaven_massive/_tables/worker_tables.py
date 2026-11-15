@@ -70,7 +70,7 @@ _ACTIVE: Final = frozenset({StreamState.RUNNING, StreamState.LOADING})
 
 
 def _worker_table_shut_down(
-    tables_ref: weakref.ref[WorkerTables],
+    tables_ref: Callable[[], WorkerTables | None],
     stream_id: int,
     *,
     record: Callable[[WorkerTables, int], None],
@@ -88,7 +88,8 @@ def _worker_table_shut_down(
     nothing to record.
 
     Args:
-        tables_ref: The session's worker-table registry, weakly.
+        tables_ref: Returns the session's worker-table registry, or None once it is freed: a
+            weak reference.
         record: `WorkerTables._shut_down`, unbound.
         stream_id: The table's `StreamId`.
         stop: The thread's stop token.

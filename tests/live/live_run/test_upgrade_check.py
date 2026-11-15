@@ -232,7 +232,7 @@ def test_the_options_call_reads_an_endpoint_basic_includes(
 
 
 def test_each_call_s_effect_is_shown_before_its_row_is_read(
-    monkeypatch: pytest.MonkeyPatch,
+    massive_session: MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A call's effect reaches m.rate_limits() only on a later update cycle: learn_limit waits
     # for it after each call and then reads the row once, so the second call, whose effect
@@ -257,6 +257,5 @@ def test_each_call_s_effect_is_shown_before_its_row_is_read(
     monkeypatch.setitem(upgrade_check.CALLS, "stocks", call)
     monkeypatch.setattr(upgrade_check, "wait_for_diagnostics", wait)
     monkeypatch.setattr(upgrade_check, "_row", row)
-    unused: MassiveSession = None  # type: ignore[assignment]  # the patched calls never read it
-    assert upgrade_check.learn_limit(unused, "stocks") == 2
+    assert upgrade_check.learn_limit(massive_session, "stocks") == 2  # the calls never read it
     assert steps == ["call", "wait", "read"] * 2

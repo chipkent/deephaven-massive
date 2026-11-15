@@ -124,7 +124,7 @@ from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import blink_publisher
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
 
@@ -140,6 +140,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass, Recency
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -780,7 +781,7 @@ class StreamSink:
         *,
         core: SessionCore,
         plan: ChannelPlan,
-        publisher: BlinkPublisher,
+        publisher: Publisher,
         symbols: frozenset[str] | None,
     ) -> None:
         """Create the sink.
@@ -1910,7 +1911,7 @@ def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:
         core.update_streams(changes)
 
 
-def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
+def _fail_later(sink_ref: Callable[[], StreamSink | None], message: str) -> None:
     """A watch's `on_invalid`: queue its stream's failure, if the stream still exists.
 
     The listener's callbacks are held from Java until the JVM collects the listener, so they
@@ -1918,7 +1919,7 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
     keep a finished session alive until the next JVM collection.
 
     Args:
-        sink_ref: The stream's sink, weakly.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
         message: Why the stream cannot follow its watchlist.
     """
     sink = sink_ref()
@@ -1926,7 +1927,7 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
         sink.fail_later(message)
 
 
-def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) -> None:
+def _show_skipped(sink_ref: Callable[[], StreamSink | None], values: tuple[str, ...]) -> None:
     """A watch's `on_skipped`: show the symbol-table values its stream skips in `m.streams()`.
 
     The text is kept apart from the transport's own warning (`StreamRow.skipped`), so neither
@@ -1937,7 +1938,7 @@ def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) ->
     The sink and its session are held weakly, as in `_fail_later`.
 
     Args:
-        sink_ref: The stream's sink, weakly.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
         values: The values skipped now, sorted; empty once every bad row is fixed or deleted,
             which clears the row's `Error`.
     """

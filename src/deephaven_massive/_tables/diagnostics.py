@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
     from deephaven_massive._massive import DriftReport
+    from deephaven_massive._tables.publisher import Publisher
 
 __all__ = [
     "CONNECTIONS",
@@ -1144,12 +1145,13 @@ class _KeyedTable:
         """
         self.name: Final = name
         self.schema: Final = schema
-        blink, self.publisher = blink_publisher(
+        blink, publisher = blink_publisher(
             name,
             col_defs(schema),
             on_shutdown=functools.partial(_log_shut_down, name),
             release_later=release_later,
         )
+        self.publisher: Publisher = publisher
         self.table: Final = blink.last_by(list(keys))
 
     def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow]) -> None:

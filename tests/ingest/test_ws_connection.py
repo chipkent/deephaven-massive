@@ -10,7 +10,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, TypeAlias
@@ -974,14 +974,16 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
             return None
 
         @staticmethod
-        def fetch_rows(path: str, _query: object, **_charging: object) -> list[dict[str, object]]:
-            reads.append(path)
+        def fetch_rows(
+            template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+        ) -> list[dict[str, object]]:
+            del query, bucket, cancel
+            reads.append(template)
             return []
 
     group = ws_session.connections.group
     real = group.sessions
-    freed: ws.WsConnections = _Freed()  # type: ignore[assignment]  # a fake: a session that closed
-    group.sessions = {freed}
+    group.sessions = {_Freed()}
     try:
         with pytest.raises(dm.MassiveError, match="connection group has closed"):
             group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())

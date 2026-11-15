@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -54,10 +54,6 @@ from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
-
-if TYPE_CHECKING:
-    from deephaven_massive._tables.publisher import BlinkPublisher
-
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -1610,12 +1606,14 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     publisher = poller._publisher
 
     class _Recording:
+        def add(self, table: Table) -> None:
+            publisher.add(table)
+
         def publish_failure(self, error: Exception) -> None:
             failures.append(error)
             publisher.publish_failure(error)
 
-    recording: BlinkPublisher = _Recording()  # type: ignore[assignment]  # records its failure
-    poller._publisher = recording
+    poller._publisher = _Recording()
     with caplog.at_level(logging.ERROR, LOGGER):
         assert poller.fail(dm.AuthenticationError("HTTP 401"))
     assert [str(e) for e in failures] == [closed]
@@ -1625,11 +1623,20 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller.thread.join(TIMEOUT)
 
 
-def test_a_cycle_after_the_core_is_gone_ends_the_poller(
-    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
-) -> None:
-    unused: BlinkPublisher = None  # type: ignore[assignment]  # a fake: the cycle ends first
-    poller = poll.Poller(
+class _UnusedPublisher:
+    # The publisher of a poller that never publishes: it is never started.
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
+
+    def publish_failure(self, error: Exception) -> None:
+        raise AssertionError(error)
+
+
+def _unstarted_poller(
+    massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> poll.Poller:
+    # A poller that is never started or added to `pollers`.
+    return poll.Poller(
         massive_session._core,
         spec=DIVIDENDS,
         request=Request(),
@@ -1639,14 +1646,20 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
         read=script,
         pollers=pollers,
         clock=poll.CLOCK,
-        publisher=unused,
+        publisher=_UnusedPublisher(),
         stop=Cancel(),
     )
+
+
+def test_a_cycle_after_the_core_is_gone_ends_the_poller(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    poller = _unstarted_poller(massive_session, script, pollers)
 
     def gone() -> SessionCore | None:
         return None  # the core was collected
 
-    poller._core = gone  # type: ignore[assignment]  # a weak reference whose core is gone
+    poller._core = gone
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
     assert poller._end_reason() == "its session is gone"
@@ -1755,10 +1768,9 @@ def test_an_error_after_a_stop_is_not_reported(
 
 
 def test_pollers_forget_and_ignore_unknown(
-    *, massive_session: dm.MassiveSession, pollers: Pollers
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
 ) -> None:
-    stranger: poll.Poller = object()  # type: ignore[assignment]  # a poller it never had
-    pollers.discard(stranger)
+    pollers.discard(_unstarted_poller(massive_session, script, pollers))  # one it never had
     assert not pollers.closed
     pollers.close()
     pollers.close()
@@ -2970,7 +2982,6 @@ def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
     *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
 ) -> None:
     # AUTO is resolved before a poller starts; a mode with no publish rule must not be upserted.
-    unused: BlinkPublisher = None  # type: ignore[assignment]  # a fake: the poller never starts
     refused = r"^stocks\.dividends poll\(\) has no rule for auto\."
     with pytest.raises(BrokenGuaranteeError, match=refused):
         poll.Poller(
@@ -2983,6 +2994,6 @@ def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
             read=script,
             pollers=pollers,
             clock=poll.CLOCK,
-            publisher=unused,
+            publisher=_UnusedPublisher(),
             stop=Cancel(),
         )

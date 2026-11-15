@@ -13,7 +13,7 @@ from collections.abc import Set as AbstractSet
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
-from types import MethodType, SimpleNamespace
+from types import MethodType
 from typing import Any, NoReturn, ParamSpec, TypedDict
 from zoneinfo import ZoneInfo
 
@@ -4498,7 +4498,10 @@ def test_the_facts_a_session_warned_about_are_bounded(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(rest, "_FACTS_LIMIT", 2)
-    client: _massive.RestClient = SimpleNamespace(governor=None)  # type: ignore[assignment]  # a fake: the state reads only its governor
+    governor = _massive.RequestGovernor(("stocks",), clock=FakeClock())
+    client = _massive.RestClient(  # sends no request
+        "k", base_url="http://127.0.0.1:9", max_concurrency=1, governor=governor
+    )
     state = rest.RestState(client, "MassiveSession #9")
     with caplog.at_level(logging.DEBUG, LOGGER):
         assert [state.first("x", "a"), state.first("x", "b"), state.first("x", "a")] == [
@@ -4511,6 +4514,7 @@ def test_the_facts_a_session_warned_about_are_bounded(
     assert caplog.messages == [
         "MassiveSession #9: forgot the 2 facts already warned about, past the limit of 2"
     ]
+    state.close()
 
 
 def test_each_page_logs_its_rows_after_each_step(
