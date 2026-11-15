@@ -619,10 +619,10 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
 
 
 def test_a_certificate_for_another_name_is_never_retried(
-    tls_server: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+    tls_server: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
 ) -> None:
     # The certificate is trusted but names 127.0.0.1, not localhost.
-    monkeypatch.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
+    no_proxy_env.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
     clock = FakeClock()
     rest = RestClient(
         _KEY,
