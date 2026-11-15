@@ -54,10 +54,9 @@ take every split from Massive's crypto ticker list and pass it in (`wire_symbols
 Nothing maps one instrument to another: an option root (`SPXW`, `AAPL1`) is never turned into
 its underlying, `BRKB` never into `BRK.B`, and a futures year is never rewritten.
 
-Every function here is thread-safe and makes no Deephaven call, and every one but a converter
-under `OnError.LOG` or `IGNORE`, which records the value once in a process-wide log, is pure;
-the module and imports Deephaven for
-type checking only.
+Every function here is thread-safe and makes no Deephaven call, and the module imports Deephaven
+only for its `Table` type. Every function is pure except a converter under `OnError.LOG` or
+`IGNORE`, which records the value once in a process-wide log.
 
 The module is one subject although it runs past 1,000 lines: the checks and every converter
 are the grammar applied, one class at a time, and each converter's message names the canonical

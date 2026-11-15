@@ -146,9 +146,10 @@ class StreamQuery(Query):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair that
-        Massive's crypto ticker list does not hold follows `unlisted_symbols` when the stream
-        opens (`StreamTransport.open_stream`).
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. The request
+        records that its symbols are a table's rows (`Request.symbols_from_table`). A crypto
+        pair that Massive's crypto ticker list does not hold follows `unlisted_symbols` when the
+        stream opens (`StreamTransport.open_stream`).
 
         Args:
             verb: The stream method called, such as `"blink"`, which a refusal names.
@@ -166,7 +167,7 @@ class StreamQuery(Query):
             return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
             read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
-            return replace(request, symbols=read)
+            return replace(request, symbols=read, symbols_from_table=True)
         return request
 
     def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
@@ -181,7 +182,8 @@ class StreamQuery(Query):
         not hold, in code or in a table, at the call or added later, follows
         `MassiveConfig.unlisted_symbols`: skipped and listed in `m.streams()` under `LOG` and
         `IGNORE`, and raised as `MassiveError` before any topic is subscribed under `RAISE`. A
-        list that cannot be read at the call raises its error when no pair could be split.
+        list that cannot be read at the call raises its error when it leaves a pair passed in
+        code, or every pair, unsplit.
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for

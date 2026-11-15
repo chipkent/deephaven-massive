@@ -384,8 +384,10 @@ class MassiveConfig:
             `poll()` lists the pair in `Error`; and a `fetch()` of a live table shows it `DONE`
             with 0 rows in `m.symbol_reads()`. A stream or `fetch()` whose pairs are all skipped
             opens and gives no rows. A pair the library couldn't look up, because the list
-            couldn't be read, stays skipped in a stream, which looks it up again when its row is
-            added again, and a `fetch()` of a live table marks it `FAILED`. When no pair of a
+            couldn't be read, is not skipped when you pass it in code: a stream raises that
+            read's error at the call. From a table, it stays skipped in a stream, which looks it
+            up again when its row is added again, and a `fetch()` of a live table marks it
+            `FAILED`. When no pair of a
             stream or static `fetch()` can be split because the list can't be read, a stream
             raises that read's error at the call, and a `fetch()` fails its table, or raises
             with `wait=True`.

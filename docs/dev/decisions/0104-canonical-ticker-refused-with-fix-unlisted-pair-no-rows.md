@@ -27,7 +27,11 @@ So decision 58 stands, as the owner set it on 2026-10-28: "only accept the canno
 everything". Every symbol in code or in a table is Massive's canonical ticker of its class, by its
 grammar, which case never folds (`KIMpL` passes; `kimpl`, `BRK-B`, `C:EUR-USD`, and `SPX` for
 an index are refused, each naming the ticker or the converter to write), and a listed form the
-grammar refuses is a library defect to fix (verification item 119). A non-canonical value raises
+grammar refuses is a library defect to fix (verification item 119). This amends the AGENTS.md
+rule decision 103 set, that the library refuses a value itself only with evidence that Massive
+answers it wrongly with no error: a ticker's spelling is refused by its class's canonical
+grammar, now a rule of its own in AGENTS.md ("Symbols are Massive's canonical tickers"), and
+decision 103 holds for every other value. A non-canonical value raises
 `ValueError` in code, and a table's row follows `MassiveConfig.noncanonical_symbols`. A canonical
 ticker is sent as written, and one Massive has no data for is no error: it gives no rows
 (verification item 62), the library never looks it up, and a watchlist read with `fetch()` or
@@ -47,5 +51,7 @@ rule that a `str` or list in code always raises no longer applies. Under `LOG`, 
 stream or read skips it and gives no rows, even when every pair is skipped; a followed read shows
 it `DONE` with 0 rows; a stream of a live table lists it in `m.streams()` `Error`. A list the
 library cannot read at all is not a missing pair: a stream keeps running without the unsplit
-pairs and looks them up again, as before, and a call made while the list cannot be read raises
-the read's own error when no pair could be split.
+pairs and looks them up again, as before. A call made while the list cannot be read raises the
+read's own error for any pair passed in code that it left unsplit, as before, so a passing
+failure never drops a pair for a stream's life, and for a table's rows when no pair could be
+split.

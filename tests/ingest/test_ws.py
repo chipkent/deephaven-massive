@@ -2166,13 +2166,33 @@ def test_a_list_whose_pairs_none_could_be_split_raises_the_unread_list_s_error(
     assert ws_session.urls == []
 
 
-def test_a_list_with_a_pair_split_opens_without_the_unread_ones(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+def test_a_pair_in_code_the_unread_list_left_unsplit_raises_though_another_split(
+    ws_session: WsSession,
 ) -> None:
-    # One pair splits before the list's read fails for the next: the stream opens with it, and
-    # lists the other, which is looked up again only when the stream is opened again.
+    # One pair splits before the list's read fails for the next: a passing failure must not
+    # drop a pair passed in code for the stream's life, so the read's own error raises.
     ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
-    result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^test\.crypto: Massive's crypto ticker list could not be read, so not every pair "
+        r"passed in code can be split: crypto pairs 1 \[X:DOTUSD\], since Massive's crypto "
+        r"ticker list could not be read \(cannot stream 'X:DOTUSD': HTTP 503: busy\)$",
+    ) as unread:
+        ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
+    assert (unread.value.status, unread.value.is_retryable) == (503, True)
+    assert ws_session.urls == []
+
+
+def test_a_static_table_with_a_pair_split_opens_without_the_unread_ones(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A static table's rows open with the pairs that split and list the others, which are
+    # looked up again only when the stream is opened again.
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    rows = crypto_watchlist(["X:BTCUSD", "X:DOTUSD"], reactive=False, dh_input_table=dh_input_table)
+    result = ws_session.query(CRYPTO, rows).append_only()
     ws_session.subscribed("XT.BTC-USD")
     assert stream_error(ws_session, dh_to_pylist) == (
         "skipped crypto pairs 1 [X:DOTUSD], since Massive's crypto ticker list could not be read "
@@ -2338,6 +2358,7 @@ def test_a_crypto_stream_names_every_form_of_symbols_at_the_call(ws_session: WsS
             core,
             CRYPTO,
             ["X:BTCUSD"],  # type: ignore[arg-type]  # the point: refused at run time
+            in_code=True,
             stream_id=1,
         )
 

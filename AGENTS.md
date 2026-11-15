@@ -156,10 +156,10 @@ These protect the owner's repository, money, and secrets.
   - **Symbols are Massive's canonical tickers** (decision 58): a symbol in code that is not
     in Massive's canonical form for its class raises `ValueError` naming the form to write or
     the converter that gives it, and such a table row follows `noncanonical_symbols`. Massive
-    answers a non-canonical spelling with silence, not an error (an empty 200, a topic that
-    streams nothing, a file filter that matches nothing), so the library identifies it as bad
-    instead. The grammar is held to Massive's own ticker lists: a listed form it refuses is a
-    library defect to fix, never a reason to send unchecked text.
+    answers a ticker it doesn't know with an empty 200, not an error (verification item 62),
+    and a flat-file read's filter for it matches nothing, so the library identifies a
+    non-canonical spelling as bad itself. The grammar is held to Massive's own ticker lists: a
+    listed form it refuses is a library defect to fix, never a reason to send unchecked text.
   - **The library refuses any other value itself only** when it is the wrong Python type, when
     the library cannot express it in a request, or when sending it would return wrong data
     with no error (each such check says which, with its evidence). Beyond its tickers'

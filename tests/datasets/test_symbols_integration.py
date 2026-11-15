@@ -249,7 +249,8 @@ def test_massive_answers_tickers_in_another_case(
     rows without one. Reading it: three such rows, and an empty or refused `aapl` bar, mean
     Massive reads case, so `aapl` names no ticker, and the grammar's refusal of it, naming
     `AAPL`, spares the user a silent empty answer; five such rows, or a bar for `aapl`, mean
-    Massive folds case, and the refusal could be relaxed.
+    Massive folds case, which is reported to the owner: `aapl` is not the canonical form, so
+    the refusal stands either way.
     """
     assert bad_values.ask_all(live_rest, bad_values.TICKER_CASE, evidence)
 
