@@ -77,9 +77,11 @@ def _symbols(rows: Sequence[Mapping[str, Any]]) -> list[tuple[str | None, str | 
         rows: Rows of a dataset table.
 
     Returns:
-        One `(Symbol, RawSymbol)` per row, sorted.
+        One `(Symbol, RawSymbol)` per row, sorted with nulls last, since a row whose ticker the
+        library cannot read has a null `Symbol` beside rows that have one.
     """
-    return sorted((row.get("Symbol"), row.get("RawSymbol")) for row in rows)
+    pairs = [(row.get("Symbol"), row.get("RawSymbol")) for row in rows]
+    return sorted(pairs, key=lambda pair: [(text is None, text or "") for text in pair])
 
 
 def _check(pairs: Sequence[tuple[str | None, str | None]], evidence: Evidence) -> list[str]:
