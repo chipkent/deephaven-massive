@@ -7,7 +7,8 @@ could drift from what a reader pastes:
 
 - `blocks`, `section_blocks`, and `intro_blocks` read a page's Python blocks, each a `Block`; a
   block fenced as `python continues` is the second step of an example, run in the namespace of
-  the block before it, and one fenced as `python skip-test` never runs.
+  the block before it, and one fenced as `python skip-test` never runs. `examples` groups a
+  page's blocks into its examples, each a block with the blocks that continue it.
 - `settings_commands` reads the README's shell commands that save the settings file, one block
   for the delayed plans and one for the real-time plans, and `write_settings_file` runs them.
 - `run_blocks` runs blocks as scripts, each as one console command, and `merged` and `forget`
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 
 _FENCE: Final = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _BASH: Final = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
+_ANCHOR: Final = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 
 SETTINGS_ANCHOR: Final = "what-your-plan-allows"
 """The README section whose shell commands save the settings file the paid examples load."""
@@ -156,6 +158,40 @@ def intro_blocks(page: Path) -> list[Block]:
     text = page.read_text(encoding="utf-8")
     end = text.find("<a id=")
     return blocks(text[: end if end >= 0 else len(text)])
+
+
+class Example(NamedTuple):
+    """One example of a user page: a block, and the blocks that continue it, in order."""
+
+    anchor: str
+    """The `<a id>` of the section the example starts in; `""` before the page's first anchor."""
+    blocks: list[Block]
+    """The example's blocks: the first starts afresh, and each later one continues it."""
+
+
+def examples(page: Path) -> list[Example]:
+    """Return the examples of a page, in order, each with the anchor of its section.
+
+    Every block that runs belongs to exactly one example: a block that continues the one before
+    it joins that block's example, even across a section's end, and every other block starts an
+    example.
+
+    Args:
+        page: The user page.
+
+    Returns:
+        The examples.
+    """
+    parts = _ANCHOR.split(page.read_text(encoding="utf-8"))
+    sections = zip(["", *parts[1::2]], parts[::2], strict=True)
+    found: list[Example] = []
+    for anchor, text in sections:
+        for block in blocks(text):
+            if block.continues and found:
+                found[-1].blocks.append(block)
+            else:
+                found.append(Example(anchor, [block]))
+    return found
 
 
 def settings_commands(page: Path, *, delayed: bool) -> str:
