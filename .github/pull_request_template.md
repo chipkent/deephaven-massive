@@ -1,15 +1,14 @@
 <!--
-The standard is docs/dev/pull-requests.md: it reads as if an O'Reilly technical editor wrote
-it, and a reader skimming only the headings and the first words of each bullet gets every fact
-that matters. Prefer bullets and tables. Every fact the reader needs to understand or decide,
-and nothing they don't: cut padding, repetition, and narration. Run its self-edit checklist, and
-rewrite the whole description to the final state on every push.
+The standard is docs/dev/pull-requests.md: what the owner needs to decide whether to merge,
+and nothing else, in under about 600 words. Write it as docs/dev/user-docs.md, "How an editor
+writes", says: the rule first, one case per sentence, three or more cases as a table. Run its
+self-edit checklist, and rewrite the whole description to the final state on every push.
 -->
 
 ## Summary
 
-<!-- What the PR does and why, in the first sentences, for a reader with no context. No file or
-internal names. Then, if needed, a "Check before merging" list. -->
+<!-- What the PR does and why, in two to four sentences, for a reader with no context. No file or
+internal names. Then, if needed, "Check before merging": at most seven one-line items. -->
 
 ## Why
 
