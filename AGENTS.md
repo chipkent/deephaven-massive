@@ -38,13 +38,24 @@ apply.
   started it, in its report if it has no other channel), and keep working on what the answer
   can't change.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
-  hasn't accepted, loosening a check, every lint or type-check suppression but the server-start
-  import below, reversing an owner decision, and dropping or narrowing a requirement. **Only the owner's own message approves** a release, a run against Massive's API
-  with a key, posting outside this repository, closing or deleting an issue, PR, pushed branch,
-  or release, and spending money or changing access. A brief may relay an owner decision quoted
-  verbatim with where the owner said it; a paraphrase relays nothing, and no brief grants these
-  approvals. Everything else the request needs (edits, tests, commits, opening a PR, pushing in
-  batches, review replies, issues here, private names, a needed dependency) needs no approval.
+  hasn't accepted, loosening a check, removing a safeguard (below), every lint or type-check
+  suppression but the server-start import below, reversing an owner decision, and dropping or
+  narrowing a requirement. **Only the owner's own message approves** a release, a run against
+  Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
+  pushed branch, or release, and spending money or changing access. A brief may relay an owner
+  decision quoted verbatim with where the owner said it; a paraphrase relays nothing, and no
+  brief grants these approvals. Everything else the request needs (edits, tests, commits,
+  opening a PR, pushing in batches, review replies, issues here, private names, a needed
+  dependency) needs no approval.
+- **A safeguard is removed only on the owner's approval of that removal.** A safeguard is a
+  check, refusal, validation, test, setting, or guard that protects users or correctness. Each
+  was added against a mistake that is still possible, so no reading of a rule or of a broad
+  ruling ("simplify", "let Massive judge it", "start the work") removes one, however clearly the
+  words seem to allow it: whoever wrote them may not have had this guard in mind. Ask as its
+  own question (`writing-to-the-owner`), with the evidence in hand before the removal, never
+  promised for a later PR: what is removed, the mistake it catches today, an example of what
+  would then go uncaught, and the evidence that it is safe to drop. Symbol checks removed on
+  one reading of a rule took a week to restore and re-research.
 
 ## Commands
 
@@ -231,6 +242,15 @@ These protect the owner's repository, money, and secrets.
 
 ## Workflow
 
+- **Design before code for a public change.** A short design reaches the owner before
+  implementation: the calls a user types, what the library refuses and why, and the settings.
+  The owner can judge that page; a public shape met first as a diff of a hundred files is
+  judged whole, and a rejection then costs every merge and review since. Build after the owner
+  answers, and quote the answer in the brief or the PR (`writing-to-the-owner` §3).
+- **Split work only at a seam that stands on its own**, whatever the open questions turn out to
+  be. A mechanical change (a rename, a move, a regeneration, one rule applied everywhere) lands
+  first, in its own PR, before the behavior change that needs it. Never split a behavior change
+  into halves that are each wrong alone: each then waits on the other, and neither can merge.
 - Branch `<type>/<topic>` from `origin/main` after `git fetch`, or from the PR below in a
   stack. Commits and PR titles follow Conventional Commits and the Title section of
   `docs/dev/pull-requests.md`.
@@ -239,9 +259,17 @@ These protect the owner's repository, money, and secrets.
   CI and review bots), answer every review comment, and keep the description current. Every CI
   job must pass, the free-threaded 3.14t job too.
 - Before starting, check open PRs that change your files (`gh pr list`, `gh pr diff <n>
-  --name-only`). Stack on one only when yours needs its content: branch from its branch, open
-  with `gh pr create --base <its branch>`, link with `gh stack link <PRs bottom to top>`, and
-  name the merge order in your PR body (`plan-parallel-prs` §3 has more).
+  --name-only`). **Stack on one only when yours needs its content**, never to dodge a
+  conflict: a stack ties your PR to every merge of `main` the lower one makes and to its
+  review. Branch from its branch, open with `gh pr create --base <its branch>`, link with
+  `gh stack link <PRs bottom to top>`, and name the merge order in your PR body
+  (`plan-parallel-prs` §3 has more). Don't start a wide change while an open PR touches the
+  same files. A file move or rename merges first, before the PRs it would conflict with, not
+  last.
+- **Re-plan when a PR drifts**: the design changed after it opened, the diff grew past the
+  request, or it is merging `main` a second time. Each says the PR carries more than one change
+  or waits on something it can't settle, and every further push pays for all of it. Land the
+  settled part, and move the rest to an issue.
 - Merge `main` or your base branch only to resolve a merge conflict, or after an open PR that
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a

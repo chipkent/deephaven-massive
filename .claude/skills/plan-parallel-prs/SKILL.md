@@ -21,8 +21,13 @@ a close reason, or a named owner question.
 
 One PR holds one coherent change and everything it needs. Two changes to the same code path go
 in one PR. Unrelated pieces stay separate, however small; never split or merge PRs only by size.
-Never plan a step you already know is bad, such as text moved verbatim to be rewritten later, to
-make a diff easier to review: fix the content as you move it. Docs that share a file, a
+Split only at a seam that stands on its own, whatever the open questions turn out to be: a
+mechanical change (a rename, a move, a regeneration, one rule applied everywhere) is such a
+seam, and it lands first, in its own PR, before the behavior change that needs it, so the
+behavior PR stays small and the mechanical one never waits on a design question. Two halves of
+one behavior change are not seams: each is wrong alone, each waits on the other, and neither can
+merge. Never plan a step you already know is bad, such as text moved verbatim to be rewritten
+later, to make a diff easier to review: fix the content as you move it. Docs that share a file, a
 generated page, or a generator go on one branch, never on parallel branches. Each user doc gets
 at most two grading rounds, then goes to the owner with its graders' notes, and a doc that
 passes is pushed at once, never held back for others.
@@ -32,8 +37,12 @@ passes is pushed at once, never held back for others.
 Contention at merge time (rebases, `main` merges, and the CI reruns they trigger) is a main
 reason features land slowly. A planned merge order limits it; stacking does not remove it.
 
-- Stack a PR only when it needs the content of the PR below it. Use GitHub's native stacked
-  PRs: each upper PR branches from the PR below it, opens with
+- Stack a PR only when it needs the content of the PR below it, never to avoid a conflict: a
+  stacked PR inherits every merge of `main` the lower one makes and waits on its review, so a
+  stack built to dodge conflicts pays for them twice. Don't start a wide change while an open
+  PR touches the same files; wait for it, or take its agent's work into yours. A file move or
+  rename merges first, before the PRs it would conflict with, never last. Use GitHub's native
+  stacked PRs: each upper PR branches from the PR below it, opens with
   `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
   top>` (`gh extension install github/gh-stack` once), and names the merge order in its body.
   `AGENTS.md` forbids the `gh stack` commands that rewrite pushed branches. A stack is one
@@ -55,6 +64,10 @@ reason features land slowly. A planned merge order limits it; stacking does not 
   past entries keep the old name.
 - Agents never force-push or rebase a pushed branch. Conflicts are resolved by the owning agent
   with a written rationale; the coordinator never pushes or resolves one itself.
+- Re-plan a PR that drifts: its design changed after it opened, its diff grew past the request,
+  or it is merging `main` a second time. Each says the PR carries more than one change or waits
+  on something its agent can't settle, and every further push pays for all of it. Have the
+  agent land the settled part and move the rest to an issue.
 
 ## 4. Reserve numbers
 
@@ -79,6 +92,12 @@ says only what the agent cannot know:
   approach and steps are background;
 - for user-facing work (docs, an API, an error message), who reads the result and what they
   need from it;
+- for a public change, the design the owner approved and their answer to it, quoted (the
+  calls a user types, what is refused and why, the settings). No design yet means the agent's
+  first deliverable is that design, not code (`AGENTS.md`, Workflow);
+- each safeguard the work may remove (a check, refusal, validation, test, setting, or guard),
+  with the owner's approval of that removal quoted, or the instruction to ask before removing
+  it: a brief's reading of a rule approves no removal;
 - that review findings which add work go under Follow-ups with an issue, never into the diff;
 - the base branch (`origin/main`, or the branch below it in its stack) and the stack's PR
   numbers, bottom to top;
