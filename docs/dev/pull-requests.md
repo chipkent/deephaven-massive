@@ -140,7 +140,7 @@ Run it on every draft, and before every push that changes the PR:
    changed, why, the decisions, how it was checked, what is left. Promote anything buried in a
    paragraph to a bullet or a row.
 2. **Read it as an O'Reilly technical editor would, and fix what they'd mark** under
-   [How an editor writes](user-docs.md#method).
+   [How an editor writes](user-docs.md#method) and [Sentences](user-docs.md#sentences).
 3. **Read the first three sentences alone.** A reader with no context can say what the PR does
    and why.
 4. **A reviewer new to the PR knows why it exists and can follow every section without
