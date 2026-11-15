@@ -20,8 +20,8 @@ rewritten with no record of the decisions it replaced. This script fails on each
   (`decision N`) whose file is in `docs/dev/decisions/` and that this pull request does not
   itself add.
 - **A rule change without its record**: a pull request touching `AGENTS.md` or
-  `.claude/skills/` holds a dated quote; one whose diff removes or rewrites a line of
-  `AGENTS.md` also holds a `Decisions touched:` line naming decision numbers or `none`.
+  `.claude/skills/` holds a dated quote; one whose diff removes or rewrites a line of either
+  also holds a `Decisions touched:` line naming decision numbers or `none`.
 
 It checks the shape, not the substance: whether a quoted sentence covers the change is for
 the reader (`plan-parallel-prs`, section 6). Three ways to run it, each with only the
@@ -89,6 +89,10 @@ DECISIONS_TOUCHED: Final = re.compile(
 )
 #: A deleted diff line that is not the `---` file header and not blank.
 DELETED_LINE: Final = re.compile(r"^-(?!--)\s*\S")
+#: The `b/` path of a `diff --git` header, plain or quoted as git quotes non-ASCII names.
+DIFF_HEADER: Final = re.compile(
+    r'^diff --git (?:"a/.*"|a/.*) (?:"b/(?P<quoted>.*)"|b/(?P<plain>.*))$'
+)
 RULE_FILES: Final = ("AGENTS.md", ".claude/skills/")
 BODY_FILE: Final = pathlib.Path(".git-pr-body.md")
 STANDARD: Final = "docs/dev/pull-requests.md"
@@ -110,15 +114,20 @@ def check_section(body: str) -> list[str]:
     for start, line in enumerate(lines):
         if not SECTION_HEADING.match(line):
             continue
+        section: list[str] = []
         for later in lines[start:]:
             if later.startswith("## ") and later is not line:
                 break
-            hit = OPEN_ITEM.search(later)
+            section.append(later)
+        # A phrase wrapped across the lines of one item is still that phrase.
+        for unit in units("\n".join(section)):
+            flat = " ".join(unit.split())
+            hit = OPEN_ITEM.search(flat)
             if hit:
                 problems.append(
                     f"Check before merging asks the owner something ({hit.group(0)!r}): "
-                    f"{later.strip()[:100]!r}. Ask the owner directly and open or push the "
-                    f"pull request after the answer ({STANDARD})."
+                    f"{flat[:100]!r}. Ask the owner directly and open or push the pull "
+                    f"request after the answer ({STANDARD})."
                 )
     return problems
 
@@ -186,8 +195,9 @@ def added_paths(diff: str) -> set[str]:
     added: set[str] = set()
     path = ""
     for line in diff.splitlines():
-        if line.startswith("diff --git "):
-            path = line.split(" b/", 1)[1]
+        header = DIFF_HEADER.match(line)
+        if header:
+            path = header.group("quoted") or header.group("plain")
         elif line.startswith("new file mode") and path:
             added.add(path)
     return added
@@ -243,20 +253,22 @@ def check_claims(body: str, diff: str, decisions_dir: pathlib.Path) -> list[str]
     return problems
 
 
-def agents_md_deletions(diff: str) -> bool:
-    """Whether the diff deletes a non-blank line of AGENTS.md (a rule dropped or rewritten).
+def rule_deletions(diff: str) -> bool:
+    """Whether the diff deletes a non-blank line of AGENTS.md or a skill (a rule rewritten).
 
     Args:
         diff: A unified diff of the branch against its base.
 
     Returns:
-        True when a `-` line inside the AGENTS.md hunks holds text.
+        True when a `-` line inside the hunks of a rule file holds text.
     """
-    in_agents = False
+    in_rule_file = False
     for line in diff.splitlines():
-        if line.startswith("diff --git "):
-            in_agents = line.endswith(" b/AGENTS.md")
-        elif in_agents and DELETED_LINE.match(line):
+        header = DIFF_HEADER.match(line)
+        if header:
+            path = header.group("quoted") or header.group("plain")
+            in_rule_file = path == RULE_FILES[0] or path.startswith(RULE_FILES[1])
+        elif in_rule_file and DELETED_LINE.match(line):
             return True
     return False
 
@@ -271,8 +283,8 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
 
     Returns:
         A line when a rule file changes and the body holds no dated quote, and a line when
-        AGENTS.md loses a line and the body holds no `Decisions touched:` line. Empty when no
-        rule file changes.
+        a rule file loses a line and the body holds no `Decisions touched:` line. Empty when
+        no rule file changes.
     """
     rule_files = [f for f in changed if f == RULE_FILES[0] or f.startswith(RULE_FILES[1])]
     if not rule_files:
@@ -283,10 +295,10 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
             f"The pull request changes a rule ({', '.join(rule_files)}) without the owner's "
             f"words quoted with their date (AGENTS.md, an approval is a quote)."
         )
-    if agents_md_deletions(diff) and not DECISIONS_TOUCHED.search(body):
+    if rule_deletions(diff) and not DECISIONS_TOUCHED.search(body):
         problems.append(
-            "The pull request removes or rewrites a line of AGENTS.md without a 'Decisions "
-            "touched: <numbers or none>' line (AGENTS.md, Workflow)."
+            "The pull request removes or rewrites a line of AGENTS.md or a skill without a "
+            "'Decisions touched: <numbers or none>' line (AGENTS.md, Workflow)."
         )
     return problems
 
@@ -299,7 +311,7 @@ def find_problems(
     Args:
         body: The description's Markdown.
         changed: The paths the pull request changes.
-        diff: Its unified diff; empty when unknown, which skips the AGENTS.md deletion rule
+        diff: Its unified diff; empty when unknown, which skips the rule-deletion check
             and treats every cited decision as one this pull request did not add.
         decisions_dir: The folder of decision files; absent, no cited decision counts.
 

@@ -89,6 +89,16 @@ def test_an_item_that_asks_the_owner_fails(check: ModuleType, item: str) -> None
     assert "asks the owner something" in problems[0]
 
 
+def test_a_phrase_wrapped_across_lines_still_asks(check: ModuleType) -> None:
+    body = (
+        "**Check before merging:**\n\n- The setting is a choice for the owner to\n"
+        "  confirm before merging.\n"
+    )
+    problems = check.find_problems(body, [], "")
+    assert len(problems) == 1
+    assert "for the owner to confirm" in problems[0]
+
+
 def test_a_question_mark_in_a_quote_code_span_or_link_asks_nothing(check: ModuleType) -> None:
     body = (
         "**Check before merging:**\n\n"
@@ -246,6 +256,23 @@ def test_an_agents_md_rewrite_needs_its_decisions_touched_line(check: ModuleType
 def test_an_agents_md_addition_needs_only_the_quote(check: ModuleType) -> None:
     body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
     assert check.find_problems(body, ["AGENTS.md"], AGENTS_ADDITION) == []
+
+
+def test_a_skill_rewrite_needs_its_decisions_touched_line_too(check: ModuleType) -> None:
+    diff = AGENTS_DIFF.replace("AGENTS.md", ".claude/skills/pre-push-review/SKILL.md")
+    body = '## Summary\n\nThe owner, 2026-11-15: "I approve the principles, as written."\n'
+    problems = check.find_problems(body, [".claude/skills/pre-push-review/SKILL.md"], diff)
+    assert len(problems) == 1
+    assert "Decisions touched" in problems[0]
+
+
+def test_a_git_quoted_path_in_a_diff_header_is_read(check: ModuleType) -> None:
+    diff = (
+        'diff --git "a/docs/caf\\303\\251.md" "b/docs/caf\\303\\251.md"\n'
+        "new file mode 100644\n--- /dev/null\n+++ b/docs/x\n@@ -0,0 +1 @@\n+x\n"
+    )
+    assert check.added_paths(diff) == {"docs/caf\\303\\251.md"}
+    assert check.find_problems("## Summary\n\nClean.\n", ["docs/x"], diff) == []
 
 
 def test_a_deletion_in_another_file_is_not_a_rule_rewrite(check: ModuleType) -> None:
