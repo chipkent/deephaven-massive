@@ -22,9 +22,12 @@ From the diff, the issue, and your notes, collect what the reader needs:
 - each check run and its result, and what was not run;
 - what is left, with its issue: Follow-ups, including review findings that add work;
 - under Check before merging: whether the change breaks code written to the last release and,
-  if so, the next version; each new dependency or raised floor; each new check entry; each
-  suppression, with the owner's acceptance quoted (an import after a Deephaven server start
-  needs none); and each owner decision a brief relayed, quoted.
+  if so, the next version; each new dependency or raised floor; each new check entry; and
+  each approval the PR relies on (a suppression, a public change, a dropped protection, a
+  reversed decision, a rule edit), as the owner's words quoted with their date (`AGENTS.md`,
+  an approval is a quote; an import after a Deephaven server start needs none). A question
+  for the owner is not a fact for the description: it goes to the owner first, and the PR
+  waits for the answer (`pre-push-review` §4).
 
 Then select. Every fact must earn its place by changing what the reader understands or decides.
 A true fact the reader has no use for (an internal constant, a helper's name, a count of test
@@ -44,7 +47,9 @@ shows it). End with the issue link that the "Close the issue" section of
 `docs/dev/pull-requests.md` gives (`Closes #<issue>` on its own line for a full delivery) and the
 attribution footer your session requires. Write the Summary last, as two to four plain sentences
 that say what the PR does and why for a reader with no context. A **Check before merging** list
-holds the open questions and the notices from section 1, and nothing the owner already settled.
+holds the notices and quoted approvals from section 1, for the owner to see, and nothing the
+owner has not settled (`AGENTS.md`, Ask, and keep working). `uv run python
+scripts/check_pr_body.py` checks it before you publish.
 Use bullets and tables where the reader scans (What changes, Decisions, Verification); use
 sentences where the reader follows reasoning (Summary, Why, How it works).
 
@@ -69,8 +74,8 @@ would. Two passes help:
 
 ## 4. Publish
 
-Keep the body file inside your own worktree, never under a shared name such as `pr.md` in a
-scratchpad other agents use: two agents have overwritten each other's bodies that way.
+Write the body to `.git-pr-body.md` at the root of your own worktree: `.gitignore` holds that
+name, so `git add` never stages it, and two agents never overwrite each other's draft.
 
 - New PR: `gh pr create --title "<title>" --body-file <file>`.
 - Existing PR: `gh pr edit <n> --body-file <file>`, in the same batch as the push it describes.

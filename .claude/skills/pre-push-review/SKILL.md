@@ -42,8 +42,12 @@ another CI run.
 ## 1. Review the diff
 
 Attack it as the reviewer who has to defend the codebase, with the request (the owner's words,
-or the issue's stated problem and acceptance list) and `AGENTS.md` open. Start from
-`git diff --stat` and the deleted lines (`git diff origin/main...HEAD | grep -n '^-'`). Then
+or the issue's stated problem and acceptance list) and `AGENTS.md` open. First, the file
+list: `git diff --stat origin/main...HEAD` (or the commits since the last push), and for each
+file, the sentence that says what the request needs from it. A file with no such sentence (a
+draft, a log, a scratch file, output the change did not cause) comes out of the branch before
+anything else is reviewed; a PR-description draft committed with `git add -A` is how this step
+was once skipped. Then the deleted lines (`git diff origin/main...HEAD | grep -n '^-'`), and
 look for:
 
 - **A protection dropped**: a check, refusal, validation, test, setting, or guard that is
@@ -53,9 +57,12 @@ look for:
   yes). A rule the author read as allowing it, a broad ruling, or an approved design that never
   mentioned the guard is not that yes. Not a finding: a test deleted with the code it tested,
   or a check replaced by one that catches the same mistake or more, when the description says
-  what replaced it. Without the yes, restore the guard and ask (`writing-to-the-owner`, A
-  removal leads); the question goes under Check before merging and blocks the merge, not the
-  push.
+  what replaced it. Before judging any removal or reversal, read the decisions whose names
+  touch it and the PR that added it (`git log -S'<name>' --oneline -- <file>`, then `gh pr
+  view`): contradicting an accepted decision is the same finding, and a yes to it also gives
+  the old decision's `Status:` line a new entry. Without the yes, restore the guard and ask
+  (`writing-to-the-owner`, A removal leads); until the answer, the work is not ready for a
+  PR (section 4).
 - **Scope.** Every changed file serves the request, and nothing it needs is missing. Regenerated
   output the change did not cause stays out. A PR that has drifted (its design changed after it
   opened, its diff grew past the request, or this push merges `main` a second time) is a finding
@@ -186,10 +193,15 @@ breaks fails in CI, after the push.
 
 Write or rewrite it to the branch's final state with the `writing-a-pr-description` skill. An
 open question in it ("should this return X?") is a finding: answer it from `AGENTS.md`,
-`docs/dev/decisions/`, and the code and record the answer under Decisions. If it is the owner's call,
-ask with the `writing-to-the-owner` skill and don't build the contested part. A PR complete
-except for that part is not work in progress: push it with the question under Check before
-merging, where it blocks the merge, not the push.
+`docs/dev/decisions/`, and the code and record the answer under Decisions. If it is the owner's
+call, the work is not ready for a PR or for CI: ask the owner directly with
+`writing-to-the-owner` (a subagent asks through its coordinator), build nothing that depends
+on the answer, take off the branch anything already built that does, and open or push the PR
+after the answer. A description, a review reply, or an issue is never where a question waits
+for the owner. Check before merging lists only what the owner has settled, quoted, and the
+notices `writing-a-pr-description` names. `scripts/check_pr_body.py` fails, locally and in
+CI, on an item that asks the owner anything and on an approval claimed without the owner's
+dated quote; run it before `gh pr create` or `gh pr edit`.
 
 ## 5. Review threads
 
@@ -212,8 +224,9 @@ source after reading it.
 
 1. Fix every in-scope finding, and record each Follow-up with its issue. Anything deliberately
    left alone goes in the description with its reason.
-2. Push once, with the fixes, any merge of `main`, and the description
-   (`gh pr edit <n> --body-file <file>`). Push once when the PR opens, then once per finished
+2. Stage by name (`git add <paths>`), never `git add -A`. Push once, with the fixes, any
+   merge of `main`, and the description (`gh pr edit <n> --body-file .git-pr-body.md`). Push
+   once when the PR opens, then once per finished
    batch of fixes; never push work in progress or to see whether CI passes. The pre-push hook
    runs `./scripts/check.sh`: ruff, mypy, and the tests of the changed files, without
    coverage; CI runs the whole suite. Don't run it first.

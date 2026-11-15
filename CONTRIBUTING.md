@@ -13,6 +13,7 @@ needs JDK 17 or later. Run everything from the repository root:
 uv sync --upgrade                          # create or update .venv with the newest versions
 uv run pre-commit install --hook-type pre-commit --hook-type pre-push   # once per clone
 ./scripts/check.sh                         # lint, format, types, and the tests of the changed files (the pre-push hook)
+uv run python scripts/check_pr_body.py     # the description draft at .git-pr-body.md against the approval rules (also run on push)
 ./scripts/check.sh full --all              # the whole suite with coverage, as CI runs it
 ./scripts/check.sh fast                    # lint and types only; fixes what ruff can fix
 uv build                                   # sdist and wheel

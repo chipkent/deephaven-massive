@@ -119,8 +119,10 @@ fine. A bold label heading a paragraph is a wall in disguise.
 >
 > - The note headings: Features, Fixes, Docs, Tests, Refactors, Chores, and Other.
 
-A decision only the owner can make also goes, in full, into your report to whoever launched
-you; the description is not a way to ask. Record the answer under Decisions once given.
+A decision only the owner can make goes to the owner, in full, before the pull request opens
+(`writing-to-the-owner`; a subagent asks through its coordinator); the description is not a
+way to ask, and a question in it means the work was not ready. Record the answer under
+Decisions once given.
 
 ## Keep it current
 
@@ -165,3 +167,7 @@ Run it on every draft, and before every push that changes the PR:
 7. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
    title that meets the rules, text that describes the branch after this push, and the issue in
    `closingIssuesReferences`.
+8. **Run the description check**: `uv run python scripts/check_pr_body.py` on the draft at
+   `.git-pr-body.md`. It fails on an item under Check before merging that asks the owner
+   anything, on an approval claimed without the owner's dated quote, and on a rule change
+   without its record; CI runs it on the published description.

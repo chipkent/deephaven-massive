@@ -14,11 +14,12 @@ pytest collects a test module wherever it lies, so one inside a helper package m
 mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
 `tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
-The only other test files that mirror no module are a `conftest.py`, in any test folder outside
-a helper package, and four files at the top of `tests/`: `embedded_server.py` (the `-p` plugin
-that starts the test JVM), this file, `test_docs.py`, and `test_dev_records.py` (the decisions
-and verification items under `docs/dev/`). Fixtures under `tests/data/` follow
-the test paths, so none of their directories starts with `_` either.
+A `tests/scripts/test_<name>.py` mirrors `scripts/<name>.py` the same way, though a script need
+not have one. The only other test files that mirror no module are a `conftest.py`, in any test
+folder outside a helper package, and four files at the top of `tests/`: `embedded_server.py`
+(the `-p` plugin that starts the test JVM), this file, `test_docs.py`, and
+`test_dev_records.py` (the decisions and verification items under `docs/dev/`). Fixtures under
+`tests/data/` follow the test paths, so none of their directories starts with `_` either.
 
 The file also enforces the boundary of the wire package `deephaven_massive._massive`, by reading
 the imports of every module with `ast`:
@@ -113,6 +114,7 @@ from tests._live import key_check, parallel
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
 _TESTS = _ROOT / "tests"
+_SCRIPTS = _ROOT / "scripts"
 _DATA = _TESTS / "data"
 
 # Test files that mirror no source module. A new entry needs owner approval.
@@ -327,6 +329,15 @@ def _source_modules() -> list[PurePosixPath]:
     return sorted(PurePosixPath(path.relative_to(_SRC).as_posix()) for path in _SRC.rglob("*.py"))
 
 
+def _script_modules() -> list[PurePosixPath]:
+    """The scripts, as `scripts/<name>.py`, so their mirrors live under `tests/scripts/`.
+
+    Returns:
+        One path per `scripts/*.py`, sorted.
+    """
+    return sorted(PurePosixPath("scripts", path.name) for path in _SCRIPTS.glob("*.py"))
+
+
 def _test_files() -> list[PurePosixPath]:
     return sorted(
         PurePosixPath(path.relative_to(_TESTS).as_posix()) for path in _TESTS.rglob("*.py")
@@ -474,7 +485,13 @@ def test_two_modules_with_one_mirror_are_reported() -> None:
 
 
 def test_every_test_file_mirrors_a_source_module() -> None:
-    assert orphans(_source_modules(), _test_files()) == []
+    assert orphans([*_source_modules(), *_script_modules()], _test_files()) == []
+
+
+def test_a_scripts_test_mirrors_its_script() -> None:
+    modules = _paths("scripts/check_pr_body.py")
+    assert orphans(modules, _paths("scripts/test_check_pr_body.py")) == []
+    assert orphans(modules, _paths("scripts/test_other.py")) == ["tests/scripts/test_other.py"]
 
 
 def test_a_test_file_without_a_module_is_an_orphan() -> None:
