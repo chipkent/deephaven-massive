@@ -1,6 +1,6 @@
 ---
 name: writing-to-the-owner
-description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a safeguard (a check, refusal, validation, test, setting, or guard) you want to remove, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
+description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a protection (a check, refusal, validation, test, setting, or guard) you want to drop, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
 ---
 
 # Writing to the owner
@@ -36,11 +36,13 @@ certain, is.
   rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, an entry under
   an existing rule, and a dependency the change needs are not questions: name them under Check
   before merging;
-- removing a safeguard: a check, refusal, validation, test, setting, or guard that protects
-  users or correctness (`AGENTS.md`, A safeguard is removed only on the owner's approval of
-  that removal). A rule you read as allowing the removal, or a broad ruling ("simplify", "let
-  Massive judge it"), is the reason to ask, not an answer: the owner approves the removal of
-  this guard, by name, or it stays. Section 4 says how to present one;
+- dropping a protection: removing a check, refusal, validation, test, setting, or guard while
+  the mistake it catches stays possible (`AGENTS.md`, Dropping a protection needs the owner's
+  yes). A rule you read as allowing the removal, or a broad ruling ("simplify", "let Massive
+  judge it"), is the reason to ask, not an answer: the owner approves the removal of this
+  guard, by name, or it stays. A test deleted with the code it tested, or a check replaced by
+  one that catches the same mistake or more, drops nothing: say what replaced it in the PR, and
+  don't ask. Section 4 says how to present a real removal;
 - every lint or type-check suppression, with its reason and why the design can't avoid it
   (not an import after a Deephaven server start, which `AGENTS.md` accepts in advance);
 - a column suspected but not proven to be a field another dataset already names, with both
@@ -96,11 +98,12 @@ Not from memory or an agent's report:
 ## 3. Vet a design before the owner sees it
 
 A design or contract change the owner must approve (`AGENTS.md`, The public API and the data)
-reaches them before implementation, as a short page: the calls a user types, what the library
-refuses and why, and the settings. The owner can judge that page; a public shape first seen as
-a diff of a hundred files is judged whole, and a rejection then costs everything built on it
-(`AGENTS.md`, Workflow). It reaches them only after it survives these steps: options built
-straight from raw research come out incomplete, and a long list of questions goes unread.
+reaches them before any code is written, as a short page: the calls a user types, what the
+library refuses and why, the settings, and which files change. The owner can judge that page;
+a public shape first seen as a diff of a hundred files is judged whole, and a rejection then
+costs everything built on it (`AGENTS.md`, Workflow, Design before code). It reaches them only
+after it survives these steps: options built straight from raw research come out incomplete,
+and a long list of questions goes unread.
 
 1. **A Fable agent proposes the complete design, and separate Fable critics attack it.** Revise
    until the critics run out of substantive objections. Every item a top-1% developer would find
@@ -161,11 +164,12 @@ have never seen. Each question carries everything needed to decide it, in this o
 7. **A recommendation**, and why it beats the next-best option on the property that matters.
 8. **What waits on the answer.** Silence is not consent: the question stays open.
 
-**A removal leads.** When a change removes a safeguard, the removal is the heading and the
-first thing shown, never one line in a list of changes, a row in a Check before merging table,
-or a clause in a question about something else: a removal the owner reads past is one they
-never approved. Show the guard (its code, or the test's name and what it asserts), the mistake
-it catches today with a call a user could make, what that user sees once it is gone, and the
+**A removal leads.** When a change drops a protection (a guard removed while the mistake it
+catches stays possible), the removal is the heading and the first thing shown, never one line
+in a list of changes, a row in a Check before merging table, or a clause in a question about
+something else: a removal the owner reads past is one they never approved. Show the guard (its
+code, or the test's name and what it asserts), the mistake it catches today with a call a user
+could make, what that user sees once it is gone, and the
 evidence that nothing is lost (Massive's answer from a live check already run, or a test that
 pins the same property another way). Then ask whether to remove it. The owner's yes to the
 wider change is not a yes to this; a removal found during the work gets its own question, even

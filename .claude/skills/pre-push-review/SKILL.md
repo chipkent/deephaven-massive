@@ -1,6 +1,6 @@
 ---
 name: pre-push-review
-description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it): scope against the request, a safeguard removed without the owner's approval of that removal, a behavior that misses one of its paths, the public API surface, module cohesion, code bent to satisfy a rule, and tests that catch a regression; then it checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it): scope against the request, a protection dropped without the owner's yes, a behavior that misses one of its paths, the public API surface, module cohesion, code bent to satisfy a rule, and tests that catch a regression; then it checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
 ---
 
 # Review locally before you push
@@ -46,15 +46,16 @@ or the issue's stated problem and acceptance list) and `AGENTS.md` open. Start f
 `git diff --stat` and the deleted lines (`git diff origin/main...HEAD | grep -n '^-'`). Then
 look for:
 
-- **A safeguard removed or weakened**: a check, refusal, validation, test, setting, or guard
-  that protected users or correctness and is gone, loosened, or no longer reached. Each one
-  needs the owner's approval of that removal, quoted in the description: a message that names
-  the guard, after seeing what it caught (`AGENTS.md`, A safeguard is removed only on the owner's
-  approval of that removal). A rule the author read as allowing it, a broad ruling, or an
-  approved design that never mentioned the guard is not that approval, and a deleted test is
-  fine only when the diff adds one that pins the same property. Without the approval, restore
-  the guard and ask (`writing-to-the-owner`, A removal leads); the question goes under Check
-  before merging and blocks the merge, not the push.
+- **A protection dropped**: a check, refusal, validation, test, setting, or guard that is
+  gone, loosened, or no longer reached while the mistake it caught is still possible. Each one
+  needs the owner's yes to that removal, quoted in the description: a message that names the
+  guard, after seeing what it caught (`AGENTS.md`, Dropping a protection needs the owner's
+  yes). A rule the author read as allowing it, a broad ruling, or an approved design that never
+  mentioned the guard is not that yes. Not a finding: a test deleted with the code it tested,
+  or a check replaced by one that catches the same mistake or more, when the description says
+  what replaced it. Without the yes, restore the guard and ask (`writing-to-the-owner`, A
+  removal leads); the question goes under Check before merging and blocks the merge, not the
+  push.
 - **Scope.** Every changed file serves the request, and nothing it needs is missing. Regenerated
   output the change did not cause stays out. A PR that has drifted (its design changed after it
   opened, its diff grew past the request, or this push merges `main` a second time) is a finding
