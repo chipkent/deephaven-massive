@@ -38,14 +38,13 @@ from deephaven_massive._errors import (
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
-    failure_kind,
     split_by_symbol,
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive.namespaces import _futures as futures
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -182,34 +181,34 @@ def _monday() -> HistoryWindow:
 
 
 @pytest.mark.parametrize(
-    ("error", "kind"),
+    ("error", "retryable"),
     [
-        (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
-        (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
-        (MassiveError("connection reset", source=ErrorSource.NETWORK), FailureKind.TRANSIENT),
+        (MassiveError("rate limited: ...", status=429), True),
+        (MassiveError("HTTP 503", status=503), True),
+        (MassiveError("connection reset", source=ErrorSource.NETWORK), True),
         # A certificate this machine does not trust fails alike until its settings change.
-        (MassiveError("TLS failed", source=ErrorSource.USER), FailureKind.PERMANENT),
-        (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        (MassiveError("TLS failed", source=ErrorSource.USER), False),
+        (CutShortError("AAPL's data was cut short", status=404), True),
         # S3's RequestTimeout on a flat-file scan: an HTTP 400 that means try again.
         (
             MassiveError("HTTP 400 (RequestTimeout)", status=400, is_retryable=True),
-            FailureKind.TRANSIENT,
+            True,
         ),
         # Any other 404, such as one for a request of several symbols or of none (a path
         # Massive retired), would answer the same again.
-        (MassiveError("HTTP 404 from GET /v1/retired", status=404), FailureKind.PERMANENT),
-        (EntitlementError("not in the plan", status=403), FailureKind.PERMANENT),
-        (RowDataError("every row was dropped"), FailureKind.PERMANENT),
-        (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
-        (UnlistedPairError("X:NOPEUSD is not listed"), FailureKind.PERMANENT),
-        (MassiveError("unreadable", source=ErrorSource.LIBRARY), FailureKind.PERMANENT),
-        (MassiveError("HTTP 400", status=400), FailureKind.PERMANENT),
+        (MassiveError("HTTP 404 from GET /v1/retired", status=404), False),
+        (EntitlementError("not in the plan", status=403), False),
+        (RowDataError("every row was dropped"), False),
+        (UnsupportedParameterError("does not take ['adjusted']"), False),
+        (UnlistedPairError("X:NOPEUSD is not listed"), False),
+        (MassiveError("unreadable", source=ErrorSource.LIBRARY), False),
+        (MassiveError("HTTP 400", status=400), False),
     ],
 )
-def test_a_failure_is_transient_only_when_it_is_retryable(
-    error: MassiveError, kind: FailureKind
+def test_a_failure_is_retryable_only_when_its_cause_may_pass(
+    error: MassiveError, *, retryable: bool
 ) -> None:
-    assert failure_kind(error) is kind
+    assert error.is_retryable is retryable
 
 
 # --- fetch by symbol ----------------------------------------------------------------------------
@@ -232,7 +231,7 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
     nvda, tsla = _failure(out["NVDA"]), _failure(out["TSLA"])
     assert nvda.error is tsla.error
     assert isinstance(nvda.error, EntitlementError)
-    assert nvda.kind is FailureKind.PERMANENT
+    assert not nvda.error.is_retryable
     # The row of a symbol no one asked for belongs to no symbol's read.
     unowned = [r for r in caplog.records if "name none of those symbols" in r.getMessage()]
     assert [(r.levelno, r.getMessage()) for r in unowned] == [
@@ -252,8 +251,9 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
         failed[0]
         .getMessage()
         .startswith(
-            "call 7 stocks.dividends TSLA: the read from REST failed (permanent), which fails this "
-            "symbol alone: stocks.dividends: the Stocks subscription of your plan does not include "
+            "call 7 stocks.dividends TSLA: the read from REST failed (not retryable), which "
+            "fails this symbol alone: stocks.dividends: the Stocks subscription of your plan "
+            "does not include "
         )
     )
 
@@ -351,7 +351,7 @@ def test_a_crypto_pair_massive_does_not_list_fails_alone(
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
     nope = _failure(out["X:NOPEUSD"])
     assert isinstance(nope.error, UnlistedPairError)
-    assert nope.kind is FailureKind.PERMANENT
+    assert not nope.error.is_retryable
     # No request was made for the pair the list does not hold.
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
         "/v1/last/crypto/BTC/USD"
@@ -369,7 +369,7 @@ def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request
         "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']; leave that "
         "parameter out, or read these symbols in a call without it"
     )
-    assert aapl.kind is FailureKind.PERMANENT
+    assert not aapl.error.is_retryable
     assert fake_rest.get_queries() == []
 
 
@@ -429,12 +429,15 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
         out = _history(session, symbols, _monday())
     assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
     assert _rows(out["MSFT"]) == []
-    kinds = {symbol: _failure(out[symbol]).kind for symbol in ["NVDA", "TSLA", "AMZN", "WMT"]}
-    assert kinds == {
-        "NVDA": FailureKind.PERMANENT,
-        "TSLA": FailureKind.TRANSIENT,
-        "AMZN": FailureKind.TRANSIENT,
-        "WMT": FailureKind.TRANSIENT,
+    retryable = {
+        symbol: _failure(out[symbol]).error.is_retryable
+        for symbol in ["NVDA", "TSLA", "AMZN", "WMT"]
+    }
+    assert retryable == {
+        "NVDA": False,
+        "TSLA": True,
+        "AMZN": True,
+        "WMT": True,
     }
     assert isinstance(_failure(out["AMZN"]).error, CutShortError)
     assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
@@ -488,7 +491,7 @@ def test_a_history_parameter_the_path_does_not_take_fails_every_symbol(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     out = _history(session, ["AAPL", "MSFT"], _monday(), adjusted=False)
-    assert {_failure(o).kind for o in out.values()} == {FailureKind.PERMANENT}
+    assert not any(_failure(o).error.is_retryable for o in out.values())
     assert isinstance(_failure(out["AAPL"]).error, UnsupportedParameterError)
     assert fake_rest.get_queries() == []
 
@@ -567,7 +570,7 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
             source="flat files",
         )
     failure = _failure(out["AAPL"])
-    assert failure.kind is FailureKind.PERMANENT
+    assert not failure.error.is_retryable
     assert failure.error.source is ErrorSource.LIBRARY
     assert str(failure.error) == (
         "stocks.trades: AAPL's rows from flat files lack Price; have Extra, which the dataset "
