@@ -36,17 +36,22 @@ apply.
   owner the step to take themselves, and propose the edit if they want the Limit changed.
 - **Ask, and keep working.** Ask with `writing-to-the-owner` (a subagent asks the agent that
   started it, in its report if it has no other channel), and keep working on what the answer
-  can't change.
+  can't change. The PR opens, or its next push goes up, after the answer: a description, a
+  review reply, or an issue never holds a question for the owner.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
   hasn't accepted, loosening a check, dropping a protection (below), every lint or type-check
   suppression but the server-start import below, reversing an owner decision, and dropping or
   narrowing a requirement. **Only the owner's own message approves** a release, a run against
   Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
-  pushed branch, or release, and spending money or changing access. A brief may relay an owner
-  decision quoted verbatim with where the owner said it; a paraphrase relays nothing, and no
-  brief grants these approvals. Everything else the request needs (edits, tests, commits,
-  opening a PR, pushing in batches, review replies, issues here, private names, a needed
-  dependency) needs no approval.
+  pushed branch, or release, and spending money or changing access. **An approval is a
+  quote**: the owner's own words, verbatim and dated, from a message in the session or a
+  decision file, and, when the words answer a question ("a.", "ok"), that question in full. A
+  GitHub comment under the owner's login counts only once the owner confirms it in the
+  session, since an agent may have posted it. "Owner-approved", "the owner decided", and a
+  paraphrase claim nothing, and no brief grants an approval. A quote covers what its words
+  name: never widened into a rule, never narrowed to the case you asked about. Everything else
+  the request needs (edits, tests, commits, opening a PR, pushing in batches, review replies,
+  issues here, private names, a needed dependency) needs no approval.
 - **Dropping a protection needs the owner's yes.** A safeguard is a check, refusal,
   validation, test, setting, or guard that catches a mistake a user or the code can still make.
   Deleting one together with the code it guarded, or replacing it with one that catches the
@@ -120,7 +125,7 @@ These protect the owner's repository, money, and secrets.
   with its user docs, docstrings, and tests. `docs/dev/decisions/` records
   broad decisions only: a rule or contract set or changed, a break, or a design choice worth
   remembering; not each new name. When the request leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
-  under Decisions, and list it under Check before merging, where the owner judges it; no list
+  under Decisions with the alternatives you weighed, and the owner judges it in review; no list
   of public modules decides it. A fix that makes code do what its docs say is not a public
   change.
 - **Compatibility starts at `0.1.0`.** Release candidates owe none: until `v0.1.0` is tagged
@@ -239,9 +244,11 @@ These protect the owner's repository, money, and secrets.
   its line. One case is accepted in advance: a script that starts the Deephaven server imports
   what loads Deephaven after the start, each line with `# noqa: E402 - needs the server above`.
 - **The checks are the owner's rules**: `tests/test_layout.py`, the ruff, mypy, and coverage
-  settings, the hooks, `check.sh`, and CI. A stricter check and an entry under an existing rule whose stated purpose
+  settings, the hooks, `check.sh`, CI, and the PR-description check (`scripts/check_pr_body.py`). A stricter check and an entry under an existing rule whose stated purpose
   covers the case (a helper package, an approved exception) are ordinary edits, named under
-  Check before merging; an entry added only so new code passes is bent code. Loosening a rule
+  Check before merging; an entry, exception, or rule edit made only so code passes, new or
+  already on `main`, is bent code: fix the code, or ask the owner which to change, and never
+  write the exception unasked. Loosening a rule
   (removing a check, raising a limit, turning a rule off project-wide) needs the owner first.
 - **Dependencies**: a new dependency or raised floor a change needs goes in that change's PR,
   named under Check before merging; only a dependency-only change is its own `chore(deps):` PR.
@@ -311,9 +318,16 @@ These protect the owner's repository, money, and secrets.
   coordinator reserved, or the next after the highest on `main` and in every open PR. Never
   rename or delete an entry, except to renumber one of two that landed with the same number: a
   changed decision is a new file, and the old one's `Status:` line names it; settling an item
-  changes its `Status:` line. Before citing decisions or asking the
-  owner, list them (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read every entry whose
-  name touches the subject.
+  changes its `Status:` line. Before citing decisions, asking the owner, or removing or
+  weakening anything, list them (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read
+  every entry whose name touches the subject. An owner ruling that sets, changes, or reverses
+  a rule or contract becomes a decision file, quoting it, in the next PR on the subject (the
+  coordinator's own `docs:` PR when none is open): a ruling that lives only in chat is broken
+  again by the next agent, who never saw it. A PR that changes a rule in this file or a skill
+  quotes the owner's words for it and, when it rewrites or removes a rule, says under Check
+  before merging which decisions it touches (`Decisions touched: 58, 66` or `none`), each
+  given a new `Status:` line; `scripts/check_pr_body.py` fails without the line and the
+  quote.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
   `writing-a-pr-description` for PR descriptions, issue bodies, and reports, and
   `writing-user-docs` for a user page or any change to what one describes.

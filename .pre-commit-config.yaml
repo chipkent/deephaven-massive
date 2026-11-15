@@ -32,3 +32,12 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+      # The description draft at the worktree root, when there is one, meets the approval
+      # rules before the push; the Conventional PR workflow checks the published description.
+      - id: check-pr-body
+        name: scripts/check_pr_body.py
+        entry: uv run python scripts/check_pr_body.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

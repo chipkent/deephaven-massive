@@ -1,6 +1,6 @@
 ---
 name: writing-to-the-owner
-description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a protection (a check, refusal, validation, test, setting, or guard) you want to drop, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
+description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a protection (a check, refusal, validation, test, setting, or guard) you want to drop, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', and questions from subagents or reviewers that you pass on; a question for the owner never waits in a PR description, a review reply, or an issue. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
 ---
 
 # Writing to the owner
@@ -167,7 +167,10 @@ have never seen. Each question carries everything needed to decide it, in this o
    before they have to ask.
 5. **The question**, in one sentence: "Should the README keep this paragraph?"
 6. **Two to four options**, with "do nothing" when it is real. Each says what the user sees (an
-   example call and result), what changes in the project, and what it costs or risks.
+   example call and result), what changes in the project, and what it costs or risks. An
+   option that removes, weakens, or stops checking something names each thing by name, with
+   what then goes uncaught; "nothing else is checked" or "the rest stays" hides a list the
+   owner cannot see.
 7. **A recommendation**, and why it beats the next-best option on the property that matters.
 8. **What waits on the answer.** Silence is not consent: the question stays open.
 
@@ -212,9 +215,11 @@ is missing. The usual gaps:
 - a label or name this message does not define;
 - a repeat that points back instead of restating.
 
-When a message holds three or more decisions, or any public-API or design decision, also have a
-Fable agent with no other context read it and list every question it could not answer from the
-message alone. Fix those before sending.
+When a message holds three or more decisions, or any public, design, removal, or rule
+decision, also have a Fable agent that has not seen your reasoning read it with the diff and
+the record and report two lists: each question it could not decide from the message alone,
+and each claim in it (a fact about the code, a quote, a "nothing else changes") it could not
+confirm. Fix both before sending.
 
 ## 5. Words
 
