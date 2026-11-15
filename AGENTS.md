@@ -38,8 +38,8 @@ apply.
   started it, in its report if it has no other channel), and keep working on what the answer
   can't change.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
-  hasn't accepted, loosening a check, every lint or type-check suppression, reversing an owner decision, and dropping or narrowing a
-  requirement. **Only the owner's own message approves** a release, a run against Massive's API
+  hasn't accepted, loosening a check, every lint or type-check suppression but the server-start
+  import below, reversing an owner decision, and dropping or narrowing a requirement. **Only the owner's own message approves** a release, a run against Massive's API
   with a key, posting outside this repository, closing or deleting an issue, PR, pushed branch,
   or release, and spending money or changing access. A brief may relay an owner decision quoted
   verbatim with where the owner said it; a paraphrase relays nothing, and no brief grants these
@@ -215,7 +215,8 @@ These protect the owner's repository, money, and secrets.
   code pass. Too-many-arguments is off because
   keyword-only optional parameters are the API style; positional parameters are capped at three.
   Every suppression (`# noqa`, `# type: ignore[code]`, `# pragma: no cover`) has its reason on
-  its line.
+  its line. One case is accepted in advance: a script that starts the Deephaven server imports
+  what loads Deephaven after the start, each line with `# noqa: E402 - needs the server above`.
 - **The checks are the owner's rules**: `tests/test_layout.py`, the ruff, mypy, and coverage
   settings, the hooks, `check.sh`, and CI. A stricter check and an entry under an existing rule whose stated purpose
   covers the case (a helper package, an approved exception) are ordinary edits, named under
