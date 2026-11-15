@@ -548,6 +548,8 @@ def test_schedule_window_size_and_horizon(live_rest: RestClient, *, evidence: Ev
     Raises:
         WireEntitlementError: When Massive refuses a request for want of entitlement, which
             skips the test with Massive's refusal.
+        WireError: When the horizon request fails other than by Massive refusing its sort
+            (HTTP 400), which is recorded instead.
     """
     today = futures_session(datetime.now(UTC))  # the calendar's today
     last_day = today + _DAYS_AHEAD
@@ -578,12 +580,14 @@ def test_schedule_window_size_and_horizon(live_rest: RestClient, *, evidence: Ev
         f"{len(short)} products end before {last_day}, e.g. "
         f"{[(code, latest[code]) for code in short[:15]]}"
     )
-    try:  # Massive documents no `session_end_date` sort column; a refusal is evidence
+    try:  # Massive documents no `session_end_date` sort column; its refusal is evidence
         furthest = _page(live_rest, _SCHEDULES, query={"sort": "session_end_date.desc", "limit": 1})
     except WireEntitlementError:
         raise
     except WireError as error:
-        evidence(f"latest session Massive holds: {type(error).__name__}: {error}")
+        if error.status != 400:  # not Massive refusing the sort: a failure of the request
+            raise
+        evidence(f"latest session Massive holds: the sort was refused: {error}")
         furthest = []
     evidence(
         "latest session Massive holds: "
@@ -616,7 +620,7 @@ def _timed(client: RestClient, path: str, query: Mapping[str, object]) -> tuple[
 
 
 @pytest.mark.settles("125")
-@pytest.mark.requests(26)
+@pytest.mark.requests(27)
 @pytest.mark.timeout(400)
 def test_contract_and_schedule_lookup_latency(
     live_rest: RestClient, *, recent_monday: date, evidence: Evidence
@@ -624,23 +628,27 @@ def test_contract_and_schedule_lookup_latency(
     """How long the calendar's two lookups take: a contract's product, then its schedule.
 
     Reads one page of the single contracts active on the most recent published Monday for
-    their tickers and product codes. Then times, five times each, the calendar's contract
+    their tickers, and one page of the single products listed that day for their codes. Then
+    times, five times each, the calendar's contract
     lookup (`ticker.any_of`, the largest page) for 1 and for 100 tickers, and its schedule
     lookup (`product_code.any_of` over its window, the largest page) for 1, 20, and 100
     products. Records each lookup's seconds, median, and slowest, with its rows. A time
     includes any wait for the key's rate limit, which the evidence's wall times show.
 
-    Passes when every request is answered; the times are evidence. Sends 26 requests.
+    Passes when every request is answered; the times are evidence. Sends 27 requests.
     """
     query = {"date": recent_monday, "active": True, "type": "single", "limit": _LIST_PAGE}
     singles = _page(live_rest, _CONTRACTS, query=query)
     tickers = sorted({str(r.get("ticker")) for r in singles})[:100]
-    codes = sorted({str(r.get("product_code")) for r in singles})[:100]
+    query = {"date": recent_monday, "type": "single", "limit": _LIST_PAGE}
+    products = _page(live_rest, _PRODUCTS, query=query)
+    codes = sorted({str(r.get("product_code")) for r in products})[:100]
     evidence(
-        f"{len(singles)} active single contracts read: {len(tickers)} tickers, "
-        f"{len(codes)} products"
+        f"{len(singles)} active single contracts read: {len(tickers)} tickers; "
+        f"{len(products)} single products read: {len(codes)} codes"
     )
     assert tickers, f"Massive listed no active single contract on {recent_monday}"
+    assert codes, f"Massive listed no single product on {recent_monday}"
     today = futures_session(datetime.now(UTC))  # the calendar's today
     lookups: Sequence[tuple[str, str, Mapping[str, object]]] = [
         (
@@ -809,7 +817,7 @@ def test_trades_outside_every_futures_session(
     The calendar dates a streamed trade by the session whose span (first schedule event to
     last) holds it, and a trade between one session's last event and the next's first by the
     next session. Finds the front contract (the active one that expires first) of 20 products
-    of all four venues, reads their schedules from 10 days back to today, and for each product
+    of all four venues, reads their schedules from 10 days back to 3 ahead, and for each product
     reads the trades of its front contract strictly between the latest two sessions of which
     the second has begun: from the last event of one to the first event of the next (the
     daily close to the next pre-open, or the weekend). Records, per product, the gap, the
@@ -826,7 +834,7 @@ def test_trades_outside_every_futures_session(
     query = {
         "product_code.any_of": sorted(fronts),
         "session_end_date.gte": today - timedelta(days=10),
-        "session_end_date.lte": today,
+        "session_end_date.lte": today + timedelta(days=3),
         "limit": _LIST_PAGE,
     }
     spans = _schedule_spans(_page(live_rest, _SCHEDULES, query=query))
