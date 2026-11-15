@@ -168,7 +168,9 @@ def test_an_approval_recorded_in_an_existing_decision_passes(
     check: ModuleType, decisions: pathlib.Path
 ) -> None:
     body = "## Decisions\n\n- The owner decided that converters raise by default (decision 104).\n"
-    assert check.find_problems(body, ["src/x.py"], "", decisions_dir=decisions) == []
+    assert (
+        check.find_problems(body, ["src/x.py"], "", decisions=check.decision_files(decisions)) == []
+    )
 
 
 def test_a_decision_this_pull_request_adds_records_no_approval(
@@ -176,7 +178,9 @@ def test_a_decision_this_pull_request_adds_records_no_approval(
 ) -> None:
     body = "## Summary\n\nThe owner decided to ship it before 0.1.0; decision 96 records it.\n"
     changed = ["docs/dev/decisions/0096-options-admin-messages.md", "src/x.py"]
-    problems = check.find_problems(body, changed, ADDED_DECISION, decisions_dir=decisions)
+    problems = check.find_problems(
+        body, changed, ADDED_DECISION, decisions=check.decision_files(decisions)
+    )
     assert len(problems) == 1
 
 
@@ -184,7 +188,7 @@ def test_a_decision_no_file_carries_records_no_approval(
     check: ModuleType, decisions: pathlib.Path
 ) -> None:
     body = "- The owner approved removing the guard (decision 9999).\n"
-    assert len(check.find_problems(body, [], "", decisions_dir=decisions)) == 1
+    assert len(check.find_problems(body, [], "", decisions=check.decision_files(decisions))) == 1
 
 
 def test_a_decision_whose_status_this_pull_request_updates_still_counts(
@@ -194,7 +198,12 @@ def test_a_decision_whose_status_this_pull_request_updates_still_counts(
     diff = ADDED_DECISION.replace("0096-options-admin-messages", "0104-canonical-ticker-refused")
     diff = diff.replace("new file mode 100644\n", "")
     changed = ["docs/dev/decisions/0104-canonical-ticker-refused.md"]
-    assert check.find_problems(body, changed, diff, decisions_dir=decisions) == []
+    assert check.find_problems(body, changed, diff, decisions=check.decision_files(decisions)) == []
+
+
+def test_a_claim_wrapped_across_lines_is_still_a_claim(check: ModuleType) -> None:
+    body = "- The owner\n  approved removing the guard.\n"
+    assert len(check.find_problems(body, [], "")) == 1
 
 
 def test_prose_between_two_short_quotations_is_not_a_quotation(check: ModuleType) -> None:
@@ -334,14 +343,39 @@ def _fake_run(outputs: dict[str, str]) -> Callable[[list[str]], str]:
     return run
 
 
+_LISTING = "gh api repos/{owner}/{repo}/contents/docs/dev/decisions?ref=main --jq .[].name"
+
+
 def test_main_reads_a_pull_request_with_gh(
     check: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    body = json.dumps({"body": CLEAN, "files": [{"path": "AGENTS.md"}]})
-    outputs = {"gh pr view 7 --json body,files": body, "gh pr diff 7": AGENTS_DIFF}
+    view = {"body": CLEAN, "files": [{"path": "AGENTS.md"}], "baseRefName": "main"}
+    outputs = {
+        "gh pr view 7 --json body,files,baseRefName": json.dumps(view),
+        "gh pr diff 7": AGENTS_DIFF,
+        _LISTING: "0104-canonical-ticker-refused.md\nREADME.md\n",
+    }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main(["--pr", "7"]) == 1
     assert "Decisions touched" in capsys.readouterr().out
+
+
+def test_a_cited_decision_is_resolved_against_the_pull_request_s_base(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    # The worktree holds decision 120; the reviewed PR's base does not.
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "docs" / "dev" / "decisions"
+    folder.mkdir(parents=True)
+    (folder / "0120-local-only.md").write_text("# 120. Local only\n")
+    view = {"body": "- Owner-approved (decision 120).\n", "files": [], "baseRefName": "main"}
+    outputs = {
+        "gh pr view 7 --json body,files,baseRefName": json.dumps(view),
+        "gh pr diff 7": "",
+        _LISTING: "0104-canonical-ticker-refused.md\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main(["--pr", "7"]) == 1
 
 
 def test_the_branch_is_measured_against_its_pull_request_s_base(

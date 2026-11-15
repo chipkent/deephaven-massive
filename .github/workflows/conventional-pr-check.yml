@@ -73,7 +73,11 @@ jobs:
     # The description meets the approval rules of AGENTS.md: no item that asks the owner
     # anything, no approval claimed without the owner's dated quote, and a rule change with its
     # record (scripts/check_pr_body.py). The diff and the file list come from the API, read-only.
-    if: github.event.action != 'edited' || github.event.changes.body != null
+    # A retargeted PR (changes.base) has a new diff, so it is rechecked like an edited body.
+    if: >-
+      github.event.action != 'edited'
+      || github.event.changes.body != null
+      || github.event.changes.base != null
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -99,10 +103,11 @@ jobs:
         run: |
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/body.md"
           gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/diff.patch"
+          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only > "$RUNNER_TEMP/files"
           args=()
           while IFS= read -r path; do
             [ -n "$path" ] && args+=(--changed-file "$path")
-          done < <(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --name-only)
+          done < "$RUNNER_TEMP/files"
           python3 -I scripts/check_pr_body.py --body-file "$RUNNER_TEMP/body.md" \
             --diff-file "$RUNNER_TEMP/diff.patch" "${args[@]}"
 

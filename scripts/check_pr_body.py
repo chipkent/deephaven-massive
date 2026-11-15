@@ -53,7 +53,10 @@ import re
 import subprocess
 import sys
 import uuid
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 #: What asks the owner something: a question mark, or the phrases of a deferred decision.
 OPEN_ITEM: Final = re.compile(
@@ -203,33 +206,45 @@ def added_paths(diff: str) -> set[str]:
     return added
 
 
-def cites_existing_decision(unit: str, added: set[str], decisions_dir: pathlib.Path) -> bool:
+def decision_files(decisions_dir: pathlib.Path) -> list[str]:
+    """Return the names of the decision files in a folder, `NNNN-<slug>.md`.
+
+    Args:
+        decisions_dir: The folder; absent, there are none.
+
+    Returns:
+        The file names whose first character is a digit, sorted.
+    """
+    return sorted(path.name for path in decisions_dir.glob("[0-9]*.md"))
+
+
+def cites_existing_decision(unit: str, added: set[str], decisions: Collection[str]) -> bool:
     """Whether the unit names a decision that exists and this pull request does not add.
 
     Args:
         unit: A bullet, row, or paragraph of the body.
         added: The paths the pull request adds as new files.
-        decisions_dir: The folder of decision files, `NNNN-<slug>.md`.
+        decisions: The names of the decision files on the base, `NNNN-<slug>.md`.
 
     Returns:
-        True for a `decision N` whose file is in `decisions_dir` and not among `added`: a
+        True for a `decision N` whose file is among `decisions` and not among `added`: a
         number no file carries records nothing, and neither does a decision written in the
         same pull request.
     """
     for number in DECISION_REFERENCE.findall(unit):
-        files = list(decisions_dir.glob(f"{int(number):04d}-*.md"))
-        if files and not any(f"docs/dev/decisions/{f.name}" in added for f in files):
+        files = [name for name in decisions if name.startswith(f"{int(number):04d}-")]
+        if files and not any(f"docs/dev/decisions/{name}" in added for name in files):
             return True
     return False
 
 
-def check_claims(body: str, diff: str, decisions_dir: pathlib.Path) -> list[str]:
+def check_claims(body: str, diff: str, decisions: Collection[str]) -> list[str]:
     """Return each unit that claims an approval without its source.
 
     Args:
         body: The description's Markdown.
         diff: The pull request's unified diff, for the decision files it adds.
-        decisions_dir: The folder of decision files.
+        decisions: The names of the decision files on the base.
 
     Returns:
         One line per bullet, row, or paragraph whose own words (outside quotations and code)
@@ -240,10 +255,10 @@ def check_claims(body: str, diff: str, decisions_dir: pathlib.Path) -> list[str]
     problems = []
     added = added_paths(diff)
     for unit in units(body):
-        hit = APPROVAL_CLAIM.search(QUOTED_OR_CODE.sub("", unit))
-        if hit and not (
-            is_dated_quote(unit) or cites_existing_decision(unit, added, decisions_dir)
-        ):
+        # The claim is matched on the author's own words, flattened, so a wrapped line and a
+        # quoted hypothetical count the same as on one line; the quote is sought in the whole.
+        hit = APPROVAL_CLAIM.search(" ".join(QUOTED_OR_CODE.sub("", unit).split()))
+        if hit and not (is_dated_quote(unit) or cites_existing_decision(unit, added, decisions)):
             problems.append(
                 f"An approval is claimed ({hit.group(0)!r}) without the owner's words quoted "
                 f"with their date, or the decision that records them, in the same bullet, "
@@ -304,7 +319,11 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
 
 
 def find_problems(
-    body: str, changed: list[str], diff: str = "", *, decisions_dir: pathlib.Path = DECISIONS_DIR
+    body: str,
+    changed: list[str],
+    diff: str = "",
+    *,
+    decisions: Collection[str] | None = None,
 ) -> list[str]:
     """Return every problem of the description, in the order the rules are listed.
 
@@ -313,7 +332,9 @@ def find_problems(
         changed: The paths the pull request changes.
         diff: Its unified diff; empty when unknown, which skips the rule-deletion check
             and treats every cited decision as one this pull request did not add.
-        decisions_dir: The folder of decision files; absent, no cited decision counts.
+        decisions: The names of the decision files on the base; `None` reads
+            `docs/dev/decisions/` in the working directory, and with no such folder no
+            cited decision counts.
 
     Returns:
         The problems of each rule in turn: the Check before merging items, the claims, the
@@ -321,7 +342,9 @@ def find_problems(
     """
     return (
         check_section(body)
-        + check_claims(body, diff, decisions_dir)
+        + check_claims(
+            body, diff, decision_files(DECISIONS_DIR) if decisions is None else decisions
+        )
         + check_rule_change(body, changed, diff)
     )
 
@@ -330,10 +353,25 @@ def _run(command: list[str]) -> str:
     return subprocess.run(command, check=True, capture_output=True, text=True).stdout  # noqa: S603 - fixed argv, no shell
 
 
-def _from_gh(number: int) -> tuple[str, list[str], str]:
-    data = json.loads(_run(["gh", "pr", "view", str(number), "--json", "body,files"]))
+def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
+    """Read a pull request's body, file list, diff, and its base's decision files with gh.
+
+    Args:
+        number: The pull request number.
+
+    Returns:
+        The body, the changed paths, the unified diff, and the decision file names on the
+        pull request's base branch, read from the repository rather than this worktree.
+    """
+    fields = "body,files,baseRefName"
+    view = json.loads(_run(["gh", "pr", "view", str(number), "--json", fields]))
     diff = _run(["gh", "pr", "diff", str(number)])
-    return str(data["body"]), [str(f["path"]) for f in data["files"]], diff
+    contents = (
+        f"repos/{{owner}}/{{repo}}/contents/{DECISIONS_DIR.as_posix()}?ref={view['baseRefName']}"
+    )
+    listing = _run(["gh", "api", contents, "--jq", ".[].name"])
+    decisions = [name for name in listing.splitlines() if name[:1].isdigit()]
+    return str(view["body"]), [str(f["path"]) for f in view["files"]], diff, decisions
 
 
 def _base() -> str:
@@ -378,8 +416,9 @@ def main(argv: list[str] | None = None) -> int:
         "--diff-file", type=pathlib.Path, help="the unified diff (with --body-file)"
     )
     args = parser.parse_args(argv)
+    decisions: list[str] | None = None
     if args.pr is not None:
-        body, changed, diff = _from_gh(args.pr)
+        body, changed, diff, decisions = _from_gh(args.pr)
     elif args.body_file is not None:
         body, changed = args.body_file.read_text(), args.changed_file
         diff = args.diff_file.read_text() if args.diff_file else ""
@@ -391,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             f"published description.\n"
         )
         return 0
-    problems = find_problems(body, changed, diff)
+    problems = find_problems(body, changed, diff, decisions=decisions)
     sys.stdout.writelines(f"{problem}\n" for problem in problems)
     output = os.environ.get("GITHUB_OUTPUT")
     if problems and output:

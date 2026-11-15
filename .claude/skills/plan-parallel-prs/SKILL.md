@@ -155,7 +155,9 @@ says only what the agent cannot know:
    - its file list and diff (`gh pr diff <n> --name-only`, then `gh pr diff <n>`), read
      against the owner's request and the owner's rulings on its subject, recorded or not:
      every changed file serves the request, nothing it needs is missing, and nothing it
-     removes or reverses lacks the owner's quoted yes.
+     removes or reverses lacks the owner's quoted yes, except what `AGENTS.md` exempts (a
+     guard deleted with the code it guarded, or replaced by one that catches the same
+     mistake or more, with the description saying what replaced it).
    A large diff the request causes (a generator fix that regenerates every page) is
    fine; a small file the request doesn't need is not. Check each live before saying so. Sweep
    recently merged PRs too: a bot finding posted after the merge gets a reply, and a valid one
