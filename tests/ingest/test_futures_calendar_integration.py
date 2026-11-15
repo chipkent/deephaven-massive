@@ -603,25 +603,32 @@ def test_schedule_window_size_and_horizon(live_rest: RestClient, *, evidence: Ev
 _LATENCY_RUNS = 5
 """How many times each lookup is timed."""
 
+_LATENCY_PAGES = 4
+"""The most pages of one lookup the latency check reads, each a request."""
 
-def _timed(client: RestClient, path: str, query: Mapping[str, object]) -> tuple[list[float], int]:
-    """Time one request `_LATENCY_RUNS` times.
+
+def _timed(
+    client: RestClient, path: str, query: Mapping[str, object]
+) -> tuple[list[float], int, int, bool]:
+    """Time one whole lookup, every page as the calendar reads it, `_LATENCY_RUNS` times.
 
     Returns:
-        The seconds of each run, and the rows of the last.
+        The seconds of each run, and the last run's rows, pages, and whether it read the whole
+        lookup within `_LATENCY_PAGES` pages.
     """
     seconds: list[float] = []
     rows: list[dict[str, Any]] = []
+    pages, ended = 0, True
     for _ in range(_LATENCY_RUNS):
         start = time.perf_counter()
-        rows = _page(client, path, query=query)
+        rows, pages, ended = _read_pages(client, path, query, most=_LATENCY_PAGES)
         seconds.append(time.perf_counter() - start)
-    return seconds, len(rows)
+    return seconds, len(rows), pages, ended
 
 
 @pytest.mark.settles("125")
-@pytest.mark.requests(27)
-@pytest.mark.timeout(400)
+@pytest.mark.requests(102)
+@pytest.mark.timeout(900)
 def test_contract_and_schedule_lookup_latency(
     live_rest: RestClient, *, recent_monday: date, evidence: Evidence
 ) -> None:
@@ -629,13 +636,15 @@ def test_contract_and_schedule_lookup_latency(
 
     Reads one page of the single contracts active on the most recent published Monday for
     their tickers, and one page of the single products listed that day for their codes. Then
-    times, five times each, the calendar's contract
-    lookup (`ticker.any_of`, the largest page) for 1 and for 100 tickers, and its schedule
-    lookup (`product_code.any_of` over its window, the largest page) for 1, 20, and 100
-    products. Records each lookup's seconds, median, and slowest, with its rows. A time
-    includes any wait for the key's rate limit, which the evidence's wall times show.
+    times, five times each, the calendar's whole contract lookup (`ticker.any_of`, the
+    largest page, every page as the calendar reads them) for 1 and for 100 tickers, and its
+    whole schedule lookup (`product_code.any_of` over its window) for 1, 20, and 100
+    products, each up to 4 pages. Records each lookup's seconds, median, and slowest, with
+    its rows and pages, and whether it ended within 4 pages (if not, its times are of its
+    first 4 pages). A time includes any wait for the key's rate limit.
 
-    Passes when every request is answered; the times are evidence. Sends 27 requests.
+    Passes when every request is answered; the times are evidence. Sends at most 102
+    requests: 2, then 5 lookups timed 5 times at up to 4 pages each.
     """
     query = {"date": recent_monday, "active": True, "type": "single", "limit": _LIST_PAGE}
     singles = _page(live_rest, _CONTRACTS, query=query)
@@ -671,10 +680,12 @@ def test_contract_and_schedule_lookup_latency(
         for n in (1, 20, 100)
     ]
     for label, path, lookup in lookups:
-        seconds, rows = _timed(live_rest, path, lookup)
+        seconds, rows, pages, ended = _timed(live_rest, path, lookup)
         evidence(
-            f"{label}: {rows} rows, seconds {[round(s, 3) for s in seconds]}, median "
-            f"{statistics.median(seconds):.3f}, slowest {max(seconds):.3f}"
+            f"{label}: {rows} rows in {pages} pages"
+            f"{'' if ended else ' (the lookup goes on: times of its first pages)'}, seconds "
+            f"{[round(s, 3) for s in seconds]}, median {statistics.median(seconds):.3f}, "
+            f"slowest {max(seconds):.3f}"
         )
 
 
@@ -918,11 +929,12 @@ def test_streamed_futures_tickers_are_listed(
     Skips at once when no futures trade is due (the market is closed), and with Massive's
     refusal when the stream is refused.
 
-    Passes when trades arrived and every lookup is answered; the missing tickers are
-    evidence. Sends at most 31 requests of its own: the market status and the lookups. The
-    stream's own futures calendar also looks up the contracts it sees, 100 a request, and
-    loads their products' schedules, on the same futures rate limit; their number depends on
-    how many contracts trade, and the timeout leaves 10 minutes for them and the lookups.
+    Passes when trades arrived, the stream never failed, and every lookup is answered; the
+    missing tickers are evidence. Sends at most 31 requests of its own: the market status
+    and the lookups. The stream's own futures calendar also looks up the contracts it sees,
+    100 a request, and loads their products' schedules, on the same futures rate limit;
+    their number depends on how many contracts trade, and the timeout leaves 10 minutes for
+    them and the lookups.
     """
     status, due = rows_due("futures", "trades")
     if not due:
@@ -939,6 +951,10 @@ def test_streamed_futures_tickers_are_listed(
         for row in table_rows(live_session.streams()):
             evidence(f"stream {row['Dataset']}: {row['State']}, error {row['Error']!r}")
         skip_if_not_entitled(live_session, "the futures trades stream")
+        failed = [
+            row["Error"] for row in table_rows(live_session.streams()) if row["State"] == "FAILED"
+        ]
+        assert not failed, f"the stream failed before its {_STREAM_SECONDS:.0f} s: {failed}"
     finally:
         live_session.release(board)
     singles = [t for t in seen if is_futures_contract(t)]
