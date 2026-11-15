@@ -1,6 +1,6 @@
 ---
 name: pre-push-review
-description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it): scope against the request, the public API surface, module cohesion, code bent to satisfy a rule, and tests that catch a regression; then it checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
+description: "Mandatory gate before any push that runs paid CI and the review bots. Use it whenever you are about to open a PR, or to push to a branch that already has one: review fixes, answers to reviewer or bot comments (coderabbit, codex, the owner), a merge of main, or \"push the batch\". Use it even when the request only says \"push\", \"ship it\", or \"open the PR\", and even if check.sh is green. It attacks the diff as a hostile senior reviewer would (only a typo or one-word doc fix skips it): scope against the request, a protection dropped without the owner's yes, a behavior that misses one of its paths, the public API surface, module cohesion, code bent to satisfy a rule, and tests that catch a regression; then it checks the words and the PR description, drafts the review-thread replies, and pushes once. Not for a branch with no PR (a backup push), for reviewing someone else's PR, or for debugging CI."
 ---
 
 # Review locally before you push
@@ -33,18 +33,44 @@ what is wrong, the fix) as you go. Fix every finding inside the change before th
 finding that would add work the request does not need (a feature, tooling, a refactor of code
 the change does not touch) goes under Follow-ups in the description, with an issue.
 
+A finding is a pattern, not a spot. Whoever made the mistake once made it wherever the same
+situation came up, so before fixing it, find every other instance in the diff and in the closed
+set it belongs to (the other members of the enum, the sibling datasets, the other callers) and
+fix them in the same push; a reviewer who finds the second instance costs another push and
+another CI run.
+
 ## 1. Review the diff
 
 Attack it as the reviewer who has to defend the codebase, with the request (the owner's words,
 or the issue's stated problem and acceptance list) and `AGENTS.md` open. Start from
-`git diff --stat`: a deleted or weakened test is a finding unless the diff adds one that pins the
-same property. Then look for:
+`git diff --stat` and the deleted lines (`git diff origin/main...HEAD | grep -n '^-'`). Then
+look for:
 
+- **A protection dropped**: a check, refusal, validation, test, setting, or guard that is
+  gone, loosened, or no longer reached while the mistake it caught is still possible. Each one
+  needs the owner's yes to that removal, quoted in the description: a message that names the
+  guard, after seeing what it caught (`AGENTS.md`, Dropping a protection needs the owner's
+  yes). A rule the author read as allowing it, a broad ruling, or an approved design that never
+  mentioned the guard is not that yes. Not a finding: a test deleted with the code it tested,
+  or a check replaced by one that catches the same mistake or more, when the description says
+  what replaced it. Without the yes, restore the guard and ask (`writing-to-the-owner`, A
+  removal leads); the question goes under Check before merging and blocks the merge, not the
+  push.
 - **Scope.** Every changed file serves the request, and nothing it needs is missing. Regenerated
-  output the change did not cause stays out.
+  output the change did not cause stays out. A PR that has drifted (its design changed after it
+  opened, its diff grew past the request, or this push merges `main` a second time) is a finding
+  on the plan: land the settled part and move the rest to an issue (`AGENTS.md`, Workflow).
+- **Every path.** A new behavior reaches every path it applies to. List the callers and entry
+  points of what changed (REST, flat files, and WebSocket; a value passed in code and the same
+  value in a table row; the first read and the refresh) and walk each one, with the points where
+  shared state changes hands: what if it is interrupted between two steps, or sees nothing? The
+  most common fix after a push is one path the behavior never reached, such as a policy passed
+  to the first lookup and not to the later one.
 - **Wrong behavior.** Empty, one, and many inputs; boundaries (midnight, day zones, nanosecond
   limits); network and Deephaven errors. A failure swallowed, logged without failing what needs
-  it, or retried forever. State written before an operation that can still fail.
+  it, or retried forever. State written before an operation that can still fail. For a new rule
+  or check, write down the case that would defeat it (the value it was not written for, the
+  spelling that passes it and still means something else) and try it before the push.
 - **Contract drift.** A public change (`AGENTS.md`, **A public change needs the owner's request
   or approval**) without matching docs and tests, or without a decision entry when it sets or changes a
   rule or contract; from `0.1.0`, a change that
@@ -126,13 +152,26 @@ same property. Then look for:
 For each behavior the diff adds or fixes, break the code on purpose (invert a condition, drop a
 call, return a wrong value of the right type) and confirm a test fails; restore it after each
 try. A test that only checks that something returns, or that nothing raises, passes for wrong
-code. A change no test catches needs a test, or it is dead code to delete. Spend this on logic;
-a docs or config change has nothing to break.
+code, and so does one that loops over an empty result or reads a field that is never set: a
+test must fail when the thing it tests yields nothing, fails, or is partial. A live test you
+can't run treats missing evidence as inconclusive, never as a verdict either way. A change no
+test catches needs a test, or it is dead code to delete. Spend this on logic; a docs or config
+change has nothing to break.
+
+The pre-push hook runs only the changed files' own tests, so also run the tests that use or
+patch what you changed (`git grep -l '<name>' tests/`): a fixture or a fake that the change
+breaks fails in CI, after the push.
 
 ## 3. Check the words
 
 - Docstrings and comments of every function whose body changed still describe it (the
   `writing-docstrings` skill).
+- Every claim about what the code or Massive does, in any file the diff touches (a docstring,
+  a comment, a doc page, a decision entry, the PR description) and in every review reply, is
+  read from its source before the push, not from memory: the function's body, Massive's docs,
+  or the live record. The usual error is a rule stated without its exception ("every ticker is
+  sent as written", when one class keeps its prefix check), and it reads as true to anyone who
+  has not just read the code.
 - For each behavior the diff changes (a default, a limit, an error, a column), find every page
   that describes it: `git grep -n '<name or message>' -- README.md docs/`. A diff that touches
   a user page follows steps 5 and 6 of the `writing-user-docs` skill: the calibrated editor's

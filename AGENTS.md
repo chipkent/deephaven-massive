@@ -38,13 +38,26 @@ apply.
   started it, in its report if it has no other channel), and keep working on what the answer
   can't change.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
-  hasn't accepted, loosening a check, every lint or type-check suppression but the server-start
-  import below, reversing an owner decision, and dropping or narrowing a requirement. **Only the owner's own message approves** a release, a run against Massive's API
-  with a key, posting outside this repository, closing or deleting an issue, PR, pushed branch,
-  or release, and spending money or changing access. A brief may relay an owner decision quoted
-  verbatim with where the owner said it; a paraphrase relays nothing, and no brief grants these
-  approvals. Everything else the request needs (edits, tests, commits, opening a PR, pushing in
-  batches, review replies, issues here, private names, a needed dependency) needs no approval.
+  hasn't accepted, loosening a check, dropping a protection (below), every lint or type-check
+  suppression but the server-start import below, reversing an owner decision, and dropping or
+  narrowing a requirement. **Only the owner's own message approves** a release, a run against
+  Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
+  pushed branch, or release, and spending money or changing access. A brief may relay an owner
+  decision quoted verbatim with where the owner said it; a paraphrase relays nothing, and no
+  brief grants these approvals. Everything else the request needs (edits, tests, commits,
+  opening a PR, pushing in batches, review replies, issues here, private names, a needed
+  dependency) needs no approval.
+- **Dropping a protection needs the owner's yes.** A safeguard is a check, refusal,
+  validation, test, setting, or guard that catches a mistake a user or the code can still make.
+  Deleting one together with the code it guarded, or replacing it with one that catches the
+  same mistake or more, loses no protection and needs no approval: say in the PR what replaced
+  it. Removing one while the mistake stays possible loses protection, and that is the owner's
+  call, however clearly a rule or a broad ruling ("simplify", "let Massive judge it") seems to
+  allow it: whoever wrote those words may not have had this guard in mind. Ask before removing
+  it, as its own question (`writing-to-the-owner`): the guard, the mistake it catches, an
+  example of what would then go uncaught, and the evidence, already in hand, that dropping it
+  is safe. Symbol checks removed on one reading of a rule took a week to restore and
+  re-research.
 
 ## Commands
 
@@ -231,6 +244,31 @@ These protect the owner's repository, money, and secrets.
 
 ## Workflow
 
+- **Design before code, for every change.** Write down what will change and why before
+  writing it, sized to the change: a one-line fix gets a few lines (the cause, the fix, the
+  test that catches it); a feature, a new module, or a change across many files gets a short
+  design (the calls a user types, what is refused and why, the settings, which files change).
+  The costly failures of one week were code written before its design settled: a public shape
+  the owner first met as a 184-file diff, and a PR whose rules changed twice after it opened,
+  each change paid for in merges and reviews. So for anything beyond a small fix, draft the
+  design with the most capable model available (Fable) and have a second Fable instance attack
+  it as an adversary before any code: a flaw found on paper costs a paragraph, and the same
+  flaw found in the diff costs the diff. Where the design is ambiguous, or the design and its
+  critic can't agree on a choice, stop and ask (the owner, or the coordinator for a subagent)
+  with the options and a recommendation, instead of picking one and building; keep working
+  only on what the answer can't change. A public change, and any dropped protection, goes to
+  the owner in that design form before any code is written (`writing-to-the-owner` §3). Every
+  other design the critic accepts is yours to settle: record it in the PR under Decisions and
+  start.
+- **One PR per change that can merge on its own.** A PR holds one change with everything it
+  needs to be correct: the code, its tests, and its docs together (a new column lands with its
+  docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a
+  regeneration, one rule applied everywhere) is right by itself, so it goes in its own PR and
+  merges first: rename the setting across 80 files in one PR, then change what it covers in
+  the next, so the rename never waits on a design question and the behavior PR stays small.
+  Never split one behavior into parts that are each wrong until the others land, such as the
+  REST half of a new rule in one PR and the WebSocket half in another: neither can merge alone.
+  Unrelated fixes found on the way go in their own PR or an issue, however small.
 - Branch `<type>/<topic>` from `origin/main` after `git fetch`, or from the PR below in a
   stack. Commits and PR titles follow Conventional Commits and the Title section of
   `docs/dev/pull-requests.md`.
@@ -238,10 +276,23 @@ These protect the owner's repository, money, and secrets.
   one-word doc fix skips it. It holds the push procedure: push in batches (each push runs paid
   CI and review bots), answer every review comment, and keep the description current. Every CI
   job must pass, the free-threaded 3.14t job too.
-- Before starting, check open PRs that change your files (`gh pr list`, `gh pr diff <n>
-  --name-only`). Stack on one only when yours needs its content: branch from its branch, open
-  with `gh pr create --base <its branch>`, link with `gh stack link <PRs bottom to top>`, and
-  name the merge order in your PR body (`plan-parallel-prs` §3 has more).
+- **Branch from another PR only when yours needs its code.** Before starting, check the open
+  PRs that change your files (`gh pr list`, `gh pr diff <n> --name-only`). If your change calls
+  a function or uses a type that an open PR adds, branch from that PR's branch, open with
+  `gh pr create --base <its branch>`, link with `gh stack link <PRs bottom to top>`, and name
+  the merge order in your PR body (`plan-parallel-prs` §3 has more). If you only touch the same
+  files, branch from `main` as usual: basing on the other PR to avoid a merge conflict makes
+  yours wait on its review and inherit each merge of `main` it makes, which costs more than
+  resolving the conflict once when the second PR lands. Don't start a wide change (many files,
+  or a rewrite of a module) while an open PR is changing the same files; wait for it to land,
+  or join it. A PR that moves or renames files merges before the PRs it would conflict with,
+  not after them, so no other PR merges `main` to follow the move.
+- **Stop and re-plan a PR that has drifted.** Three signs: the owner changed the design after
+  the PR opened; the diff grew past the request (a three-file fix now touches twenty); or the
+  PR is merging `main` a second time. Each means the PR carries more than one change, or waits
+  on something it can't settle, and every further push pays for all of it. Land what is settled
+  now, as a PR that is correct by itself, and move the rest to an issue with what you learned.
+  One merge of `main` to resolve a conflict is normal; the second is the sign.
 - Merge `main` or your base branch only to resolve a merge conflict, or after an open PR that
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a

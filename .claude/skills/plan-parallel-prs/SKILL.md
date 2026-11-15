@@ -21,8 +21,15 @@ a close reason, or a named owner question.
 
 One PR holds one coherent change and everything it needs. Two changes to the same code path go
 in one PR. Unrelated pieces stay separate, however small; never split or merge PRs only by size.
-Never plan a step you already know is bad, such as text moved verbatim to be rewritten later, to
-make a diff easier to review: fix the content as you move it. Docs that share a file, a
+Each PR must be able to merge on its own, whatever the open questions turn out to be. A
+mechanical step a change needs (a rename, a file move, a regeneration, one rule applied
+everywhere) is right by itself, so it gets its own PR and merges first: the rename of a setting
+across 80 files lands, then the PR that changes what the setting covers, so the rename never
+waits on a design question and the behavior PR stays small. Two parts of one behavior (the REST
+half of a rule and its WebSocket half) are not such a split: each is wrong until the other
+lands, so neither can merge. Never plan a step you already know is bad, such as text moved
+verbatim to be rewritten later, to make a diff easier to review: fix the content as you move
+it. Docs that share a file, a
 generated page, or a generator go on one branch, never on parallel branches. Each user doc gets
 at most two grading rounds, then goes to the owner with its graders' notes, and a doc that
 passes is pushed at once, never held back for others.
@@ -32,8 +39,14 @@ passes is pushed at once, never held back for others.
 Contention at merge time (rebases, `main` merges, and the CI reruns they trigger) is a main
 reason features land slowly. A planned merge order limits it; stacking does not remove it.
 
-- Stack a PR only when it needs the content of the PR below it. Use GitHub's native stacked
-  PRs: each upper PR branches from the PR below it, opens with
+- Stack a PR only when it needs the code of the PR below it (it calls a function or uses a
+  type that PR adds), never to avoid a conflict: a stacked PR inherits every merge of `main`
+  the lower one makes and waits on its review, which costs more than resolving the conflict
+  once when the second PR lands. Two PRs that only touch the same file both start from `main`.
+  Don't start a wide change (many files, or a rewrite of a module) while an open PR is
+  changing the same files; wait for it, or take its agent's work into yours. A PR that moves or
+  renames files merges before the PRs it would conflict with, never after them. Use GitHub's native
+  stacked PRs: each upper PR branches from the PR below it, opens with
   `gh pr create --base <lower branch>`, and joins the stack with `gh stack link <PRs bottom to
   top>` (`gh extension install github/gh-stack` once), and names the merge order in its body.
   `AGENTS.md` forbids the `gh stack` commands that rewrite pushed branches. A stack is one
@@ -55,6 +68,12 @@ reason features land slowly. A planned merge order limits it; stacking does not 
   so past ones keep the old name.
 - Agents never force-push or rebase a pushed branch. Conflicts are resolved by the owning agent
   with a written rationale; the coordinator never pushes or resolves one itself.
+- Stop and re-plan a PR that has drifted: the owner changed its design after it opened, its
+  diff grew past the request (a three-file fix now touches twenty), or it is merging `main` a
+  second time (one merge to resolve a conflict is normal). Each means the PR carries more than
+  one change or waits on something its agent can't settle, and every further push pays for all
+  of it. Have the agent land the settled part as a PR that is correct by itself and move the
+  rest to an issue with what it learned.
 
 ## 4. Reserve numbers
 
@@ -79,6 +98,15 @@ says only what the agent cannot know:
   approach and steps are background;
 - for user-facing work (docs, an API, an error message), who reads the result and what they
   need from it;
+- for a public change, the design the owner approved and their answer to it, quoted (the
+  calls a user types, what is refused and why, the settings). No design yet means the agent's
+  first deliverable is that design, not code (`AGENTS.md`, Workflow). For any change beyond a
+  small fix, the agent drafts the design with Fable and has a second Fable instance attack it
+  before code; a choice the two can't settle, or a point the brief leaves ambiguous, comes
+  back to you as a question with options and a recommendation, never built on a guess;
+- each protection the work may drop (a check, refusal, validation, test, setting, or guard
+  against a mistake that stays possible), with the owner's yes to that removal quoted, or the
+  instruction to ask before removing it: a brief's reading of a rule approves no removal;
 - that review findings which add work go under Follow-ups with an issue, never into the diff;
 - the base branch (`origin/main`, or the branch below it in its stack) and the stack's PR
   numbers, bottom to top;
