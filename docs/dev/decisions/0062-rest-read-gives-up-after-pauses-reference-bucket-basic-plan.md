@@ -2,7 +2,7 @@
 
 Date: 2026-10-29
 
-Status: accepted
+Status: partly superseded: its buckets learning a Basic plan by [114](0114-code-never-knows-massive-plans-learns-from-answers.md)
 
 A read gives up after about 10 minutes of pauses (about 90 s under the update-graph lock) with an
 error that names the cause and remedies; the bucket never gives up. Every reference endpoint is
