@@ -148,22 +148,26 @@ def units(body: str) -> list[str]:
     lines = body.splitlines()
     result: list[str] = []
     current: list[str] = []
+    depth = 0  # the indentation of the current unit's first line
     for index, line in enumerate(lines):
         stripped = line.strip()
         starts_item = stripped.startswith(("- ", "* ", "|")) or re.match(r"\d+\. ", stripped)
-        indented = line.startswith((" ", "\t"))
+        indent = len(line) - len(line.lstrip())
         if not stripped:
-            # A blank line inside a list item (the next text is indented) continues the item.
+            # A blank line inside a list item continues it when the next text is deeper.
             following = next((later for later in lines[index + 1 :] if later.strip()), "")
-            if current and following.startswith((" ", "\t")):
+            if current and len(following) - len(following.lstrip()) > depth:
                 continue
             if current:
                 result.append("\n".join(current))
             current = []
-        elif (starts_item and not indented) or stripped.startswith("|"):
+        elif stripped.startswith("|") or (starts_item and (not current or indent <= depth)):
+            # A table row, or an item no deeper than the unit's first line: a sibling, not a
+            # sub-bullet, so it never borrows the unit's quotation.
             if current:
                 result.append("\n".join(current))
             current = [line]
+            depth = indent
         else:
             current.append(line)
     if current:

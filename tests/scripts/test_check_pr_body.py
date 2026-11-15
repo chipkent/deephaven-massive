@@ -201,6 +201,15 @@ def test_a_decision_whose_status_this_pull_request_updates_still_counts(
     assert check.find_problems(body, changed, diff, decisions=check.decision_files(decisions)) == []
 
 
+def test_indented_sibling_bullets_never_share_a_quotation(check: ModuleType) -> None:
+    body = (
+        '  - The owner approved the split on 2026-11-15: "Keep the proposed split exactly."\n'
+        "  - The owner approved removing the guard.\n"
+    )
+    assert len(check.units(body)) == 2
+    assert len(check.find_problems(body, [], "")) == 1
+
+
 def test_a_claim_wrapped_across_lines_is_still_a_claim(check: ModuleType) -> None:
     body = "- The owner\n  approved removing the guard.\n"
     assert len(check.find_problems(body, [], "")) == 1
