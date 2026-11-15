@@ -30,7 +30,7 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   this module's logger, once, where it is decoded.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
-  one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
+  one must wait at least. The overrides use the shared `net` helpers: `is_certificate_failure`
   and the `Retry-After` reader.
 
 Topics are exact strings throughout: nothing here matches one topic as a prefix of another.
@@ -65,7 +65,7 @@ from deephaven_massive._massive.net.errors import (
     LIBRARY_BUG_REPORT,
     WireError,
     WireFailure,
-    is_tls_failure,
+    is_certificate_failure,
 )
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
@@ -293,7 +293,7 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         the `Retry-After` of an HTTP 429 (0.0 when absent or unreadable), and 0.0 otherwise,
         so the backoff alone decides.
     """
-    if is_tls_failure(error):
+    if is_certificate_failure(error):
         return WireError(
             f"TLS certificate verification failed for {host}: {error}; "
             "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
