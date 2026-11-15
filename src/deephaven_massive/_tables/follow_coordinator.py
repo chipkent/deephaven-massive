@@ -50,9 +50,9 @@ the coordinator records the failure and publishes it, never the listener. So doe
 Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`. So does a call that
 did not wait whose call-time symbols (the table's symbols when the watch started) all end
 `FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
-with the first symbol's error, in name order, as a call that waits raises it
-(`_call_time_outcome`). One of them with rows, or one deleted from the table before it failed,
-settles the check: from then on a symbol's failure is its own.
+with the first symbol's error, in name order, retryable only when every symbol's error is, as
+a call that waits raises it (`_call_time_outcome`). One of them with rows, or one deleted from
+the table before it failed, settles the check: from then on a symbol's failure is its own.
 
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
@@ -85,9 +85,10 @@ from deephaven_massive._enums import OnError, Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     BrokenGuaranteeError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     UnlistedPairError,
+    every_symbol_failed,
     failure_text,
     library_bug,
     required,
@@ -432,16 +433,24 @@ def _now_ns() -> int:
 
 
 def _cause(error: MassiveError) -> str:
-    """Return the key that groups failures of one cause: the error's type and HTTP status.
+    """Return the key that groups failures of one cause: the error's type, source, and status.
+
+    A bug is a cause of its own, so it never shares a key, or its single WARNING or ERROR, with
+    a failure that is none.
 
     Args:
         error: A symbol's failure.
 
     Returns:
-        Such as `"EntitlementError 403"`, or `"MassiveError"` for a failure without a status.
+        Such as `"EntitlementError massive 403"`, `"MassiveError network"` for a failure
+        without a status, or `"MassiveError library bug"`.
     """
-    name = type(error).__name__
-    return name if error.status is None else f"{name} {error.status}"
+    parts = [type(error).__name__, error.source.value]
+    if error.status is not None:
+        parts.append(str(error.status))
+    if error.is_bug:
+        parts.append("bug")
+    return " ".join(parts)
 
 
 def _transport(read: FollowedRead, outcome: SymbolOutcome) -> str:
@@ -776,7 +785,7 @@ class FollowCoordinator:
         """Fail a result one of whose steps raised: its state may no longer be whole.
 
         The caller logged the defect with its traceback; this fails the result's table with a
-        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`), marked as logged. The
+        `MassiveError` that names it (`ErrorSource.LIBRARY`), marked as logged. The
         table's failure stops the result, so none of its symbols stays queued or loading.
 
         Args:
@@ -789,7 +798,7 @@ class FollowCoordinator:
                 f"{result.read.dataset}: the followed read failed {step}: "
                 f"{type(error).__name__}: {error}"
             ),
-            cause=ErrorCause.LIBRARY_DEFECT,
+            source=ErrorSource.LIBRARY,
         )
         mark_failure_logged(failure)  # the caller logged it, with its trace
         self._fail(result, failure)
@@ -1106,7 +1115,7 @@ class FollowCoordinator:
         level = logging.WARNING if first else logging.DEBUG
         if unlisted is not None:
             level = logging.WARNING if first and unlisted is OnError.LOG else logging.DEBUG
-        elif error.cause is not ErrorCause.EXPECTED and first:
+        elif error.is_bug and first:
             level = logging.ERROR
         logger.log(
             level,
@@ -1119,6 +1128,7 @@ class FollowCoordinator:
             "attempt" if attempts == 1 else "attempts",
             outcome.kind.value,
             symbol.error,
+            exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )
         self._call_time_outcome(result, name, error)
 
@@ -1153,14 +1163,13 @@ class FollowCoordinator:
             return
         # Every call-time symbol still in the table has failed.
         result.call_time = None
-        first = next(error for error in pending.values() if error is not None)
         logger.debug(
             "call %d follow: all %d call-time symbols failed; the table fails, as a call "
             "that waits raises",
             result.read.call,
             len(pending),
         )
-        self._fail(result, first)
+        self._fail(result, every_symbol_failed([e for e in pending.values() if e is not None]))
 
     def _retry_due(self, touched: dict[int, _Result] | None = None) -> None:
         """Queue every retry whose time has come, taking each off the heap of retries.
@@ -1306,7 +1315,7 @@ class FollowCoordinator:
                         f"{read.dataset}: the read of {', '.join(names)} failed: "
                         f"{type(error).__name__}: {error}"
                     ),
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                    source=ErrorSource.LIBRARY,
                 )
                 mark_failure_logged(table_error)  # logged here, with its trace
                 logger.exception("call %d follow: a read failed. %s", read.call, LIBRARY_BUG)
@@ -1510,7 +1519,7 @@ class FollowCoordinator:
         """
         error = MassiveError(
             library_bug(f"the follow coordinator died ({death!r}); this table no longer updates"),
-            cause=ErrorCause.LIBRARY_DEFECT,
+            source=ErrorSource.LIBRARY,
         )
         for result in self._results.values():
             result.ended = True

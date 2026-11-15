@@ -69,14 +69,16 @@ from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    SessionClosedError,
     from_wire,
     required,
     required_instance,
-    wire_cause,
+    wire_source,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
 from deephaven_massive._ingest.host_decision import refused_snapshot, unlabelled
@@ -1103,7 +1105,7 @@ class Connection:
             "the other program or session that uses the key and call the method again, or set "
             "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
             f"connection back; see {_TAKEN_HELP}",
-            cause=ErrorCause.EXPECTED,
+            source=ErrorSource.MASSIVE,
         )
         with self._lock:
             leased = [sid for sid, connection in group.streams.items() if connection is self]
@@ -1198,14 +1200,14 @@ class Connection:
                 f"includes no WebSocket streams for {self.asset_class.value}, not only a bad key",
                 status=wire.status,
                 request_id=wire.request_id,
-                cause=wire.cause,
+                source=wire.source,
             )
         else:
             public = MassiveError(
                 f"the WebSocket connection to {self.decision.host}{self.path} failed: "
                 f"{error.message}",
                 status=error.status,
-                cause=wire_cause(error),  # an internal error of the client is a defect
+                source=wire_source(error),  # an internal error of the client is a defect
             )
         self._last_error = str(public)
         log_failure(logger, public, "%s")
@@ -1477,7 +1479,7 @@ class Connection:
                 f"since {since}, longer than MassiveConfig.max_outage "
                 f"({self._group.max_outage:g} s); the rows from {since} on are missing, so this "
                 "table stopped; call the verb again for a new live table",
-                cause=ErrorCause.EXPECTED,
+                source=ErrorSource.NETWORK,
             )
         self.flusher.fail([stream_id], episodes.failure)
 
@@ -2089,7 +2091,7 @@ class ConnectionGroup:
             The calendar.
 
         Raises:
-            MassiveError: If every session has left the group meanwhile.
+            SessionClosedError: If every session has left the group meanwhile.
         """
         with self.lock:
             found = self._calendar
@@ -2108,7 +2110,9 @@ class ConnectionGroup:
         if found is not candidate:
             candidate.close()
         if found is None:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return found
 
     def _fetch_rows(
@@ -2130,12 +2134,15 @@ class ConnectionGroup:
             The rows.
 
         Raises:
-            MassiveError: If no session of the group is open, or the read fails.
+            SessionClosedError: If no session of the group is open.
+            MassiveError: If the read fails.
         """
         with self.lock:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+            )
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:

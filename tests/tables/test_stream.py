@@ -30,7 +30,13 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+)
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, sources
 from deephaven_massive._tables import stream
@@ -604,7 +610,7 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert sink.rows_published == 1
 
 
-def test_one_failure_of_many_streams_is_logged_once_at_the_level_of_its_cause(
+def test_one_failure_of_many_streams_is_logged_once_at_the_level_its_bug_flag_gives(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     core = massive_session._core
@@ -781,7 +787,11 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     with caplog.at_level(logging.DEBUG, logger=stream.__name__):
         gate.set()
         drain()
-    assert failures == ["the symbol table failed, so the result can no longer follow it"]
+    assert [str(e) for e in failures] == [
+        "the symbol table failed, so the result can no longer follow it"
+    ]
+    assert isinstance(failures[0], MassiveError)
+    assert failures[0].source is ErrorSource.USER  # the table is the user's to fix
     reported = (
         "test.trades stream 1 failed: the symbol table failed, so the result can no longer "
         "follow it"
@@ -789,14 +799,14 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.ERROR, reported)]
 
 
-def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[Exception]:
     # Records the error each `publish_failure` of the sink's publisher fails its table with.
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = sink.publisher
 
     class _Recording:
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
     monkeypatch.setattr(sink, "publisher", _Recording())
@@ -813,11 +823,12 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
         assert sink.fail(MassiveError("a failure that raced the close"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], SessionClosedError)
     assert not caplog.records
     assert not sink.fail(MassiveError("again"))  # once only
 

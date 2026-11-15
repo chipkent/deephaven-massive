@@ -76,7 +76,7 @@ from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     failure_text,
 )
@@ -653,7 +653,7 @@ class FuturesCalendar:
                         if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
                             found[ticker] = found[ticker] or product
         except MassiveError as error:
-            self._failure(contracts, f"looking up its product failed: {error}", cause=error.cause)
+            self._failure(contracts, f"looking up its product failed: {error}", error)
             with self._lock:
                 unknown = {c: None for c in contracts if c not in self._products}
                 self._products = MappingProxyType({**self._products, **unknown})
@@ -682,7 +682,7 @@ class FuturesCalendar:
             with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
                 rows = self._fetch(self._schedules_path, query, bucket=_BUCKET, cancel=lane)
         except MassiveError as error:
-            self._failure(products, f"loading its schedule failed: {error}", cause=error.cause)
+            self._failure(products, f"loading its schedule failed: {error}", error)
             return
         events: dict[str, dict[date, list[int]]] = {product: {} for product in products}
         for row in rows:
@@ -709,9 +709,7 @@ class FuturesCalendar:
                 self._loaded[product] = self._asked[product] = now
                 self._failed.pop(product, None)
 
-    def _failure(
-        self, keys: set[str], why: str, *, cause: ErrorCause = ErrorCause.EXPECTED
-    ) -> None:
+    def _failure(self, keys: set[str], why: str, error: MassiveError | None = None) -> None:
         """Record that loading some contracts or products failed, and log it once.
 
         Their rows are misses, with a null `Date`; they are asked for again after
@@ -723,7 +721,8 @@ class FuturesCalendar:
         Args:
             keys: The contracts or products.
             why: The failure, for the log and the misses.
-            cause: Whose problem the failure is; expected by default.
+            error: The `MassiveError` that failed the lookup, whose `is_bug` sets the level; None
+                for any other failure, which the caller has logged with its trace.
         """
         with self._lock:
             closed = self._closed
@@ -731,10 +730,17 @@ class FuturesCalendar:
                 self._failed[key] = why
         if not closed:
             logger.log(
-                logging.WARNING if cause is ErrorCause.EXPECTED else logging.ERROR,
+                logging.ERROR if error is not None and error.is_bug else logging.WARNING,
                 "%s: futures schedules: %s",
                 self._label,
-                failure_text(MassiveError(f"{why} ({', '.join(sorted(keys))})", cause=cause)),
+                failure_text(
+                    MassiveError(
+                        f"{why} ({', '.join(sorted(keys))})",
+                        source=ErrorSource.MASSIVE if error is None else error.source,
+                        is_bug=error is not None and error.is_bug,
+                    )
+                ),
+                exc_info=error if error is not None and error.is_bug else None,
             )
 
 

@@ -21,7 +21,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
@@ -473,7 +473,7 @@ def test_closing_the_session_fails_a_loading_read(
     (row,) = [r for r in dh_to_pylist(view) if r["Kind"] == "read"]
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
     )
     del view
 

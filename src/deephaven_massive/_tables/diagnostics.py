@@ -81,10 +81,13 @@ from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     BrokenGuaranteeError,
+    ErrorSource,
     MassiveError,
     library_bug,
     required,
+    source_of,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
@@ -1598,12 +1601,14 @@ def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
         death: What ended the thread.
 
     Returns:
-        Such as `MassiveError("MassiveSession #1: its reaper thread died (SystemExit()); this
-        table no longer updates")`.
+        Such as `MassiveError("MassiveSession #1: its reaper thread died (KeyboardInterrupt());
+        this table no longer updates; open a new dm.MassiveSession() to read again")`. A death
+        of an `Exception` is a bug, whose message says how to report it instead.
     """
-    return MassiveError(
-        f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
-    )
+    source = source_of(death)
+    text = f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
+    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}; {NEW_SESSION}"
+    return MassiveError(message, source=source)
 
 
 def _pascal_case(name: str) -> str:

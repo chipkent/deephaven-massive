@@ -135,7 +135,7 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import TableDefinition
 
 from deephaven_massive._enums import Reread
-from deephaven_massive._errors import MassiveError, required
+from deephaven_massive._errors import MassiveError, SessionClosedError, required
 from deephaven_massive._tables.background_read import GROUP_ROWS
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState, shown_query
@@ -389,9 +389,9 @@ class FollowedRead:
             if self._failed:
                 return False
             self.stop_token.set()
-            closed = self.core.fail_stream(self.call, str(error))
+            closed = self.core.fail_stream(self.call, error)
             required(self._publisher, f"call {self.call}'s publisher").publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
+                error if closed in (None, str(error)) else SessionClosedError(closed)
             )
             self._failed = True
             return True
@@ -938,7 +938,7 @@ def open_followed_read(
 
     Raises:
         MassiveError: If the session closed before the result could be registered, or after
-            (`"MassiveSession #1 is closed"`).
+            (`"MassiveSession #1 is closed; ..."`).
     """
     stop = core.read_stop()
     read = FollowedRead(

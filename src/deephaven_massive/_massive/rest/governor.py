@@ -109,7 +109,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Self
 
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, WireFailure
 from deephaven_massive._massive.net.retry import RATE_LIMIT_WAITS, SYSTEM_CLOCK, rate_limit_wait
 
 if TYPE_CHECKING:
@@ -367,7 +367,7 @@ class Admission:
         permit = self._governor.admit(self, cancel)
         if isinstance(permit, WireError):
             logger.debug("%s: the wait for a permit ends: %s", self.bucket, permit.message)
-            raise WireError(permit.message, status=permit.status)
+            raise WireError(permit.message, status=permit.status, kind=permit.kind)
         if permit.probe:
             logger.debug(
                 "%s: the pause is over; this request probes alone, and the bucket's other "
@@ -1246,14 +1246,17 @@ class RequestGovernor:
             now: The monotonic time.
 
         Returns:
-            A `WireError` without a status when `cancel` is set; one with status 429 when the
-            bucket is paused for longer than the read's patience still covers (only a pause
-            counts: an unpaused bucket never fails a request); or None. A pause the patience
-            covers is charged to it.
+            A `WireError` without a status, `WireFailure.STOPPED`, when `cancel` is set; one
+            with status 429 when the bucket is paused for longer than the read's patience still
+            covers (only a pause counts: an unpaused bucket never fails a request); or None. A
+            pause the patience covers is charged to it.
         """
         bucket = admission.bucket
         if cancel.is_set():
-            return WireError(f"{bucket}: the wait for a request slot was cancelled")
+            return WireError(
+                f"{bucket}: the wait for a request slot was cancelled",
+                kind=WireFailure.STOPPED,
+            )
         state = self._buckets[bucket]
         state.settle(now)
         return self._beyond_patience(state, admission.patience, now)
@@ -1274,7 +1277,10 @@ class RequestGovernor:
         """
         # A pause already over adds nothing to charge, so an unpaused bucket never fails.
         if not patience.charge(now, state.pause_until):
-            return WireError(self._give_up_text(state, patience, now), status=429)
+            # Massive refused the bucket with HTTP 429; the read will not wait out the pause.
+            return WireError(
+                self._give_up_text(state, patience, now), status=429, kind=WireFailure.REFUSED
+            )
         return None
 
     def _give_up_text(self, state: _Bucket, patience: Patience, now: float) -> str:

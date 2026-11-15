@@ -26,7 +26,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION
 from deephaven_massive._massive import DriftReport, Transport
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables import session_core as _core
@@ -462,8 +462,9 @@ def test_a_failure_after_the_stream_left_the_registry_is_logged(
     core = massive_session._core
     result = stream_query(massive_session).blink()
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"):
-        core.fail_stream(1, "shown")  # in the registry: shown in m.streams(), not logged
-        core.fail_stream(42, "late")  # never registered: only logged
+        # In the registry: shown in m.streams(), not logged.
+        core.fail_stream(1, dm.MassiveError("shown"))
+        core.fail_stream(42, dm.MassiveError("late"))  # never registered: only logged
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.DEBUG, f"{core.label}: stream 42 failed after it left the registry: late")
     ]
@@ -641,7 +642,10 @@ def test_a_diagnostics_view_that_races_close_raises_the_closed_error(
         return build(exec_ctx, factory)
 
     monkeypatch.setattr(_core, "make_result", close_first)
-    with pytest.raises(dm.MassiveError, match=f"^{label(massive_session)} is closed$") as caught:
+    with pytest.raises(
+        dm.MassiveError,
+        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+    ) as caught:
         massive_session.streams()
     assert isinstance(caught.value.__cause__, DHError)
     assert core._views == 0
@@ -695,7 +699,7 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = fake_streams.failed[1]
     assert text.startswith(f"{label(massive_session)}: its reaper thread died (_Fatal")
-    assert text.endswith("this table no longer updates")
+    assert text.endswith(f"this table no longer updates; {NEW_SESSION}")
     assert core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = dh_to_pylist(core.diagnostics.streams)  # no view: nothing could release it
     assert (row["State"], row["Error"]) == ("FAILED", text)
@@ -744,7 +748,7 @@ def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = fake_streams.failed[1]
     assert text.startswith(f"{label(massive_session)}: its diagnostics writer thread died (_Fatal")
-    assert text.endswith("this table no longer updates")
+    assert text.endswith(f"this table no longer updates; {NEW_SESSION}")
     massive_session.release(result)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -773,7 +777,9 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     with pytest.raises(
         dm.MassiveError,
         match=rf"^test\.trades stream 1 failed: {re.escape(label(massive_session))}: its "
-        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates$",
+        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates; "
+        + re.escape(NEW_SESSION)
+        + "$",
     ):
         stream_query(massive_session).append_only()
     assert not writer.is_alive()
@@ -816,7 +822,9 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = f"{label(massive_session)}: its diagnostics writer thread died (_Fatal()); this table"
     assert fake_streams.failed[1].startswith(text)  # the live table fails as before
-    assert [str(error) for error in publisher.failures] == [f"{text} no longer updates"]
+    assert [str(error) for error in publisher.failures] == [
+        f"{text} no longer updates; {NEW_SESSION}"
+    ]
     assert diagnostics._scope in handed
     assert "their scope is handed to the reaper" in caplog.text
     assert wait_for_update_cycle(core.exec_ctx, TIMEOUT)  # the cycle that delivers the failures
@@ -824,7 +832,9 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     with pytest.raises(
         dm.MassiveError,
         match=rf"^{re.escape(label(massive_session))}: its diagnostics tables failed when their "
-        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then$",
+        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then; "
+        + re.escape(NEW_SESSION)
+        + "$",
     ):
         massive_session.connections()
     assert core._views == 1  # the refused view counted nothing
@@ -933,7 +943,7 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
     massive_session.close()
     with (
         caplog.at_level(logging.DEBUG, logger=_core.__name__),
-        pytest.raises(dm.MassiveError, match=r"is closed$"),
+        pytest.raises(dm.MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"),
     ):
         core.run_verb("m.stocks.trades('AAPL').fetch()", refuse)
     # The guard's refusal too: every exception that escapes a verb.
@@ -944,7 +954,8 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
         ),
         (
             logging.DEBUG,
-            f"m.stocks.trades('AAPL').fetch() raised MassiveError: {core.label} is closed",
+            f"m.stocks.trades('AAPL').fetch() raised SessionClosedError: {core.label} is closed; "
+            + NEW_SESSION,
         ),
     ]
 
@@ -984,3 +995,44 @@ def test_rows_written_while_close_runs_leave_one_row_per_key(
     assert len(keys) == len(set(keys))
     assert all(0 <= r["Reconnects"] < 200 for r in rows)
     del view
+
+
+def test_an_unexpected_exception_escaping_a_verb_is_raised_as_a_library_bug(
+    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    core = massive_session._core
+    broken = RuntimeError("the index broke")
+
+    def body() -> None:
+        raise broken
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"),
+        pytest.raises(dm.MassiveError, match=r"^m\.x\(\)\.fetch\(\) failed: RuntimeError") as bug,
+    ):
+        core.run_verb("m.x().fetch()", body)
+    assert (bug.value.source, bug.value.is_bug, bug.value.is_retryable) == (
+        dm.ErrorSource.LIBRARY,
+        True,
+        False,
+    )
+    assert bug.value.__cause__ is broken
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.exc_info is not None  # logged with its traceback
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("bad start"), TypeError("not a bool"), KeyboardInterrupt()],
+    ids=["value", "type", "interrupt"],
+)
+def test_a_wrong_argument_or_an_interrupt_escapes_a_verb_unchanged(
+    massive_session: dm.MassiveSession, error: BaseException
+) -> None:
+    def body() -> None:
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        massive_session._core.run_verb("m.x().fetch()", body)
+    assert raised.value is error
+    error.__traceback__ = None  # the parameter outlives the test; its traceback holds the core

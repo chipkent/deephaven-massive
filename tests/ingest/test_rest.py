@@ -47,7 +47,14 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG, CutShortError, RowDataError, UnlistedPairError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    READ_STOPPED,
+    CutShortError,
+    RowDataError,
+    UnlistedPairError,
+)
 from deephaven_massive._ingest import (
     crypto_tickers,
     host_decision,
@@ -1171,7 +1178,9 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         claimed.set()
         assert refuse.wait(TIMEOUT)
         stop.set()  # the maker's table is released as the refusal arrives
-        raise _massive.WireError("HTTP 403 for GET /v3/reference/tickers", status=403)
+        raise _massive.WireError(
+            "HTTP 403 for GET /v3/reference/tickers", status=403, kind=_massive.WireFailure.REFUSED
+        )
 
     monkeypatch.setattr(client, "pages", refused)
     reader = _endpoints(m)._reader("crypto pairs")
@@ -1214,7 +1223,9 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         stop.set()
         stopped = joiner.join()
         assert isinstance(stopped, dm.MassiveError)
-        assert str(stopped).endswith("waiting for the crypto ticker list: cancelled")
+        assert str(stopped).endswith(
+            f"waiting for the crypto ticker list: cancelled; {READ_STOPPED}"
+        )
         clock.advance(60.0)
         assert maker.join() == ("DOT", "USD")
     finally:
@@ -2061,7 +2072,7 @@ def test_a_refusal_names_the_dataset_and_its_subscription(
         fetch(session, spec, symbols=symbols)
     assert str(info.value).startswith(refusal)
     assert str(info.value).endswith("upgrade")
-    assert (info.value.status, info.value.cause) == (403, dm.ErrorCause.EXPECTED)
+    assert (info.value.status, info.value.source) == (403, dm.ErrorSource.MASSIVE)
 
 
 def test_a_refusal_names_the_alternative_where_one_exists(
@@ -2100,7 +2111,7 @@ def test_refusals_raise_their_public_errors(
     with caplog.at_level(logging.DEBUG), pytest.raises(error) as info:
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert (info.value.status, info.value.request_id) == (status, "r9")
-    assert info.value.cause is dm.ErrorCause.EXPECTED
+    assert info.value.source is dm.ErrorSource.MASSIVE
     # A refusal the caller receives is expected: the call logs it at DEBUG, never higher.
     failed = [r for r in caplog.records if r.getMessage().startswith("call ")]
     assert [r.levelno for r in failed if "failed" in r.getMessage()] == [logging.DEBUG]
@@ -2164,7 +2175,9 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
-    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
+    with pytest.raises(
+        dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
+    ):
         transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1, unlisted=dm.OnError.RAISE)
 
 
@@ -2771,13 +2784,20 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     def pages(*_: object, **__: object) -> NoReturn:
         # The session closes while the symbol's request is on the wire, which then ends in 404.
         reader.state.close()
-        raise _massive.WireError("HTTP 404 from GET /v1/last/crypto/BTC/USD", status=404)
+        raise _massive.WireError(
+            "HTTP 404 from GET /v1/last/crypto/BTC/USD",
+            status=404,
+            kind=_massive.WireFailure.REFUSED,
+        )
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
     with (
         caplog.at_level(logging.DEBUG, LOGGER),
         ThreadPoolExecutor(1) as pool,
-        pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"),
+        pytest.raises(
+            dm.MassiveError,
+            match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$",
+        ),
     ):
         reader.read(
             CRYPTO_LAST,
@@ -3712,6 +3732,8 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
     )
     assert info.value.status == 404
+    # Unlike any other 404: a new call starts over with a new cursor.
+    assert info.value.is_retryable
 
 
 def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:
@@ -3752,8 +3774,9 @@ def test_every_page_of_bars_must_echo_the_requested_adjustment(
         match=r"^stocks\.bars: Massive answered /v2/aggs/ticker/\{stocksTicker\}/range/.* with "
         r"adjusted=False although adjusted=True was requested, so the call would mix "
         r"split-adjusted and as-traded prices; retry it$",
-    ):
+    ) as mixed:
         daily_bars(session, adjusted=True)
+    assert mixed.value.is_retryable  # the next answer may agree with the request
     assert [r["Close"] for r in daily_bars(session, adjusted=False)] == [1.0, 2.0]
 
 
@@ -4663,13 +4686,17 @@ def _not_found(
 def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
     session: dm.MassiveSession,
 ) -> None:
-    error = _massive.WireError("not found", status=404, request_id="r1")
+    error = _massive.WireError(
+        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
     assert outcome == rest._Outcome((), 1, missing="ZZZZ")
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
-    error = _massive.WireError("not found", status=404, request_id="r1")
+    error = _massive.WireError(
+        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
     with pytest.raises(CutShortError, match="after 2 pages had arrived") as info:
         _not_found(session, error, symbol="AAPL", requests=2)
     assert info.value.request_id == "r1"
@@ -4681,7 +4708,7 @@ def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSe
 def test_only_a_per_symbol_404_is_about_the_symbol(
     *, session: dm.MassiveSession, status: int, symbol: str | None
 ) -> None:
-    error = _massive.WireError("failed", status=status)
+    error = _massive.WireError("failed", status=status, kind=_massive.WireFailure.REFUSED)
     with pytest.raises(dm.MassiveError) as info:
         _not_found(session, error, symbol=symbol, requests=0)
     assert not isinstance(info.value, CutShortError)

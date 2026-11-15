@@ -1112,7 +1112,7 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    error = _massive.WireError("dropped")
+    error = _massive.WireError("dropped", kind=_massive.WireFailure.UNREADABLE)
     rejects = [
         _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
         for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
@@ -1421,6 +1421,9 @@ def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
     assert [r["State"] for r in rows] == ["FAILED", "FAILED"]
     since = _since(rows[0]["Error"])
     assert [r["Error"] for r in rows] == [_outage_failure(since, "300")] * 2
+    failure = connection._episodes.failure
+    assert failure is not None
+    assert (failure.source, failure.is_retryable) == (dm.ErrorSource.NETWORK, True)
     # An expected failure: one WARNING for both streams, never an ERROR.
     failures = [r for r in caplog.records if "longer than MassiveConfig.max_outage" in r.message]
     assert [r.levelno for r in failures] == [logging.WARNING]

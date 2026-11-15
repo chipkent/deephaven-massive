@@ -1,38 +1,45 @@
 """The library's exception hierarchy.
 
 Every error that Massive or the library itself reports derives from `MassiveError`, so one
-`except dm.MassiveError` catches all of them. Two subclasses name the failures a user can act
+`except dm.MassiveError` catches all of them. Three subclasses name the failures a user can act
 on:
 
 - `AuthenticationError`: the API key is missing or Massive rejected it, or Massive's S3
   endpoint rejected the flat-file credentials.
 - `EntitlementError`: the key is valid, but the plan lacks the dataset, the WebSocket host, or
   the timeframe that was requested.
+- `SessionClosedError`: the session is closed, so a call on it, or a live table of it, can do
+  nothing more.
 
 Every `MassiveError` carries two read-only attributes, set when the error came from an HTTP
 response and `None` otherwise: `status`, the HTTP status, and `request_id`, the `request_id` of
 Massive's response. Branch on `status` (for example 404 or 429) instead of parsing messages.
 
-Every `MassiveError` also says whose problem it is, through `cause`, an `ErrorCause`:
+Three more attributes tell code what to do about an error:
 
-- `EXPECTED`, the default: a condition the library expects and reports, such as a refusal, a
-  plan or rate limit, a network failure, or a closed session.
-- `USER_DEFECT`: a defect in the user's code or input that the library caught, such as a symbol
-  table that failed upstream; the message names what to fix.
-- `LIBRARY_DEFECT`: a bug in the library, or data from Massive it cannot convert or read; the
-  message ends with `LIBRARY_BUG`, which says how to report it.
+- `source`, an `ErrorSource`: what stopped the call. `MASSIVE`, the default, when Massive
+  answered with a refusal or an error; `NETWORK` when no answer came through the library's
+  retries; `USER` when the user's code or settings stopped it; and `LIBRARY` for a bug in the
+  library, data from Massive it cannot read included.
+- `is_retryable`: whether the same call may succeed later. True for a status in
+  `RETRYABLE_STATUSES` (429, 500, 502, 503, 504) and for a `NETWORK` error; false for any
+  other unless the raising code says otherwise, and always false for a bug.
+- `is_bug`: whether a defect caused the error. Always true for `LIBRARY`; true for a user's
+  bug the library caught, such as a symbol table that failed upstream, whose class or raise
+  site says so.
 
-The cause sets the level a failure is logged at: ERROR for a defect, so that a broad `except`
-never hides one, and below ERROR for an expected condition (`_log_limits.log_failure`).
-`library_bug` and `user_defect` build the two kinds of defect message, `cause_of` reads the
-cause of any exception, and `failure_text` is the text a log record gives it. `required` and
-`required_instance` return a value the library's design guarantees, such as a dataset's REST
-path or the session a caller holds, and raise `BrokenGuaranteeError`, a defect of the library,
-when it is missing or of another type.
+`is_bug` sets the level a failure is logged at: ERROR for a bug, so that a broad `except` never
+hides one, and below ERROR otherwise (`_log_limits.log_failure`). `library_bug` and
+`user_defect` build the two kinds of bug message, `source_of` and `is_bug_of` read the source
+and the bug flag of any exception, and `failure_text` is the text a log record gives it.
+`required` and `required_instance` return a value the library's design guarantees, such as a
+dataset's REST path or the session a caller holds, and raise `BrokenGuaranteeError`, a
+`LIBRARY` error, when it is missing or of another type.
 
 The wire package `deephaven_massive._massive` raises its own errors (`WireError`,
 `WireAuthError`, `WireEntitlementError`), and `from_wire` turns each into its public
-counterpart here, keeping the message, `status`, and `request_id`. Users never see a wire error.
+counterpart here, keeping the message, `status`, and `request_id`, and taking `source` from
+what the wire error says (`wire_source`). Users never see a wire error.
 
 Parameter mistakes are not `MassiveError`s: a wrong *value* raises `ValueError` and a wrong
 *type* (for example a plain string where an enum member is required) raises `TypeError`, both
@@ -42,7 +49,7 @@ Static verbs (`fetch()`, `history()`) read in the background by default: a failu
 call has returned fails the verb's table instead of raising, while a parameter mistake or a
 closed session still raises at the call. With `wait=True` they raise these exceptions
 directly. A live table fails with one (its publisher's `publish_failure`), so the failure shows
-where Deephaven users look; it is also logged, at the level its cause gives, and shown in
+where Deephaven users look; it is also logged, at the level its `is_bug` gives, and shown in
 `m.streams()`.
 
 The module also holds `PermanentError`, the internal base of the ingest errors a retry cannot
@@ -59,35 +66,48 @@ The public names are re-exported by `deephaven_massive/__init__.py`; this module
 from __future__ import annotations
 
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
-from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._massive import (
+    RETRYABLE_STATUSES,
+    WireAuthError,
+    WireEntitlementError,
+    WireError,
+    WireFailure,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 
 __all__ = [
     "LIBRARY_BUG",
+    "NEW_SESSION",
     "RAISES_THROUGH",
+    "READ_STOPPED",
     "AuthenticationError",
     "BrokenGuaranteeError",
     "CutShortError",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
     "MassiveError",
     "PermanentError",
     "RowDataError",
+    "SessionClosedError",
     "UnlistedPairError",
-    "cause_of",
+    "copy_error",
+    "every_symbol_failed",
     "failure_text",
     "from_wire",
+    "is_bug_of",
     "library_bug",
     "raises_through",
     "required",
     "required_instance",
+    "source_of",
     "user_defect",
-    "wire_cause",
+    "wire_source",
 ]
 
 RAISES_THROUGH: Final = "raises_through"
@@ -95,6 +115,16 @@ RAISES_THROUGH: Final = "raises_through"
 
 _F = TypeVar("_F", bound="Callable[..., object]")
 _V = TypeVar("_V")
+
+
+NEW_SESSION: Final = "open a new dm.MassiveSession() to read again"
+"""What ends every message of a `SessionClosedError`: the fix for a closed session."""
+
+READ_STOPPED: Final = (
+    "the read was stopped when its table was released or its session closed; call the method "
+    "again for a new table"
+)
+"""What ends the message of a read that was stopped before it finished: why, and the fix."""
 
 
 LIBRARY_BUG: Final = (
@@ -108,75 +138,99 @@ The wire package ends its own ERROR records with the same text, which it keeps a
 it imports nothing else of the library."""
 
 
-class ErrorCause(StrEnum):
-    """Whose problem a `MassiveError` is, which tells you what to do about it.
+class ErrorSource(StrEnum):
+    """What stopped a call that raised a `MassiveError`: Massive, the network, you, or a bug.
 
-    Read it from an error's `cause`. The library logs a defect at ERROR and an expected condition
-    below ERROR. The values are the library's own names, not values Massive sends.
+    Read it from an error's `source` to decide what to do. Massive's refusals and errors
+    are `MASSIVE`, an answer that never came is `NETWORK`, a problem in your code or settings is
+    `USER`, and a bug in the library is `LIBRARY`. Later versions may add members, so end a
+    `match` on it with `case _:`. The values are the library's own names, not values Massive
+    sends.
 
     Example:
-        Report a bug in the library, and handle every other failure as your application's own::
+        Tell a library bug from a problem in your code or settings::
 
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
             try:
-                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
+                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch(wait=True)
             except dm.MassiveError as e:
-                if e.cause is dm.ErrorCause.LIBRARY_DEFECT:
+                if e.source is dm.ErrorSource.LIBRARY:
                     print(f"please report: {e}")
+                elif e.source is dm.ErrorSource.USER:
+                    print(f"fix this: {e}")
                 else:
                     print(f"failed: {e}")
     """
 
-    EXPECTED = "expected"
-    """A condition the library expects and reports, such as a refused request, a plan or rate
-    limit, a network failure, or a closed session. Logged below ERROR."""
+    MASSIVE = "massive"
+    """Massive refused or failed the request: an HTTP error such as 403 or 503, a rejected key,
+    a plan without the data, a WebSocket status message, or Massive's reference data lacking
+    what you asked for. When Massive answered, the message quotes it."""
 
-    USER_DEFECT = "user_defect"
-    """A mistake in your code or input that the library caught, such as a table of symbols
-    of yours that failed. Logged at ERROR, with a message that names the fix."""
+    NETWORK = "network"
+    """No answer came: a connection failed through every retry the library made, or a live
+    table got nothing for longer than `MassiveConfig.max_outage`."""
 
-    LIBRARY_DEFECT = "library_defect"
-    """A bug in the library, or data from Massive it can't read. Logged at ERROR, with a
-    message that says how to report it."""
+    USER = "user"
+    """Your code or settings stopped the call, such as a missing API key, delayed data your
+    `MassiveConfig` doesn't allow, a certificate or proxy setting that fails, a closed session,
+    or a watchlist table of yours that failed. The message names the fix."""
+
+    LIBRARY = "library"
+    """A bug in the library, or data from Massive it can't read. The message says how to report
+    it."""
 
 
 class MassiveError(Exception):
     """The base class of every error Massive or the library reports.
 
-    One `except dm.MassiveError` catches them all. The library raises `MassiveError` itself for any
-    other failure: a network error, an HTTP error other than 401 or 403, a rate limit that outlasted
-    the retries, or a closed session. The message names the host, the dataset, and Massive's own
-    text. To branch on the failure, read `status`, such as 404 or 429, instead of the message.
+    One `except dm.MassiveError` catches them all. Its subclasses `AuthenticationError`,
+    `EntitlementError`, and `SessionClosedError` name three failures you can act on. Every
+    other failure raises `MassiveError` itself, such as a network error, an HTTP error other
+    than 401 or 403, a rate limit longer than the read waits out, or a bug. The message names
+    what failed, and quotes Massive's text when Massive answered. To branch on the failure,
+    read `is_retryable`, `is_bug`, `source`, or `status` instead of the message.
 
-    A `fetch()` or `history()` with `wait=True` raises the error. A live table, including the
-    table `fetch()` and `history()` return by default, fails with it instead: the table shows the
-    error, the log records it, and `m.streams()` lists it.
+    A `fetch()` or `history()` with `wait=True` raises the error. Without `wait=True`, a
+    failure after the call returns fails their table instead, as it fails a live table: the
+    table shows the error, the log records it, and `m.streams()` lists it. A closed session or
+    a wrong argument still raises at the call.
 
     Example:
-        Catch every failure of the library, and branch on the HTTP status::
+        Catch any `MassiveError`, and branch on the HTTP status::
 
             import deephaven_massive as dm
 
             m = dm.MassiveSession()
             try:
-                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch()
+                dividends = m.stocks.dividends(["AAPL", "MSFT"]).fetch(wait=True)
             except dm.MassiveError as e:
                 if e.status == 429:
                     print(f"slow down (request {e.request_id}): {e}")
     """
 
-    default_cause: ClassVar[ErrorCause] = ErrorCause.EXPECTED
-    """The `cause` of an error of this class created without one; a subclass whose every
-    instance is a defect sets its own."""
+    default_source: ClassVar[ErrorSource] = ErrorSource.MASSIVE
+    """The `source` of an error of this class created without one; a subclass whose every
+    instance has another source sets its own."""
+
+    default_is_retryable: ClassVar[bool] = False
+    """Whether every error of this class created without `is_retryable` may succeed later, an
+    answer that means "try again" whatever its status; a subclass of such answers sets it."""
+
+    default_is_bug: ClassVar[bool] = False
+    """Whether an error of this class created without `is_bug` is a bug; a subclass whose every
+    instance is a user's bug sets it. A `LIBRARY` error is a bug whatever this says."""
 
     def __init__(
         self,
         *args: object,
         status: int | None = None,
         request_id: str | None = None,
-        cause: ErrorCause | None = None,
+        source: ErrorSource | None = None,
+        is_retryable: bool | None = None,
+        is_bug: bool | None = None,
     ) -> None:
         """Create the error.
 
@@ -186,17 +240,42 @@ class MassiveError(Exception):
                 not come from an HTTP response.
             request_id: The `request_id` of Massive's response, or `None` when there was no
                 response or it carried none.
-            cause: Whose problem the error is, or `None` (absent) for the class's
-                `default_cause`, which is `ErrorCause.EXPECTED` unless a subclass sets another.
+            source: What stopped the call, or `None` (absent) for the class's
+                `default_source`, which is `ErrorSource.MASSIVE` unless a subclass sets another.
+                A `LIBRARY` error's message is ended with `LIBRARY_BUG` unless it holds it.
+            is_retryable: Whether the same call may succeed later, or `None` (absent) to
+                decide: true for the class's `default_is_retryable`, a status in
+                `RETRYABLE_STATUSES`, or a `NETWORK` source. A bug is never retryable, whatever
+                this says.
+            is_bug: Whether a defect caused the error, or `None` (absent) for the class's
+                `default_is_bug`. A `LIBRARY` error is a bug whatever this says.
         """
+        source = self.default_source if source is None else source
+        if source is ErrorSource.LIBRARY and len(args) == 1 and isinstance(args[0], str):
+            # Every library bug's message says how to report it, whoever wrote the rest.
+            args = (args[0] if LIBRARY_BUG in args[0] else library_bug(args[0]),)
         super().__init__(*args)
         self._status = status
         self._request_id = request_id
-        self._cause = self.default_cause if cause is None else cause
+        self._source = source
+        if is_bug is None:
+            is_bug = self.default_is_bug
+        self._is_bug = is_bug or self._source is ErrorSource.LIBRARY
+        if is_retryable is None:
+            is_retryable = (
+                self.default_is_retryable
+                or status in RETRYABLE_STATUSES
+                or self._source is ErrorSource.NETWORK
+            )
+        self._is_retryable = is_retryable and not self._is_bug
 
     @property
     def status(self) -> int | None:
-        """The HTTP status of the response behind the error, such as 404 or 429, or `None`."""
+        """The HTTP status of the response behind the error, or `None` when there was none.
+
+        Usually Massive's, such as 404 or 429. A flat file's comes from S3, and a proxy that
+        refused its credentials gives its own 407.
+        """
         return self._status
 
     @property
@@ -205,19 +284,63 @@ class MassiveError(Exception):
         return self._request_id
 
     @property
-    def cause(self) -> ErrorCause:
-        """Whose problem the error is: expected, a mistake in your code, or a library bug."""
-        return self._cause
+    def source(self) -> ErrorSource:
+        """What stopped the call: Massive, the network, your code or settings, or a bug."""
+        return self._source
+
+    @property
+    def is_retryable(self) -> bool:
+        """Whether the same call may succeed if you make it again later.
+
+        True for:
+
+        - a rate limit (HTTP 429);
+        - a failure on Massive's side (HTTP 500, 502, 503, or 504);
+        - no answer (`ErrorSource.NETWORK`);
+        - HTTP 404 on a later page of one symbol's REST read;
+        - S3's `RequestTimeout` on a flat file;
+        - a flat file Massive hasn't published yet;
+        - a page Massive answered with another `adjusted` than the call asked for.
+
+        A `fetch()` or `history()` of a watchlist whose every symbol failed is retryable only
+        when every symbol's error is. False for any other HTTP status, an `AuthenticationError`,
+        an `EntitlementError`, a `SessionClosedError`, or a bug.
+
+        Before it raises, the library has retried a server failure or a failed connection a few
+        times. It raises a rate limit as soon as the read would spend more than 10 minutes in
+        all waiting out rate limits, or 90 seconds for a console command with `wait=True`. Wait
+        before you call again.
+        """
+        return self._is_retryable
+
+    @property
+    def is_bug(self) -> bool:
+        """Whether a defect caused the error: a bug in the library, or one in your code.
+
+        True for every `ErrorSource.LIBRARY` error; its message says how to report it. True too
+        for a bug in your code that the library caught, such as a watchlist table that failed
+        or an argument that one of the watchlist's symbols doesn't take; its message names the
+        fix. The library logs a bug at ERROR, and any other error below ERROR.
+        """
+        return self._is_bug
 
 
 class AuthenticationError(MassiveError):
-    """Massive refused your keys: the API key is missing or rejected, or the S3 keys are.
+    """Your API key is missing, or Massive refused your API key or your flat-file S3 keys.
 
     `dm.MassiveConfig()` raises it when `MASSIVE_API_KEY` isn't set and you pass no `api_key`. A
-    live table fails with it when Massive's streaming server rejects the key. Every other stream on
-    that connection fails too. Massive gives the same answer to a plan with no streams of the asset
-    class, and the message says so. `history()` raises it when Massive's flat-file server rejects
-    the S3 keys. The message then names `s3_access_key_id` and `s3_secret_access_key`.
+    `fetch()` or `history()` with `wait=True` raises it when Massive rejects the API key (HTTP
+    401); without `wait=True`, the table fails with it instead. A live table fails with it when
+    Massive's streaming server rejects the key, and so does every other stream on that
+    connection. Massive may give the same answer to a plan without streams of the asset class,
+    so the message says that too.
+
+    If S3 rejects your flat-file keys, `history()` reads REST instead and logs a warning. It
+    raises this error only under `source=dm.HistorySource.FLAT_FILES`, or when REST can't serve
+    the read. The message names `s3_access_key_id` and `s3_secret_access_key`.
+
+    Its `source` is `ErrorSource.USER` when the key is missing, and `ErrorSource.MASSIVE` when
+    Massive refused it.
 
     Example:
         ::
@@ -234,13 +357,15 @@ class AuthenticationError(MassiveError):
 class EntitlementError(MassiveError):
     """Your key is valid, but your plan doesn't include what you asked for.
 
-    Massive refused the request: a REST request with HTTP 403, a stream subscription, or a flat
-    file. The library raises it too when Massive marks current data as delayed and its subscription
-    isn't in `MassiveConfig.delayed_subscriptions`. The message then names the setting to change.
-    Only the table that asked fails. Other tables on the same connection keep running.
+    Massive refused a REST request with HTTP 403, a flat file, or a stream subscription. A
+    refused subscription fails only the table that asked, and other tables on the same
+    connection keep running. The library raises it too when Massive marks the data delayed
+    and the data's subscription isn't in `MassiveConfig.delayed_subscriptions`. The message
+    then names the setting to change. Its `source` is `ErrorSource.MASSIVE` when Massive
+    refused, and `ErrorSource.USER` when `delayed_subscriptions` refused delayed data.
 
-    The message says what Massive refused, in Massive's own words. A refused flat-file `history()`
-    also names `source=dm.HistorySource.REST` when REST can serve the read.
+    When Massive refused, the message quotes its answer. A refused flat-file `history()` also
+    names `source=dm.HistorySource.REST` when REST can serve the read.
 
     Example:
         Read a day of trades, and report it when your plan lacks them::
@@ -249,7 +374,7 @@ class EntitlementError(MassiveError):
 
             m = dm.MassiveSession()
             try:
-                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06")
+                day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06", wait=True)
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
     """
@@ -285,7 +410,7 @@ class PermanentError(MassiveError):
     """
 
 
-def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveError:
+def from_wire(error: WireError, *, source: ErrorSource | None = None) -> MassiveError:
     """Return the public error for an error raised by the wire package.
 
     The REST, WebSocket, and flat-file transports call it on every `WireError` they do not
@@ -294,14 +419,16 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
 
     Args:
         error: The wire error.
-        cause: Whose problem it is, or `None` (absent) to take it from the wire error:
-            `ErrorCause.LIBRARY_DEFECT` for data the client could not read (`unreadable`), and
-            `ErrorCause.EXPECTED` otherwise.
+        source: What stopped the call, or `None` (absent) to take it from the wire error
+            (`wire_source`).
 
     Returns:
         `AuthenticationError` for a `WireAuthError`, `EntitlementError` for a
         `WireEntitlementError`, and `MassiveError` for any other `WireError`, with the wire
-        error's message, `status`, and `request_id`, and `cause`.
+        error's message, `status`, `request_id`, and `source`, and retryable as
+        `MassiveError` decides from them, or retryable when the wire error `means_retry`. The
+        message of a stopped request ends with
+        `READ_STOPPED`, which says why and what to do.
     """
     public: type[MassiveError]
     if isinstance(error, WireAuthError):
@@ -310,44 +437,123 @@ def from_wire(error: WireError, *, cause: ErrorCause | None = None) -> MassiveEr
         public = EntitlementError
     else:
         public = MassiveError
-    if cause is None:
-        cause = wire_cause(error)
-    return public(error.message, status=error.status, request_id=error.request_id, cause=cause)
+    message = error.message
+    if error.kind is WireFailure.STOPPED:
+        message = f"{message}; {READ_STOPPED}"
+    return public(
+        message,
+        status=error.status,
+        request_id=error.request_id,
+        source=wire_source(error) if source is None else source,
+        is_retryable=True if error.means_retry else None,
+    )
 
 
-def wire_cause(error: WireError) -> ErrorCause:
-    """Return whose problem a wire error is, from what the wire client knows.
+def wire_source(error: WireError) -> ErrorSource:
+    """Return what stopped a call, from the kind of failure its wire error is.
 
     Args:
         error: The wire error.
 
     Returns:
-        `ErrorCause.LIBRARY_DEFECT` for data Massive delivered that the client could not read
-        (`unreadable`) or a failure of the client itself (`client_defect`), and
-        `ErrorCause.EXPECTED` for every failure to reach or hear from Massive.
+        `ErrorSource.MASSIVE` for a refusal or an error Massive answered with
+        (`WireFailure.REFUSED`); `ErrorSource.NETWORK` for a request that got no answer
+        (`NO_ANSWER`); `ErrorSource.USER` for this machine's settings (`LOCAL`) or a request
+        the caller stopped (`STOPPED`); and `ErrorSource.LIBRARY` for data the client could not
+        read (`UNREADABLE`) or a failure of the client itself (`CLIENT_DEFECT`).
     """
-    if error.unreadable or error.client_defect:
-        return ErrorCause.LIBRARY_DEFECT
-    return ErrorCause.EXPECTED
+    return _SOURCES[error.kind]
 
 
-def cause_of(error: BaseException) -> ErrorCause:
-    """Return whose problem an exception the library caught is.
+_SOURCES: Final = MappingProxyType(
+    {
+        WireFailure.REFUSED: ErrorSource.MASSIVE,
+        WireFailure.NO_ANSWER: ErrorSource.NETWORK,
+        WireFailure.LOCAL: ErrorSource.USER,
+        WireFailure.STOPPED: ErrorSource.USER,
+        WireFailure.UNREADABLE: ErrorSource.LIBRARY,
+        WireFailure.CLIENT_DEFECT: ErrorSource.LIBRARY,
+    }
+)
+"""The source of the public error of each kind of wire failure (`wire_source`)."""
+
+
+def source_of(error: BaseException) -> ErrorSource:
+    """Return what stopped a call, for any exception the library caught.
 
     Args:
         error: What was caught.
 
     Returns:
-        A `MassiveError`'s `cause`; `ErrorCause.LIBRARY_DEFECT` for any other `Exception`,
-        which the library does not expect from its own code; `ErrorCause.EXPECTED` for a
-        `BaseException` that is not an `Exception`, such as `KeyboardInterrupt`, which is no
-        defect.
+        A `MassiveError`'s `source`; `ErrorSource.LIBRARY` for any other `Exception`, which
+        the library does not expect from its own code; `ErrorSource.USER` for a
+        `BaseException` that is not an `Exception`, such as `KeyboardInterrupt`.
     """
     if isinstance(error, MassiveError):
-        return error.cause
+        return error.source
     if isinstance(error, Exception):
-        return ErrorCause.LIBRARY_DEFECT
-    return ErrorCause.EXPECTED
+        return ErrorSource.LIBRARY
+    return ErrorSource.USER
+
+
+def is_bug_of(error: BaseException) -> bool:
+    """Tell whether a defect caused an exception the library caught, which logs it at ERROR.
+
+    Args:
+        error: What was caught.
+
+    Returns:
+        A `MassiveError`'s `is_bug`; True for any other `Exception`, which the library does not
+        expect from its own code; False for a `BaseException` that is not an `Exception`, such
+        as `KeyboardInterrupt`.
+    """
+    if isinstance(error, MassiveError):
+        return error.is_bug
+    return isinstance(error, Exception)
+
+
+def copy_error(
+    error: MassiveError, message: str | None = None, *, is_retryable: bool | None = None
+) -> MassiveError:
+    """Return a new error of the same class and attributes, for a thread of its own to raise.
+
+    Args:
+        error: The error to copy.
+        message: The copy's message, or `None` (absent) for `error`'s own.
+        is_retryable: The copy's `is_retryable`, or `None` (absent) for `error`'s own.
+
+    Returns:
+        A new instance of `type(error)` with the same `status`, `request_id`, `source`, and
+        `is_bug`, and the given message and `is_retryable`.
+    """
+    return type(error)(
+        str(error) if message is None else message,
+        status=error.status,
+        request_id=error.request_id,
+        source=error.source,
+        is_retryable=error.is_retryable if is_retryable is None else is_retryable,
+        is_bug=error.is_bug,
+    )
+
+
+def every_symbol_failed(errors: Sequence[MassiveError]) -> MassiveError:
+    """Return the error a read raises when every one of its symbols failed.
+
+    One error stands for them all, as a copy (`copy_error`). It is the first bug among them,
+    when any symbol failed of one, so a bug is never hidden behind another symbol's refusal;
+    otherwise the first symbol's, retryable only when every symbol's error is: calling again
+    helps only if each symbol may then succeed.
+
+    Args:
+        errors: Each symbol's error, the first symbol's first; at least one.
+
+    Returns:
+        A copy of the first bug's error, or of the first symbol's.
+    """
+    bug = next((e for e in errors if e.is_bug), None)
+    if bug is not None:
+        return copy_error(bug)
+    return copy_error(errors[0], is_retryable=all(e.is_retryable for e in errors))
 
 
 def library_bug(message: str) -> str:
@@ -364,14 +570,17 @@ def library_bug(message: str) -> str:
     return f"{message}{stop} {LIBRARY_BUG}"
 
 
-class BrokenGuaranteeError(Exception):
-    """A guarantee of the library's own code that broke: a defect of the library.
+class BrokenGuaranteeError(MassiveError):
+    """A guarantee of the library's own code that broke: a bug in the library.
 
-    It is not a `MassiveError`, so no handler of Massive's failures takes it for one symbol's or
-    one cycle's expected failure; every handler of defects logs it with its traceback, as it
-    does any other exception that is not a `MassiveError`. Its message ends with `LIBRARY_BUG`.
+    Internal: not exported from `dm`; a user catches it as the `MassiveError` it is, whose
+    `source` is `ErrorSource.LIBRARY` and `is_bug` True, and whose message ends with
+    `LIBRARY_BUG`. A handler that absorbs one symbol's or one cycle's failure logs a bug with
+    its traceback (`_log_limits.log_failure`), so it is never taken for an expected failure.
     `required` and `required_instance` raise it.
     """
+
+    default_source = ErrorSource.LIBRARY
 
 
 def required(value: _V | None, what: str) -> _V:
@@ -446,7 +655,7 @@ def failure_text(error: BaseException) -> str:
         and an exception that is not a `MassiveError` named by its type.
     """
     text = str(error) if isinstance(error, MassiveError) else f"{type(error).__name__}: {error}"
-    if cause_of(error) is not ErrorCause.LIBRARY_DEFECT or LIBRARY_BUG in text:
+    if source_of(error) is not ErrorSource.LIBRARY or LIBRARY_BUG in text:
         return text
     return library_bug(text)
 
@@ -507,8 +716,11 @@ class CutShortError(MassiveError):
     Internal: not exported from `dm`; `fetch()` and `history()` raise it as the `MassiveError`
     it is, with status 404. The REST transport raises it, and a read by symbol
     (`_ingest/symbol_reads.py`) names it: unlike any other 404, which the same request would
-    meet again, a page that vanished mid-read may be there when the symbol is read again.
+    meet again, a page that vanished mid-read may be there when the symbol is read again: a
+    new call starts over with a new cursor, so the error is `is_retryable`.
     """
+
+    default_is_retryable = True
 
 
 class RowDataError(PermanentError):
@@ -521,10 +733,10 @@ class RowDataError(PermanentError):
     dataset's poll keys. A `fetch()` or `history()` table fails with it like any `MassiveError`,
     and a call with `wait=True` raises it; a `poll()` table fails with it, since the next cycle
     would fail alike. Data from Massive that the library cannot read is the library's to fix, so
-    its cause is `ErrorCause.LIBRARY_DEFECT`.
+    its source is `ErrorSource.LIBRARY`, a bug.
     """
 
-    default_cause = ErrorCause.LIBRARY_DEFECT
+    default_source = ErrorSource.LIBRARY
 
 
 class UnlistedPairError(PermanentError):
@@ -540,3 +752,28 @@ class UnlistedPairError(PermanentError):
     `poll()`, or followed table fails with it, and `fetch(wait=True)` raises it. A pair passed in
     code always raises it at the call.
     """
+
+
+class SessionClosedError(MassiveError):
+    """The session is closed, so it reads nothing more.
+
+    After `m.close()`, a query method such as `fetch()` raises it, and so do `m.streams()`
+    and a call that the close cut short. A live table that was running when the session
+    closed fails with it. The message names the session and the fix, such as
+    `"MassiveSession #1 is closed; open a new dm.MassiveSession() to read again"`. Its
+    `source` is `ErrorSource.USER`, and `is_retryable` is False.
+
+    Example:
+        ::
+
+            import deephaven_massive as dm
+
+            m = dm.MassiveSession()
+            m.close()
+            try:
+                m.stocks.dividends("AAPL").fetch()
+            except dm.SessionClosedError:
+                m = dm.MassiveSession()
+    """
+
+    default_source = ErrorSource.USER

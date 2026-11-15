@@ -41,6 +41,7 @@ __all__ = [
     "JITTER",
     "MAX_RETRIES",
     "RATE_LIMIT_WAITS",
+    "RETRYABLE_STATUSES",
     "SYSTEM_CLOCK",
     "TRANSIENT_STATUSES",
     "TRANSIENT_WAITS",
@@ -60,6 +61,10 @@ MAX_RETRIES = 3
 
 TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 """The HTTP statuses that mean the server failed for now and a retry may succeed."""
+
+RETRYABLE_STATUSES = frozenset({429, *TRANSIENT_STATUSES})
+"""The HTTP statuses whose request may succeed when it is sent again later: a rate limit and
+the transient statuses. A caller that gets one of them after the clients gave up may try again."""
 
 TRANSIENT_WAITS = (0.5, 1.0, 2.0)
 """The base wait in seconds before each retry of a transient failure, before jitter."""

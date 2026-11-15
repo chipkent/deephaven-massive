@@ -54,8 +54,8 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
   episode, with the recovery at INFO. INFO is for decisions and progress. Everything else is
   DEBUG, including an expected error that is also raised to the caller. Expected conditions
   (refusals, plan and rate limits, network failures, the user's own `close()`) never log at
-  ERROR. A `MassiveError` carries its `cause`; `_log_limits.log_failure` logs a failure that
-  fails live tables once, at the level its cause gives.
+  ERROR. A `MassiveError` carries its `is_bug`; `_log_limits.log_failure` logs a failure that
+  fails live tables once, at the level its `is_bug` gives.
 - Each record names what an agent needs to reproduce it: the offending field and value, the
   dataset, the endpoint or channel, the symbol, and the call or stream id. Every layer logs
   what it knows at DEBUG; repeats there are fine. Log too much rather than too little.

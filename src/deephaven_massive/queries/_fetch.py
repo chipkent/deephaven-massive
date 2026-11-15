@@ -252,11 +252,10 @@ class FetchQuery(Query):
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
                 For those two crypto datasets, also at the call, if your plan doesn't include
                 Massive's list of crypto tickers.
-            MassiveError: At the call, if:
-                - the session is closed;
-                - for those two crypto datasets, Massive's list of crypto tickers can't be read,
-                  or lacks a crypto pair passed as a `str` or list.
-                With `wait=True`, also if:
+            SessionClosedError: If the session is closed.
+            MassiveError: At the call, for those two crypto datasets, if Massive's list of crypto
+                tickers can't be read, or lacks a crypto pair passed as a `str` or list. With
+                `wait=True`, also if:
                 - a rate limit outlasts the retries;
                 - a request fails in any other way;
                 - for a watchlist, every symbol's read failed.
@@ -517,8 +516,9 @@ class FetchQuery(Query):
                 call reads Massive's list of crypto tickers.
             EntitlementError: For a crypto dataset, if your plan doesn't include Massive's list of
                 crypto tickers.
-            MassiveError: If the session is closed, or Massive's list of crypto tickers can't be
-                read or lacks a crypto pair passed as a `str` or list.
+            SessionClosedError: If the session is closed.
+            MassiveError: If Massive's list of crypto tickers can't be read or lacks a crypto
+                pair passed as a `str` or list.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")

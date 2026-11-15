@@ -32,7 +32,13 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import BrokenGuaranteeError, PermanentError, RowDataError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    PermanentError,
+    RowDataError,
+)
 from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
@@ -165,6 +171,21 @@ class RecordingPollers(Pollers):
 @pytest.fixture
 def pollers(massive_session: dm.MassiveSession) -> Pollers:
     return RecordingPollers(massive_session._core.label)
+
+
+@pytest.fixture
+def published_failures(monkeypatch: pytest.MonkeyPatch) -> list[dm.MassiveError]:
+    # Records each error a table is failed with, and fails the table with it.
+    published: list[dm.MassiveError] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        assert isinstance(error, dm.MassiveError)  # a poll fails its table with no other
+        published.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
+    return published
 
 
 def start(
@@ -458,6 +479,34 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
     ]
 
 
+def test_a_run_of_failures_warns_once_whatever_their_source_but_a_bug_logs_an_error(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    failures = [
+        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK),
+        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY),
+    ]
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for failure in failures:
+            script.fail(failure)
+            next_cycle(clock)
+    failed = [r for r in caplog.records if "a cycle failed" in r.getMessage()]
+    # One outage of Massive's and the network's: one WARNING. The bug starts a run of its own.
+    assert [r.levelno for r in failed] == [logging.WARNING, logging.ERROR]
+    assert [r.exc_info is not None for r in failed] == [False, True]  # the bug, with its trace
+
+
 def test_late_cycles_warn_once_and_on_time_cycles_say_so(
     *,
     massive_session: dm.MassiveSession,
@@ -597,7 +646,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
     core = massive_session._core
     record, publish = core.fail_stream, TablePublisher.publish_failure
 
-    def recording(stream_id: int, error: str) -> None:
+    def recording(stream_id: int, error: dm.MassiveError) -> None:
         order.append("recorded")
         record(stream_id, error)
 
@@ -733,11 +782,12 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
     mode: PollMode,
 ) -> None:
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
-    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends")
+    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503)
     for _ in range(5):  # failures at 60 to 300 s: the table runs and names its last good cycle
         script.fail(error)
         next_cycle(clock)
@@ -761,6 +811,10 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
         f"latest error: {error}"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # Massive's outage may be over by the next call, as the latest error says.
+    assert [e.is_retryable for e in published_failures] == [True]
+    # Chained to the latest error, so a bug's traceback reaches the failure's log record.
+    assert [str(e.__cause__) for e in published_failures] == [str(error)]
 
 
 @pytest.mark.parametrize(
@@ -888,6 +942,7 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
@@ -917,6 +972,10 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
         "table"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # No page came: the network's, and data may flow again.
+    assert [(e.source, e.is_retryable) for e in published_failures] == [
+        (dm.ErrorSource.NETWORK, True)
+    ]
     assert (
         "stocks.dividends poll() stream 1: no page for 301 s, max_outage is 300 s; failing it"
         in caplog.messages
@@ -1061,7 +1120,7 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
         f"stocks.dividends poll(): {NO_GOOD}; every cycle since 2027-01-15T08:00:00Z has "
         "failed, for 0 s, longer than MassiveConfig.max_outage (0 s); the rows since then may "
         "be missing, so this table stopped; call the verb again for a new live table. The "
-        "latest error: a defect"
+        f"latest error: a defect. {LIBRARY_BUG}"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
 
@@ -1290,7 +1349,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
     )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1545,21 +1604,22 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = massive_session._core
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = poller._publisher
 
     class _Recording:
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
     recording: BlinkPublisher = _Recording()  # type: ignore[assignment]  # records its failure
     poller._publisher = recording
     with caplog.at_level(logging.ERROR, LOGGER):
         assert poller.fail(dm.AuthenticationError("HTTP 401"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], dm.SessionClosedError)
     assert not caplog.records
     until(lambda: bool(table.j_table.isFailed()))
     poller.thread.join(TIMEOUT)
@@ -2389,7 +2449,10 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
     table = q.poll(60, mode=mode)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("FAILED", f"stocks.dividends poll(): {message}")
+    assert (row["State"], row["Error"]) == (
+        "FAILED",
+        f"stocks.dividends poll(): {message}. {LIBRARY_BUG}",
+    )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
 
 
@@ -2447,7 +2510,7 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
     (row,) = stream_rows()
     prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
     assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
-    rendered = row["Error"].removeprefix(prefix)
+    rendered = row["Error"].removeprefix(prefix).removesuffix(f" {LIBRARY_BUG}")
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
 
