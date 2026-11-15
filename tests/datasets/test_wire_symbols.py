@@ -299,6 +299,10 @@ def test_a_class_with_no_spellings_is_a_defect() -> None:
     # Every class names its file spellings; a new one fails until it does, never reads as stocks.
     with pytest.raises(AssertionError):
         wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(AssertionError):
+        canonical_from_wire("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(AssertionError):
+        ws_symbol("bonds", "X:Y", {})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize("symbol", ["C:EUR/USD", "C:EUR-USD", "C:EURO"])

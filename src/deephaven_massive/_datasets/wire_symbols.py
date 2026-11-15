@@ -89,9 +89,17 @@ def canonical_from_wire(asset_class: AssetClass | ClassFromPrefix, raw: str) -> 
         return read_forex_pair(raw, ("C:", "X:"))
     if resolved is AssetClass.CRYPTO:
         return read_crypto_pair(raw, ("X:",))
-    if asset_class is AssetClass.INDICES and not raw.startswith("I:"):
-        return f"I:{raw}"
-    return raw
+    if resolved is AssetClass.INDICES:
+        # Only a dataset of the indices class reaches here with unprefixed text: a dataset of
+        # every class reads such text as a stock.
+        return raw if raw.startswith(_INDEX_PREFIX) else f"{_INDEX_PREFIX}{raw}"
+    if (
+        resolved is AssetClass.STOCKS
+        or resolved is AssetClass.OPTIONS
+        or resolved is AssetClass.FUTURES
+    ):
+        return raw  # every transport writes these classes' REST ticker
+    assert_never(resolved)  # a new class needs its wire spellings here
 
 
 def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
@@ -199,7 +207,14 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
     if asset_class is AssetClass.CRYPTO:
         base, quote = pairs[symbol]
         return f"{base}-{quote}"
-    return symbol
+    if (
+        asset_class is AssetClass.STOCKS
+        or asset_class is AssetClass.OPTIONS
+        or asset_class is AssetClass.FUTURES
+        or asset_class is AssetClass.INDICES
+    ):
+        return symbol  # their topics take the REST ticker
+    assert_never(asset_class)  # a new class needs its topic spelling here
 
 
 _INDEX_PREFIX: Final = "I:"
