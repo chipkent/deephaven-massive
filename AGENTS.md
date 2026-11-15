@@ -250,9 +250,16 @@ These protect the owner's repository, money, and secrets.
   design (the calls a user types, what is refused and why, the settings, which files change).
   The costly failures of one week were code written before its design settled: a public shape
   the owner first met as a 184-file diff, and a PR whose rules changed twice after it opened,
-  each change paid for in merges and reviews. A public change, and any dropped protection, goes
-  to the owner in that design form before any code is written (`writing-to-the-owner` §3).
-  Every other design is yours to settle: record it in the PR under Decisions and start.
+  each change paid for in merges and reviews. So for anything beyond a small fix, draft the
+  design with the most capable model available (Fable) and have a second Fable instance attack
+  it as an adversary before any code: a flaw found on paper costs a paragraph, and the same
+  flaw found in the diff costs the diff. Where the design is ambiguous, or the design and its
+  critic can't agree on a choice, stop and ask (the owner, or the coordinator for a subagent)
+  with the options and a recommendation, instead of picking one and building; keep working
+  only on what the answer can't change. A public change, and any dropped protection, goes to
+  the owner in that design form before any code is written (`writing-to-the-owner` §3). Every
+  other design the critic accepts is yours to settle: record it in the PR under Decisions and
+  start.
 - **One PR per change that can merge on its own.** A PR holds one change with everything it
   needs to be correct: the code, its tests, and its docs together (a new column lands with its
   docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a

@@ -109,6 +109,11 @@ and a long list of questions goes unread.
    until the critics run out of substantive objections. Every item a top-1% developer would find
    obvious is decided there and listed under **Decided**; only what is still a matter of taste,
    product, or reversing an owner decision reaches the owner, ideally fewer than five items.
+   A choice the design and its critic can't settle between them, or a point the request leaves
+   ambiguous, is one of those items: ask it with the options and a recommendation, and build
+   nothing that depends on it (`AGENTS.md`, Workflow, Design before code). This step is for
+   any change beyond a small fix, public or not; a private design the critics accept goes
+   under Decisions in the PR, not to the owner.
 2. **Complete.** Each option covers every dataset and case it touches, defines every term, and
    shows the calls a user writes.
 3. **Researched, not assumed.** A choice of format, standard, or convention cites what widely

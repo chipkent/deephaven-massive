@@ -100,7 +100,10 @@ says only what the agent cannot know:
   need from it;
 - for a public change, the design the owner approved and their answer to it, quoted (the
   calls a user types, what is refused and why, the settings). No design yet means the agent's
-  first deliverable is that design, not code (`AGENTS.md`, Workflow);
+  first deliverable is that design, not code (`AGENTS.md`, Workflow). For any change beyond a
+  small fix, the agent drafts the design with Fable and has a second Fable instance attack it
+  before code; a choice the two can't settle, or a point the brief leaves ambiguous, comes
+  back to you as a question with options and a recommendation, never built on a guess;
 - each protection the work may drop (a check, refusal, validation, test, setting, or guard
   against a mistake that stays possible), with the owner's yes to that removal quoted, or the
   instruction to ask before removing it: a brief's reading of a rule approves no removal;
