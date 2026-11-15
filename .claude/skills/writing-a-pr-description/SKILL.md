@@ -23,7 +23,8 @@ From the diff, the issue, and your notes, collect what the reader needs:
 - what is left, with its issue: Follow-ups, including review findings that add work;
 - under Check before merging: whether the change breaks code written to the last release and,
   if so, the next version; each new dependency or raised floor; each new check entry; each
-  suppression, with the owner's acceptance quoted; and each owner decision a brief relayed, quoted.
+  suppression, with the owner's acceptance quoted (an import after a Deephaven server start
+  needs none); and each owner decision a brief relayed, quoted.
 
 Then select. Every fact must earn its place by changing what the reader understands or decides.
 A true fact the reader has no use for (an internal constant, a helper's name, a count of test

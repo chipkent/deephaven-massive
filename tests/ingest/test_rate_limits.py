@@ -223,7 +223,10 @@ def test_the_registry_counts_the_leases_not_yet_released() -> None:
 
 
 def _error(message: str) -> _massive.WireError:
-    return _massive.WireError(f"HTTP 429 from GET /v3/trades/AAPL (request_id r1): {message}")
+    return _massive.WireError(
+        f"HTTP 429 from GET /v3/trades/AAPL (request_id r1): {message}",
+        kind=_massive.WireFailure.REFUSED,
+    )
 
 
 def test_a_learned_basic_subscription_is_explained_once_per_session(

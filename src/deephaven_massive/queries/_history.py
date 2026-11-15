@@ -37,6 +37,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import (
     raises_through,
 )
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import utc_text
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
@@ -214,7 +215,8 @@ class HistoryQuery(Query):
                 keys.
             EntitlementError: With `wait=True`, if your plan doesn't include the data from any
                 source the call can use.
-            MassiveError: At the call, if the session is closed. With `wait=True`, also if:
+            SessionClosedError: If the session is closed.
+            MassiveError: With `wait=True`, if:
                 - a request fails;
                 - adjusted bars come back unadjusted, or the reverse;
                 - a trading day's flat file is missing and REST can't serve that day;
@@ -370,6 +372,8 @@ class HistoryQuery(Query):
             files = core.flat_file_transport()
             dates = partition_dates(spec, window)
             forced = source is HistorySource.FLAT_FILES
+            # The plan, and so the result, keeps what the call has logged across its reads.
+            logged = LoggedKeys()
             plan = FollowPlan(
                 Transport.FLAT_FILES,
                 one_scan=True,
@@ -382,6 +386,7 @@ class HistoryQuery(Query):
                     dates=dates,
                     call=call,
                     forced=forced,
+                    logged=logged,
                     stop=stop,
                 ),
             )

@@ -12,10 +12,12 @@ or JSON exception:
 - `WireEntitlementError`: the credentials are valid but the plan does not cover the request
   (HTTP 403, a `NOT_AUTHORIZED` envelope, or any other S3 403).
 
-Each carries the HTTP `status`, the `host` and `path` of the request, Massive's `request_id`,
-and a `message`. The library outside `_massive` never shows these to users: `_errors.from_wire`
-turns each one into the public `MassiveError`, `AuthenticationError`, or `EntitlementError`
-with the same message, `status`, and `request_id`.
+Each carries its `kind`, a `WireFailure` that says who, if anyone, answered: every error has
+exactly one, and the client that raises it must choose it. Each also carries the HTTP
+`status`, the `host` and `path` of the request, Massive's `request_id`, and a `message`. The
+library outside `_massive` never shows these to users: `_errors.from_wire` turns each one into
+the public `MassiveError`, `AuthenticationError`, or `EntitlementError` with the same message,
+`status`, and `request_id`.
 
 The clients classify what their HTTP libraries raise before they wrap it, and those libraries
 nest the root cause as an argument, a `__cause__`, or a `__context__`. `linked_errors` walks
@@ -34,6 +36,7 @@ shares. Its functions are pure, so they are safe from any thread.
 
 from __future__ import annotations
 
+import enum
 import sys
 from typing import TYPE_CHECKING, Final
 
@@ -45,6 +48,7 @@ __all__ = [
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireFailure",
     "is_proxy_auth_failure",
     "is_tls_failure",
     "linked_errors",
@@ -62,6 +66,44 @@ from Massive the library cannot convert or read: none is the user's to fix, so t
 how to report it."""
 
 
+class WireFailure(enum.Enum):
+    """What kind of failure a wire error is: whether Massive answered, and if not, why not.
+
+    Every `WireError` has exactly one, chosen where it is raised, so a failure is never taken
+    for Massive's answer by default. `_errors.wire_source` maps each to the public error's
+    source.
+    """
+
+    REFUSED = "refused"
+    """Massive answered with a refusal or an error: an HTTP error status (S3's included), a
+    WebSocket status message, or an answer the client refuses to follow, such as a `next_url`
+    on another host or one that repeats a page."""
+
+    NO_ANSWER = "no_answer"
+    """No answer came: a connection that could not be made, was reset, timed out, or broke
+    off part-way through a body, or a TLS handshake that failed for another reason than the
+    certificate. A client that retries such a failure raises it once its retries are spent;
+    one that does not, at once."""
+
+    LOCAL = "local"
+    """This machine's settings stopped the request before Massive could answer: a
+    certificate it does not trust (`SSL_CERT_FILE`), or a proxy that refused its credentials
+    or is configured wrong (`HTTPS_PROXY`)."""
+
+    STOPPED = "stopped"
+    """The caller stopped the request, or closed the client, before an answer came. A stop
+    the library chooses itself, such as its other requests after one fails, is never
+    surfaced: the caller raises the failure that caused it."""
+
+    UNREADABLE = "unreadable"
+    """Massive delivered data the client could not read: a malformed or truncated flat file,
+    a header the file lacks, or a body that is not the JSON the path declares."""
+
+    CLIENT_DEFECT = "client_defect"
+    """The client itself failed on an unexpected exception: a bug in it, not anything Massive
+    did."""
+
+
 class WireError(Exception):
     """A failure talking to Massive, raised by a wire client.
 
@@ -77,7 +119,7 @@ class WireError(Exception):
     Example:
         A REST client giving up on a rate limit::
 
-            from deephaven_massive._massive import WireError
+            from deephaven_massive._massive import WireError, WireFailure
 
             error = WireError(
                 "HTTP 429 from GET /v3/trades/AAPL (request_id abc123): rate limited",
@@ -85,6 +127,7 @@ class WireError(Exception):
                 host="api.massive.com",
                 path="/v3/trades/AAPL",
                 request_id="abc123",
+                kind=WireFailure.REFUSED,
             )
             assert str(error) == error.message
     """
@@ -97,8 +140,8 @@ class WireError(Exception):
         host: str | None = None,
         path: str | None = None,
         request_id: str | None = None,
-        unreadable: bool = False,
-        client_defect: bool = False,
+        kind: WireFailure,
+        means_retry: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -112,12 +155,11 @@ class WireError(Exception):
                 WebSocket path, or the S3 object key; `None` when there was no request.
             request_id: The `request_id` of Massive's response (`x-amz-request-id` for S3), or
                 `None` when the response had none.
-            unreadable: True when Massive delivered the data but the client could not read it
-                (a malformed or truncated flat file, a header the file lacks): a gap in the
-                library rather than a transport failure, which the library reports as a
-                defect. False, the default, for every failure to reach or hear from Massive.
-            client_defect: True when the client itself failed on an unexpected exception (a
-                bug in it, not anything Massive did), which the library reports as a defect.
+            kind: What kind of failure it is; required, so that no failure is taken for
+                Massive's answer by default.
+            means_retry: True for an answer that means "try again" although its status alone
+                does not say so, such as S3's `RequestTimeout` (HTTP 400): the caller may
+                succeed by sending the request again later.
         """
         super().__init__(message)
         self._message = message
@@ -125,8 +167,8 @@ class WireError(Exception):
         self._host = host
         self._path = path
         self._request_id = request_id
-        self._unreadable = unreadable
-        self._client_defect = client_defect
+        self._kind = kind
+        self._means_retry = means_retry
 
     @property
     def message(self) -> str:
@@ -154,14 +196,14 @@ class WireError(Exception):
         return self._request_id
 
     @property
-    def unreadable(self) -> bool:
-        """True when Massive delivered the data but the client could not read it."""
-        return self._unreadable
+    def kind(self) -> WireFailure:
+        """What kind of failure it is: whether Massive answered, and if not, why not."""
+        return self._kind
 
     @property
-    def client_defect(self) -> bool:
-        """True when the client itself failed on an unexpected exception: a bug in it."""
-        return self._client_defect
+    def means_retry(self) -> bool:
+        """True for an answer that means "try again" although its status alone does not say so."""
+        return self._means_retry
 
 
 class WireAuthError(WireError):
@@ -180,6 +222,33 @@ class WireAuthError(WireError):
             assert isinstance(error, WireError)
     """
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        host: str | None = None,
+        path: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        """Create the error, a refusal by Massive (`WireFailure.REFUSED`).
+
+        Args:
+            message: The complete text a person reads, as for `WireError`.
+            status: The HTTP status of the response, or `None` for a WebSocket reply.
+            host: The host the request went to, or `None`.
+            path: The request's path or S3 object key, without secrets, or `None`.
+            request_id: The `request_id` of Massive's response, or `None`.
+        """
+        super().__init__(
+            message,
+            status=status,
+            host=host,
+            path=path,
+            request_id=request_id,
+            kind=WireFailure.REFUSED,
+        )
+
 
 class WireEntitlementError(WireError):
     """The credentials are valid, but the plan does not cover the request.
@@ -197,6 +266,33 @@ class WireEntitlementError(WireError):
             )
             assert error.status == 403
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        host: str | None = None,
+        path: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        """Create the error, a refusal by Massive (`WireFailure.REFUSED`).
+
+        Args:
+            message: The complete text a person reads, as for `WireError`.
+            status: The HTTP status of the response, or `None` for a WebSocket reply.
+            host: The host the request went to, or `None`.
+            path: The request's path or S3 object key, without secrets, or `None`.
+            request_id: The `request_id` of Massive's response, or `None`.
+        """
+        super().__init__(
+            message,
+            status=status,
+            host=host,
+            path=path,
+            request_id=request_id,
+            kind=WireFailure.REFUSED,
+        )
 
 
 def is_tls_failure(error: BaseException) -> bool:

@@ -59,6 +59,8 @@ def test_a_stream_refusal_names_the_delayed_feed() -> None:
         Subscription.OPTIONS, "options streams", "last_trade.timeframe=DELAYED", streams=True
     )
     assert isinstance(error, dm.EntitlementError)
+    # Massive serves the delayed data; the session's settings refuse it.
+    assert (error.source, error.is_bug) == (dm.ErrorSource.USER, False)
     assert str(error) == (
         "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED), and "
         "dm.Subscription.OPTIONS is not in MassiveConfig.delayed_subscriptions, so the library "

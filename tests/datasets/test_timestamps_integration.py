@@ -115,5 +115,5 @@ def test_forex_conversion_last_timestamp_is_milliseconds(
     raw = rest_rows("/v1/conversion/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/conversion/EUR/USD: {raw}")
     rows = table_rows(live_session.forex.conversion("EUR", "USD").fetch(wait=True))
-    column = "Timestamp" if rows and "Timestamp" in rows[0] else "LastTimestamp"
+    column = "Timestamp" if rows and "Timestamp" in rows[0] else "LastQuoteParticipantTimestamp"
     _check("forex.conversion fetch()", rows, column=column, text=instant_text, evidence=evidence)

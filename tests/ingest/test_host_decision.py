@@ -60,7 +60,7 @@ def snapshot(load_fixture: Load) -> Callable[[str], Snapshot]:
 
 @pytest.fixture(autouse=True)
 def _fresh_once_logs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", _log_limits.LoggedKeys())
 
 
 def run(

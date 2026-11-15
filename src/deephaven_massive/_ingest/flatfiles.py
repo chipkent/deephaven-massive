@@ -114,7 +114,7 @@ gathering a file's rows (out of memory, say) is a failed read of that file.
 A failed read, a `KeyboardInterrupt`, or `m.close()` stops every other read of the call at its
 next block, and reads not yet started are cancelled. After a close, no request starts once a
 reader has seen it; a request already in flight is discarded, and the call raises
-`MassiveError("MassiveSession #1 is closed")`.
+`SessionClosedError("MassiveSession #1 is closed; ...")`.
 
 The module is one subject although it runs past 1,000 lines: it is one transport, from the
 read plan of a call to its table, and every step shares the plan's columns and its failure
@@ -166,11 +166,14 @@ from deephaven_massive._datasets.wire_symbols import (
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._errors import (
+    NEW_SESSION,
+    READ_STOPPED,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     RowDataError,
+    SessionClosedError,
     from_wire,
     required,
 )
@@ -209,7 +212,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
-    from deephaven_massive._log_limits import BoundedLog
+    from deephaven_massive._log_limits import BoundedLog, LoggedKeys
     from deephaven_massive._massive import FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
@@ -662,7 +665,7 @@ class _Transform:
                 if read.unreadable and not self.symbols.keeps:
                     raise MassiveError(
                         unreadable_symbol_message(self.dataset, read.unreadable),
-                        cause=ErrorCause.LIBRARY_DEFECT,  # a spelling the library cannot read
+                        source=ErrorSource.LIBRARY,  # a spelling the library cannot read
                     )
                 values, raw = read.symbols, read.raw
             else:
@@ -811,6 +814,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -822,7 +826,7 @@ class FlatFileHistory:
         other read stops at its next block, reads that have not started are cancelled, and the
         failure of the earliest file is raised. Closing the session stops the reads the same
         way, and so does setting a background read's `stop` token, after which the call raises
-        `MassiveError("<dataset> history: the read was cancelled")` once the pool has drained.
+        `MassiveError("<dataset> history: the read was stopped ...")` once the pool has drained.
         Logs `source=S3 files=<n> skipped=<dates> unread=<dates>` at INFO.
 
         Args:
@@ -839,6 +843,8 @@ class FlatFileHistory:
                 refuses is skipped when `request.refused_venues` is `LOG` or `IGNORE`. False to
                 report every missing trading day as unread, for the query to read from REST,
                 and to raise every refusal, for the query to read the call from REST.
+            logged: The facts the call has logged (`LoggedKeys`): the refused venues, each
+                logged once per call even when a followed table reads the files again.
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
                 None when only the session's close should stop the reads.
 
@@ -882,7 +888,7 @@ class FlatFileHistory:
         refusals = None
         policy = request.refused_venues
         if infer_holidays and policy is not None and not effect_of(policy).fails:
-            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}")
+            refusals = RefusedVenues(policy, call=f"{self._core.label} call-{call}", logged=logged)
         return self._read(
             spec,
             transform,
@@ -953,6 +959,7 @@ class FlatFileHistory:
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         """Read `history()` from the flat files for each symbol, each with its own outcome.
@@ -969,6 +976,7 @@ class FlatFileHistory:
             dates: The partition dates of the files the window needs.
             call: The call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
+            logged: The facts the call has logged, kept across its reads (`LoggedKeys`).
             stop: A read's stop token; None for a read only the session's close stops.
 
         Returns:
@@ -985,6 +993,7 @@ class FlatFileHistory:
             symbols=symbols,
             dates=dates,
             call=call,
+            logged=logged,
             stop=stop,
             forced=forced,
         )
@@ -1009,7 +1018,7 @@ class FlatFileHistory:
         of this thread, it sets the call's cancel event, which stops the other reads at their
         next block, cancels the reads not yet started, and waits for the pool to drain; then it
         raises the failure of the earliest file (an interrupt is re-raised as is). If the
-        session was closed meanwhile, it raises `"MassiveSession #1 is closed"`, whatever the
+        session was closed meanwhile, it raises `"MassiveSession #1 is closed; ..."`, whatever the
         reads returned: a request in flight at the close may have been answered with any
         outcome. A missing file of a day without trading (`dates.is_trading_day`) is skipped
         silently. A missing trading day's file is judged by `infer_holidays`. When it is set
@@ -1068,7 +1077,7 @@ class FlatFileHistory:
         # any outcome (a row, a missing file, a refusal): report the close instead.
         self._check_open()
         if stop is not None and stop.is_set():  # the reads stopped early: report no result
-            raise MassiveError(f"{spec.name} history: the read was cancelled")
+            raise MassiveError(f"{spec.name} history: {READ_STOPPED}", source=ErrorSource.USER)
         parts = [_outcome(future) for future in futures]
         if refusals is not None:
             keys, parts = _without_refused(keys, parts, refusals=refusals)
@@ -1197,7 +1206,7 @@ class FlatFileHistory:
         transform keeps only the rows inside the range. Otherwise the file is only opened and
         closed. The looks run on the caller thread, one at a time. Each checks the session
         before its request and after every block, as the pool's reads do, so a close stops it
-        with `"MassiveSession #1 is closed"`. The pool's cancel event is already set when this
+        with `"MassiveSession #1 is closed; ..."`. The pool's cancel event is already set when this
         runs, so these looks listen to the background read's stop token instead, if there is
         one.
 
@@ -1220,7 +1229,7 @@ class FlatFileHistory:
             `roll`, each with its file's day, in venue order.
 
         Raises:
-            MassiveError: `"<dataset> history: the read was cancelled"` once `stop` is set. A
+            MassiveError: `"<dataset> history: the read was stopped ..."` once `stop` is set. A
                 failed request or read raises the public error `_read_key` raises
                 (`MassiveError`, `AuthenticationError`, or `EntitlementError`).
         """
@@ -1298,7 +1307,7 @@ class FlatFileHistory:
             one that `refusals` recorded.
 
         Raises:
-            MassiveError: `"<dataset> history: the read was cancelled"` once `cancel` is set;
+            MassiveError: `"<dataset> history: the read was stopped ..."` once `cancel` is set;
                 a failed request or read raises the public error `_read_key` raises.
         """
         name = None if first.venue is None else first.venue.value
@@ -1315,7 +1324,9 @@ class FlatFileHistory:
                 )
             except _CancelledError:
                 logger.debug("%s history: stopped before reading %s", spec.name, key.key)
-                raise MassiveError(f"{spec.name} history: the read was cancelled") from None
+                raise MassiveError(
+                    f"{spec.name} history: {READ_STOPPED}", source=ErrorSource.USER
+                ) from None
             if refusals is not None and first.venue in refusals:
                 return None
             if found is not None:
@@ -1366,10 +1377,10 @@ class FlatFileHistory:
         """Reject further work once the session's flat-file client is closed.
 
         Raises:
-            MassiveError: `"MassiveSession #1 is closed"` once the session has closed.
+            SessionClosedError: `"MassiveSession #1 is closed; ..."` once the session has closed.
         """
         if self._client.closed:
-            raise MassiveError(f"{self._core.label} is closed")
+            raise SessionClosedError(f"{self._core.label} is closed; {NEW_SESSION}")
 
     def _check(self, cancel: threading.Event) -> None:
         """Stop a read if the session was closed or another read of the call failed.
@@ -1497,7 +1508,7 @@ class FlatFileHistory:
                     return self._gather(batches, transform, key=key, cancel=cancel, file=file)
                 except pa.ArrowException as error:
                     raise MassiveError(
-                        f"cannot read {file.location}: {error}", cause=ErrorCause.LIBRARY_DEFECT
+                        f"cannot read {file.location}: {error}", source=ErrorSource.LIBRARY
                     ) from error
         except WireError as error:
             if file is not None and file.dropped:
@@ -1620,7 +1631,7 @@ def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
 def _malformed_message(dataset: str, file: FlatFile) -> str:
     """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
 
-    A `RowDataError` carries it (`ErrorCause.LIBRARY_DEFECT`: data from Massive the library
+    A `RowDataError` carries it (`ErrorSource.LIBRARY`: data from Massive the library
     can't read), and a retry of the read would meet the same line.
 
     Args:

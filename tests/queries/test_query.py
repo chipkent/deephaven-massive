@@ -180,8 +180,8 @@ def test_an_expected_failure_is_logged_once_at_debug(
 
 
 @pytest.mark.parametrize(
-    ("cause", "suffix"),
-    [(dm.ErrorCause.LIBRARY_DEFECT, f". {LIBRARY_BUG}"), (dm.ErrorCause.USER_DEFECT, "")],
+    ("source", "suffix"),
+    [(dm.ErrorSource.LIBRARY, f". {LIBRARY_BUG}"), (dm.ErrorSource.USER, "")],
 )
 def test_a_defect_is_logged_at_error_even_though_it_is_raised(
     *,
@@ -189,11 +189,11 @@ def test_a_defect_is_logged_at_error_even_though_it_is_raised(
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    cause: dm.ErrorCause,
+    source: dm.ErrorSource,
     suffix: str,
 ) -> None:
     def broken(*_: object, **__: object) -> Table:
-        raise dm.MassiveError("stocks.trades: a row broke", cause=cause)
+        raise dm.MassiveError("stocks.trades: a row broke", source=source, is_bug=True)
 
     monkeypatch.setattr(rest, "fetch", broken)
     with pytest.raises(dm.MassiveError):

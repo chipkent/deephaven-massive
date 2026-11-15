@@ -25,7 +25,7 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._ingest import history_reads
-from deephaven_massive._ingest.flatfiles import FlatFileHistory
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.publisher import BlinkPublisher
@@ -270,6 +270,7 @@ class FlatFiles:
         self.core = core
         self.unread = unread
         self.inferred: list[bool] = []
+        self.logged: list[LoggedKeys] = []
 
     def history(
         self,
@@ -280,8 +281,10 @@ class FlatFiles:
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
+        del logged
         self.inferred.append(infer_holidays)
         table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
         return FlatFileRead(((date.min, table),), table, self.unread)
@@ -296,17 +299,14 @@ class FlatFiles:
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         del dates, forced
+        self.logged.append(logged)
         return self.recorder.history_by_symbol(
             spec, request, window, symbols=symbols, call=call, stop=stop
         )
-
-    def _as_files(self) -> FlatFileHistory:
-        """Return this recorder as the flat-file transport `read_history` reads from."""
-        files: FlatFileHistory = self  # type: ignore[assignment]  # a fake with its read methods
-        return files
 
     def read_history(
         self,
@@ -324,7 +324,7 @@ class FlatFiles:
             request,
             window,
             core=self.core,
-            files=self._as_files(),
+            files=self,
             dates=dates,
             call=call,
             forced=forced,

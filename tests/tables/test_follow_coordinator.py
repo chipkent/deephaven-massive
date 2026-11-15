@@ -12,10 +12,10 @@ import dataclasses
 import functools
 import gc
 import logging
+import re
 import threading
 import weakref
-from collections import UserDict
-from collections.abc import Callable, Mapping, ValuesView
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import MethodType
@@ -25,6 +25,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
+from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.update_graph import exclusive_lock
 from typing_extensions import override
@@ -32,7 +33,12 @@ from typing_extensions import override
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import BrokenGuaranteeError, MassiveError, UnlistedPairError
+from deephaven_massive._errors import (
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    MassiveError,
+    UnlistedPairError,
+)
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.diagnostics import (
@@ -40,7 +46,6 @@ from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
     StreamRow,
-    StreamUpdate,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
@@ -55,8 +60,11 @@ from deephaven_massive._tables.transports import (
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
 from tests._fakes.clock import FakeClock
+from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
+    from _collections_abc import dict_values
+
     from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
@@ -838,7 +846,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     view = massive_session.symbol_reads()
     massive_session.close()
     until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
-    with pytest.raises(MassiveError, match=r"is closed$"):
+    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
         massive_session.symbol_reads()
     massive_session.release(view)
     del result
@@ -1252,7 +1260,7 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
 ) -> None:
     # As a read by symbol fails a table without the dataset's columns: a defect, ERROR.
     defect = MassiveError(
-        "test.trades: AAPL's rows from REST lack Price", cause=dm.ErrorCause.LIBRARY_DEFECT
+        "test.trades: AAPL's rows from REST lack Price", source=dm.ErrorSource.LIBRARY
     )
     script = Script(massive_session)
     script.answers["AAPL"] = [SymbolFailure(defect, FailureKind.PERMANENT)]
@@ -1262,6 +1270,7 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
         wait_state(massive_session, "MSFT", SymbolReadState.DONE)
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
     assert "This is a bug in deephaven-massive" in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is not None  # a bug, with its traceback
     assert not result.j_table.isFailed()
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
@@ -1787,10 +1796,22 @@ def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
 
 
 def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
-    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # While AAPL is read again, the table waits; once its last retry fails, every call-time
     # symbol has failed, and the table fails, as a call that waits would have raised.
+    failures: list[Exception] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        failures.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(503, "busy")]
     script.answers["MSFT"] = [refused(403, "not in the plan")]
@@ -1803,6 +1824,11 @@ def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
         massive_session._core.follows.wake()
         until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
     until(lambda: bool(result.j_table.isFailed()))
+    # The table fails with AAPL's error, the first by name, but calling again cannot help
+    # MSFT, so the failure is not retryable, though AAPL's HTTP 503 alone would be.
+    (failure,) = failures
+    assert isinstance(failure, dm.MassiveError)
+    assert (failure.status, failure.is_retryable) == (503, False)
 
 
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
@@ -1859,50 +1885,6 @@ class _CountedSymbol(follow_coordinator._Symbol):
         return super().__getattribute__(name)
 
 
-class _QuietCore:
-    # The core a followed read reports to, reduced to the calls the coordinator makes.
-    closed = False
-    config = dm.MassiveConfig(api_key="k")
-
-    def __init__(self) -> None:
-        self.progress: list[int | None] = []
-        self.workers = self  # the worker-table registry's one call, `update_followed_read`
-
-    def write_symbol_reads(self, rows: list[SymbolReadRow]) -> None:
-        del rows
-
-    def update_followed_read(self, call: int, update: StreamUpdate, *, loading: bool) -> None:
-        del call, loading
-        self.progress.append(update.loading)
-
-
-class _QuietRead:
-    # A followed read with no table: it only takes the coordinator's downloads.
-    call = 1
-    dataset = "test.trades"
-    reread = Reread.ALWAYS
-    built_step = 0
-    shut_down = False
-
-    def __init__(self) -> None:
-        self.core = _QuietCore()
-        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
-        self.stop_token = threading.Event()
-
-    @staticmethod
-    def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
-        raise AssertionError(names, stop)  # the pool has stopped: nothing is read
-
-    def fail_table(self, error: MassiveError) -> None:
-        self.failed = error
-
-    def publish(
-        self, name: str, seq: int, table: object, *, decided_at_step: int, parts_before: int
-    ) -> int:
-        del name, seq, table, decided_at_step
-        return parts_before
-
-
 def _stopped_pool() -> ReadPool:
     # A pool that refuses every read, so a coordinator driven by hand reads nothing.
     pool = ReadPool("stopped", 1)
@@ -1916,12 +1898,12 @@ class _TwoRows:
     size: int = 2
 
 
-class _CountedScans(UserDict[str, MassiveError | None]):
+class _CountedScans(dict[str, MassiveError | None]):
     # The call-time symbols' failures, counting each pass over them.
     scans = 0
 
     @override
-    def values(self) -> ValuesView[MassiveError | None]:
+    def values(self) -> dict_values[str, MassiveError | None]:
         _CountedScans.scans += 1
         return super().values()
 
@@ -1933,24 +1915,20 @@ def test_the_call_time_check_does_not_rescan_its_symbols(
     # dataset failing 20,000 symbols in name order cost 20,000 passes over a growing prefix.
     count = 2_000
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "scan test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     names = [f"S{i:04}" for i in range(count)]
     handle([follow_coordinator._Follow(read, None)])
     result = coordinator._results[id(read)]
     handle([follow_coordinator._Baseline(read, frozenset(names), 1)])
     assert result.call_time is not None
-    counted: dict[str, MassiveError | None] = _CountedScans(  # type: ignore[assignment]  # counts
-        result.call_time
-    )
-    result.call_time = counted
+    result.call_time = _CountedScans(result.call_time)
     monkeypatch.setattr(_CountedScans, "scans", 0)
     for name in names:
         outcome = refused(403, f"{name} not in the plan")
         handle([follow_coordinator._Began(read, {name: 1})])
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
-    assert str(quiet.failed) == "HTTP 403: S0000 not in the plan"
+    assert str(read.failed) == "HTTP 403: S0000 not in the plan"
     assert _CountedScans.scans <= 1
 
 
@@ -1962,8 +1940,7 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
     # 10,000. Now a batch looks at the symbols it changed, plus a constant few.
     count = 2_000
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "work test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     names = [f"S{i:04}" for i in range(count)]
     monkeypatch.setattr(follow_coordinator, "_Symbol", _CountedSymbol)
@@ -1978,13 +1955,13 @@ def test_the_work_per_landed_symbol_does_not_grow_with_the_symbols(
         handle([follow_coordinator._Began(read, {name: 1})])
         outcome = failure if i % 10 == 0 else rows
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
-    assert quiet.core.progress[-1] == count // 10  # the retrying symbols still load
+    assert read.core.progress[-1] == count // 10  # the retrying symbols still load
     clock.advance(RETRY_DELAYS[0])
     coordinator._retry_due()  # the retries come due, and each is read and lands
     for name in names[::10]:
         handle([follow_coordinator._Began(read, {name: 1})])
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: rows}, 0, 0.0)])
-    assert quiet.core.progress[-1] == 0
+    assert read.core.progress[-1] == 0
     assert result.progress.rows == 2 * count
     # About 60 field reads per symbol; one pass over every symbol per batch made it 54 million.
     assert _CountedSymbol.looks < 100 * count
@@ -1999,7 +1976,7 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     coordinator = follow_coordinator.FollowCoordinator(
         dh_exec_ctx, "late start test", _stopped_pool()
     )
-    read: FollowedRead = _QuietRead()  # type: ignore[assignment]  # a fake that takes downloads
+    read = QuietRead()
     handle = coordinator._handle
     handle([follow_coordinator._Follow(read, None)])
     symbols = coordinator._results[id(read)].symbols
@@ -2011,13 +1988,27 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     assert symbols["AAPL"].attempts == 0
 
 
+def test_a_bug_is_a_cause_of_its_own() -> None:
+    # A bug never shares the one WARNING of a failure that is none, so it logs its ERROR.
+    lost = dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK)
+    broken = dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY)
+    misuse = dm.MassiveError("your table failed", source=dm.ErrorSource.USER, is_bug=True)
+    refused = dm.EntitlementError("HTTP 403", status=403)
+    keys = [follow_coordinator._cause(e) for e in (lost, broken, misuse, refused)]
+    assert keys == [
+        "MassiveError network",
+        "MassiveError library bug",
+        "MassiveError user bug",
+        "EntitlementError massive 403",
+    ]
+
+
 def test_an_event_the_coordinator_has_no_rule_for_is_a_defect(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
     # Every event kind has its rule; any other raises, never stops the result unseen.
     coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "rule test", _stopped_pool())
-    quiet = _QuietRead()
-    read: FollowedRead = quiet  # type: ignore[assignment]  # a fake that only takes downloads
+    read = QuietRead()
     coordinator._handle([follow_coordinator._Follow(read, None)])
     result = coordinator._results[id(read)]
     with pytest.raises(BrokenGuaranteeError, match=r"^no rule applies 'text' to a result\."):

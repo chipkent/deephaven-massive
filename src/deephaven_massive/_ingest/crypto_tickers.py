@@ -21,10 +21,11 @@ from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, TypeVar
 
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     UnlistedPairError,
-    cause_of,
+    copy_error,
+    source_of,
 )
 from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._ingest.rest_requests import largest_page
@@ -199,12 +200,10 @@ class CryptoTickerList:
         try:
             return self._tickers(reader, cancel)
         except MassiveError as public:
-            raise type(public)(
-                f"{where}: reading Massive's crypto tickers failed: {public}",
-                status=public.status,
-                request_id=public.request_id,
-                cause=public.cause,
-            ) from public
+            named = copy_error(
+                public, f"{where}: reading Massive's crypto tickers failed: {public}"
+            )
+            raise named from public
 
     def _tickers(self, reader: TickerListReader, cancel: Cancel | None) -> CryptoTickers:
         """Return the session's list, reading it on first need.
@@ -268,7 +267,7 @@ class CryptoTickerList:
         except BaseException as error:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
             self._lookup.fail(claim, error, "the read failed")
-            if cause_of(error) is ErrorCause.LIBRARY_DEFECT:
+            if source_of(error) is ErrorSource.LIBRARY:
                 logger.exception(
                     "%s: reading Massive's crypto tickers failed. %s", self._label, LIBRARY_BUG
                 )

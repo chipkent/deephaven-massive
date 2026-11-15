@@ -215,17 +215,21 @@ def _quotes(
     conversion: dict[str, Any],
     last: dict[str, Any],
     snapshot_time: int = 5,
+    snapshot_exchange: int = 48,
 ) -> None:
     fake_rest.reply("/v1/conversion/AUD/USD", Reply({"status": "success", "last": conversion}))
     fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply({"status": "success", "last": last}))
-    snapped = {"ticker": "C:AUDUSD", "lastQuote": {"b": 0.731, "a": 0.732, "t": snapshot_time}}
+    snapped = {
+        "ticker": "C:AUDUSD",
+        "lastQuote": {"b": 0.731, "a": 0.732, "x": snapshot_exchange, "t": snapshot_time},
+    }
     fake_rest.reply(same_field.V2_FOREX, _snapshot([snapped]))
 
 
 def test_conversion_quote_sends_the_pair_and_its_snapshot_ticker_as_a_list(
     fake_rest: FakeRestServer, client: RestClient
 ) -> None:
-    quote = {"bid": 0.731, "ask": 0.732, "timestamp": 5}
+    quote = {"bid": 0.731, "ask": 0.732, "exchange": 48, "timestamp": 5}
     _quotes(fake_rest, conversion=quote, last=quote)
     outcome = same_field.conversion_quote(client, _ignore, base="AUD", quote="USD")
     assert outcome == same_field.Outcome(verdict="SAME", rows=(1, 1, 1))
@@ -240,9 +244,18 @@ def test_conversion_quote_sends_the_pair_and_its_snapshot_ticker_as_a_list(
 def test_conversion_quote_compares_the_snapshot_only_at_the_same_time(
     fake_rest: FakeRestServer, client: RestClient
 ) -> None:
-    quote = {"bid": 0.731, "ask": 0.732, "timestamp": 5}
+    quote = {"bid": 0.731, "ask": 0.732, "exchange": 48, "timestamp": 5}
     _quotes(fake_rest, conversion=quote, last=quote, snapshot_time=6)
     assert same_field.conversion_quote(client, _ignore, base="AUD", quote="USD").verdict == "SAME"
+
+
+def test_conversion_quote_compares_the_snapshot_s_exchange_at_the_same_time(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    quote = {"bid": 0.731, "ask": 0.732, "exchange": 48, "timestamp": 5}
+    _quotes(fake_rest, conversion=quote, last=quote, snapshot_exchange=49)
+    outcome = same_field.conversion_quote(client, _ignore, base="AUD", quote="USD")
+    assert outcome.verdict == "DIFFERENT"
 
 
 @pytest.mark.parametrize(
@@ -251,7 +264,9 @@ def test_conversion_quote_compares_the_snapshot_only_at_the_same_time(
         # The inverse pair's quote, at another time: 1 / 0.732 is about 1.366.
         ({"bid": 1.366, "ask": 1.368, "timestamp": 4}, "DIFFERENT"),
         # One quote on both endpoints, with another bid.
-        ({"bid": 0.730, "ask": 0.732, "timestamp": 5}, "DIFFERENT"),
+        ({"bid": 0.730, "ask": 0.732, "exchange": 48, "timestamp": 5}, "DIFFERENT"),
+        # One quote's time and prices, from another exchange.
+        ({"bid": 0.731, "ask": 0.732, "exchange": 49, "timestamp": 5}, "DIFFERENT"),
         # Never one quote on both, and nothing inverse.
         ({"bid": 0.731, "ask": 0.732, "timestamp": 4}, "INCONCLUSIVE"),
         # One quote's time, but no prices to compare.
@@ -261,5 +276,6 @@ def test_conversion_quote_compares_the_snapshot_only_at_the_same_time(
 def test_conversion_quote_verdicts(
     fake_rest: FakeRestServer, client: RestClient, *, conversion: dict[str, Any], verdict: str
 ) -> None:
-    _quotes(fake_rest, conversion=conversion, last={"bid": 0.731, "ask": 0.732, "timestamp": 5})
+    last = {"bid": 0.731, "ask": 0.732, "exchange": 48, "timestamp": 5}
+    _quotes(fake_rest, conversion=conversion, last=last)
     assert same_field.conversion_quote(client, _ignore, base="AUD", quote="USD").verdict == verdict

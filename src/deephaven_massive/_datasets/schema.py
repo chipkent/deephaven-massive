@@ -66,7 +66,7 @@ from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.row_times import DATE, END, INSERT, START, TIMESTAMP, RowTimes
 from deephaven_massive._datasets.source_columns import key_column, kind_position, rename
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorSource, MassiveError
 from deephaven_massive._massive import Transport, WireType
 
 if TYPE_CHECKING:
@@ -330,7 +330,8 @@ class Schema:
             ) as e:
                 raise MassiveError(
                     f"schema mismatch in {self.name}.{column.name} "
-                    f"(expected {column.type.value}): {e}"
+                    f"(expected {column.type.value}): {e}",
+                    source=ErrorSource.LIBRARY,  # the library's own rows: a bug in it
                 ) from e
         return pa.Table.from_arrays(arrays, schema=self.arrow_schema())
 

@@ -323,6 +323,30 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     follows(massive_session)
 
 
+def test_a_followed_fetch_whose_every_symbol_failed_is_retryable_only_when_each_is(
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    refusal = dm.EntitlementError("HTTP 403: not in the plan", status=403)
+    rest.outcomes = {
+        "AAPL": SymbolFailure(busy, FailureKind.TRANSIENT),
+        "MSFT": SymbolFailure(busy, FailureKind.TRANSIENT),
+    }
+    both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
+    assert isinstance(both, FetchQuery)
+    with pytest.raises(dm.MassiveError, match="busy") as retried:
+        both.fetch(wait=True)
+    assert retried.value.is_retryable
+    rest.outcomes["MSFT"] = SymbolFailure(refusal, FailureKind.PERMANENT)
+    with pytest.raises(dm.MassiveError, match="busy") as mixed:
+        both.fetch(wait=True)
+    # AAPL's error, the first, but calling again cannot help MSFT.
+    assert (mixed.value.status, mixed.value.is_retryable) == (503, False)
+    assert mixed.value.__cause__ is busy
+    rest.outcomes = {}  # the raised errors' tracebacks hold the session
+    follows(massive_session)
+
+
 @pytest.mark.parametrize("setting", [OnError.LOG, OnError.IGNORE, OnError.RAISE])
 def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
     *,

@@ -50,6 +50,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Source, WsClient
@@ -814,7 +815,7 @@ def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session
             break
         pace.wait(0.02)
     # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
-    assert "was closed; this table no longer updates" in str(closed.text())
+    assert "was closed; this table no longer updates; " + NEW_SESSION in str(closed.text())
     assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
     assert stopped["m"]._core.closed

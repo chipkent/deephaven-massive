@@ -10,7 +10,8 @@ requested, and the read then drops every file of a refused venue, whatever its d
 table never holds a venue for some days of the range and not others. `report` logs the refused
 venues in one record, each venue once per `history()` call (a WARNING under `LOG`, DEBUG under
 `IGNORE`), with Massive's status and text, even when a table that follows a live symbol table
-reads the files again;
+reads the files again: the call keeps a `LoggedKeys` of the venues it logged, held by its read or,
+for a followed table, by its result, so the keys go when the call ends;
 `every_venue_refused` is the `EntitlementError` raised when no requested venue is left, whatever
 the setting. A static table's description names the skipped venues (`refused_note`); a
 followed table's description is fixed before its reads, so each symbol's transport in
@@ -26,10 +27,10 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._errors import EntitlementError
-from deephaven_massive._log_limits import first_seen
 from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
+    from deephaven_massive._log_limits import LoggedKeys
     from deephaven_massive._massive import WireEntitlementError
 
 __all__ = ["RefusedVenues", "refused_note", "refused_source"]
@@ -44,9 +45,9 @@ class RefusedVenues:
     leaf: nothing else is called under it.
     """
 
-    __slots__ = ("_lock", "_refusals", "call", "policy")
+    __slots__ = ("_lock", "_logged", "_refusals", "call", "policy")
 
-    def __init__(self, policy: OnError, *, call: str) -> None:
+    def __init__(self, policy: OnError, *, call: str, logged: LoggedKeys) -> None:
         """Start a read's record with no venue refused.
 
         Args:
@@ -55,9 +56,12 @@ class RefusedVenues:
             call: The `history()` call the read serves, such as `"MassiveSession #1 call-9"`.
                 A table that follows a live symbol table reads its files again as symbols
                 join, and `report` logs each refused venue once per call, not per read.
+            logged: The venues the call has logged (`LoggedKeys`), which the call keeps
+                across its reads and drops when it ends.
         """
         self.policy = policy
         self.call = call
+        self._logged = logged
         self._lock = threading.Lock()
         self._refusals: dict[FuturesVenue, WireEntitlementError] = {}
 
@@ -117,8 +121,8 @@ class RefusedVenues:
             dataset: The dataset's name, such as `"futures.trades"`.
         """
         refused = dict(self._refused())
-        keys = {f"{self.call}\0{dataset}\0refused venue {venue.name}": venue for venue in refused}
-        new = tuple((keys[key], refused[keys[key]]) for key in first_seen(keys))
+        keys = {f"{dataset}\0refused venue {venue.name}": venue for venue in refused}
+        new = tuple((keys[key], refused[keys[key]]) for key in self._logged.first_seen(keys))
         if not new:
             return
         logger.log(

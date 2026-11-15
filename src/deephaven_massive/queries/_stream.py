@@ -253,8 +253,8 @@ class StreamQuery(Query):
                 change. For the options admin messages, which stream only in real time, a delayed
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
@@ -300,8 +300,8 @@ class StreamQuery(Query):
                 change. For the options admin messages, which stream only in real time, a delayed
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
@@ -353,8 +353,8 @@ class StreamQuery(Query):
                 change. For the options admin messages, which stream only in real time, a delayed
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;
@@ -477,8 +477,8 @@ class SymbolStreamQuery(StreamQuery):
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
                 change.
+            SessionClosedError: If the session is closed.
             MassiveError: If:
-                - the session is closed;
                 - the stream fails while it opens;
                 - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
                   `str` or list;

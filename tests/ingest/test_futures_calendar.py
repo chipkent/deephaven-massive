@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 from typing_extensions import override
 
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, ErrorSource, MassiveError
 from deephaven_massive._ingest import futures_calendar
 from deephaven_massive._ingest.futures_calendar import (
     RELOAD_SPACING,
@@ -566,14 +566,15 @@ def test_a_failed_lookup_is_logged_and_its_rows_are_misses(
 def test_an_unreadable_lookup_answer_is_logged_as_a_library_defect(
     *, calendar: FuturesCalendar, fetch: FakeFetch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fetch.answers[CONTRACTS_PATH] = MassiveError("bad page", cause=ErrorCause.LIBRARY_DEFECT)
+    fetch.answers[CONTRACTS_PATH] = MassiveError("bad page", source=ErrorSource.LIBRARY)
     with caplog.at_level(logging.WARNING):
         watched(calendar, "ESM4")
         correct(calendar, [("ESM4", "2024-03-28T15:00:00", "2024-03-28")])
     [record] = [r for r in caplog.records if "futures schedules: looking up" in r.getMessage()]
     assert record.levelno == logging.ERROR
+    assert record.exc_info is not None  # a bug, with its traceback
     assert record.getMessage() == (
-        f"test: futures schedules: looking up its product failed: bad page (ESM4). {LIBRARY_BUG}"
+        f"test: futures schedules: looking up its product failed: bad page. {LIBRARY_BUG} (ESM4)"
     )
 
 
@@ -696,7 +697,10 @@ def test_a_close_that_does_not_wait_leaves_the_worker_to_end_on_its_own(
 
 @pytest.mark.parametrize(
     "failure",
-    [MassiveError("MassiveSession #1 is closed"), RuntimeError("cannot schedule new futures")],
+    [
+        MassiveError("MassiveSession #1 is closed; " + NEW_SESSION),
+        RuntimeError("cannot schedule new futures"),
+    ],
     ids=["closed-client", "unexpected"],
 )
 def test_a_lookup_cut_short_by_close_is_not_logged(
@@ -752,13 +756,24 @@ def test_the_worker_outlives_an_unexpected_error(
 
 
 def test_a_lookup_the_worker_has_no_rule_for_is_a_logged_defect(
-    *, calendar: FuturesCalendar, caplog: pytest.LogCaptureFixture
+    *, calendar: FuturesCalendar, fetch: FakeFetch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Only contract and schedule lookups are queued; anything else is logged as a defect, never
-    # read as a schedule lookup, and the worker keeps serving.
+    # read as a schedule lookup, and the good lookups taken with it in one batch still load.
+    fetch.hold(CONTRACTS_PATH)
+    calendar.watch(["ZCK4"])
+    fetch.wait(1)  # the worker is busy, so it takes the next two items together
     with caplog.at_level(logging.ERROR):
         calendar._put(("prices", frozenset({"ESM4"})))
+        calendar.watch(["ESM4"])
+        fetch.release.set()
         idle(calendar)
-    assert "the futures lookup queue holds ('prices', frozenset({'ESM4'}))" in caplog.text
-    watched(calendar, "ESM4")
+    assert caplog.messages == [
+        (
+            "test: futures schedules: the lookup queue holds ('prices', frozenset({'ESM4'})), "
+            f"which is no lookup; the worker skips it and loads the others. {LIBRARY_BUG}"
+        )
+    ]
+    contracts = [query for path, query in fetch.calls if path == CONTRACTS_PATH]
+    assert [query["ticker.any_of"] for query in contracts] == [("ZCK4",), ("ESM4",)]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])

@@ -127,7 +127,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven import dtypes, merge, new_table
 from deephaven.column import InputColumn, int_col, long_col, string_col
@@ -135,11 +135,12 @@ from deephaven.stream import blink_to_append_only
 from deephaven.table import TableDefinition
 
 from deephaven_massive._enums import Reread
-from deephaven_massive._errors import MassiveError, required
+from deephaven_massive._errors import MassiveError, SessionClosedError, required
 from deephaven_massive._tables.background_read import GROUP_ROWS
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState, shown_query
 from deephaven_massive._tables.execution_context import entered, update_cycle
+from deephaven_massive._tables.follow_coordinator import CoordinatedRead
 from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.transports import SymbolRows
@@ -159,7 +160,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._massive import Transport
-    from deephaven_massive._tables.follow_coordinator import FirstRead, FollowCoordinator
+    from deephaven_massive._tables.follow_coordinator import FirstRead
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
     from deephaven_massive._tables.watchlist import SymbolRowRule
@@ -389,9 +390,9 @@ class FollowedRead:
             if self._failed:
                 return False
             self.stop_token.set()
-            closed = self.core.fail_stream(self.call, str(error))
+            closed = self.core.fail_stream(self.call, error)
             required(self._publisher, f"call {self.call}'s publisher").publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
+                error if closed in (None, str(error)) else SessionClosedError(closed)
             )
             self._failed = True
             return True
@@ -426,8 +427,83 @@ class FollowedRead:
         self.core.workers.release(self.call)
 
     def stop_watch(self) -> None:
-        """Stop the watch's listener: a Deephaven call, so the reaper runs it."""
-        required(self._watch, f"call {self.call}'s symbol watch").stop()
+        """Stop the watch's listener: a Deephaven call, so the reaper runs it.
+
+        A result whose build was undone after its blink table was made (an exception, even a
+        `KeyboardInterrupt`, in `open_followed_read` before `attach`) shuts down with no watch:
+        there is nothing to stop, and that is logged at DEBUG.
+        """
+        if self._watch is None:
+            logger.debug(
+                "call %d follow: the result shut down before its watch was made; no watch to stop",
+                self.call,
+            )
+            return
+        self._watch.stop()
+
+
+class _WatchReports(Protocol):
+    """Where a watch router hands a result's reports: the session's `FollowCoordinator`."""
+
+    def baseline(self, read: CoordinatedRead, symbols: frozenset[str], step: int, /) -> None:
+        """Queue the symbols a result follows from the start (`FollowCoordinator.baseline`).
+
+        Args:
+            read: The result.
+            symbols: The symbol table's symbols.
+            step: The update cycle they were read at.
+        """
+        ...
+
+    def changed(
+        self,
+        read: CoordinatedRead,
+        added: frozenset[str],
+        removed: frozenset[str],
+        /,
+        *,
+        step: int,
+    ) -> None:
+        """Queue a change of the symbol table (`FollowCoordinator.changed`).
+
+        Args:
+            read: The result.
+            added: Symbols gained.
+            removed: Symbols lost.
+            step: The update cycle that made the change.
+        """
+        ...
+
+    def skipped(self, read: CoordinatedRead, text: str | None, /) -> None:
+        """Queue the text of the values skipped now (`FollowCoordinator.skipped`).
+
+        Args:
+            read: The result.
+            text: The text, or None once no value is skipped.
+        """
+        ...
+
+    def invalid(self, read: CoordinatedRead, message: str, /) -> None:
+        """Queue the result's failure (`FollowCoordinator.invalid`).
+
+        Args:
+            read: The result.
+            message: Why it fails.
+        """
+        ...
+
+
+class _ShutDownRead(CoordinatedRead, Protocol):
+    """A followed read, as its blink table's shutdown callback stops it: a `FollowedRead`."""
+
+    @property
+    def shut_down_event(self) -> threading.Event:
+        """Set once the result's blink table has shut down."""
+        ...
+
+    def stop_watch(self) -> None:
+        """Stop the watch's listener (`FollowedRead.stop_watch`)."""
+        ...
 
 
 class _WatchRouter:
@@ -456,7 +532,7 @@ class _WatchRouter:
     )
 
     def __init__(
-        self, coordinator: FollowCoordinator, read: FollowedRead, step: Callable[[], int]
+        self, coordinator: _WatchReports, read: CoordinatedRead, step: Callable[[], int]
     ) -> None:
         """Gather reports until `finish`.
 
@@ -473,9 +549,9 @@ class _WatchRouter:
         self._starter = threading.get_ident()
         self._replay: set[str] = set()
         self._replay_step = 0
-        self._waiting: list[Callable[[FollowedRead], None]] = []
+        self._waiting: list[Callable[[CoordinatedRead], None]] = []
 
-    def _route(self, report: Callable[[FollowedRead], None]) -> None:
+    def _route(self, report: Callable[[CoordinatedRead], None]) -> None:
         """Queue one report now, or keep it until `finish`.
 
         Args:
@@ -521,7 +597,7 @@ class _WatchRouter:
         """
         self._route(lambda read: self._coordinator.invalid(read, message))
 
-    def finish(self, read: FollowedRead) -> None:
+    def finish(self, read: CoordinatedRead) -> None:
         """Queue the replay's set, then every report that waited, and route later ones at once.
 
         Args:
@@ -537,7 +613,7 @@ class _WatchRouter:
 
 def _shut_down(
     core_ref: weakref.ref[SessionCore],
-    read_ref: weakref.ref[FollowedRead],
+    read_ref: Callable[[], _ShutDownRead | None],
     *,
     worker_shut_down: Callable[[], None],
 ) -> None:
@@ -549,7 +625,7 @@ def _shut_down(
 
     Args:
         core_ref: The session's core, weakly.
-        read_ref: The result, weakly.
+        read_ref: Returns the result, or None once it is freed: a weak reference.
         worker_shut_down: The session's shutdown callback of the result's worker table
             (`WorkerTables.shutdown_callback`), run last.
     """
@@ -927,7 +1003,7 @@ def open_followed_read(
 
     Raises:
         MassiveError: If the session closed before the result could be registered, or after
-            (`"MassiveSession #1 is closed"`).
+            (`"MassiveSession #1 is closed; ..."`).
     """
     stop = core.read_stop()
     read = FollowedRead(

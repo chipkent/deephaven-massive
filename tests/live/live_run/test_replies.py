@@ -269,8 +269,7 @@ def test_every_example_asks_through_the_public_verbs() -> None:
     assert any(year in call and "HistorySource.REST" in call for call in calls)
 
 
-def test_the_default_hold_waits_its_seconds() -> None:
+def test_the_default_hold_waits_its_seconds(massive_session: MassiveSession) -> None:
     started = time.monotonic()
-    unused: MassiveSession = None  # type: ignore[assignment]  # the hold never reads it
-    replies.hold_for(0.01)(unused)
+    replies.hold_for(0.01)(massive_session)  # never read
     assert time.monotonic() - started >= 0.01
