@@ -613,17 +613,18 @@ def _timed(
     """Time one whole lookup, every page as the calendar reads it, `_LATENCY_RUNS` times.
 
     Returns:
-        The seconds of each run, and the last run's rows, pages, and whether it read the whole
-        lookup within `_LATENCY_PAGES` pages.
+        The seconds of each run, the last run's rows, the most pages a run read, and whether
+        every run read the whole lookup within `_LATENCY_PAGES` pages.
     """
     seconds: list[float] = []
     rows: list[dict[str, Any]] = []
-    pages, ended = 0, True
+    most, every = 0, True
     for _ in range(_LATENCY_RUNS):
         start = time.perf_counter()
         rows, pages, ended = _read_pages(client, path, query, most=_LATENCY_PAGES)
         seconds.append(time.perf_counter() - start)
-    return seconds, len(rows), pages, ended
+        most, every = max(most, pages), every and ended
+    return seconds, len(rows), most, every
 
 
 @pytest.mark.settles("125")
@@ -682,8 +683,9 @@ def test_contract_and_schedule_lookup_latency(
     for label, path, lookup in lookups:
         seconds, rows, pages, ended = _timed(live_rest, path, lookup)
         evidence(
-            f"{label}: {rows} rows in {pages} pages"
-            f"{'' if ended else ' (the lookup goes on: times of its first pages)'}, seconds "
+            f"{label}: {rows} rows in up to {pages} pages"
+            f"{'' if ended else ' (a run stopped at the page cap: its time is of the first pages)'}"
+            ", seconds "
             f"{[round(s, 3) for s in seconds]}, median {statistics.median(seconds):.3f}, "
             f"slowest {max(seconds):.3f}"
         )
@@ -705,7 +707,8 @@ def test_new_futures_listings_per_day(
     """How many futures contracts Massive lists each day, which sizes contracts new to the list.
 
     The contracts list is updated daily, so a contract first traded today may be missing
-    from it until the next update. Reads, as of the most recent published Monday, the
+    from it until the next update. Massive's list records no day a contract was added, so
+    the first trade date stands in for it. Reads, as of the most recent published Monday, the
     contracts whose `first_trade_date` is within the 90 days before, up to 15 pages of 1,000,
     and counts the distinct tickers by `type`, per first trade date and per weekday. Records
     the days with listings, the mean and largest count per day, each of the last 14 days'
@@ -831,10 +834,11 @@ def test_trades_outside_every_futures_session(
     of all four venues, reads their schedules from 10 days back to 3 ahead, and for each product
     reads the trades of its front contract strictly between the latest two sessions of which
     the second has begun: from the last event of one to the first event of the next (the
-    daily close to the next pre-open, or the weekend). Records, per product, the gap, the
-    trades in it (a page of 1,000 at most, marked when full), Massive's `session_end_date` of
-    those trades beside the next session's, which the calendar would give them, and the first
-    few; then the total. A pair of sessions that touch has no gap and is recorded as such.
+    daily close to the next pre-open, or the weekend). Only that latest pair is read: when
+    it touches, the product is recorded without a gap, even if an earlier pair has one.
+    Records, per product, the gap, the trades in it (a page of 1,000 at most, marked when
+    full), Massive's `session_end_date` of those trades beside the next session's, which the
+    calendar would give them, and the first few; then the total.
 
     Passes when every request is answered and some product has a gap; the counts are
     evidence. Sends at most 22 requests.
@@ -923,9 +927,10 @@ def test_streamed_futures_tickers_are_listed(
 
     Streams every futures trade (`m.futures.trades(dm.ALL).last_by()`) on the key's WebSocket
     for 10 minutes, which takes over the key's own futures connection the whole time. Then
-    looks up every single contract ticker seen in the contracts list, 100 a request as the
-    calendar asks (`ticker.any_of`, the largest page), at most 30 requests. Records the
-    tickers seen, singles and combos, and every single contract the list does not hold.
+    looks up the single contract tickers seen in the contracts list, 100 a request as the
+    calendar asks (`ticker.any_of`, the largest page), at most 30 requests: the first 3,000
+    in sorted order. Records the tickers seen, singles and combos, how many were looked up,
+    and every one looked up that the list does not hold.
     Skips at once when no futures trade is due (the market is closed), and with Massive's
     refusal when the stream is refused.
 
@@ -970,6 +975,8 @@ def test_streamed_futures_tickers_are_listed(
     missing = sorted(set(looked_up) - found)
     evidence(
         f"looked up {len(looked_up)} of {len(singles)} single contracts; the contracts list "
-        f"holds {len(looked_up) - len(missing)}, lacks {len(missing)}: {missing[:50]}"
+        f"holds {len(looked_up) - len(missing)}, lacks {len(missing)}"
     )
+    for start in range(0, len(missing), _LOOKUP_CHUNK):
+        evidence(f"not in the contracts list: {missing[start : start + _LOOKUP_CHUNK]}")
     assert seen, f"no futures trade arrived in {_STREAM_SECONDS:.0f} s, though trades were due"
