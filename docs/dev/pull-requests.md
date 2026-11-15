@@ -63,7 +63,7 @@ the Summary, or one decision that needs a sentence of reasoning. No walls of tex
 
 | Section | Content |
 |---|---|
-| Summary | What the PR does and why, in two to four sentences, for a reader with no context; then, if needed, **Check before merging**: at most seven one-line items. An approval is the owner's date and a quote of fifteen words or fewer. No file or internal names, no history of the branch, no table of differences from `main`. |
+| Summary | What the PR does and why, in two to four sentences, for a reader with no context; then, if needed, **Check before merging**: at most seven one-line items. An approval is the owner's date and a quote of fifteen words or fewer, plus the question it answers, in full. No file or internal names, no history of the branch, no table of differences from `main`. |
 | Why | The problem, with a concrete example a user would hit. |
 | What changes | One bullet per user-visible change, with before and after wherever the API or a result changes. |
 | Decisions | Each choice the PR makes or applies, and each departure from the plan, with its reason. A table works well. "None" when there are none. |
@@ -94,7 +94,7 @@ Then `Closes #<issue>` on its own line, then the required footer.
 | Chained sentences | "It reads the version, refuses if malformed (a version is …), runs the tests, and …" | Separate sentences, or a numbered list. |
 | Undecodable references | Review labels (H1, M2), agent names, decision numbers, counts that will go stale. | The fact itself, in words. |
 | Branch history | "The earlier form of this PR removed the grammar; the owner's rulings restore each." | The description describes the branch as it is; what an earlier push did is not a fact about it. |
-| Quote walls | Three sentences of the owner's words under one bullet, repeated in a table below. | One quote per approval, fifteen words or fewer, once. |
+| Quote walls | Three sentences of the owner's words under one bullet, repeated in a table below. | One quote per approval, fifteen words or fewer, once; a question it answers is quoted in full. |
 | Case stacking | "A stream raises at the call, and a `fetch()` fails its table, or raises with `wait=True`, unless no pair split." | One case per sentence, or a before-and-after table. |
 
 A bold label on a one-line bullet (`- **Dry run:** shows the notes without releasing.`) is

@@ -259,7 +259,7 @@ A length a text can't meet is a sign it holds the wrong facts, not a reason to c
 - A rule in `AGENTS.md`: the rule in one sentence, the reason in one.
 - A PR description: under about 600 words. The Summary is two to four sentences. "Check
   before merging" is at most seven one-line items; an approval is a date and a quote of
-  fifteen words or fewer. No history of the branch's earlier forms, and no table of
+  fifteen words or fewer, plus the question it answers, in full. No history of the branch's earlier forms, and no table of
   differences from `main`.
 
 ### Examples
