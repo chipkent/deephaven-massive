@@ -33,9 +33,9 @@ certain, is.
   and tests must work with whatever the owner's key has;
 - outward actions: merging, publishing, posting upstream;
 - loosening a check: a `tests/test_layout.py` rule removed or widened, a lint limit raised or a
-  rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, an entry under
-  an existing rule, and a dependency the change needs are not questions: name them under Check
-  before merging;
+  rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, a rule replaced
+  by one that checks the same or more, an entry under an existing rule, and a dependency the
+  change needs are not questions: name them under Check before merging;
 - dropping a protection: removing a check, refusal, validation, test, setting, or guard while
   the mistake it catches stays possible (`AGENTS.md`, Dropping a protection needs the owner's
   yes). A rule you read as allowing the removal, or a broad ruling ("simplify", "let Massive
@@ -97,9 +97,10 @@ Not from memory or an agent's report:
 
 ## 3. Vet a design before the owner sees it
 
-A design or contract change the owner must approve (`AGENTS.md`, The public API and the data)
-reaches them before any code is written, as a short page: the calls a user types, what the
-library refuses and why, the settings, and which files change. The owner can judge that page;
+A design or contract change the owner must approve (`AGENTS.md`, The public API and the data,
+and any design that drops a protection) reaches them before any code is written, as a short
+page: the calls a user types, what the library refuses and why, the settings, and which files
+change. The owner can judge that page;
 a public shape first seen as a diff of a hundred files is judged whole, and a rejection then
 costs everything built on it (`AGENTS.md`, Workflow, Design before code). It reaches them only
 after it survives these steps: options built straight from raw research come out incomplete,
@@ -112,8 +113,8 @@ and a long list of questions goes unread.
    A choice the design and its critic can't settle between them, or a point the request leaves
    ambiguous, is one of those items: ask it with the options and a recommendation, and build
    nothing that depends on it (`AGENTS.md`, Workflow, Design before code). This step is for
-   any change beyond a small fix, public or not; a private design the critics accept goes
-   under Decisions in the PR, not to the owner.
+   any change beyond a small fix, public or not; a private design the critics accept, and
+   that drops no protection, goes under Decisions in the PR, not to the owner.
 2. **Complete.** Each option covers every dataset and case it touches, defines every term, and
    shows the calls a user writes.
 3. **Researched, not assumed.** A choice of format, standard, or convention cites what widely
@@ -174,9 +175,9 @@ catches stays possible), the removal is the heading and the first thing shown, n
 in a list of changes, a row in a Check before merging table, or a clause in a question about
 something else: a removal the owner reads past is one they never approved. Show the guard (its
 code, or the test's name and what it asserts), the mistake it catches today with a call a user
-could make, what that user sees once it is gone, and the
-evidence that nothing is lost (Massive's answer from a live check already run, or a test that
-pins the same property another way). Then ask whether to remove it. The owner's yes to the
+could make, what that user sees once it is gone, and the evidence, already in hand, that
+dropping it is safe (Massive's answer from a live check already run, or a test that pins the
+same property another way). Then ask whether to remove it. The owner's yes to the
 wider change is not a yes to this; a removal found during the work gets its own question, even
 when the design was already approved.
 
