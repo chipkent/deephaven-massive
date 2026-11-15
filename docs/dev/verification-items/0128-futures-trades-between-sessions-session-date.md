@@ -9,4 +9,5 @@ holds it, and a trade between one session's last event and the next's first by t
 session. How often Massive sends such a trade, and whether its own `session_end_date` for it is
 the next session's, is unknown. Settled by
 `tests/ingest/test_futures_calendar_integration.py::test_trades_outside_every_futures_session`,
-which reads the trades of 20 products' front contracts in the latest gap between two sessions.
+which reads the trades of up to 20 products' front contracts
+between each product's latest two begun sessions, only when those two have a gap.
