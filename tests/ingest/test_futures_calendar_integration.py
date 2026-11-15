@@ -59,6 +59,7 @@ _CONTRACTS = "/futures/v1/contracts"
 _PRODUCTS = "/futures/v1/products"
 _SCHEDULES = "/futures/v1/schedules"
 _TRADES = "/futures/v1/trades/{ticker}"
+_MARKET_STATUS = "/futures/v1/market-status"
 
 _CHICAGO = ZoneInfo("America/Chicago")
 
@@ -919,7 +920,6 @@ def test_streamed_futures_tickers_are_listed(
     live_rest: RestClient,
     *,
     table_rows: TableRows,
-    rows_due: Callable[..., tuple[str, bool]],
     skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
     evidence: Evidence,
 ) -> None:
@@ -931,8 +931,8 @@ def test_streamed_futures_tickers_are_listed(
     calendar asks (`ticker.any_of`, the largest page), at most 30 requests: the first 3,000
     in sorted order. Records the tickers seen, singles and combos, how many were looked up,
     and every one looked up that the list does not hold.
-    Skips at once when no futures trade is due (the market is closed), and with Massive's
-    refusal when the stream is refused.
+    Skips at once when Massive's futures market status for ES is not `open`, and with
+    Massive's refusal when the stream is refused.
 
     Passes when trades arrived, the stream never failed, and every lookup is answered; the
     missing tickers are evidence. Sends at most 31 requests of its own: the market status
@@ -941,9 +941,11 @@ def test_streamed_futures_tickers_are_listed(
     their number depends on how many contracts trade, and the timeout leaves 10 minutes for
     them and the lookups.
     """
-    status, due = rows_due("futures", "trades")
-    if not due:
-        pytest.skip(f"no futures trade is due: the market is {status}")
+    market = _page(live_rest, _MARKET_STATUS, query={"product_code": "ES"})
+    status = str(market[0].get("market_event")) if market else "unknown"
+    evidence(f"futures market status (ES): {status}")
+    if status != "open":
+        pytest.skip(f"the futures market is not open: Massive says {status!r}")
     board = live_session.futures.trades(dm.ALL).last_by()
     try:
         pause = threading.Event()  # never set; only paces the polling
