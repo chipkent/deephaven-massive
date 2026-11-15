@@ -1,10 +1,34 @@
-# 59. Live tables keep their session running, and `close()` fails them
+# 59. A live table keeps its session alive, and closing the session fails it
 
 Date: 2026-10-28
 
 Status: accepted
 
-A live table keeps alive what it needs and nothing else does; `m.close()` fails every live table
-with a clear message rather than leave tables that look live. Sessions with one key and equal
-connection settings share WebSocket connections, so they do not knock each other off a plan's one
-slot.
+## Question
+
+What keeps a live table running, and what happens to live tables when their session closes?
+
+## Options
+
+None recorded: one path was proposed.
+
+## Ruling
+
+While a live table is alive, a filled background `fetch()` result included, the connection and
+session it needs are not collected, even if the user dropped `m`. An explicit `m.close()` fails
+every live table of that session with a clear message, so no table looks live while receiving
+nothing. The owner ruled on 2026-10-28 against surprise silent failures of any kind; recorded in
+PR #514.
+
+## Reason
+
+Silent stalls are forbidden.
+
+## Consequences
+
+A user who closes a session sees its live tables fail, and must open a new session to stream
+again.
+
+## Rule
+
+The `MassiveSession.close` docstring.

@@ -2,8 +2,4 @@
 
 Date: 2026-10-30
 
-Status: accepted
-
-The debug log says what it needs to: pauses, permit waits, close reasons, connection uptime, the git
-commit and platform; `DEEPHAVEN_MASSIVE_LOG_FILE` alone turns it on; the library never rotates the
-file.
+Status: moved to `src/deephaven_massive/_debug_log.py`, "never rotates the file"

@@ -2,7 +2,4 @@
 
 Date: 2026-10-30
 
-Status: accepted
-
-`futures.contracts` names the ticker `Symbol` and takes `symbols`, so a contracts table feeds the
-market-data datasets directly.
+Status: moved to `src/deephaven_massive/namespaces/_futures.py`, "feeds the market-data datasets"

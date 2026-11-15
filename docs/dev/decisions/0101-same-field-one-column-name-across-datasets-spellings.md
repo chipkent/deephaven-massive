@@ -1,27 +1,43 @@
-# 101. One field has one column name across datasets
+# 101. One Massive field has one column name in every dataset
 
 Date: 2026-11-11
 
 Status: accepted
 
-Where Massive spells one field two ways on two endpoints, every dataset takes one of Massive's own
-spellings, through a reasoned hand table, `refresh/overrides.py` `SPELLINGS`: `(source, key)` to the
-long name an object or field takes, the endpoint it is taken from, and why the two are the same
-field. An empty long name drops a wrapper object's name, so the option chain's, the unified
-snapshot's, and the futures snapshot's `details` fields take the names
-`/v3/reference/options/contracts` and `/futures/v1/contracts` give them flat (`StrikePrice`,
-`ProductCode`, `Ticker`), and the snapshots' `last_quote.bid` and `.ask` take `bid_price` and
-`ask_price`, as do the forex conversion's `last.bid` and `.ask` (`LastBidPrice`). The futures
-snapshot's `last_quote.last_updated` and `last_trade.last_updated` take `timestamp`, the key under
-which `/futures/v1/quotes` and `/futures/v1/trades` give the same description and unit. Object
-prefixes stay otherwise: dropping them all would put 78 pairs of different fields in one column, and
-`day` and `session` are different objects. A pair is renamed only when Massive's documentation of
-both fields, their types, and their units leave no doubt; a pair with doubt keeps its names until a
-live test settles it and the owner decides (items 84 to 86: `todaysChange` and `day.change`,
-`updated` and `last_updated`, the conversion's `last` and `lastQuote`). The partners keep their own
-spellings: Benzinga's `Firm` (on a rating) and `FirmName` (on an analyst), whose tables join by
-`BenzingaFirmId`, and Fable's `MerchantTicker` (point in time) and `Ticker` (the current mapping).
-The refresh's `field-spelling` gate keeps it so: fields with one own description must share one long
-name, and fields with one wire key and one description one column, unless `SHARED_DESCRIPTIONS`
-names the description with why its fields differ; a new dataset that brings a second name for such a
-field stops the refresh.
+## Question
+
+Massive spells one field two ways on two endpoints. Does each table keep its endpoint's spelling,
+or does the field take one column name everywhere?
+
+## Options
+
+1. Each table keeps its endpoint's spelling, with no cross-table synonyms (decision 49).
+2. One field takes one of Massive's own spellings in every dataset.
+
+## Ruling
+
+When Massive spells one field two ways on two endpoints, every table uses one of Massive's
+spellings, so a user's query strings work across tables. A pair is renamed only when Massive's
+docs prove the fields, types, and units match; a doubtful pair keeps both names until a live
+test settles it and the owner decides. The owner ruled on 2026-11-11 for one name where
+possible, and a verdict of theirs on a suspected pair; recorded in PR #581. This replaces
+decision 49. Decision 108 (2026-11-13, PR #611) applied it to three pairs: the option chain's
+day change takes the snapshots' `TodaysChange` and `TodaysChangePerc`; the forex conversion's
+last quote takes the forex snapshot's `LastQuoteBidPrice`, `LastQuoteAskPrice`,
+`LastQuoteExchange`, and `LastQuoteParticipantTimestamp`; and the v2 `updated` keeps `Updated`.
+The owner kept these on 2026-11-16.
+
+## Reason
+
+One spelling, taken from Massive, beats aliases: a user learns one name and finds it in
+Massive's docs.
+
+## Consequences
+
+Object prefixes stay where dropping them would merge different fields. The partners keep their
+own spellings. A new dataset that brings a second name for a known field stops the refresh at
+its `field-spelling` gate.
+
+## Rule
+
+`AGENTS.md`, "One name per field"; `docs/dev/spec-refresh.md`, `overrides.SPELLINGS`.

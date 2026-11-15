@@ -315,8 +315,13 @@ These protect the owner's repository, money, and secrets.
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
   generated file instead of merging it, and say in the PR body how you resolved it.
-- Each decision is one file, `docs/dev/decisions/NNNN-slug.md`, and each verification item one
-  file in `docs/dev/verification-items/`; the folder README gives the format. The slug says when
+- **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
+  user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
+  owner's ruling that set one, and the rule links it (`decision N`). A verification item is a
+  fact about Massive that only a live read settles and whose answer changes the code.
+  Each decision is one file, `docs/dev/decisions/NNNN-slug.md`, and each verification item one
+  file in `docs/dev/verification-items/`; the folder README gives the format, and
+  `writing-a-record` says how to write one. The slug says when
   a reader needs the entry, in the words they would search for. A new entry takes the number the
   coordinator reserved, or the next after the highest on `main` and in every open PR. Never
   rename or delete an entry, except to renumber one of two that landed with the same number: a
@@ -335,8 +340,9 @@ These protect the owner's repository, money, and secrets.
   it touches (`Decisions touched: 58, 66` or `none`), each given a new `Status:` line;
   `scripts/check_pr_body.py` fails without the line and the answer.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
-  `writing-a-pr-description` for PR descriptions, issue bodies, and reports, and
-  `writing-user-docs` for a user page or any change to what one describes.
+  `writing-a-pr-description` for PR descriptions, issue bodies, and reports,
+  `writing-a-record` for a decision or verification item, and `writing-user-docs` for a user
+  page or any change to what one describes.
 
 ## Deephaven invariants
 

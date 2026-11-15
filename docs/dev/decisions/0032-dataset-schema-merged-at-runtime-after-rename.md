@@ -2,7 +2,4 @@
 
 Date: 2026-10-26
 
-Status: accepted
-
-Dataset schemas are merged at run time, after the rename, from the generated files and the catalog,
-cached per dataset, never inferred from data.
+Status: moved to `src/deephaven_massive/_datasets/schema.py`, "never from data"

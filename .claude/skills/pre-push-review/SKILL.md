@@ -80,10 +80,11 @@ look for:
   or check, write down the case that would defeat it (the value it was not written for, the
   spelling that passes it and still means something else) and try it before the push.
 - **Contract drift.** A public change (`AGENTS.md`, **A public change needs the owner's request
-  or approval**) without matching docs and tests, or without a decision entry when it sets or changes a
-  rule or contract; from `0.1.0`, a change that
-  breaks code written to the last release without the owner's permission and the next version
-  named; behavior inconsistent with how a sibling call treats the same concept.
+  or approval**) without matching docs and tests, or without a decision entry in the form
+  `writing-a-record` gives (its Options what was weighed, its Ruling no wider than the owner's
+  answer) when it sets or changes a rule or contract; from `0.1.0`, a change that breaks
+  code written to the last release without the owner's permission and the next version named;
+  behavior inconsistent with how a sibling call treats the same concept.
 - **The public API surface**, for any change to what a user can call or reach. Write the call a
   user types, from `import deephaven_massive as dm` to the result, and name the type every
   public signature on that path declares: each parameter, return, property, and documented

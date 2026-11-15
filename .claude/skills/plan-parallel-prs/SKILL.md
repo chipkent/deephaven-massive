@@ -90,7 +90,8 @@ sixteen at once overloaded the machine until nothing merged. Read-only agents do
 Prioritize what blocks the current goal.
 
 Before briefing, record each ruling the owner gave you on the subject as a decision file
-(`AGENTS.md`, Workflow): the brief cites it, the file keeps it for every later agent.
+(`AGENTS.md`, Workflow; `writing-a-record`): the brief cites it, the file keeps it for every
+later agent.
 
 Each agent reads `AGENTS.md` and the project skills on its own, so a brief does not restate them.
 A brief is the agent's request, so it carries the owner's intent, not your summary of it. It

@@ -2,7 +2,4 @@
 
 Date: 2026-10-23
 
-Status: accepted
-
-Flat files are reachable only through `history(source=...)`; there is no public `flat_files`
-namespace.
+Status: moved to `docs/dev/public-api.md`, "Arguments and reach"

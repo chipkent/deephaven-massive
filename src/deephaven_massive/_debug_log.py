@@ -33,9 +33,10 @@ The handler writes one line per record, with the time in UTC:
 `2026-10-28 14:03:07,112Z DEBUG [massive #1 call-7 rest_0] deephaven_massive._massive.rest.client:
 GET ...`. The thread name says which session and which call or stream a line belongs to. On
 stderr, Deephaven copies the lines into its own log, the container's log, and the Deephaven IDE's
-log panel. Turning the log on again replaces the handler and closes the old one. The logger keeps
-`propagate` on, so pytest's `caplog` and any handler a user put on the root logger still see
-every record; Deephaven installs no root handler, so nothing is printed twice there.
+log panel. Turning the log on again replaces the handler and closes the old one, and the library
+never rotates the file. The logger keeps `propagate` on, so pytest's `caplog` and any handler a
+user put on the root logger still see every record; Deephaven installs no root handler, so
+nothing is printed twice there.
 
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
 nothing below WARNING, because the last-resort handler drops lower levels; that is what this

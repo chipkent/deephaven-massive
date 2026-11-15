@@ -37,7 +37,9 @@ records>
 - `open`: the question stands, and the body's handling applies.
 - `settled YYYY-MM-DD: <the answer, in one line>`: a live check settled it; the body keeps the
   evidence.
-- `retired`: the question no longer matters, and the body or the title says why.
+- `retired YYYY-MM-DD: <why>`: the answer would change nothing the library does, or the
+  question no longer matters. Older retired items say only `retired`, with the reason in the
+  body or the title.
 
 ## The slug
 
@@ -53,8 +55,11 @@ heading, and that every file has a `Status:` line.
 A new item takes the number the coordinator reserved, or else the next after the highest on
 `main` and in every open pull request. Two pull requests that take the same number at once are
 caught on `main` by the test, and a follow-up pull request renumbers one of them. Otherwise
-numbers are permanent: never rename or delete an item. Settling an item changes its `Status:`
-line, and may add the evidence to its body.
+numbers are permanent: never rename or delete an item. An item is written only when its answer
+changes what the library does; when every answer leaves the code as it is, the test that reads
+it records the answer instead, and an open item found to be so is retired. An item written
+after 2026-11-15 has its question as its title, ending in `?` (`writing-a-record`). Settling an
+item changes its `Status:` line, and may add the evidence to its body.
 
 ## History
 

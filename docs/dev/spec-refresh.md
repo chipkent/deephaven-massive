@@ -31,6 +31,12 @@ gate, and what to do when a refresh adds something new.
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
 
+A schema is fixed before data arrives, merged at run time from the generated files and never
+inferred from data: a live table needs its full column set before its first row, the first
+message may omit optional fields, and two sessions must agree on a shape. Each dataset page
+links only its own Massive documentation: for a source several classes share, its own class's
+page.
+
 Never edit `spec/*.json` or `docs/datasets/` by hand. Their parity tests compare them byte for
 byte with what the generators produce.
 
@@ -97,6 +103,10 @@ be read by a dataset. When a refresh adds one, the same pull request adds a data
 source for good, or defers it with an issue. The module docstring of `refresh/exclusions.py`
 explains the three choices, and the coverage test in `tests/datasets/test_catalog.py` says what
 it expects when it fails. An exclusion never means "not yet".
+
+Which endpoints the library supports: every documented one, plus a new one the specification
+has before the documentation catches up. A deprecated or sunset endpoint is excluded with its
+reason, and an undocumented one is not supported.
 
 A new dataset's columns must not bring a second name for a field another dataset already has.
 The `field-spelling` gate catches the fields Massive documents with the same text; it cannot

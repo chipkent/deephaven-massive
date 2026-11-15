@@ -2,6 +2,4 @@
 
 Date: 2026-10-26
 
-Status: accepted
-
-The wheel excludes `refresh/` and the snapshot; `spec/*.json` ship.
+Status: moved to `src/deephaven_massive/_massive/refresh/__init__.py`, "the wheel excludes"

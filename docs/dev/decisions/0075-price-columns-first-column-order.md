@@ -2,6 +2,4 @@
 
 Date: 2026-10-30
 
-Status: accepted
-
-Price columns lead every table, ordered at refresh time.
+Status: moved to `src/deephaven_massive/_massive/refresh/naming.py`, "the price, size, and bar fields lead"

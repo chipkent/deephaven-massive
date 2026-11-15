@@ -2,8 +2,4 @@
 
 Date: 2026-10-29
 
-Status: accepted
-
-`symbols` is positional everywhere; `as_of` is the point-in-time parameter; Massive's spec defaults
-show in signatures; `None` means only "not sent", never a mode (`PollMode.AUTO`,
-`venues=frozenset(FuturesVenue)`, indicators' `adjusted: bool = True`).
+Status: moved to `docs/dev/public-api.md`, "Arguments and reach"

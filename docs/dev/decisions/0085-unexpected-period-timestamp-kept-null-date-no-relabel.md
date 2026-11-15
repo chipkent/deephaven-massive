@@ -2,7 +2,4 @@
 
 Date: 2026-11-02
 
-Status: accepted
-
-It has a null `Date` and ends a period after its stamp, with one WARNING per form of stamp, instead
-of being moved to a guessed day that could cause look-ahead.
+Status: absorbed by [70](0070-unexpected-bar-timestamp-warns-never-drops-bars.md)

@@ -2,7 +2,4 @@
 
 Date: 2026-10-26
 
-Status: accepted
-
-The REST client is shared by the session's threads; each WebSocket client is confined to its loop
-thread.
+Status: moved to `src/deephaven_massive/_massive/rest/client.py`, "Thread-safety"

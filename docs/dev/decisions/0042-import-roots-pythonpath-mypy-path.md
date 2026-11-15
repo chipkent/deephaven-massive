@@ -2,6 +2,4 @@
 
 Date: 2026-10-26
 
-Status: accepted
-
-Import roots: `pythonpath = ["."]` and `mypy_path = ["src"]`; fakes are imported as `tests._fakes…`.
+Status: moved to `pyproject.toml`, "mypy_path"

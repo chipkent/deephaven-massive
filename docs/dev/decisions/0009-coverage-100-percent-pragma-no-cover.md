@@ -2,6 +2,4 @@
 
 Date: 2026-10-23
 
-Status: accepted
-
-`pragma: no cover` needs a written reason and owner approval.
+Status: moved to `AGENTS.md`, "Tests mirror the package"

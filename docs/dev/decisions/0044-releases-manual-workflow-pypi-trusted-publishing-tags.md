@@ -2,7 +2,4 @@
 
 Date: 2026-11-02
 
-Status: accepted
-
-The run tests `main`, tags `v<version>`, and creates the GitHub Release; the git tag is the only
-version source, and there is no hand-written changelog.
+Status: moved to `docs/dev/releasing.md`, "Publishing to PyPI"
