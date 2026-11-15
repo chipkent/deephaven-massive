@@ -135,12 +135,14 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     CutShortError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
+    SessionClosedError,
     UnlistedPairError,
     failure_text,
     from_wire,
@@ -189,6 +191,7 @@ from deephaven_massive._ingest.symbol_reads import (
 )
 from deephaven_massive._log_limits import bounded_list, log_once
 from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
@@ -243,8 +246,8 @@ line shows it whole."""
 class UnavailableSymbolError(PermanentError):
     """A symbol Massive cannot serve, under `MassiveConfig.unavailable_symbols=RAISE`.
 
-    Massive answered HTTP 404 for it (`ErrorCause.EXPECTED`), or, in a `poll()` cycle, its path
-    does not take a parameter the poll sends (`ErrorCause.USER_DEFECT`). Under `LOG` and
+    Massive answered HTTP 404 for it (`ErrorSource.MASSIVE`), or, in a `poll()` cycle, its path
+    does not take a parameter the poll sends (`ErrorSource.USER`, a bug). Under `LOG` and
     `IGNORE` the read leaves the symbol out instead, and a `poll()` table's `Error` lists it.
     A `fetch()` or `history()` raises it, a followed `fetch()` marks the symbol `FAILED` with
     it, and a `poll()` table fails with it.
@@ -270,7 +273,7 @@ def _missing_error(
         f"{spec.name}: no data for {names}: Massive answered HTTP 404 from {template}. "
         "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to "
         "leave it out and read the others",
-        cause=ErrorCause.EXPECTED,
+        source=ErrorSource.MASSIVE,
     )
 
 
@@ -717,7 +720,7 @@ class RestReader:
         adjustment basis, its `CutShortError` for a symbol whose data was cut short, the
         `EntitlementError` of `_check_recency` for delayed data, and, with no `on_missing`, the
         `UnavailableSymbolError` of `_report_missing` for a symbol Massive answered HTTP 404. A
-        closed session raises `MassiveError("... is closed")`.
+        closed session raises `SessionClosedError("... is closed; ...")`.
         """
         converter = RowConverter.build(
             self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
@@ -822,7 +825,7 @@ class RestReader:
             for (rest_path, _), outcome in zip(units, done, strict=True)
             if isinstance(outcome, _Outcome)
         ]
-        refused = self.unavailable_symbols is OnError.RAISE
+        refused = effect_of(self.unavailable_symbols).fails
         for template in converters:
             missing = [o.missing for t, o in answered if t == template and o.missing is not None]
             if missing and not refused:
@@ -914,12 +917,11 @@ class RestReader:
         Raises:
             UnavailableSymbolError: Under `RAISE` (`_missing_error`).
         """
-        setting = self.unavailable_symbols
-        if setting is OnError.RAISE:
+        effect = effect_of(self.unavailable_symbols)
+        if effect.fails:
             error = _missing_error(spec, template, missing)
             raise error
-        level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
-        self._warn_missing(spec, template, missing, level=level)
+        self._warn_missing(spec, template, missing, level=effect.level)
 
     def _warn_missing(
         self, spec: DatasetSpec, template: str, missing: Sequence[str], *, level: int
@@ -1044,8 +1046,8 @@ class RestReader:
 
         A failed request otherwise raises the public error of its `WireError` (`public_error`), and
         once the session is closed every failed request does, a 404 included: the call raises
-        `MassiveError("... is closed")` rather than dropping its symbol. A row that breaks the
-        schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, a page on
+        `SessionClosedError("... is closed; ...")` rather than dropping its symbol. A row that
+        breaks the schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, a page on
         another adjustment basis the `MassiveError` of `_check_adjusted`, and delayed data the
         `EntitlementError` of `_check_recency`.
         """
@@ -1159,8 +1161,9 @@ class RestReader:
                 data was cut short: the message names the dataset, the symbol, the path, and
                 how many pages had arrived.
 
-        A 404 that arrives after the session closed raises the `MassiveError("... is closed")`
-        of `public_error`, and any other failure the error of `_dataset_error`.
+        A 404 that arrives after the session closed raises the
+        `SessionClosedError("... is closed; ...")` of `public_error`, and any other failure the
+        error of `_dataset_error`.
         """
         if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
             raise self._dataset_error(spec, bucket, error) from error
@@ -1463,7 +1466,8 @@ class RestReader:
             raise MassiveError(
                 f"{spec.name}: Massive answered {template} with adjusted={echoed} although "
                 f"adjusted={sent} was requested, so the call would mix split-adjusted and "
-                "as-traded prices; retry it"
+                "as-traded prices; retry it",
+                is_retryable=True,
             )
 
     def _warn_error_rows(
@@ -1510,8 +1514,8 @@ class RestReader:
     def public_error(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.
 
-        A closed session's error is `MassiveError("MassiveSession #1 is closed")`, whatever
-        the request returned. A pause that outlasts the read's patience is
+        A closed session's error is `SessionClosedError("MassiveSession #1 is closed; ...")`,
+        whatever the request returned. A pause that outlasts the read's patience is
         `MassiveError("rate limited: ...")` with status 429: the governor's message (which
         requests, the latest refusal, when its next request (a probe) goes, the read's
         patience, the usual cause, and the remedies), then where to watch the subscriptions'
@@ -1524,7 +1528,7 @@ class RestReader:
             The public error, with the wire error's status and request id.
         """
         if self.state.closed:
-            return MassiveError(f"{self.state.label} is closed")
+            return SessionClosedError(f"{self.state.label} is closed; {NEW_SESSION}")
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
                 f"rate limited: {error.message}. m.rate_limits() shows each subscription's state",
@@ -1567,7 +1571,7 @@ class RestReader:
                 "in more plans"
             )
         return EntitlementError(
-            message, status=public.status, request_id=public.request_id, cause=public.cause
+            message, status=public.status, request_id=public.request_id, source=public.source
         )
 
     def rows(
@@ -1706,7 +1710,7 @@ class RestReader:
                 )
                 absent.append(f"{value} (HTTP 404: no data)")
         schema = self.catalog.dataset_schema(
-            spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
+            spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
         )
         return poll.CycleRows(
             pa.concat_tables([one.rows for one in reads])
@@ -1811,21 +1815,21 @@ class RestReader:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
                 and the setting.
         """
-        setting = self.unavailable_symbols
-        if setting is OnError.RAISE:
+        if effect_of(self.unavailable_symbols).fails:
             raise UnavailableSymbolError(
                 f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
                 "the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
                 "it out and keep polling the others",
-                cause=ErrorCause.EXPECTED if missing else ErrorCause.USER_DEFECT,
+                source=ErrorSource.MASSIVE if missing else ErrorSource.USER,
+                is_bug=not missing,
             )
         if missing:
-            level = logging.WARNING if setting is OnError.LOG else logging.DEBUG
+            level = effect_of(self.unavailable_symbols).level
             self._warn_missing(spec, template, symbols, level=level)
             return
         new = [name for name in symbols if self.state.first("refused", spec.name, template, name)]
         logger.log(
-            logging.WARNING if new and setting is OnError.LOG else logging.DEBUG,
+            effect_of(self.unavailable_symbols, first=bool(new)).level,
             "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error and "
             "polls the other symbols",
             spec.name,
@@ -1873,7 +1877,7 @@ class RestReader:
         left_out: list[str] = []
         unlisted: dict[str, UnlistedPairError] = {}
         skips = (
-            isinstance(request.symbols, SymbolTable) and self.unlisted_symbols is not OnError.RAISE
+            isinstance(request.symbols, SymbolTable) and not effect_of(self.unlisted_symbols).fails
         )
         split = self._unlisted_recorder(unlisted, cancel) if skips else None
         for template, own in fetch_paths(spec, symbols):
@@ -1938,7 +1942,7 @@ class RestReader:
         for symbol, error in sorted(unlisted.items()):
             first = self.state.first("unlisted", spec.name, symbol)
             logger.log(
-                logging.WARNING if first and setting is OnError.LOG else logging.DEBUG,
+                effect_of(setting, first=first).level,
                 "%s %s: %s; it is left out and the table's other symbols are read. Delete its "
                 "row, or set dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead",
                 spec.name,
@@ -2105,7 +2109,7 @@ class RestReader:
         `ValueError` of `shared_params`.
         """
         found: dict[str, UnlistedPairError] = {}
-        skips = unlisted is not OnError.RAISE
+        skips = not effect_of(unlisted).fails
         split = self._unlisted_recorder(found, cancel) if skips else None
         planned = self.plan_fetch(spec, request, symbols, split=split, cancel=cancel)
         if found:
@@ -2206,7 +2210,7 @@ class RestReader:
             requests += made
         if not tables:
             schema = self.catalog.dataset_schema(
-                spec, raw_symbol=self.unreadable_symbols is not OnError.RAISE
+                spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
             )
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
@@ -2352,9 +2356,7 @@ class RestEndpoints:
             failure = (
                 error
                 if isinstance(error, MassiveError)
-                else MassiveError(
-                    library_bug(f"{context}: {error!r}"), cause=ErrorCause.LIBRARY_DEFECT
-                )
+                else MassiveError(library_bug(f"{context}: {error!r}"), source=ErrorSource.LIBRARY)
             )
             _report_host_failure(failure)
             self._core.diagnostics.write(
@@ -2469,12 +2471,12 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors, which the verb's call logs at the level their cause gives (DEBUG for an
+        Errors, which the verb's call logs at the level their `is_bug` gives (DEBUG for an
         expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
         not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
         `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other
-        failure (a rate limit as `"rate limited: ..."`, a closed session as `"... is closed"`).
+        failure (a rate limit as `"rate limited: ..."`, a closed session as `"... is closed; ..."`).
 
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
@@ -2984,7 +2986,7 @@ def _report_host_failure(error: MassiveError) -> None:
     Args:
         error: The failure.
     """
-    level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+    level = logging.DEBUG if not error.is_bug else logging.ERROR
     logger.log(level, "%s", failure_text(error))
 
 

@@ -450,8 +450,8 @@ class Param:
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
         unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
-            the trade and quote filters, `MS` for the indicator filters. An instant is sent as
-            an exact integer count of it.
+            the trade and quote filters, `MS` for the indicator filters; never `MS_OR_NS`. An
+            instant is sent as an exact integer count of it.
         default: The value Massive's specification documents as the parameter's default, as
             the JSON scalar it gives (`50` for an indicator's `window`, `"day"` for its
             `timespan`, `True` for `adjusted`); `None` when it documents none, or documents
@@ -474,8 +474,10 @@ class Param:
         """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
 
         Raises:
-            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; or if `kind`
-                is `TIMESTAMP` and `unit` is `None`, or the reverse.
+            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; if `kind` is
+                `TIMESTAMP` and `unit` is `None`, or the reverse; or if `unit` is `MS_OR_NS`,
+                which tells units apart by a value's size and so cannot say how to send one.
+                The message names the parameter.
         """
         if (self.kind is ParamKind.ENUM) != bool(self.values):
             raise ValueError(
@@ -484,6 +486,11 @@ class Param:
         if (self.kind is ParamKind.TIMESTAMP) != (self.unit is not None):
             raise ValueError(
                 f"parameter {self.name!r}: a timestamp needs a unit and any other kind has none"
+            )
+        if self.unit is WireUnit.MS_OR_NS:
+            raise ValueError(
+                f"parameter {self.name!r}: the unit {self.unit} is for fields only; a parameter "
+                "sends an instant as a count of one exact unit"
             )
 
 

@@ -62,6 +62,10 @@ the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed
 such as `docs/datasets/<dataset>.md` or `README.md#<anchor>`. The same test checks that every
 citation is a URL and that every cited page and anchor exists.
 
+The user pages and an API reference generated from the docstrings also build into one website.
+[`docs/dev/docs-site.md`](docs/dev/docs-site.md) explains how to build and preview it, what its
+CI job checks, and how to turn publishing to GitHub Pages on and off.
+
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.
 

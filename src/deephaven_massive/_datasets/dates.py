@@ -67,7 +67,6 @@ from deephaven_massive._datasets.futures_sessions import (
     futures_session_open,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
-from deephaven_massive._errors import BrokenGuaranteeError, library_bug
 from deephaven_massive._massive import WireUnit
 
 if TYPE_CHECKING:
@@ -918,8 +917,6 @@ def instant_bound(
             parameter in nanoseconds, or a date parameter that takes the instant as ISO-8601
             text (`unit` None), whose precision Massive does not document. Use the `.gte` and
             `.lt` forms instead.
-        BrokenGuaranteeError: If a `.gt` or `.lte` parameter counts in `MS_OR_NS`, a unit
-            only fields take, so it has no step to take.
     """
     if isinstance(value, datetime):
         instant = value
@@ -927,10 +924,6 @@ def instant_bound(
         instant = day_start(asset_class, value + _ONE_DAY if upper else value)
     if name.rpartition(".")[2] not in ("gt", "lte"):
         return instant
-    if unit is WireUnit.MS_OR_NS:
-        raise BrokenGuaranteeError(
-            library_bug(f"the parameter {name} counts in {unit.value}, a unit only fields take")
-        )
     # Nanoseconds have no `datetime` step; every other unit has its step in `_UNIT_STEPS`.
     step = None if unit is None or unit is WireUnit.NS else _UNIT_STEPS[unit]
     if step is None:

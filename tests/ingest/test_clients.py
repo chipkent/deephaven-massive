@@ -2,6 +2,7 @@
 
 import dataclasses
 import gc
+import re
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -12,6 +13,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import clients, flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.session_core import SessionCore
@@ -309,7 +311,9 @@ def test_clients_whose_session_is_gone_report_it_closed(fake_s3: FakeS3) -> None
     m.close()
     del m
     gc.collect()
-    with pytest.raises(dm.MassiveError, match=rf"^{label} is closed$"):
+    with pytest.raises(
+        dm.MassiveError, match=rf"^{label} is closed; " + re.escape(NEW_SESSION) + "$"
+    ):
         clients.flat_files()
 
 

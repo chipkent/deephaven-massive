@@ -36,7 +36,8 @@ certain, is.
   rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, an entry under
   an existing rule, and a dependency the change needs are not questions: name them under Check
   before merging;
-- every lint or type-check suppression, with its reason and why the design can't avoid it;
+- every lint or type-check suppression, with its reason and why the design can't avoid it
+  (not an import after a Deephaven server start, which `AGENTS.md` accepts in advance);
 - a column suspected but not proven to be a field another dataset already names, with both
   fields' documentation quoted;
 - a conflict: a rule against the request, two instructions against each other, or code bent

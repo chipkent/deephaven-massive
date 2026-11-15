@@ -21,7 +21,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
@@ -38,7 +38,6 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 if TYPE_CHECKING:
     from deephaven.table_listener import TableUpdate
 
-    from deephaven_massive._tables.session_core import SessionCore
 
 TIMEOUT = 30.0
 
@@ -473,7 +472,7 @@ def test_closing_the_session_fails_a_loading_read(
     (row,) = [r for r in dh_to_pylist(view) if r["Kind"] == "read"]
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
     )
     del view
 
@@ -1046,13 +1045,10 @@ def test_the_landing_listener_of_a_freed_session_records_nothing(
 ) -> None:
     # A close marks a published read DONE before its rows land; its session may then be freed
     # before the cycle that lands them. Called here, as on an update-graph thread.
-    class Gone:
-        pass
+    def gone() -> None:
+        return None  # the core was freed
 
-    gone = Gone()
-    core: weakref.ref[SessionCore] = weakref.ref(gone)  # type: ignore[arg-type]  # a dead core
-    landed = background_read._RowsLanded(core, 7)
-    del gone
+    landed = background_read._RowsLanded(gone, 7)
     added = SimpleNamespace(size=lambda: 3)
     update: TableUpdate = SimpleNamespace(  # type: ignore[assignment]  # a fake update: 3 added
         j_table_update=SimpleNamespace(added=lambda: added)

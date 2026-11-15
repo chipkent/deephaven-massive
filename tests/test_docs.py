@@ -8,7 +8,9 @@ fake REST and WebSocket servers, so nothing reaches Massive. Every block therefo
 own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
 the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python continues` is the second step of an example, which the reader runs
-in the same console after the block before it, so it runs in that block's namespace. A block
+in the same console after the block before it, so it runs in that block's namespace. Each
+example, a block with the blocks that continue it, is a test case of its own, and the
+examples' tables are checked where each example makes them. A block
 fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may be. The
 README's settings file is written by running its shell commands, with `HOME` in a temporary
 folder, and the settings page's example file loads as the page says. Five README sections also
@@ -28,11 +30,13 @@ URL, that every cited page and anchor exists, and that every relative link of a 
 of the tester guide) resolves.
 """
 
+import ast
 import dataclasses
 import json
 import re
 import runpy
 import threading
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
@@ -50,6 +54,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Source, WsClient
@@ -57,9 +62,12 @@ from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
 from tests._live.doc_examples import (
+    Block,
     Console,
+    Example,
     blocks,
     dashboard_panels,
+    examples,
     fences,
     forget,
     merged,
@@ -231,11 +239,67 @@ _PROMISED: dict[str, tuple[str, ...]] = {
 }
 
 
+def _bound(code_blocks: Sequence[Block]) -> set[str]:
+    """Return every name the blocks' code binds, read from its syntax without running it."""
+    return {
+        node.id
+        for block in code_blocks
+        for node in ast.walk(ast.parse(block.code))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _makes(page: Path) -> list[frozenset[str]]:
+    """Return, for each example of a page, the promised tables it is the last to bind.
+
+    A reader who runs the whole page sees each name as the last example to bind it left it,
+    so that example is the one whose run must leave a table under the name.
+
+    Args:
+        page: The user page.
+
+    Returns:
+        One set of names per example of `examples(page)`, in order.
+    """
+    claimed: set[str] = set()
+    makes: list[frozenset[str]] = []
+    for example in reversed(examples(page)):
+        made = _bound(example.blocks) & set(_PROMISED.get(_name(page), ())) - claimed
+        claimed |= made
+        makes.append(frozenset(made))
+    return makes[::-1]
+
+
+def _example_params() -> list[object]:
+    """Return every example of every user page as a test case, each named by its section.
+
+    Each case holds the page, the example, and the promised tables it makes (`_makes`). A
+    section's second example and later ones are numbered, such as
+    `docs/configuration.md#load-a-settings-file-2`, and the examples before a page's first
+    anchor are its `intro`.
+
+    Returns:
+        The cases, page by page, in each page's order.
+    """
+    params: list[object] = []
+    for page in USER_PAGES:
+        seen: Counter[str] = Counter()
+        for example, makes in zip(examples(page), _makes(page), strict=True):
+            section = example.anchor or "intro"
+            seen[section] += 1
+            number = "" if seen[section] == 1 else f"-{seen[section]}"
+            name = f"{_name(page)}#{section}{number}"
+            params.append(pytest.param(page, example, makes, id=name))
+    return params
+
+
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
-@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+@pytest.mark.parametrize(("page", "example", "makes"), _example_params())
 def test_every_user_page_example_runs_alone(
     *,
     page: Path,
+    example: Example,
+    makes: frozenset[str],
     readme_server: FakeRestServer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -261,16 +325,29 @@ def test_every_user_page_example_runs_alone(
     write_settings_file(README, tmp_path, delayed=True)
     # Every path the examples read answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
-    page_blocks = blocks(page.read_text(encoding="utf-8"))
-    namespaces = run_blocks(page_blocks, tmp_path, page.stem, console_command=console_command)
+    namespaces = run_blocks(example.blocks, tmp_path, page.stem, console_command=console_command)
     names = merged(namespaces)
-    for name in _PROMISED.get(_name(page), ()):
+    for name in makes:
         assert isinstance(names[name], Table), name
-    if any("input_table(" in block.code for block in page_blocks):
-        assert locked  # the watchlist examples made input tables
+    if any("input_table(" in block.code for block in example.blocks):
+        assert locked  # the watchlist example made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
     names.clear()
     forget(namespaces)
+
+
+@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+def test_every_block_of_a_page_runs_in_one_example(page: Path) -> None:
+    # The examples split the page's blocks without losing, repeating, or reordering one.
+    found = [block for example in examples(page) for block in example.blocks]
+    assert found == blocks(page.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+def test_every_promised_table_has_an_example_that_makes_it(page: Path) -> None:
+    # The example that makes each promised table checks, when it runs, that it is a table.
+    made = set().union(*_makes(page))
+    assert made == set(_PROMISED.get(_name(page), ()))
 
 
 def test_the_readme_has_its_examples() -> None:
@@ -814,7 +891,7 @@ def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session
             break
         pace.wait(0.02)
     # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
-    assert "was closed; this table no longer updates" in str(closed.text())
+    assert "was closed; this table no longer updates; " + NEW_SESSION in str(closed.text())
     assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
     assert stopped["m"]._core.closed

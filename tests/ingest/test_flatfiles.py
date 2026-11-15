@@ -50,6 +50,7 @@ from deephaven_massive._enums import (
     OnError,
     Timespan,
 )
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
@@ -59,7 +60,6 @@ from deephaven_massive._tables import columns
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
@@ -603,7 +603,7 @@ def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
     )
     with pytest.raises(dm.MassiveError, match="'!!'") as info:
         transform.apply(batch, received=7, key=STOCK_KEY)
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
@@ -767,9 +767,9 @@ def test_a_malformed_line_fails_the_read_under_raise(
         f"stocks.trades: {LOCATION.format(TRADES_0303)} holds a malformed line, the first: row 2 "
         "after the header has 2 fields where the header has 13. To skip such lines and keep the "
         "file's other rows, pass MassiveConfig(malformed_rows=dm.OnError.LOG), or write "
-        "'malformed_rows: log' in the settings file"
+        f"'malformed_rows: log' in the settings file. {LIBRARY_BUG}"
     )
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
     assert "SECRET" not in str(info.value)
 
 
@@ -814,7 +814,7 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
         assert "holds a malformed line" in str(failed.error)
-        assert failed.kind is FailureKind.PERMANENT
+        assert not failed.error.is_retryable
 
 
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
@@ -825,7 +825,7 @@ def test_a_file_whose_every_line_is_malformed_fails_the_call(
         dm.MassiveError,
         match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of its 2 "
         r"lines is malformed, so the file's format may have changed; the first: row 1 after the "
-        r"header has 2 fields where the header has 13$",
+        r"header has 2 fields where the header has 13\. " + re.escape(LIBRARY_BUG) + "$",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
 
@@ -840,10 +840,10 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
         match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of the 1 "
         r"rows of the requested symbols was dropped, so the file's format may have changed; the "
         r"first: timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
-        r"outside 1990 to 2100$",
+        r"outside 1990 to 2100\. " + re.escape(LIBRARY_BUG) + "$",
     ) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 def test_epoch_zero_is_null_except_in_timestamp(
@@ -1289,8 +1289,9 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(not_published("stocks.trades", "2025-03-04", READ_REST)) + "$",
-    ):
+    ) as unpublished:
         q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
+    assert unpublished.value.is_retryable  # the file appears once Massive publishes it
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
 
 
@@ -1715,7 +1716,10 @@ def test_a_stopped_read_stops_its_roll_forward(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades history: the read was stopped",
+    ) as cancelled:
         session._core.flat_file_transport().history(
             FUTURES_TRADES,
             q._request,
@@ -1726,6 +1730,7 @@ def test_a_stopped_read_stops_its_roll_forward(
             logged=LoggedKeys(),
             stop=stop,
         )
+    assert cancelled.value.source is dm.ErrorSource.USER  # the caller stopped the read
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
@@ -1791,7 +1796,10 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades history: the read was stopped",
+    ):
         session._core.flat_file_transport().history(
             FUTURES_TRADES,
             q._request,
@@ -2865,7 +2873,7 @@ def test_a_reread_is_not_made_for_a_broken_file(
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
     # A file that cannot be read is a defect of the library, never an expected failure.
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 @pytest.mark.parametrize(
@@ -3907,7 +3915,7 @@ def test_a_missing_key_header_is_a_massive_error(
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
         f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: the header "
-        f"lacks the key column {key_header}"
+        f"lacks the key column {key_header}. {LIBRARY_BUG}"
     )
 
 
@@ -3921,7 +3929,9 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
     lacking = [name for name in names if name != "session_end_date"]
     fake_s3.put_csv(FUTURES_0304.format("cme"), lacking, data)
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    with pytest.raises(dm.MassiveError, match=r"the header lacks the key column session_end_date$"):
+    with pytest.raises(
+        dm.MassiveError, match=r"the header lacks the key column session_end_date\. "
+    ):
         q.history("2025-03-04", "2025-03-04", wait=True)
 
 
@@ -3993,7 +4003,8 @@ def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3
     with pytest.raises(dm.MassiveError) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line"
+        f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line. "
+        f"{LIBRARY_BUG}"
     )
 
 
@@ -4101,7 +4112,10 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     window = history_window(STOCK_TRADES, request, start=day, end=day, classes=())
     stop = _massive.Cancel()
     stop.set()
-    with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"stocks\.trades history: the read was stopped",
+    ):
         session._core.flat_file_transport().history(
             STOCK_TRADES,
             request,

@@ -25,7 +25,6 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._ingest import history_reads
-from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import BackgroundRead
@@ -309,11 +308,6 @@ class FlatFiles:
             spec, request, window, symbols=symbols, call=call, stop=stop
         )
 
-    def _as_files(self) -> FlatFileHistory:
-        """Return this recorder as the flat-file transport `read_history` reads from."""
-        files: FlatFileHistory = self  # type: ignore[assignment]  # a fake with its read methods
-        return files
-
     def read_history(
         self,
         spec: DatasetSpec,
@@ -330,7 +324,7 @@ class FlatFiles:
             request,
             window,
             core=self.core,
-            files=self._as_files(),
+            files=self,
             dates=dates,
             call=call,
             forced=forced,

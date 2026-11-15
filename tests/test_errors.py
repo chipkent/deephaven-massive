@@ -1,5 +1,6 @@
 import ast
 import builtins
+import functools
 import importlib
 import inspect
 import pkgutil
@@ -12,29 +13,40 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     RAISES_THROUGH,
     AuthenticationError,
     BrokenGuaranteeError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
     RowDataError,
-    cause_of,
+    SessionClosedError,
+    copy_error,
+    every_symbol_failed,
     failure_text,
     from_wire,
+    is_bug_of,
     library_bug,
     raises_through,
     required,
     required_instance,
+    source_of,
     user_defect,
 )
-from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError
+from deephaven_massive._massive import WireAuthError, WireEntitlementError, WireError, WireFailure
 from deephaven_massive._session import MassiveSession
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import Query
 
-ALL_ERRORS = [MassiveError, AuthenticationError, EntitlementError, PermanentError]
+ALL_ERRORS = [
+    MassiveError,
+    AuthenticationError,
+    EntitlementError,
+    PermanentError,
+    SessionClosedError,
+]
 
 
 @pytest.mark.parametrize("error", ALL_ERRORS)
@@ -61,12 +73,14 @@ def test_status_and_request_id_are_read_only(attribute: str) -> None:
 @pytest.mark.parametrize(
     ("wire", "public"),
     [
-        (WireError, MassiveError),
+        (functools.partial(WireError, kind=WireFailure.REFUSED), MassiveError),
         (WireAuthError, AuthenticationError),
         (WireEntitlementError, EntitlementError),
     ],
 )
-def test_from_wire_maps_each_wire_error(wire: type[WireError], public: type[MassiveError]) -> None:
+def test_from_wire_maps_each_wire_error(
+    wire: Callable[..., WireError], public: type[MassiveError]
+) -> None:
     converted = from_wire(
         wire(
             "HTTP 403 from GET /v3/quotes/AAPL (request_id r9): not entitled",
@@ -82,7 +96,7 @@ def test_from_wire_maps_each_wire_error(wire: type[WireError], public: type[Mass
 
 
 def test_from_wire_keeps_missing_context_as_none() -> None:
-    converted = from_wire(WireError("connection reset by peer"))
+    converted = from_wire(WireError("connection reset by peer", kind=WireFailure.NO_ANSWER))
     assert (converted.status, converted.request_id) == (None, None)
     assert converted.args == ("connection reset by peer",)
 
@@ -100,46 +114,183 @@ def test_errors_are_distinct() -> None:
     assert not issubclass(PermanentError, (AuthenticationError, EntitlementError))
 
 
-@pytest.mark.parametrize("error", ALL_ERRORS)
-def test_an_error_is_expected_unless_its_cause_says_otherwise(error: type[MassiveError]) -> None:
-    assert error("x").cause is ErrorCause.EXPECTED
-    assert error("x", cause=ErrorCause.USER_DEFECT).cause is ErrorCause.USER_DEFECT
+@pytest.mark.parametrize("error", [MassiveError, AuthenticationError, EntitlementError])
+def test_an_error_is_massives_unless_its_source_says_otherwise(error: type[MassiveError]) -> None:
+    assert error("x").source is ErrorSource.MASSIVE
+    assert error("x", source=ErrorSource.USER).source is ErrorSource.USER
 
 
-def test_a_subclass_sets_the_cause_of_its_every_instance() -> None:
+def test_a_subclass_sets_the_source_and_bug_flag_of_its_every_instance() -> None:
     class UnreadableError(MassiveError):
-        default_cause = ErrorCause.LIBRARY_DEFECT
+        default_source = ErrorSource.LIBRARY
 
-    assert UnreadableError("x").cause is ErrorCause.LIBRARY_DEFECT
-    assert UnreadableError("x", cause=ErrorCause.EXPECTED).cause is ErrorCause.EXPECTED
+    class MisuseError(MassiveError):
+        default_source = ErrorSource.USER
+        default_is_bug = True
+
+    assert (UnreadableError("x").source, UnreadableError("x").is_bug) == (ErrorSource.LIBRARY, True)
+    assert UnreadableError("x", source=ErrorSource.MASSIVE).source is ErrorSource.MASSIVE
+    assert (MisuseError("x").source, MisuseError("x").is_bug) == (ErrorSource.USER, True)
+    assert not MisuseError("x", is_bug=False).is_bug
 
 
-def test_the_cause_is_read_only() -> None:
+def test_a_library_error_is_always_a_bug_and_only_it_is_by_default() -> None:
+    assert MassiveError("x", source=ErrorSource.LIBRARY, is_bug=False).is_bug
+    for source in (ErrorSource.MASSIVE, ErrorSource.NETWORK, ErrorSource.USER):
+        assert not MassiveError("x", source=source).is_bug
+    assert MassiveError("your table failed", source=ErrorSource.USER, is_bug=True).is_bug
+
+
+@pytest.mark.parametrize("attribute", ["source", "is_retryable", "is_bug"])
+def test_the_source_and_flags_are_read_only(attribute: str) -> None:
     with pytest.raises(AttributeError):
-        MassiveError("x").cause = ErrorCause.LIBRARY_DEFECT  # type: ignore[misc]  # read-only
+        setattr(MassiveError("x"), attribute, None)
 
 
-def test_from_wire_carries_the_cause_the_caller_knows() -> None:
-    assert from_wire(WireError("x")).cause is ErrorCause.EXPECTED
-    # Data Massive delivered that the client could not read is the library's to fix, and so
-    # is a failure of the client itself.
-    assert from_wire(WireError("bad file", unreadable=True)).cause is ErrorCause.LIBRARY_DEFECT
-    assert from_wire(WireError("bug", client_defect=True)).cause is ErrorCause.LIBRARY_DEFECT
-    rejected = from_wire(WireError("bad row"), cause=ErrorCause.LIBRARY_DEFECT)
-    assert rejected.cause is ErrorCause.LIBRARY_DEFECT
+def test_every_source_has_a_lowercase_value() -> None:
+    assert [s.value for s in ErrorSource] == ["massive", "network", "user", "library"]
 
 
 @pytest.mark.parametrize(
-    ("error", "cause"),
+    ("wire", "source"),
     [
-        (MassiveError("x", cause=ErrorCause.USER_DEFECT), ErrorCause.USER_DEFECT),
-        (MassiveError("x"), ErrorCause.EXPECTED),
-        (KeyError("x"), ErrorCause.LIBRARY_DEFECT),  # the library does not expect it of itself
-        (KeyboardInterrupt(), ErrorCause.EXPECTED),  # an interrupt is no defect
+        (WireError("HTTP 404", status=404, kind=WireFailure.REFUSED), ErrorSource.MASSIVE),
+        # A WebSocket status message refusing a subscription: Massive's answer, with no status.
+        (WireError("max connections", kind=WireFailure.REFUSED), ErrorSource.MASSIVE),
+        (WireError("connection reset", kind=WireFailure.NO_ANSWER), ErrorSource.NETWORK),
+        (
+            WireError("TLS certificate verification failed", kind=WireFailure.LOCAL),
+            ErrorSource.USER,
+        ),
+        # Data Massive delivered that the client could not read is the library's to fix, and
+        # so is a failure of the client itself.
+        (WireError("bad file", kind=WireFailure.UNREADABLE), ErrorSource.LIBRARY),
+        (WireError("bug", kind=WireFailure.CLIENT_DEFECT), ErrorSource.LIBRARY),
     ],
 )
-def test_cause_of_reads_any_exception(error: BaseException, cause: ErrorCause) -> None:
-    assert cause_of(error) is cause
+def test_from_wire_takes_the_source_the_wire_client_knows(
+    wire: WireError, source: ErrorSource
+) -> None:
+    assert from_wire(wire).source is source
+
+
+def test_from_wire_takes_the_source_the_caller_knows() -> None:
+    rejected = from_wire(WireError("bad row", kind=WireFailure.REFUSED), source=ErrorSource.LIBRARY)
+    assert (rejected.source, rejected.is_bug) == (ErrorSource.LIBRARY, True)
+
+
+@pytest.mark.parametrize(
+    ("error", "source", "is_bug"),
+    [
+        (MassiveError("x", source=ErrorSource.USER), ErrorSource.USER, False),
+        (MassiveError("x"), ErrorSource.MASSIVE, False),
+        (KeyError("x"), ErrorSource.LIBRARY, True),  # the library does not expect it of itself
+        (KeyboardInterrupt(), ErrorSource.USER, False),  # an interrupt is no bug
+    ],
+)
+def test_source_of_and_is_bug_of_read_any_exception(
+    error: BaseException, source: ErrorSource, is_bug: bool
+) -> None:
+    assert source_of(error) is source
+    assert is_bug_of(error) is is_bug
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (501, False),  # not implemented: the server will not do it later either
+        (None, False),
+    ],
+)
+def test_is_retryable_follows_the_status(status: int | None, retryable: bool) -> None:
+    assert MassiveError("x", status=status).is_retryable is retryable
+
+
+def test_a_network_error_is_retryable_and_the_raiser_may_say_otherwise() -> None:
+    assert MassiveError("connection reset", source=ErrorSource.NETWORK).is_retryable
+    assert MassiveError("not published yet", is_retryable=True).is_retryable
+    assert not MassiveError("rate limited", status=429, is_retryable=False).is_retryable
+
+
+def test_a_bug_is_never_retryable() -> None:
+    assert not MassiveError("x", status=503, source=ErrorSource.LIBRARY).is_retryable
+    assert not MassiveError("x", status=503, source=ErrorSource.USER, is_bug=True).is_retryable
+    assert not MassiveError("x", is_retryable=True, is_bug=True).is_retryable
+
+
+@pytest.mark.parametrize(
+    ("wire", "retryable"),
+    [
+        (WireError("HTTP 503", status=503, kind=WireFailure.REFUSED), True),
+        (WireError("rate limited", status=429, kind=WireFailure.REFUSED), True),
+        # S3's RequestTimeout: an HTTP 400 that means try again.
+        (
+            WireError(
+                "HTTP 400 (RequestTimeout)", status=400, kind=WireFailure.REFUSED, means_retry=True
+            ),
+            True,
+        ),
+        (WireError("connection reset", kind=WireFailure.NO_ANSWER), True),
+        (WireError("TLS certificate verification failed", kind=WireFailure.LOCAL), False),
+        (WireError("HTTP 404", status=404, kind=WireFailure.REFUSED), False),
+        (WireAuthError("HTTP 401", status=401), False),
+        (WireEntitlementError("HTTP 403", status=403), False),
+        # Data the client could not read is a bug, whatever its status.
+        (WireError("bad body", status=200, kind=WireFailure.UNREADABLE), False),
+    ],
+)
+def test_from_wire_says_whether_the_call_may_succeed_later(
+    wire: WireError, retryable: bool
+) -> None:
+    assert from_wire(wire).is_retryable is retryable
+
+
+def test_a_closed_session_error_is_public_the_users_and_never_retryable() -> None:
+    assert dm.SessionClosedError is SessionClosedError
+    error = SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
+    assert isinstance(error, dm.MassiveError)
+    assert (error.source, error.is_bug, error.is_retryable) == (ErrorSource.USER, False, False)
+
+
+def test_a_copy_keeps_the_class_and_every_attribute() -> None:
+    error = EntitlementError("no", status=403, request_id="r1", source=ErrorSource.USER)
+    copied = copy_error(error, "where: no")
+    assert type(copied) is EntitlementError
+    assert copied is not error
+    assert str(copied) == "where: no"
+    assert (copied.status, copied.request_id, copied.source) == (403, "r1", ErrorSource.USER)
+    assert (copied.is_retryable, copied.is_bug) == (False, False)
+    assert str(copy_error(error)) == "no"
+
+
+def test_every_symbol_failing_is_retryable_only_when_each_symbol_is() -> None:
+    busy = MassiveError("AAPL: HTTP 503", status=503)
+    gone = MassiveError("MSFT: HTTP 404", status=404)
+    assert every_symbol_failed([busy, busy]).is_retryable
+    first = every_symbol_failed([busy, gone])
+    assert (str(first), first.status, first.is_retryable) == ("AAPL: HTTP 503", 503, False)
+
+
+def test_every_symbol_failing_reports_a_bug_among_them() -> None:
+    busy = MassiveError("AAPL: HTTP 429", status=429)
+    broken = MassiveError("MSFT: a row broke", source=ErrorSource.LIBRARY)
+    first = every_symbol_failed([busy, broken])
+    # A bug is never hidden behind another symbol's rate limit.
+    assert (str(first), first.source, first.is_bug) == (
+        f"MSFT: a row broke. {LIBRARY_BUG}",
+        ErrorSource.LIBRARY,
+        True,
+    )
+    assert not first.is_retryable
 
 
 def test_a_library_bug_message_ends_with_how_to_report_it() -> None:
@@ -161,7 +312,10 @@ def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> 
     with pytest.raises(BrokenGuaranteeError) as raised:
         required(None, "stocks.trades's history path")
     assert str(raised.value) == f"stocks.trades's history path is missing. {LIBRARY_BUG}"
-    assert not isinstance(raised.value, MassiveError)  # no handler of Massive's failures takes it
+    # A user's `except dm.MassiveError` catches it, as the library bug it is.
+    assert isinstance(raised.value, MassiveError)
+    assert (raised.value.source, raised.value.is_bug) == (ErrorSource.LIBRARY, True)
+    assert not raised.value.is_retryable
 
 
 def test_required_instance_returns_a_value_and_names_another_type_a_library_defect() -> None:
@@ -171,15 +325,15 @@ def test_required_instance_returns_a_value_and_names_another_type_a_library_defe
     assert str(raised.value) == (
         f"stocks.trades's history path is NoneType, not str. {LIBRARY_BUG}"
     )
-    assert failure_text(raised.value) == f"BrokenGuaranteeError: {raised.value}"
+    assert failure_text(raised.value) == str(raised.value)  # its message says it is a bug
 
 
 def test_failure_text_adds_the_report_only_to_a_library_defect() -> None:
     assert failure_text(MassiveError("refused")) == "refused"
-    assert failure_text(MassiveError("fix it", cause=ErrorCause.USER_DEFECT)) == "fix it"
-    defect = MassiveError("row broke", cause=ErrorCause.LIBRARY_DEFECT)
+    assert failure_text(MassiveError("fix it", source=ErrorSource.USER)) == "fix it"
+    defect = MassiveError("row broke", source=ErrorSource.LIBRARY)
     assert failure_text(defect) == f"row broke. {LIBRARY_BUG}"
-    already = MassiveError(library_bug("row broke"), cause=ErrorCause.LIBRARY_DEFECT)
+    already = MassiveError(library_bug("row broke"), source=ErrorSource.LIBRARY)
     assert failure_text(already) == f"row broke. {LIBRARY_BUG}"  # never twice
     assert failure_text(KeyError("k")) == f"KeyError: 'k'. {LIBRARY_BUG}"
 

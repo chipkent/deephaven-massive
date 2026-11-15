@@ -53,6 +53,7 @@ jobs:
       test: ${{ steps.decide.outputs.test }}
       build: ${{ steps.decide.outputs.build }}
       docs: ${{ steps.decide.outputs.docs }}
+      site: ${{ steps.decide.outputs.site }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,6 +100,11 @@ jobs:
           # shows each one. A change to these alone runs only those two tests, on one Python
           # version.
           docs='^README\.md$|^docs/(troubleshooting|tester-guide)\.md$|^docs/tester-examples/|^docs/.+\.(png|jpe?g|gif|svg|webp)$'
+          # The documentation site's sources, which the site job builds in strict mode: its
+          # configuration and API reference pages, the griffe extension it loads, the pages it
+          # publishes, the package source its API reference reads, and pyproject.toml, which
+          # declares the site's tools.
+          site='^zensical\.toml$|^docs/api/|^scripts/site_literal_blocks\.py$|^README\.md$|^docs/(troubleshooting|configuration)\.md$|^docs/(datasets|images)/|^src/deephaven_massive/|^pyproject\.toml$'
           # Files no job reads: the contributor, developer, and live-test guides, the
           # agent instructions and skills, the pull request and issue templates, the settings of
           # Dependabot and of the local git hooks, which CI does not run, and the release notes
@@ -109,7 +115,7 @@ jobs:
           # grep exits 1 for no match and 2 or more for an error, such as an invalid pattern. An
           # error must never read as "no match", which would skip jobs, so every pattern is
           # checked on every event, and every match below fails the step on an error.
-          for pattern in "$lint" "$test" "$build" "$docs" "$unread" "$workflows"; do
+          for pattern in "$lint" "$test" "$build" "$docs" "$site" "$unread" "$workflows"; do
             status=0
             grep -qE "$pattern" <<< "" || status=$?
             if [ "$status" -gt 1 ]; then
@@ -119,7 +125,7 @@ jobs:
           done
           everything() {
             echo "Every job runs: $1."
-            printf '%s=true\n' lint test build >> "$GITHUB_OUTPUT"
+            printf '%s=true\n' lint test build site >> "$GITHUB_OUTPUT"
             # The whole suite includes the documentation tests.
             echo docs=false >> "$GITHUB_OUTPUT"
           }
@@ -138,7 +144,7 @@ jobs:
             everything "a workflow changed, and every job must exercise a workflow change"
             exit 0
           fi
-          uncovered=$(grep -vE "$lint|$test|$build|$docs|$unread" <<< "$paths" || [ $? -eq 1 ])
+          uncovered=$(grep -vE "$lint|$test|$build|$docs|$site|$unread" <<< "$paths" || [ $? -eq 1 ])
           if [ -n "$uncovered" ]; then
             everything "no rule covers $(head -n 3 <<< "$uncovered" | paste -sd ' ' -)"
             exit 0
@@ -156,7 +162,7 @@ jobs:
             esac
           }
           # Every decision is made before any is written, so a failure leaves no partial output.
-          decisions=$(decide lint "$lint" && decide test "$test" && decide build "$build")
+          decisions=$(decide lint "$lint" && decide test "$test" && decide build "$build" && decide site "$site")
           # The documentation tests run on their own only when the whole suite does not.
           if grep -qx 'test=true' <<< "$decisions"; then
             decisions+=$'\ndocs=false'
@@ -467,11 +473,54 @@ jobs:
             jvm_fatal_pid*.log
           if-no-files-found: ignore
 
+  site:
+    # Builds the documentation site that the Docs site workflow publishes from main. Zensical's
+    # strict mode fails on a broken link or anchor in a page, but a docstring problem only makes
+    # griffe print a warning, such as an Args entry for a parameter that does not exist, so the
+    # step fails on any such line too, and on a docstring example whose `::` marker shows as
+    # text. The API reference reads the package source without importing it, so the job needs
+    # neither the project installed nor a JVM.
+    name: site
+    needs: lint
+    if: needs.lint.outputs.site == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # uv reads the project's metadata, whose version comes from the git history and tags.
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.14
+      - name: Test the griffe extension's examples
+        run: uv run --python 3.14 --only-group site python -m doctest scripts/site_literal_blocks.py
+      - name: Build the site, failing on a broken link or a docstring warning
+        # uv.lock is not committed, so this resolves the newest versions of the site group.
+        run: |
+          set -euo pipefail
+          uv run --python 3.14 --only-group site zensical build --strict --clean 2>&1 | tee "$RUNNER_TEMP/site.log"
+          # Zensical colors its output; the pattern matches the text without the color codes.
+          if sed $'s/\x1b\\[[0-9;]*m//g' "$RUNNER_TEMP/site.log" | grep -E '^(griffe|WARNING|Warning)\b'; then
+            echo "::error::the site build printed the warnings above; fix each one"
+            exit 1
+          fi
+          if grep -rl '<p>::</p>' site; then
+            echo "::error::a docstring's '::' example marker shows as text on the pages above"
+            exit 1
+          fi
+
   ci-ok:
     # The single required check. It runs even when a job it needs failed or was cancelled, so
     # it always reports a status: a skipped required check would count as passed.
     name: ci-ok
-    needs: [lint, test, test-lowest, build, docs]
+    needs: [lint, test, test-lowest, build, docs, site]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -483,10 +532,12 @@ jobs:
           TEST_LOWEST: ${{ needs.test-lowest.result }}
           BUILD: ${{ needs.build.result }}
           DOCS: ${{ needs.docs.result }}
+          SITE: ${{ needs.site.result }}
           RUN_LINT: ${{ needs.lint.outputs.lint }}
           RUN_TEST: ${{ needs.lint.outputs.test }}
           RUN_BUILD: ${{ needs.lint.outputs.build }}
           RUN_DOCS: ${{ needs.lint.outputs.docs }}
+          RUN_SITE: ${{ needs.lint.outputs.site }}
         # The lint job runs on every run, since it makes the decision, so it must pass; it
         # skips its own checks when the change cannot affect them. The other jobs wait for it,
         # so they never start after a lint failure. Each decision must be exactly true or
@@ -517,9 +568,11 @@ jobs:
           decision test "$RUN_TEST"
           decision build "$RUN_BUILD"
           decision docs "$RUN_DOCS"
+          decision site "$RUN_SITE"
           expect lint success "$LINT"
           expect test "$(wanted "$RUN_TEST")" "$TEST"
           expect test-lowest "$(wanted "$RUN_TEST")" "$TEST_LOWEST"
           expect build "$(wanted "$RUN_BUILD")" "$BUILD"
           expect docs "$(wanted "$RUN_DOCS")" "$DOCS"
+          expect site "$(wanted "$RUN_SITE")" "$SITE"
           exit "$failed"

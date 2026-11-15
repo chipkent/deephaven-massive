@@ -26,9 +26,9 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   option chain's underlying, a futures product code) is read value by value, each with the
   requests `fetch()` makes for that value alone, so every row belongs to the value whose
   request returned it, and one value's failure fails only that value.
-- **Classes of failure** (`failure_kind`): `TRANSIENT` when the cause may pass (a rate limit
-  beyond the read's patience, a server error after the client's retries, a network failure, a
-  symbol's later page that answered HTTP 404), `PERMANENT` otherwise: the same read would fail
+- **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
+  rate limit beyond the read's patience, a server error after the client's retries, a network
+  failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
   again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
   lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
   does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
@@ -39,10 +39,10 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
 - **Columns**: each symbol's table must have exactly the dataset's columns
   (`SessionCore.dataset_schema`), so tables of different symbols, and of reads made at
   different times, can be merged. A table that does not is a defect of the library: the symbol
-  fails `PERMANENT`, logged at ERROR.
+  fails with an error that is not retryable, logged at ERROR.
 
 Each symbol's outcome logs one DEBUG line (its rows and source); each failure is logged once
-at the level its cause gives (`_log_limits.log_failure`): DEBUG for an expected one, ERROR for
+at the level its `is_bug` gives (`_log_limits.log_failure`): DEBUG for an expected one, ERROR for
 a defect. Every function runs on the calling thread (a read's own thread), which may be any
 thread but an update-graph thread holding no library lock; the REST requests fan out on the
 reader's pool (`RestReader.read_each`).
@@ -53,7 +53,6 @@ from __future__ import annotations
 import functools
 import logging
 from dataclasses import replace
-from http import HTTPStatus
 from typing import TYPE_CHECKING, TypeAlias
 
 import pyarrow as pa
@@ -62,12 +61,12 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
-    CutShortError,
-    EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
+    SessionClosedError,
     library_bug,
     required,
     required_instance,
@@ -83,7 +82,7 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -103,7 +102,6 @@ if TYPE_CHECKING:
 __all__ = [
     "RestUnit",
     "UnsupportedParameterError",
-    "failure_kind",
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
@@ -124,47 +122,15 @@ class UnsupportedParameterError(PermanentError):
     A dataset with a path per symbol class can route one symbol to a path that lacks a
     parameter the call set (`adjusted=False` on the crypto indicators). That symbol's read
     fails with this error before any request, and the other symbols are read. The parameter is
-    the caller's, so its cause is `ErrorCause.USER_DEFECT`.
+    the caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 
-    default_cause = ErrorCause.USER_DEFECT
+    default_source = ErrorSource.USER
+    default_is_bug = True
 
 
 _SYMBOL = "Symbol"
 """The column that names each row's symbol, by which a request of several symbols is split."""
-
-
-def failure_kind(error: MassiveError) -> FailureKind:
-    """Class a symbol's failure: may the same read succeed if it is made again later?
-
-    Args:
-        error: The failure, as the transport raised or returned it.
-
-    Returns:
-        `TRANSIENT` for a symbol's data cut short (`CutShortError`: a later page's 404), and
-        for an expected failure with no status (a network failure, a read stopped), a server
-        error (5xx), or a rate limit (429). `PERMANENT`, meaning the same read would fail
-        again for this session's entitlements, for everything else: a refusal of the plan
-        (`EntitlementError`, which an upgrade of the plan lifts), a failure a retry cannot fix
-        (`PermanentError`: rows that break the schema, a parameter the path does not take, a
-        crypto pair Massive does not list), any defect (`ErrorCause.LIBRARY_DEFECT` or
-        `USER_DEFECT`), and any other HTTP status, such as 400 or the 404 of a path Massive
-        retired.
-    """
-    if isinstance(error, CutShortError):
-        return FailureKind.TRANSIENT
-    if isinstance(error, (EntitlementError, PermanentError)):
-        return FailureKind.PERMANENT
-    if error.cause is not ErrorCause.EXPECTED:
-        return FailureKind.PERMANENT
-    status = error.status
-    if (
-        status is None
-        or status == HTTPStatus.TOO_MANY_REQUESTS
-        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    ):
-        return FailureKind.TRANSIENT
-    return FailureKind.PERMANENT
 
 
 def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
@@ -207,9 +173,12 @@ def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveErro
         error: The planning error, which names the path and the parameter.
 
     Returns:
-        Each symbol with one shared `UnsupportedParameterError`.
+        Each symbol with one shared `UnsupportedParameterError`, whose message ends with the
+        fix: leave the parameter out, or read these symbols in a call without it.
     """
-    refusal = UnsupportedParameterError(str(error))
+    refusal = UnsupportedParameterError(
+        f"{error}; leave that parameter out, or read these symbols in a call without it"
+    )
     return dict.fromkeys(symbols, refusal)
 
 
@@ -627,13 +596,12 @@ def symbol_outcomes(
             `"flat files and REST"` when REST served the days the files lack.
 
     Returns:
-        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`
-        classed by `failure_kind`;
+        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`;
         a table without exactly the dataset's columns fails its symbol as a library defect.
 
     Raises:
         AuthenticationError: When any symbol failed with it: every symbol would.
-        MassiveError: `"<session> is closed"` when the session closed during the read.
+        SessionClosedError: `"<session> is closed"` when the session closed during the read.
     """
     refused = next((e for e in failures.values() if isinstance(e, AuthenticationError)), None)
     if refused is not None:
@@ -642,7 +610,7 @@ def symbol_outcomes(
         )
         raise refused
     if core.closed:
-        raise MassiveError(f"{core.label} is closed")
+        raise SessionClosedError(f"{core.label} is closed; {NEW_SESSION}")
     expected = col_defs(core.dataset_schema(spec))
     outcomes: dict[str, SymbolOutcome] = {}
     for symbol in symbols:
@@ -663,10 +631,9 @@ def symbol_outcomes(
                 continue
             error = MassiveError(
                 library_bug(f"{spec.name}: {symbol}'s rows from {source} {problem}"),
-                cause=ErrorCause.LIBRARY_DEFECT,
+                source=ErrorSource.LIBRARY,
             )
-        kind = failure_kind(error)
-        outcomes[symbol] = SymbolFailure(error, kind)
+        outcomes[symbol] = SymbolFailure(error)
         log_failure(
             logger,
             error,
@@ -675,7 +642,7 @@ def symbol_outcomes(
             spec.name,
             symbol,
             source,
-            kind.value,
+            "retryable" if error.is_retryable else "not retryable",
             expected=logging.DEBUG,
         )
     return outcomes

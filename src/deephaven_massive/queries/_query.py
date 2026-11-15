@@ -27,16 +27,14 @@ from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import (
-    OnError,
-)
 from deephaven_massive._errors import (
-    ErrorCause,
     MassiveError,
     UnlistedPairError,
+    every_symbol_failed,
     failure_text,
     raises_through,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -182,7 +180,7 @@ def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
         error: What the call raised.
     """
     if isinstance(error, MassiveError):
-        level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+        level = logging.DEBUG if not error.is_bug else logging.ERROR
         logger.log(level, "call %d failed after %.3f s: %s", call, elapsed, failure_text(error))
     else:
         logger.debug(
@@ -431,9 +429,10 @@ class Query:
             Each symbol's outcome, with when the read began and how long it took.
 
         Raises:
-            MassiveError: The first symbol's error, when every symbol failed; or, under
-                `unlisted_symbols=RAISE`, the first unlisted pair's. A failure of every symbol
-                alike (a rejected key, a closed session) propagates from the read.
+            MassiveError: The first symbol's error, retryable only when every symbol's is,
+                when every symbol failed; or, under `unlisted_symbols=RAISE`, the first
+                unlisted pair's. A failure of every symbol alike (a rejected key, a closed
+                session) propagates from the read.
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
@@ -443,18 +442,19 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        unlisted = self._core.config.unlisted_symbols
+        unlisted = effect_of(self._core.config.unlisted_symbols)
         pairs = [
             name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
         ]
-        if pairs and unlisted is OnError.RAISE:
+        if pairs and unlisted.fails:
             raise failed[pairs[0]].error
         if len(failed) == len(call_time):
-            raise failed[call_time[0]].error
+            first = every_symbol_failed([failed[name].error for name in call_time])
+            raise first from failed[call_time[0]].error
         warned = {
             name: outcome
             for name, outcome in failed.items()
-            if not (unlisted is OnError.IGNORE and name in pairs)
+            if not (name in pairs and unlisted.level <= logging.DEBUG)
         }
         if warned:
             logger.warning(

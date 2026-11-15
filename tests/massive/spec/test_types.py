@@ -207,6 +207,13 @@ def test_a_unit_on_anything_but_a_timestamp_param_is_rejected(kind: ParamKind) -
         Param(name="p", kind=kind, unit=WireUnit.MS)
 
 
+def test_a_timestamp_param_in_the_field_only_unit_is_rejected() -> None:
+    # `MS_OR_NS` tells units apart by a value's size, so it cannot say how to send an instant:
+    # refused where the parameter is built, never a bare KeyError where a value is sent.
+    with pytest.raises(ValueError, match=r"^parameter 't\.gte': the unit ms\|ns is for fields"):
+        Param(name="t.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS_OR_NS)
+
+
 # Source.
 
 

@@ -38,8 +38,8 @@ apply.
   started it, in its report if it has no other channel), and keep working on what the answer
   can't change.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
-  hasn't accepted, loosening a check, every lint or type-check suppression, reversing an owner decision, and dropping or narrowing a
-  requirement. **Only the owner's own message approves** a release, a run against Massive's API
+  hasn't accepted, loosening a check, every lint or type-check suppression but the server-start
+  import below, reversing an owner decision, and dropping or narrowing a requirement. **Only the owner's own message approves** a release, a run against Massive's API
   with a key, posting outside this repository, closing or deleting an issue, PR, pushed branch,
   or release, and spending money or changing access. A brief may relay an owner decision quoted
   verbatim with where the owner said it; a paraphrase relays nothing, and no brief grants these
@@ -202,12 +202,21 @@ These protect the owner's repository, money, and secrets.
   None` after the check that guarantees it), for readers and the type checker; it never
   validates input or guards anything at run time, since `python -O` removes it. Prefer it to a
   `cast`, which asserts the same fact without checking it.
+- **Every choice over a closed set handles each case by name** (an enum's members, a union of
+  types, the forms of `symbols`, a fixed set of values), so a new member or type fails loudly in
+  a test instead of corrupting data or dropping rows. A `match` or `if` chain ends in
+  `assert_never` where mypy can check it, or else raises `BrokenGuaranteeError`; a lookup table
+  over an enum has a test that every member is in it. No `else` or default case, `dict.get`
+  default, type-filtering comprehension, or silent `except` absorbs a value nobody planned for;
+  an intended fallback (a documented `OnError` behavior, an optional field Massive may omit)
+  says why in a comment.
 - **Lint size and complexity limits flag smells**: fix the design. A suppression at a site
   needs the owner's acceptance first, asked with its reason; never raise a global limit to make
   code pass. Too-many-arguments is off because
   keyword-only optional parameters are the API style; positional parameters are capped at three.
   Every suppression (`# noqa`, `# type: ignore[code]`, `# pragma: no cover`) has its reason on
-  its line.
+  its line. One case is accepted in advance: a script that starts the Deephaven server imports
+  what loads Deephaven after the start, each line with `# noqa: E402 - needs the server above`.
 - **The checks are the owner's rules**: `tests/test_layout.py`, the ruff, mypy, and coverage
   settings, the hooks, `check.sh`, and CI. A stricter check and an entry under an existing rule whose stated purpose
   covers the case (a helper package, an approved exception) are ordinary edits, named under

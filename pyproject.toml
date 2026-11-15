@@ -136,6 +136,9 @@ site = [
     # package. 2.0.0 is the first release whose mkdocstrings Zensical loads; 1.x needs an
     # mkdocstrings without the mkdocstrings.handlers module Zensical imports.
     "mkdocstrings-python>=2.0.0",
+    # The griffe extension that renders the docstrings' examples (scripts/site_literal_blocks.py)
+    # marks its hook with override; 4.4.0 is the first release that has it.
+    "typing_extensions>=4.4.0",
 ]
 
 [tool.hatch.version]
@@ -205,8 +208,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# assert states internal invariants for readers and the type checker; never input validation.
-"src/**" = ["S101"]
+"src/**" = [
+    "S101",  # assert only states a fact the code has just established, never an input check
+]
 "tests/**" = [
     "S101",  # pytest uses bare assert statements
     "PLR2004",  # literal expected values in assertions are the point of a test

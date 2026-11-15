@@ -84,7 +84,14 @@ from deephaven.table import TableDefinition
 from deephaven.table_listener import TableListener, TableListenerHandle
 from typing_extensions import override
 
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug, required
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+    library_bug,
+    required,
+)
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._tables.columns import col_defs, describe
 from deephaven_massive._tables.diagnostics import (
@@ -284,7 +291,7 @@ class BackgroundRead:
         DEBUG, whatever the call returned or raised. A
         `MassiveError` fails the table as it is; anything else is a defect of the library, logged
         at ERROR with its traceback and how to report it, and fails the table with a
-        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`).
+        `MassiveError` that names it (`ErrorSource.LIBRARY`).
         """
         try:
             if self._stopped_by("no request: it was stopped before its turn"):
@@ -309,7 +316,7 @@ class BackgroundRead:
                             f"{self._name}: the background read failed: "
                             f"{type(error).__name__}: {error}"
                         ),
-                        cause=ErrorCause.LIBRARY_DEFECT,
+                        source=ErrorSource.LIBRARY,
                     )
                     mark_failure_logged(failure)  # logged here, with its trace
                     logger.exception(
@@ -320,7 +327,7 @@ class BackgroundRead:
     def _failed_with(self, core: SessionCore, error: MassiveError) -> None:
         """Log a `MassiveError` that ended the read, by its text, and fail the table.
 
-        It logs once at the level its cause gives (`log_failure`): WARNING for an expected
+        It logs once at the level its `is_bug` gives (`log_failure`): WARNING for an expected
         failure, ERROR for a defect, naming whose. Its text names the status, the path, and the
         `request_id`; its traceback adds nothing a user can act on.
 
@@ -414,9 +421,9 @@ class BackgroundRead:
         with self._publish_lock:
             if self._failed or self._published is not None:
                 return False
-            closed = core.fail_stream(self._call, str(error))
+            closed = core.fail_stream(self._call, error)
             self._publisher.publish_failure(
-                error if closed in (None, str(error)) else MassiveError(closed)
+                error if closed in (None, str(error)) else SessionClosedError(closed)
             )
             self._failed = True
             return True
@@ -433,14 +440,14 @@ class _RowsLanded(TableListener):
     state under `registry_lock` (`WorkerTables.finish_read`), which never blocks.
     """
 
-    def __init__(self, core_ref: weakref.ref[SessionCore], call: int) -> None:
+    def __init__(self, core_ref: Callable[[], SessionCore | None], call: int) -> None:
         """Wait for the read's rows.
 
         Args:
-            core_ref: The session's core, weakly. The read's record keeps the session in the
-                live set while the read loads; a close marks a read that has published `DONE`
-                before its rows land, and once its result is released too the session may be
-                freed before the listener runs.
+            core_ref: Returns the session's core, or None once it is freed: a weak reference.
+                The read's record keeps the session in the live set while the read loads; a
+                close marks a read that has published `DONE` before its rows land, and once
+                its result is released too the session may be freed before the listener runs.
             call: The read's `StreamId`.
         """
         self._core_ref = core_ref
@@ -581,7 +588,7 @@ def open_read(
 
     Raises:
         MassiveError: If the session closed after the read was registered but before the
-            read was submitted (`"MassiveSession #1 is closed"`). One closed before the read
+            read was submitted (`"MassiveSession #1 is closed; ..."`). One closed before the read
             could be registered raises the `MassiveError` of `WorkerTables.track`.
             A close after the read was submitted fails its table instead.
     """

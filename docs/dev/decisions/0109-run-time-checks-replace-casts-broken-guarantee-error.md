@@ -2,7 +2,7 @@
 
 Date: 2026-11-13
 
-Status: accepted
+Status: partly superseded: its rule that a broken guarantee is not a `MassiveError` by [105](0105-errors-source-is-retryable-is-bug-session-closed-error.md)
 
 A `cast` tells mypy a value has a type without checking it, so a wrong assumption fails later and
 elsewhere, with an `AttributeError` far from its cause. The library checks the fact instead:
