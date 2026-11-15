@@ -1111,6 +1111,10 @@ _RECENT_TRADE = timedelta(days=7)
 _SNAPSHOT_PAGE = 50_000
 """The largest snapshot page Massive serves; a page of exactly this many is cut short."""
 
+_LIST_PAGE = 1000
+"""The largest page of the futures contracts and schedules lists; a page this full may be cut
+short."""
+
 _LEG_SEPARATOR = re.compile(r"[-: ]")
 """What ends a combo ticker's first leg: `GCQ6` of `GCQ6-GCJ7`, `CL` of `CL:BF Q6-U6-V6`."""
 
@@ -1240,8 +1244,11 @@ def _record_products(
 ) -> None:
     """Record whether the products list holds each combo's candidate products (Q1)."""
     codes = sorted({code for found in candidates.values() for code in found})
+    rows = _page(client, _PRODUCTS_PATH, query={"product_code.any_of": codes, "limit": 50_000})
+    full = " (a full page: a product may be left out)" if len(rows) == 50_000 else ""
+    evidence(f"Q1 products list for {codes}: {len(rows)} rows{full}")
     listed: dict[str, set[tuple[str, str]]] = {}
-    for row in _page(client, _PRODUCTS_PATH, query={"product_code.any_of": codes, "limit": 50_000}):
+    for row in rows:
         listed.setdefault(str(row.get("product_code")), set()).add(
             (str(row.get("type")), str(row.get("strategy_type")))
         )
@@ -1261,10 +1268,13 @@ def _record_schedules(
     candidates: Mapping[str, Sequence[str]],
     *,
     evidence: Evidence,
-) -> None:
+) -> dict[str, dict[str, tuple[int, int]]]:
     """Record the candidates' sessions, and which of them holds each combo's last trade (Q2).
 
     Reads the window the futures calendar reads: 7 days back to 10 ahead.
+
+    Returns:
+        The sessions read, as `_schedule_spans` gives them.
     """
     codes = sorted({code for found in candidates.values() for code in found})
     today = datetime.now(UTC).date()
@@ -1272,11 +1282,11 @@ def _record_schedules(
         "product_code.any_of": codes,
         "session_end_date.gte": today - timedelta(days=7),
         "session_end_date.lte": today + timedelta(days=10),
-        "limit": 1000,
+        "limit": _LIST_PAGE,
     }
     schedules = _page(client, _SCHEDULES, query=query)
     spans = _schedule_spans(schedules)
-    full = " (a full page)" if len(schedules) == 1000 else ""
+    full = " (a full page)" if len(schedules) == _LIST_PAGE else ""
     evidence(f"Q2 schedules: {len(schedules)} events{full} for {codes}")
     for code in codes:
         evidence(f"Q2 {code!r}: sessions {sorted(spans.get(code, {}))}")
@@ -1286,19 +1296,38 @@ def _record_schedules(
                 f"Q2 {combo.ticker!r}: last trade {_chicago(combo.traded)} Chicago, in a "
                 f"session of {code!r}: {_session_holding(spans.get(code, {}), combo.traded)}"
             )
+    return spans
 
 
-def _record_trades(client: RestClient, combos: Sequence[_Combo], evidence: Evidence) -> None:
-    """Record the session Massive's trades list gives each combo's latest trade (Q2)."""
+def _record_trades(
+    client: RestClient,
+    combos: Sequence[_Combo],
+    *,
+    spans: Mapping[str, Mapping[str, tuple[int, int]]],
+    candidates: Mapping[str, Sequence[str]],
+    evidence: Evidence,
+) -> None:
+    """Record the session Massive gives each combo's latest trade, beside the schedules' (Q2).
+
+    The trade read is the latest when the request runs, which may not be the snapshot's, so
+    its own instant is placed in the candidates' sessions.
+    """
     for combo in combos:
         query = {"ticker": combo.ticker, "sort": "timestamp.desc", "limit": 1}
         trades = _page(client, _TRADES, query=query)
         for trade in trades:
             stamp = trade.get("timestamp")
+            if not isinstance(stamp, int):
+                evidence(f"Q2 {combo.ticker!r}: latest trade without an integer timestamp {trade}")
+                continue
+            placed = {
+                code: _session_holding(spans.get(code, {}), stamp)
+                for code in candidates[combo.ticker]
+            }
             evidence(
-                f"Q2 {combo.ticker!r}: latest trade's session_end_date "
-                f"{trade.get('session_end_date')!r}, at "
-                f"{_chicago(stamp) if isinstance(stamp, int) else repr(stamp)} Chicago"
+                f"Q2 {combo.ticker!r}: latest trade at {_chicago(stamp)} Chicago, Massive's "
+                f"session_end_date {trade.get('session_end_date')!r}, the schedules' session "
+                f"by candidate {placed}"
             )
         if not trades:
             evidence(f"Q2 {combo.ticker!r}: the trades list returned no trade")
@@ -1306,8 +1335,9 @@ def _record_trades(client: RestClient, combos: Sequence[_Combo], evidence: Evide
 
 def _record_contracts(client: RestClient, tickers: Sequence[str], evidence: Evidence) -> None:
     """Record what the contracts list answers for the combos, asked as the calendar asks (Q3)."""
-    contracts = _page(client, _CONTRACTS, query={"ticker.any_of": list(tickers), "limit": 1000})
-    full = " (a full page: a combo may be left out)" if len(contracts) == 1000 else ""
+    query = {"ticker.any_of": list(tickers), "limit": _LIST_PAGE}
+    contracts = _page(client, _CONTRACTS, query=query)
+    full = " (a full page: a combo may be left out)" if len(contracts) == _LIST_PAGE else ""
     evidence(f"Q3 contracts list for {list(tickers)}: {len(contracts)} rows{full}")
     for ticker in tickers:
         rows = [row for row in contracts if row.get("ticker") == ticker]
@@ -1345,7 +1375,8 @@ def test_products_schedules_and_contracts_of_futures_combos(
     - Q1: each combo's candidates, whether its ticker starts with each, and whether the
       products list holds each (with its `type` and `strategy_type`).
     - Q2: the sessions each candidate's schedule holds, the session whose span (first event
-      to last) holds each combo's last trade, and the latest trades' own `session_end_date`.
+      to last) holds each combo's last trade, and each latest trade's own `session_end_date`
+      beside the session its instant falls in.
     - Q3: the rows the contracts list returned for each combo (their `type` and
       `product_code`), and whether its page was full, which could leave a combo out.
 
@@ -1363,6 +1394,122 @@ def test_products_schedules_and_contracts_of_futures_combos(
         for combo in combos
     }
     _record_products(live_rest, combos, candidates, evidence=evidence)
-    _record_schedules(live_rest, combos, candidates, evidence=evidence)
-    _record_trades(live_rest, latest, evidence)
+    spans = _record_schedules(live_rest, combos, candidates, evidence=evidence)
+    _record_trades(live_rest, latest, spans=spans, candidates=candidates, evidence=evidence)
     _record_contracts(live_rest, sorted(candidates), evidence)
+
+
+_LIST_PAGES = 15
+"""The most pages of active contracts the sizing check reads, 1,000 contracts each."""
+
+_SCHEDULE_PAGES = 5
+"""The most pages of one day's schedule events, of every product, the sizing check reads."""
+_MONTH_AND_YEAR = re.compile(r"[FGHJKMNQUVXZ]\d{1,2}$")
+"""A single contract ticker's end: a month letter and a one- or two-digit year."""
+
+
+def _read_pages(
+    client: RestClient, path: str, query: Mapping[str, object], *, most: int
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Read up to `most` pages of a futures list, following each page's `next_url`.
+
+    Returns:
+        The rows, the pages read, and whether the list ended within them (the last page read
+        has no `next_url`).
+    """
+    rows: list[dict[str, Any]] = []
+    read = 0
+    for page in client.pages(source(Transport.REST, path), {}, query, bucket="futures"):
+        rows.extend(page.rows)
+        read += 1
+        if not (isinstance(page.body, dict) and page.body.get("next_url")):
+            return rows, read, True
+        if read == most:
+            break
+    return rows, read, False
+
+
+def _record_roots(singles: Sequence[Mapping[str, Any]], evidence: Evidence) -> None:
+    """Record whether each single contract's ticker, less its month and year, is its product."""
+    pairs = sorted({(str(r.get("ticker")), str(r.get("product_code"))) for r in singles})
+    unlike = [(t, code) for t, code in pairs if _MONTH_AND_YEAR.sub("", t) != code]
+    shapeless = [t for t, _ in pairs if not _MONTH_AND_YEAR.search(t)]
+    evidence(
+        f"Q5 single contracts: {len(pairs)} tickers, {len(pairs) - len(unlike)} whose root "
+        f"(the ticker less its month letter and year) is their product code"
+    )
+    evidence(f"Q5 roots that differ from the product code (ticker, product_code): {unlike[:40]}")
+    evidence(f"Q5 single tickers without a month letter and year: {shapeless[:40]}")
+
+
+def _weekdays(first: date, last: date) -> int:
+    """Count the weekdays from one date to another, both included.
+
+    Returns:
+        The count.
+    """
+    return sum((first + timedelta(days=n)).weekday() < 5 for n in range((last - first).days + 1))
+
+
+@pytest.mark.settles("123")
+@pytest.mark.requests(21)
+@pytest.mark.timeout(400)
+def test_count_of_futures_products_contracts_and_schedule_pages(
+    live_rest: RestClient, *, recent_monday: date, evidence: Evidence
+) -> None:
+    """How many futures products and active contracts there are, and what their schedules cost.
+
+    Sizes loading every product's schedule up front, and records whether a single contract's
+    ticker root is its product code. Reads, for the most recent published Monday: the products
+    list (one page of up to 50,000); the active contracts, single and combo, up to 15 pages of
+    1,000; and that day's schedule events of every product, up to 5 pages of 1,000. Records:
+
+    - Q4: the products by `type`; the active contracts by `type`, and whether the list ended
+      within the pages read (if not, the counts are lower bounds); the day's schedule events,
+      the products they cover, and the requests that loading every product's schedule over the
+      futures calendar's window (7 days back to 10 ahead) would take at 1,000 events a page,
+      taking each weekday in it to have as many events as that Monday.
+    - Q5: of the single contracts read, how many have a ticker that, less its month letter and
+      one- or two-digit year, equals their `product_code`, and every one that differs.
+
+    Passes when every request is answered and lists something; the answers are evidence,
+    never asserted. Sends at most 21 requests.
+    """
+    day = recent_monday
+    products = _page(live_rest, _PRODUCTS_PATH, query={"date": day, "limit": 50_000})
+    kinds = Counter(str(row.get("type")) for row in products)
+    codes = {str(row.get("product_code")) for row in products}
+    full = " (a full page: more may exist)" if len(products) == 50_000 else ""
+    evidence(
+        f"Q4 products on {day}: {len(products)} rows{full}, {len(codes)} product codes, "
+        f"by type {dict(kinds)}"
+    )
+    query = {"date": day, "active": True, "limit": _LIST_PAGE}
+    contracts, pages, ended = _read_pages(live_rest, _CONTRACTS, query, most=_LIST_PAGES)
+    tickers = {(str(r.get("ticker")), str(r.get("type"))) for r in contracts}
+    evidence(
+        f"Q4 active contracts on {day}: {len(tickers)} tickers in {pages} pages, "
+        f"{'the whole list' if ended else 'the list goes on (a lower bound)'}, by type "
+        f"{dict(Counter(kind for _, kind in tickers))}, "
+        f"{len({str(r.get('product_code')) for r in contracts})} product codes"
+    )
+    query = {"session_end_date": day, "limit": _LIST_PAGE}
+    events, pages, ended = _read_pages(live_rest, _SCHEDULES, query, most=_SCHEDULE_PAGES)
+    scheduled = {str(row.get("product_code")) for row in events}
+    today = datetime.now(UTC).date()
+    sessions = _weekdays(today - timedelta(days=7), today + timedelta(days=10))
+    evidence(
+        f"Q4 schedule events for the session of {day}: {len(events)} in {pages} pages"
+        f"{'' if ended else ' (more follow)'}, for {len(scheduled)} product codes, "
+        f"{len(scheduled - codes)} of them not in the products list, "
+        f"{len(codes - scheduled)} listed products with none"
+    )
+    evidence(
+        f"Q4 every product's schedule over {sessions} weekday sessions: about "
+        f"{-(-len(events) * sessions // _LIST_PAGE)} requests of {_LIST_PAGE} events"
+        f"{'' if ended else ' at least'}"
+    )
+    _record_roots([r for r in contracts if r.get("type") == "single"], evidence)
+    assert products, f"Massive listed no futures product on {day}"
+    assert contracts, f"Massive listed no active futures contract on {day}"
+    assert events, f"Massive's schedules hold no event for the session of {day}"
