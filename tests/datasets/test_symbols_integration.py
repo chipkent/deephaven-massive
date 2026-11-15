@@ -110,7 +110,7 @@ def _problems(
         if not wire_spellings(asset_class, ticker):
             found.append(f"{ticker!r}: no flat-file spelling reads back as it")
         if asset_class is AssetClass.CRYPTO and ticker not in pairs:
-            continue  # its currencies do not join; item 49 records such pairs
+            continue  # its currencies do not join, so no stream topic can be built for it
         topic = ws_symbol(asset_class, ticker, pairs)
         if canonical_from_wire(asset_class, topic) != ticker:
             found.append(f"{ticker!r}: stream topic {topic!r} reads back as another ticker")
