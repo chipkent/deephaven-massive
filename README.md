@@ -629,5 +629,5 @@ setting, its values, and its default, with an example settings file.
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) explains how to set up a development checkout, run the
+[CONTRIBUTING.md](https://github.com/chipkent/deephaven-massive/blob/main/CONTRIBUTING.md) explains how to set up a development checkout, run the
 checks, and propose a change.

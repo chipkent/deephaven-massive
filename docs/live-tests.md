@@ -15,7 +15,7 @@ checkout's root. Each pytest marker selects one set of tests:
 
 | Marker | What it runs |
 |---|---|
-| `integration` | The question tests, most of which record or check Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items.md)) |
+| `integration` | The question tests, most of which record or check Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items/README.md)) |
 | `integration_smoke` | Every dataset and method once, checked automatically |
 | `integration_rate_limits` | The three rate-limit tests, which go over Basic's 5 requests a minute on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |

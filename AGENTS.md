@@ -3,7 +3,7 @@
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
 Deephaven tables: a Python library managed with `uv`. Its user contract is the user docs
 (`README.md`, `docs/troubleshooting.md`, `docs/configuration.md`, the generated
-`docs/datasets/`) and the public docstrings; tests enforce it, and `docs/dev/decisions.md`
+`docs/datasets/`) and the public docstrings; tests enforce it, and `docs/dev/decisions/`
 records why it is what it is. Each rule states its intent: apply it as written, and let the
 intent settle only what the words leave open. Procedures live in the skills, named where they
 apply.
@@ -104,7 +104,7 @@ These protect the owner's repository, money, and secrets.
   PR. A public change is approved only by the owner's message naming that change, after seeing
   what it adds, removes, or alters for users. A work list, a plan, or "start the work" never
   approves the public changes inside it; each gets its own question. Each public change ships
-  with its user docs, docstrings, and tests. `docs/dev/decisions.md` records
+  with its user docs, docstrings, and tests. `docs/dev/decisions/` records
   broad decisions only: a rule or contract set or changed, a break, or a design choice worth
   remembering; not each new name. When the request leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
   under Decisions, and list it under Check before merging, where the owner judges it; no list
@@ -246,8 +246,15 @@ These protect the owner's repository, money, and secrets.
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
   generated file instead of merging it, and say in the PR body how you resolved it.
-- A new decision or verification item takes the number the coordinator reserved, or else the
-  next after the highest on `main` and in every open PR's diff. Both files are append-only.
+- Each decision is one file, `docs/dev/decisions/NNNN-slug.md`, and each verification item one
+  file in `docs/dev/verification-items/`; the folder README gives the format. The slug says when
+  a reader needs the entry, in the words they would search for. A new entry takes the number the
+  coordinator reserved, or the next after the highest on `main` and in every open PR. Never
+  rename or delete an entry, except to renumber one of two that landed with the same number: a
+  changed decision is a new file, and the old one's `Status:` line names it; settling an item
+  changes its `Status:` line. Before citing decisions or asking the
+  owner, list them (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read every entry whose
+  name touches the subject.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
   `writing-a-pr-description` for PR descriptions, issue bodies, and reports, and
   `writing-user-docs` for a user page or any change to what one describes.

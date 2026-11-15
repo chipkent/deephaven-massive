@@ -136,6 +136,9 @@ site = [
     # package. 2.0.0 is the first release whose mkdocstrings Zensical loads; 1.x needs an
     # mkdocstrings without the mkdocstrings.handlers module Zensical imports.
     "mkdocstrings-python>=2.0.0",
+    # The griffe extension that renders the docstrings' examples (scripts/site_literal_blocks.py)
+    # marks its hook with override; 4.4.0 is the first release that has it.
+    "typing_extensions>=4.4.0",
 ]
 
 [tool.hatch.version]

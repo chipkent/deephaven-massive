@@ -62,14 +62,19 @@ the console: `https://github.com/chipkent/deephaven-massive/blob/main/` followed
 such as `docs/datasets/<dataset>.md` or `README.md#<anchor>`. The same test checks that every
 citation is a URL and that every cited page and anchor exists.
 
+The user pages and an API reference generated from the docstrings also build into one website.
+[`docs/dev/docs-site.md`](docs/dev/docs-site.md) explains how to build and preview it, what its
+CI job checks, and how to turn publishing to GitHub Pages on and off.
+
 When Massive changes its documentation, [`docs/dev/spec-refresh.md`](docs/dev/spec-refresh.md)
 explains how the generated schemas and the reference follow.
 
 The owner's decisions behind the public contract, and why, are in
-[`docs/dev/decisions.md`](docs/dev/decisions.md). A change to a public signature, default,
-column, or failure behavior adds an entry there. The facts about Massive that the documentation
-does not settle, and the live tests that settle them, are in
-[`docs/dev/verification-items.md`](docs/dev/verification-items.md).
+[`docs/dev/decisions/`](docs/dev/decisions/README.md), one file each. A change that sets or
+changes a rule or contract, breaks code, or makes a design choice worth remembering adds one.
+The facts about Massive that the documentation does not settle, and the live tests that settle
+them, are in [`docs/dev/verification-items/`](docs/dev/verification-items/README.md). Each
+folder's README gives the format and the command that lists every entry with its status.
 
 ## Agent instructions and skills
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 from tests._live import plans, summary
@@ -148,8 +147,8 @@ def test_marker_items_reads_both_markers_and_ignores_other_marks() -> None:
 
 def test_every_marked_item_is_listed_in_the_verification_items() -> None:
     root = Path(__file__).resolve().parents[2]
-    items_page = (root / "docs/dev/verification-items.md").read_text()
-    listed = set(re.findall(r"^- \*\*(\d+)\.\*\*", items_page, re.MULTILINE))
+    items = (root / "docs/dev/verification-items").glob("[0-9]*.md")
+    listed = {str(int(item.name.split("-", 1)[0])) for item in items}
     marked: set[str] = set()
     for path in sorted((root / "tests").rglob("test_*_integration.py")):
         marked |= _marker_items(path.read_text())
