@@ -11,7 +11,9 @@ test records what Massive sent (`evidence`). How to run these tests is in `docs/
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -35,16 +37,29 @@ _TICKERS: Final = "/v3/reference/tickers"
 _OPTION_CONTRACTS: Final = "/v3/reference/options/contracts"
 _FUTURES_CONTRACTS: Final = "/futures/v1/contracts"
 _PAGE: Final = 1000
-"""Rows of one page: the largest each list serves, read once, so each list costs one request."""
+"""Rows of one page: the largest each list serves."""
 
 _SHOWN: Final = 20
 """The most refused or changed tickers the evidence names, per list."""
 
+_OPTION_UNDERLYINGS: Final = (
+    *("AAPL", "SPY", "QQQ", "BRK.B", "BF.B", "GOOGL", "GOOG"),
+    *("BAC", "KIM", "WFC"),
+    *("SPX", "NDX", "VIX", "RUT"),
+)
+"""The underlyings whose every options contract is read: share classes (`BRK.B`, `BF.B`,
+`GOOGL`, `GOOG`), the common stocks behind preferreds the stock lists hold (`BAC`, `KIM`,
+`WFC`), and index options, which the contracts list takes by their bare ticker (`SPX`)."""
 
-def _first_page(
+_TODAY: Final = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+"""Today in New York, the day whose tradeable futures contracts are read: without a day, the
+futures contracts list holds each contract once for every day of its history."""
+
+
+def _every_page(
     client: RestClient, path: str, query: Mapping[str, object], *, bucket: str
-) -> list[dict[str, Any]]:
-    """Read one page of a list.
+) -> tuple[list[dict[str, Any]], int]:
+    """Read every page of a list, following its `next_url`.
 
     Args:
         client: The wire REST client.
@@ -53,10 +68,14 @@ def _first_page(
         bucket: The rate bucket of its class.
 
     Returns:
-        The page's rows, as Massive sent them.
+        The rows, as Massive sent them, and how many requests the pages took.
     """
-    pages = client.pages(source(Transport.REST, path), {}, query, bucket=bucket, limit=_PAGE)
-    return [row for page in pages for row in page.rows]
+    rows: list[dict[str, Any]] = []
+    requests = 0
+    for page in client.pages(source(Transport.REST, path), {}, query, bucket=bucket):
+        rows.extend(page.rows)
+        requests += 1
+    return rows, requests
 
 
 def _crypto_pairs(rows: Sequence[Mapping[str, Any]]) -> dict[str, tuple[str, str]]:
@@ -118,66 +137,60 @@ def _problems(
 
 
 @pytest.mark.verifies("119")
-@pytest.mark.requests(1)
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(1800)
 @pytest.mark.parametrize(
-    ("asset_class", "path", "query", "bucket"),
+    ("asset_class", "path", "queries", "bucket"),
     [
         pytest.param(
             AssetClass.STOCKS,
             _TICKERS,
-            {"market": "stocks", "limit": _PAGE},
+            ({"market": "stocks", "limit": _PAGE},),
             "stocks",
-            marks=pytest.mark.needs("stocks:basic"),
+            marks=pytest.mark.needs("stocks:starter"),
             id="stocks",
         ),
         pytest.param(
             AssetClass.INDICES,
             _TICKERS,
-            {"market": "indices", "limit": _PAGE},
+            ({"market": "indices", "limit": _PAGE},),
             "indices",
-            marks=pytest.mark.needs("indices:basic"),
+            marks=pytest.mark.needs("indices:starter"),
             id="indices",
         ),
         pytest.param(
             AssetClass.FOREX,
             _TICKERS,
-            {"market": "fx", "limit": _PAGE},
+            ({"market": "fx", "limit": _PAGE},),
             "currencies",
-            marks=pytest.mark.needs("currencies:basic"),
+            marks=pytest.mark.needs("currencies:starter"),
             id="forex",
         ),
         pytest.param(
             AssetClass.CRYPTO,
             _TICKERS,
-            {"market": "crypto", "limit": _PAGE},
+            ({"market": "crypto", "limit": _PAGE},),
             "currencies",
-            marks=pytest.mark.needs("currencies:basic"),
+            marks=pytest.mark.needs("currencies:starter"),
             id="crypto",
         ),
         pytest.param(
             AssetClass.OPTIONS,
             _OPTION_CONTRACTS,
-            {"limit": _PAGE},
+            tuple({"underlying_ticker": u, "limit": _PAGE} for u in _OPTION_UNDERLYINGS),
             "options",
-            marks=pytest.mark.needs("options:basic"),
+            marks=pytest.mark.needs("options:starter"),
             id="options",
         ),
         pytest.param(
             AssetClass.FUTURES,
             _FUTURES_CONTRACTS,
-            {"type": "single", "limit": _PAGE},
+            (
+                {"type": "single", "date": _TODAY, "active": True, "limit": _PAGE},
+                {"type": "combo", "date": _TODAY, "active": True, "limit": _PAGE},
+            ),
             "futures",
-            marks=pytest.mark.needs("futures:basic"),
-            id="futures-single",
-        ),
-        pytest.param(
-            AssetClass.FUTURES,
-            _FUTURES_CONTRACTS,
-            {"type": "combo", "limit": _PAGE},
-            "futures",
-            marks=pytest.mark.needs("futures:basic"),
-            id="futures-combo",
+            marks=pytest.mark.needs("futures:starter"),
+            id="futures",
         ),
     ],
 )
@@ -186,26 +199,41 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     *,
     asset_class: AssetClass,
     path: str,
-    query: Mapping[str, object],
+    queries: Sequence[Mapping[str, object]],
     bucket: str,
     evidence: Evidence,
 ) -> None:
-    """Whether the rule accepts each ticker of one page of Massive's own list of a class.
+    """Whether the rule accepts every ticker of Massive's own list of a class.
 
-    Reads one page of 1,000 rows: the ticker list of the market for stocks, indices, forex,
-    and crypto, the options contracts list, and the futures contracts list of single contracts
-    and of combos. For every ticker, asserts that the library sends it as written (no refusal,
-    its class's prefix present, a forex or crypto pair joined), that `canonical_symbol` keeps
-    it, that a flat-file filter holds a spelling that reads back as it, and that its stream
-    topic reads back as it. Records the page's size and the characters its tickers use, so a
-    lower-case letter, a space, or a separator Massive writes shows up. Reading it: no problem
-    line confirms the rule for that class; each problem line is a ticker Massive lists that
-    the library would refuse or misread.
+    Reads every page, following `next_url`: the ticker list of the market for stocks,
+    indices, forex, and crypto; every futures contract, single and combo, tradeable today;
+    and, since the options contracts list holds millions of contracts, a sample: every current
+    contract of 14 underlyings, share classes (`BRK.B`, `BF.B`, `GOOGL`), the common stocks
+    behind listed preferreds (`BAC`, `KIM`, `WFC`), and index options (`SPX`, `NDX`, `VIX`,
+    `RUT`). For every ticker, asserts that the library sends it as written (no refusal, its
+    class's prefix present, a forex or crypto pair joined), that `canonical_symbol` keeps it,
+    that a flat-file filter holds a spelling that reads back as it, and that its stream topic
+    reads back as it. Records each list's size, the requests it took, and the characters its
+    tickers use, so a lower-case letter, a space, or a separator Massive writes shows up.
+
+    Cost: a paid plan of each class, since Basic paces 5 requests a minute and these lists
+    take more. Estimated, not yet measured: about 30 requests for stocks, 15 for indices, 2
+    each for forex and crypto, 60 for the options sample, and 30 for futures, about 140 in
+    all, unpaced, so about 5 minutes. Each case records the count it took.
+
+    Reading it: no problem line confirms the rule for that class; each problem line is a
+    ticker Massive lists that the library would refuse or misread.
     """
-    rows = _first_page(live_rest, path, query, bucket=bucket)
+    rows: list[dict[str, Any]] = []
+    requests = 0
+    for query in queries:
+        read, sent = _every_page(live_rest, path, query, bucket=bucket)
+        rows.extend(read)
+        requests += sent
     tickers = sorted({row["ticker"] for row in rows if isinstance(row.get("ticker"), str)})
     pairs = _crypto_pairs(rows) if asset_class is AssetClass.CRYPTO else {}
-    evidence(f"{len(rows)} rows, {len(tickers)} tickers, e.g. {tickers[:5]} ... {tickers[-5:]}")
+    evidence(f"{requests} requests, {len(rows)} rows, {len(tickers)} tickers")
+    evidence(f"e.g. {tickers[:5]} ... {tickers[-5:]}")
     evidence(f"characters used: {''.join(sorted(set(''.join(tickers))))!r}")
     if asset_class is AssetClass.CRYPTO:
         evidence(f"{len(tickers) - len(pairs)} tickers whose currencies do not join, not streamed")

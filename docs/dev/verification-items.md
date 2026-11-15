@@ -164,8 +164,11 @@ settles it.
   at either end, a control character, `,`, `*`, a missing class prefix, or a forex or crypto
   pair written with `-` or `/`; any case is sent. Verified by
   `tests/datasets/test_symbols_integration.py` (Stocks, Indices, Currencies, Options, and
-  Futures Basic; one request per class, two for futures), which pages one list of each class
-  and records the characters its tickers use.
+  Futures Starter), which reads every page of the stocks, indices, forex, and crypto ticker
+  lists and of today's futures contracts, single and combo, and every current options contract
+  of 14 sampled underlyings, since the full options list holds millions. Estimated at about
+  140 requests and 5 minutes, unpaced; each case records its count and the characters its
+  tickers use.
 - **120.** Whether Massive reads tickers case-sensitively, and what it answers to a forex pair
   written with a dash. Any case is sent as written, and `C:EUR-USD` is refused, naming
   `C:EURUSD`, until read. Settled by `tests/datasets/test_symbols_integration.py` (Stocks
