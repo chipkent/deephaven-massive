@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -24,6 +25,8 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.epoch import epoch_ns
+from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -33,7 +36,7 @@ from deephaven_massive._massive import (
 )
 from tests._live import futures_bar_buckets
 from tests._live.calendar import months_before
-from tests._live.ticker_lists import accepts
+from tests._live.ticker_lists import accepts, ticker_form
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -74,6 +77,7 @@ _SNAPSHOT = "/futures/v1/snapshot"
 _CONTRACTS = "/futures/v1/contracts"
 _PRODUCTS_PATH = "/futures/v1/products"
 _SCHEDULES = "/futures/v1/schedules"
+_TRADES = "/futures/v1/trades/{ticker}"
 
 _CONTRACT_SHAPE = re.compile(r"[A-Z0-9]+?[FGHJKMNQUVXZ]\d{1,2}")
 """A single contract: a product code, a month letter, and a one- or two-digit year."""
@@ -1092,3 +1096,273 @@ def test_contracts_follow_a_live_table_of_product_codes(
         evidence(f"after deleting NQ: {sorted(left)}, {result.size} rows")
     finally:
         m.release(result)
+
+
+_COMBO_ROOTS = ("CL", "GC")
+"""The ticker prefixes whose combos the combo check reads: crude oil and gold, whose calendar
+spreads (`GCQ6-GCJ7`) and butterflies (`CL:BF Q6-U6-V6`) trade every day."""
+
+_COMBOS_PER_ROOT = 2
+"""The combos read per prefix: those of the most recent trades, one per ticker form."""
+
+_RECENT_TRADE = timedelta(days=7)
+"""How recent a combo's last trade must be for its session to fall in the schedules read."""
+
+_SNAPSHOT_PAGE = 50_000
+"""The largest snapshot page Massive serves; a page of exactly this many is cut short."""
+
+_LEG_SEPARATOR = re.compile(r"[-: ]")
+"""What ends a combo ticker's first leg: `GCQ6` of `GCQ6-GCJ7`, `CL` of `CL:BF Q6-U6-V6`."""
+
+
+@dataclass(frozen=True)
+class _Combo:
+    """A combo read from the snapshot: its ticker, product code, and last trade."""
+
+    ticker: str
+    product_code: str
+    traded: int
+    """The last trade's `last_updated`, in epoch nanoseconds."""
+
+
+def _snapshot_combos(
+    rows: Sequence[Mapping[str, Any]], since: int
+) -> tuple[dict[str, str], list[_Combo]]:
+    """Read the snapshot's product codes, and the combos traded since an instant.
+
+    A combo is a ticker the futures calendar does not take for a single contract
+    (`is_futures_contract`).
+
+    Returns:
+        Each ticker's `details.product_code`, and the combos with a `last_trade` at or after
+        `since` (epoch nanoseconds), most recent first.
+    """
+    products: dict[str, str] = {}
+    recent: list[_Combo] = []
+    for row in rows:
+        details = row.get("details") or {}
+        ticker, code = details.get("ticker"), details.get("product_code")
+        if not isinstance(ticker, str):
+            continue
+        products[ticker] = str(code)
+        traded = (row.get("last_trade") or {}).get("last_updated")
+        if not is_futures_contract(ticker) and isinstance(traded, int) and traded >= since:
+            recent.append(_Combo(ticker, str(code), traded))
+    return products, sorted(recent, key=lambda combo: combo.traded, reverse=True)
+
+
+def _one_per_form(combos: Sequence[_Combo], count: int) -> list[_Combo]:
+    """Take the first combos of distinct ticker forms (`ticker_form`), at most `count`.
+
+    Returns:
+        The combos, in their order.
+    """
+    taken: dict[str, _Combo] = {}
+    for combo in combos:
+        if len(taken) < count:
+            taken.setdefault(ticker_form(combo.ticker), combo)
+    return list(taken.values())
+
+
+def _schedule_spans(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, tuple[int, int]]]:
+    """Group schedule events into sessions, as the futures calendar does.
+
+    Returns:
+        By product code, then `session_end_date`, the session's first and last event in epoch
+        nanoseconds.
+    """
+    stamps: dict[str, dict[str, list[int]]] = {}
+    for row in rows:
+        code, day, stamp = (row.get(k) for k in ("product_code", "session_end_date", "timestamp"))
+        if isinstance(code, str) and isinstance(day, str) and isinstance(stamp, str):
+            at = epoch_ns(datetime.fromisoformat(stamp))
+            stamps.setdefault(code, {}).setdefault(day, []).append(at)
+    return {
+        code: {day: (min(found), max(found)) for day, found in days.items()}
+        for code, days in stamps.items()
+    }
+
+
+def _session_holding(spans: Mapping[str, tuple[int, int]], nanos: int) -> str:
+    """Name the session whose span, first event to last, holds an instant.
+
+    Returns:
+        Its `session_end_date`, or `"none"` with the sessions read.
+    """
+    held = [day for day, (first, last) in sorted(spans.items()) if first <= nanos <= last]
+    return held[0] if held else f"none of {sorted(spans)}"
+
+
+def _read_combos(
+    client: RestClient, evidence: Evidence
+) -> tuple[list[_Combo], list[_Combo], dict[str, str]]:
+    """Read the snapshot of each of `_COMBO_ROOTS` and take its recently traded combos.
+
+    Returns:
+        The combos taken, each prefix's most recent first; each prefix's most recent combo;
+        and every ticker's snapshot product code.
+    """
+    since = int((datetime.now(UTC) - _RECENT_TRADE).timestamp()) * 1_000_000_000
+    products_of: dict[str, str] = {}
+    combos: list[_Combo] = []
+    latest: list[_Combo] = []
+    for root in _COMBO_ROOTS:
+        end = root[:-1] + chr(ord(root[-1]) + 1)
+        query = {"ticker.gte": root, "ticker.lt": end, "limit": _SNAPSHOT_PAGE}
+        rows = _page(client, _SNAPSHOT, query=query)
+        products, recent = _snapshot_combos(rows, since)
+        products_of.update(products)
+        picked = _one_per_form(recent, _COMBOS_PER_ROOT)
+        full = " (a full page)" if len(rows) == _SNAPSHOT_PAGE else ""
+        evidence(
+            f"snapshot {root} to {end}: {len(rows)} rows{full}, "
+            f"{sum(not is_futures_contract(t) for t in products)} combos, "
+            f"{len(recent)} traded within 7 days, read "
+            f"{[(c.ticker, c.product_code, _chicago(c.traded)) for c in picked]}"
+        )
+        if rows:
+            first = rows[0]
+            evidence(
+                f"snapshot row keys {sorted(first)}, details {first.get('details')}, "
+                f"last_trade {first.get('last_trade')}"
+            )
+        combos.extend(picked)
+        latest.extend(picked[:1])
+    return combos, latest, products_of
+
+
+def _record_products(
+    client: RestClient,
+    combos: Sequence[_Combo],
+    candidates: Mapping[str, Sequence[str]],
+    *,
+    evidence: Evidence,
+) -> None:
+    """Record whether the products list holds each combo's candidate products (Q1)."""
+    codes = sorted({code for found in candidates.values() for code in found})
+    listed: dict[str, set[tuple[str, str]]] = {}
+    for row in _page(client, _PRODUCTS_PATH, query={"product_code.any_of": codes, "limit": 50_000}):
+        listed.setdefault(str(row.get("product_code")), set()).add(
+            (str(row.get("type")), str(row.get("strategy_type")))
+        )
+    for combo in combos:
+        for code in candidates[combo.ticker]:
+            evidence(
+                f"Q1 {combo.ticker!r}: candidate {code!r} (the snapshot's product code: "
+                f"{code == combo.product_code}), ticker starts with it: "
+                f"{combo.ticker.startswith(code)}, products list (type, strategy_type): "
+                f"{sorted(listed.get(code, set())) or 'not listed'}"
+            )
+
+
+def _record_schedules(
+    client: RestClient,
+    combos: Sequence[_Combo],
+    candidates: Mapping[str, Sequence[str]],
+    *,
+    evidence: Evidence,
+) -> None:
+    """Record the candidates' sessions, and which of them holds each combo's last trade (Q2).
+
+    Reads the window the futures calendar reads: 7 days back to 10 ahead.
+    """
+    codes = sorted({code for found in candidates.values() for code in found})
+    today = datetime.now(UTC).date()
+    query = {
+        "product_code.any_of": codes,
+        "session_end_date.gte": today - timedelta(days=7),
+        "session_end_date.lte": today + timedelta(days=10),
+        "limit": 1000,
+    }
+    schedules = _page(client, _SCHEDULES, query=query)
+    spans = _schedule_spans(schedules)
+    full = " (a full page)" if len(schedules) == 1000 else ""
+    evidence(f"Q2 schedules: {len(schedules)} events{full} for {codes}")
+    for code in codes:
+        evidence(f"Q2 {code!r}: sessions {sorted(spans.get(code, {}))}")
+    for combo in combos:
+        for code in candidates[combo.ticker]:
+            evidence(
+                f"Q2 {combo.ticker!r}: last trade {_chicago(combo.traded)} Chicago, in a "
+                f"session of {code!r}: {_session_holding(spans.get(code, {}), combo.traded)}"
+            )
+
+
+def _record_trades(client: RestClient, combos: Sequence[_Combo], evidence: Evidence) -> None:
+    """Record the session Massive's trades list gives each combo's latest trade (Q2)."""
+    for combo in combos:
+        query = {"ticker": combo.ticker, "sort": "timestamp.desc", "limit": 1}
+        trades = _page(client, _TRADES, query=query)
+        for trade in trades:
+            stamp = trade.get("timestamp")
+            evidence(
+                f"Q2 {combo.ticker!r}: latest trade's session_end_date "
+                f"{trade.get('session_end_date')!r}, at "
+                f"{_chicago(stamp) if isinstance(stamp, int) else repr(stamp)} Chicago"
+            )
+        if not trades:
+            evidence(f"Q2 {combo.ticker!r}: the trades list returned no trade")
+
+
+def _record_contracts(client: RestClient, tickers: Sequence[str], evidence: Evidence) -> None:
+    """Record what the contracts list answers for the combos, asked as the calendar asks (Q3)."""
+    contracts = _page(client, _CONTRACTS, query={"ticker.any_of": list(tickers), "limit": 1000})
+    full = " (a full page: a combo may be left out)" if len(contracts) == 1000 else ""
+    evidence(f"Q3 contracts list for {list(tickers)}: {len(contracts)} rows{full}")
+    for ticker in tickers:
+        rows = [row for row in contracts if row.get("ticker") == ticker]
+        kinds = sorted({(str(r.get("type")), str(r.get("product_code"))) for r in rows})
+        days = sorted(str(r.get("date")) for r in rows)
+        evidence(
+            f"Q3 {ticker!r}: {len(rows)} rows, (type, product_code) {kinds or 'not listed'}"
+            + (f", dates {days[0]} to {days[-1]}" if days else "")
+        )
+
+
+@pytest.mark.settles("122")
+@pytest.mark.requests(7)
+@pytest.mark.timeout(200)
+def test_products_schedules_and_contracts_of_futures_combos(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether a futures combo's product and schedule could date its streamed rows.
+
+    The calendar that dates streamed futures rows looks up a single contract's product in the
+    contracts list and loads that product's schedule; it never looks up a combo (a spread
+    traded as one instrument, `GCQ6-GCJ7`, `CL:BF Q6-U6-V6`), so a combo's streamed rows get
+    a null `Date`. This records whether Massive's data could place them.
+
+    Reads the snapshot of every ticker from `CL` up to `CM`, then from `GC` up to `GD`, and
+    takes of each the combos (tickers the calendar does not take for a single contract) of
+    the most recent trades within 7 days, one per ticker form, two at most. Each combo has up
+    to two candidate products: its snapshot row's `details.product_code`, and that of its
+    first leg's own snapshot row (`GCQ6` of `GCQ6-GCJ7`). Then reads the products list and
+    the schedules of the candidates, the schedules from 7 days back to 10 ahead (the
+    calendar's window); the contracts list for the combos, by `ticker.any_of` at the largest
+    page and nothing else (the calendar's lookup); and the latest trade of the most recent
+    combo of each prefix, whose `session_end_date` is Massive's own date for it. Records:
+
+    - Q1: each combo's candidates, whether its ticker starts with each, and whether the
+      products list holds each (with its `type` and `strategy_type`).
+    - Q2: the sessions each candidate's schedule holds, the session whose span (first event
+      to last) holds each combo's last trade, and the latest trades' own `session_end_date`.
+    - Q3: the rows the contracts list returned for each combo (their `type` and
+      `product_code`), and whether its page was full, which could leave a combo out.
+
+    Passes when every request is answered and a combo traded within 7 days; the answers are
+    evidence, never asserted. Sends 7 requests: two snapshot pages, the products, the
+    schedules, the contracts, and two trades pages.
+    """
+    combos, latest, products_of = _read_combos(live_rest, evidence)
+    assert combos, "no CL or GC combo traded within 7 days: nothing to judge"
+    candidates = {
+        combo.ticker: sorted(
+            {combo.product_code, products_of.get(_LEG_SEPARATOR.split(combo.ticker, 1)[0], "")}
+            - {"", "None"}
+        )
+        for combo in combos
+    }
+    _record_products(live_rest, combos, candidates, evidence=evidence)
+    _record_schedules(live_rest, combos, candidates, evidence=evidence)
+    _record_trades(live_rest, latest, evidence)
+    _record_contracts(live_rest, sorted(candidates), evidence)
