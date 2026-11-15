@@ -107,7 +107,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from tests._live import parallel
+from tests._live import key_check, parallel
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
@@ -2412,53 +2412,74 @@ def test_every_run_registers_the_parallel_refusal(pytestconfig: pytest.Config) -
     assert pytestconfig.pluginmanager.get_plugin(parallel.PLUGIN_NAME) is parallel
 
 
-_NETWORK_BLOCK = """
+def test_every_run_registers_the_live_key_plugin(pytestconfig: pytest.Config) -> None:
+    # The CI check's run below loads the plugin by hand; a real run gets it from the conftest,
+    # with the conftest's source of plans.
+    assert pytestconfig.pluginmanager.get_plugin(key_check.PLUGIN_NAME) is key_check
+    assert key_check.PLANS_SOURCE in pytestconfig.stash
+
+
+_PROBE_RECORDER = """
 import os
-import socket
+
+from tests._live import key_check
 
 
-def _blocked(*args, **kwargs):
-    with open(os.environ["NETWORK_ATTEMPTS"], "a") as attempts:
-        attempts.write(f"{args[1:2]}\\n")
-    raise OSError("network blocked by the test")
+def _probe(config, api_key):
+    with open(os.environ["PROBE_ATTEMPTS"], "a") as attempts:
+        attempts.write("probed\\n")
+    raise OSError("the plans were probed")
 
 
-socket.getaddrinfo = _blocked
-socket.socket.connect = _blocked
-socket.socket.connect_ex = _blocked
+def pytest_configure(config):
+    config.stash[key_check.PLANS_SOURCE] = _probe
 """
-"""A pytest plugin that records and refuses every name lookup and socket connection."""
+"""A pytest plugin that stands in for the conftest's source of plans and records each probe."""
 
 
 def test_a_live_test_under_ci_never_probes_the_plans_even_with_a_key(tmp_path: Path) -> None:
     # The plans probe is a session fixture, set up before the function-scoped key check of
-    # the first live test, so it must check `CI` itself. The run gets a key (a dummy) and no
-    # declared plans, so only that check stands between the test and the probe; the plugin
-    # refuses the network all the same, so the probe could not reach Massive if it ran.
-    (tmp_path / "network_block.py").write_text(_NETWORK_BLOCK)
+    # the first live test, so it must check `CI` itself. The run gets a key (a dummy), and
+    # only that check stands between the test and the run's source of plans. The run loads
+    # the fixture's plugin with `-p`, as the conftest registers it in every run, with a
+    # stand-in source that records any probe, and collects a stand-in live test that needs
+    # the plans, so it needs neither the conftest nor a JVM.
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    integration: a live test\n")
+    (tmp_path / "probe_recorder.py").write_text(_PROBE_RECORDER)
+    live = tmp_path / "tests" / "datasets" / "test_timestamps_integration.py"
+    live.parent.mkdir(parents=True)
+    live.write_text(
+        "import pytest\n\npytestmark = pytest.mark.integration\n\n\n"
+        "def test_live(live_plans):\n    pass\n"
+    )
     attempts = tmp_path / "attempts.txt"
-    drop = {"MASSIVE_LIVE_PLANS", "MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY"}
-    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
     env |= {
         "CI": "1",
         "MASSIVE_API_KEY": "not-a-real-key",
-        "NETWORK_ATTEMPTS": str(attempts),
-        "PYTHONPATH": str(tmp_path),
+        "PROBE_ATTEMPTS": str(attempts),
+        "PYTHONPATH": os.pathsep.join([str(tmp_path), str(_ROOT)]),
     }
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-m",
             "pytest",
+            "--strict-markers",
+            "--import-mode=importlib",
+            "-rs",
             "-p",
             "no:cacheprovider",
             "-p",
-            "network_block",
+            "tests._live.key_check",
+            "-p",
+            "probe_recorder",
             "-m",
             "integration",
             "tests/datasets/test_timestamps_integration.py",
         ],
-        cwd=_ROOT,
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,

@@ -27,7 +27,9 @@ from the fixtures that call it, so it can be unit-tested against the fakes:
 - `summary`: the open-questions summary that ends a live run;
 - `same_field`: whether two Massive fields carry one quantity, read back to back and compared
   within a tolerance;
-- `parallel`: which selected tests are live, and the refusal to run them on parallel workers.
+- `parallel`: which selected tests are live, and the refusal to run them on parallel workers;
+- `key_check`: the key a live test may use, never under CI, and the `live_plans` fixture, which
+  learns the run's plans only past that check.
 
 Its subpackage `live_run` holds the live-run program, which a tester runs with their own keys
 through `scripts/live_run.py` to run every live check the key allows, unattended, for days.
