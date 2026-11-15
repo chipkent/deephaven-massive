@@ -7,12 +7,15 @@ with a body, a changed-file list, and a diff, as the hook and the workflow do.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
 _SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "check_pr_body.py"
@@ -126,15 +129,81 @@ def test_an_approval_with_the_owner_s_dated_words_passes(check: ModuleType) -> N
     assert check.find_problems(body, [], "") == []
 
 
-def test_an_approval_recorded_in_an_existing_decision_passes(check: ModuleType) -> None:
+_DECISION_96 = "docs/dev/decisions/0096-options-admin-messages.md"
+ADDED_DECISION = (
+    f"diff --git a/{_DECISION_96} b/{_DECISION_96}\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    f"+++ b/{_DECISION_96}\n"
+    "@@ -0,0 +1,1 @@\n"
+    "+# 96. Options admin messages\n"
+)
+
+
+@pytest.fixture
+def decisions(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A decisions folder holding decisions 96 and 104.
+
+    Returns:
+        The folder, with one `NNNN-<slug>.md` file per decision.
+    """
+    folder = tmp_path / "decisions"
+    folder.mkdir()
+    (folder / "0096-options-admin-messages.md").write_text("# 96. Options admin messages\n")
+    (folder / "0104-canonical-ticker-refused.md").write_text("# 104. Canonical ticker\n")
+    return folder
+
+
+def test_an_approval_recorded_in_an_existing_decision_passes(
+    check: ModuleType, decisions: pathlib.Path
+) -> None:
     body = "## Decisions\n\n- The owner decided that converters raise by default (decision 104).\n"
-    assert check.find_problems(body, ["src/x.py"], "") == []
+    assert check.find_problems(body, ["src/x.py"], "", decisions_dir=decisions) == []
 
 
-def test_a_decision_this_pull_request_adds_records_no_approval(check: ModuleType) -> None:
+def test_a_decision_this_pull_request_adds_records_no_approval(
+    check: ModuleType, decisions: pathlib.Path
+) -> None:
     body = "## Summary\n\nThe owner decided to ship it before 0.1.0; decision 96 records it.\n"
     changed = ["docs/dev/decisions/0096-options-admin-messages.md", "src/x.py"]
-    assert len(check.find_problems(body, changed, "")) == 1
+    problems = check.find_problems(body, changed, ADDED_DECISION, decisions_dir=decisions)
+    assert len(problems) == 1
+
+
+def test_a_decision_no_file_carries_records_no_approval(
+    check: ModuleType, decisions: pathlib.Path
+) -> None:
+    body = "- The owner approved removing the guard (decision 9999).\n"
+    assert len(check.find_problems(body, [], "", decisions_dir=decisions)) == 1
+
+
+def test_a_decision_whose_status_this_pull_request_updates_still_counts(
+    check: ModuleType, decisions: pathlib.Path
+) -> None:
+    body = "- The owner decided it (decision 104).\n"
+    diff = ADDED_DECISION.replace("0096-options-admin-messages", "0104-canonical-ticker-refused")
+    diff = diff.replace("new file mode 100644\n", "")
+    changed = ["docs/dev/decisions/0104-canonical-ticker-refused.md"]
+    assert check.find_problems(body, changed, diff, decisions_dir=decisions) == []
+
+
+def test_prose_between_two_short_quotations_is_not_a_quotation(check: ModuleType) -> None:
+    body = (
+        '- The owner approved on 2026-11-15: "ok"; the setting is called "retry_limit".\n'
+        '- The owner approved on 2026-11-15: "ok", then later repeated "ok".\n'
+    )
+    assert len(check.find_problems(body, [], "")) == 2
+
+
+def test_a_blank_line_before_an_indented_blockquote_keeps_the_item_whole(
+    check: ModuleType,
+) -> None:
+    body = (
+        "- The owner approved on 2026-11-15:\n\n  > Keep this guard exactly as written.\n\n"
+        "- A second item.\n"
+    )
+    assert check.find_problems(body, [], "") == []
+    assert len(check.units(body)) == 2
 
 
 def test_a_paraphrase_of_what_the_owner_wants_is_a_claim(check: ModuleType) -> None:
@@ -226,3 +295,50 @@ def test_main_without_a_draft_in_the_worktree_passes_and_says_so(
     monkeypatch.chdir(tmp_path)
     assert check.main([]) == 0
     assert "No .git-pr-body.md" in capsys.readouterr().out
+
+
+def _fake_run(outputs: dict[str, str]) -> Callable[[list[str]], str]:
+    def run(command: list[str]) -> str:
+        key = " ".join(command)
+        if key not in outputs:
+            raise subprocess.CalledProcessError(1, command)
+        return outputs[key]
+
+    return run
+
+
+def test_main_reads_a_pull_request_with_gh(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    body = json.dumps({"body": CLEAN, "files": [{"path": "AGENTS.md"}]})
+    outputs = {"gh pr view 7 --json body,files": body, "gh pr diff 7": AGENTS_DIFF}
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main(["--pr", "7"]) == 1
+    assert "Decisions touched" in capsys.readouterr().out
+
+
+def test_the_branch_is_measured_against_its_pull_request_s_base(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(CLEAN)
+    outputs = {
+        "gh pr view --json baseRefName": json.dumps({"baseRefName": "fix/below"}),
+        "git diff origin/fix/below...HEAD": "",
+        "git diff --name-only origin/fix/below...HEAD": "src/x.py\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 0
+
+
+def test_a_branch_without_a_pull_request_is_measured_against_main(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text("## Summary\n\nRewords a skill.\n")
+    outputs = {
+        "git diff origin/main...HEAD": "",
+        "git diff --name-only origin/main...HEAD": ".claude/skills/x/SKILL.md\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 1

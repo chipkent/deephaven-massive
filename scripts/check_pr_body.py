@@ -16,8 +16,9 @@ rewritten with no record of the decisions it replaced. This script fails on each
 - **An approval claimed without its source**: a bullet, table row, or paragraph saying the
   owner approved, accepted, decided, agreed, confirmed, wants, said, or told something also
   holds a `YYYY-MM-DD` date and a quotation of at least fifteen characters (`"..."` or a `>`
-  line), so a bare "ok" is quoted with the question it answered, or names a decision file
-  that records it (`decision N`) and that this pull request does not itself add.
+  line), so a bare "ok" is quoted with the question it answered, or names a decision
+  (`decision N`) whose file is in `docs/dev/decisions/` and that this pull request does not
+  itself add.
 - **A rule change without its record**: a pull request touching `AGENTS.md` or
   `.claude/skills/` holds a dated quote; one whose diff removes or rewrites a line of
   `AGENTS.md` also holds a `Decisions touched:` line naming decision numbers or `none`.
@@ -72,8 +73,12 @@ APPROVAL_CLAIM: Final = re.compile(
 #: A decision file as the source of an approval: the record the owner's words live in.
 DECISION_REFERENCE: Final = re.compile(r"\bdecision (\d+)\b", re.IGNORECASE)
 DATE: Final = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+#: Paired quotation marks, straight or curly, and a blockquote line: each a quotation.
+QUOTATIONS: Final = re.compile(r'"([^"]*)"|“([^”]*)”|^\s*>\s*(\S.*)$', re.MULTILINE)
 #: Fifteen characters or more: a one-word answer ("ok", "a.") is quoted with its question.
-QUOTE: Final = re.compile(r'"[^"]{15,}"|“[^”]{15,}”|^\s*>\s*\S.{14,}', re.MULTILINE)
+QUOTE_LENGTH: Final = 15
+#: Where the decisions live, relative to the repository root the script runs from.
+DECISIONS_DIR: Final = pathlib.Path("docs/dev/decisions")
 #: Quotations, blockquote lines, code spans, and links may hold a `?` that asks nothing.
 QUOTED_OR_CODE: Final = re.compile(
     r'"[^"]*"|“[^”]*”|`[^`]*`|https?://\S+|^\s*>[^\n]*', re.DOTALL | re.MULTILINE
@@ -128,16 +133,25 @@ def units(body: str) -> list[str]:
         Each table row on its own; each bullet or numbered item with its indented
         continuation and sub-bullets; each prose paragraph (consecutive non-empty lines).
     """
+    lines = body.splitlines()
     result: list[str] = []
     current: list[str] = []
-    for line in [*body.splitlines(), ""]:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         starts_item = stripped.startswith(("- ", "* ", "|")) or re.match(r"\d+\. ", stripped)
         indented = line.startswith((" ", "\t"))
-        if not stripped or (starts_item and not indented) or stripped.startswith("|"):
+        if not stripped:
+            # A blank line inside a list item (the next text is indented) continues the item.
+            following = next((later for later in lines[index + 1 :] if later.strip()), "")
+            if current and following.startswith((" ", "\t")):
+                continue
             if current:
                 result.append("\n".join(current))
-            current = [line] if stripped else []
+            current = []
+        elif (starts_item and not indented) or stripped.startswith("|"):
+            if current:
+                result.append("\n".join(current))
+            current = [line]
         else:
             current.append(line)
     if current:
@@ -152,44 +166,74 @@ def is_dated_quote(text: str) -> bool:
         text: A unit of the body, or the whole body.
 
     Returns:
-        True when `DATE` and `QUOTE` both match somewhere in the text.
+        True when the text holds a `DATE` and a paired quotation or blockquote line of
+        `QUOTE_LENGTH` characters or more. Quotation marks are paired in order, so the prose
+        between two short quotations never counts as one.
     """
-    return bool(DATE.search(text) and QUOTE.search(text))
+    quotations = ("".join(groups) for groups in QUOTATIONS.findall(text))
+    return bool(DATE.search(text)) and any(len(q) >= QUOTE_LENGTH for q in quotations)
 
 
-def _cites_existing_decision(unit: str, changed: list[str]) -> bool:
-    """Whether the unit names a decision file that this pull request does not add.
+def added_paths(diff: str) -> set[str]:
+    """Return the paths the diff adds as new files.
+
+    Args:
+        diff: A unified diff of the branch against its base.
+
+    Returns:
+        Each `b/` path whose header is followed by `new file mode`.
+    """
+    added: set[str] = set()
+    path = ""
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            path = line.split(" b/", 1)[1]
+        elif line.startswith("new file mode") and path:
+            added.add(path)
+    return added
+
+
+def cites_existing_decision(unit: str, added: set[str], decisions_dir: pathlib.Path) -> bool:
+    """Whether the unit names a decision that exists and this pull request does not add.
 
     Args:
         unit: A bullet, row, or paragraph of the body.
-        changed: The paths the pull request changes.
+        added: The paths the pull request adds as new files.
+        decisions_dir: The folder of decision files, `NNNN-<slug>.md`.
 
     Returns:
-        True for a `decision N` whose file `docs/dev/decisions/NNNN-...` is not among the
-        changed paths: a decision written in the same pull request records nothing yet.
+        True for a `decision N` whose file is in `decisions_dir` and not among `added`: a
+        number no file carries records nothing, and neither does a decision written in the
+        same pull request.
     """
-    return any(
-        not any(path.startswith(f"docs/dev/decisions/{int(number):04d}-") for path in changed)
-        for number in DECISION_REFERENCE.findall(unit)
-    )
+    for number in DECISION_REFERENCE.findall(unit):
+        files = list(decisions_dir.glob(f"{int(number):04d}-*.md"))
+        if files and not any(f"docs/dev/decisions/{f.name}" in added for f in files):
+            return True
+    return False
 
 
-def check_claims(body: str, changed: list[str]) -> list[str]:
+def check_claims(body: str, diff: str, decisions_dir: pathlib.Path) -> list[str]:
     """Return each unit that claims an approval without its source.
 
     Args:
         body: The description's Markdown.
-        changed: The paths the pull request changes.
+        diff: The pull request's unified diff, for the decision files it adds.
+        decisions_dir: The folder of decision files.
 
     Returns:
         One line per bullet, row, or paragraph whose own words (outside quotations and code)
         match `APPROVAL_CLAIM` while the unit holds neither a dated quotation of fifteen
-        characters or more nor a reference to a decision file this pull request does not add.
+        characters or more nor a reference to an existing decision this pull request does not
+        add.
     """
     problems = []
+    added = added_paths(diff)
     for unit in units(body):
         hit = APPROVAL_CLAIM.search(QUOTED_OR_CODE.sub("", unit))
-        if hit and not (is_dated_quote(unit) or _cites_existing_decision(unit, changed)):
+        if hit and not (
+            is_dated_quote(unit) or cites_existing_decision(unit, added, decisions_dir)
+        ):
             problems.append(
                 f"An approval is claimed ({hit.group(0)!r}) without the owner's words quoted "
                 f"with their date, or the decision that records them, in the same bullet, "
@@ -247,16 +291,26 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
     return problems
 
 
-def find_problems(body: str, changed: list[str], diff: str = "") -> list[str]:
+def find_problems(
+    body: str, changed: list[str], diff: str = "", *, decisions_dir: pathlib.Path = DECISIONS_DIR
+) -> list[str]:
     """Return every problem of the description, in the order the rules are listed.
 
     Args:
         body: The description's Markdown.
         changed: The paths the pull request changes.
-        diff: Its unified diff; empty when unknown, which skips the AGENTS.md deletion rule.
+        diff: Its unified diff; empty when unknown, which skips the AGENTS.md deletion rule
+            and treats every cited decision as one this pull request did not add.
+        decisions_dir: The folder of decision files; absent, no cited decision counts.
+
+    Returns:
+        The problems of each rule in turn: the Check before merging items, the claims, the
+        rule change.
     """
     return (
-        check_section(body) + check_claims(body, changed) + check_rule_change(body, changed, diff)
+        check_section(body)
+        + check_claims(body, diff, decisions_dir)
+        + check_rule_change(body, changed, diff)
     )
 
 

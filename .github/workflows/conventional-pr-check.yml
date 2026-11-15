@@ -82,7 +82,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          sparse-checkout: scripts/check_pr_body.py
+          # The decisions on the base branch, so a cited decision counts only once it is on main.
+          sparse-checkout: |
+            scripts/check_pr_body.py
+            docs/dev/decisions
           sparse-checkout-cone-mode: false
 
       - name: Check the description against the approval rules
