@@ -44,6 +44,7 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     StreamHistoryQuery,
 )
 
@@ -223,7 +224,7 @@ class IndicesNamespace(Namespace):
     @raises_through(build_query)
     def bars(
         self, symbols: SymbolsLike, timespan: Timespan, *, multiplier: int = 1
-    ) -> StreamHistoryQuery:
+    ) -> StreamHistoryQuery | HistoryQuery:
         """Open, high, low, and close index levels over fixed windows of time.
 
         Each row is one bar of one index. Index bars come from index levels, so they have no volume
@@ -237,9 +238,11 @@ class IndicesNamespace(Namespace):
             multiplier: Units per bar.
 
         Returns:
-            A query that reads history, and streams 1-second and 1-minute bars at
-            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
-            columns, plans, and methods:
+            A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
+            Massive streams, with the stream methods and `history()`; a `HistoryQuery`, with
+            `history()` only, for any other bars. A type checker allows a stream method on the
+            result only after `isinstance(q, StreamHistoryQuery)`. Its columns, plans, and
+            methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.bars.md.
 
         Raises:
@@ -257,7 +260,7 @@ class IndicesNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=StreamHistoryQuery,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

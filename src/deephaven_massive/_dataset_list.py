@@ -38,8 +38,7 @@ from deephaven_massive._datasets.column_reference import (
 from deephaven_massive._session import CATALOG, MassiveSession
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import FetchQuery, StreamHistoryQuery
-from deephaven_massive.queries._choice import bar_stream_verbs, verbs
-from deephaven_massive.queries._stream import streaming_bars
+from deephaven_massive.queries._choice import bar_stream_verbs, streaming_bars, verbs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence

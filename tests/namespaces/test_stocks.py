@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
-NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
 """The refusal of a stream of bars Massive doesn't stream."""
 
 R = Transport.REST
@@ -492,15 +491,12 @@ def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.Massiv
         (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_every_bars_call_is_one_class_and_only_some_stream(
+def test_only_bars_that_stream_get_the_stream_methods(
     massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
     timespan, multiplier, streams = case
     query = massive_session.stocks.bars("AAPL", timespan, multiplier=multiplier)
-    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
-    if not streams:
-        with pytest.raises(ValueError, match=NOT_STREAMED):
-            query.blink()
+    assert type(query) is (StreamHistoryQuery if streams else HistoryQuery)
     assert query._request.timespan is timespan
     assert query._request.multiplier == multiplier
     assert query._request.adjusted is True

@@ -10,7 +10,7 @@ what Massive serves for its dataset, and the query's class says so:
 - `FetchQuery`: a REST dataset, with `fetch()` and `poll()`.
 - `StreamQuery`: a live stream, with `blink()`, `append_only()`, and `ring()`.
 - `SymbolStreamQuery`: a live stream whose rows name their symbol, which adds `last_by()`.
-- `HistoryQuery`: any query with `history()`, for code that only reads history.
+- `HistoryQuery`: any query with `history()`, and the query of bars Massive doesn't stream.
 - `StreamHistoryQuery`: a stream that also has history, with all five of those methods.
 - `Query`: the base class of all five, with `columns()`, for code that takes any query.
 
@@ -29,6 +29,16 @@ annotate your own code, such as a helper that keeps each symbol's latest row of 
 
     m = dm.MassiveSession()
     quotes = latest(m.stocks.quotes(["AAPL", "MSFT"]))
+
+A `bars()` call returns a `StreamHistoryQuery` for the bars Massive streams, 1-second and
+1-minute bars at `multiplier=1`, and a `HistoryQuery` for any other bars, and declares both.
+A type checker allows a stream method on its result only after you check the class::
+
+    from deephaven_massive.queries import StreamHistoryQuery
+
+    minute = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
+    assert isinstance(minute, StreamHistoryQuery)  # 1-minute bars stream
+    live = minute.last_by()
 
 `dm.datasets()` lists every dataset with its methods, and `help()` on a class describes each
 method.

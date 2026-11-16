@@ -18,6 +18,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import Page, RestClient, Transport, source
+from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery
 from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
@@ -121,7 +122,9 @@ def test_minute_bars_of_a_business_key_on_the_real_time_host(
     which it does whether or not the market is open; a refusal there means the base Business
     TICK host is another one, which the user pins with `MassiveConfig.websocket_hosts`.
     """
-    table = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
+    bars = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE)
+    assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+    table = bars.append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
     hosts = {str(r["Host"]) for r in table_rows(live_session.connections())}
     for line in stream_report(live_session):
@@ -282,14 +285,16 @@ def test_a_delayed_plan_is_refused_on_the_default_configuration(
                 session.options.chain("SPY").fetch(wait=True)
             else:
                 today = datetime.now(UTC).date()
-                queries = {
+                queries: dict[str, Callable[[], HistoryQuery]] = {
                     "stocks": lambda: session.stocks.bars("AAPL", dm.Timespan.MINUTE),
                     "futures": lambda: session.futures.bars(
                         front_contract("ES", today), dm.Timespan.MINUTE
                     ),
                     "indices": lambda: session.indices.values(index_symbol),
                 }
-                table = queries[name]().append_only()
+                query = queries[name]()
+                assert isinstance(query, StreamHistoryQuery)  # minute bars and values stream
+                table = query.append_only()
                 pause = threading.Event()  # never set; only paces the polling
                 deadline = time.monotonic() + _STREAM_WAIT
                 while time.monotonic() < deadline and not errors:

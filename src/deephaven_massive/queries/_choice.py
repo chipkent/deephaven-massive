@@ -9,13 +9,15 @@ the method declares.
 
 `verbs` and `bar_stream_verbs` answer the same question for the dataset list and the dataset
 reference: the methods every query of a dataset can use, and the stream methods a `bars()`
-query can use only for the bars that stream (`streaming_bars` in `_stream.py`).
+query can use only for the bars that stream (`streaming_bars`). A `bars()` call's own class
+follows from its timespan and multiplier as well (`bar_query_class`).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from deephaven_massive._enums import Timespan
 from deephaven_massive.queries._fetch import FetchQuery
 from deephaven_massive.queries._history import HistoryQuery, StreamHistoryQuery
 from deephaven_massive.queries._stream import StreamQuery, SymbolStreamQuery
@@ -25,8 +27,10 @@ if TYPE_CHECKING:
     from deephaven_massive.queries._query import Query
 
 __all__ = [
+    "bar_query_class",
     "bar_stream_verbs",
     "query_class",
+    "streaming_bars",
     "verbs",
 ]
 
@@ -36,6 +40,9 @@ _VERBS: Final = ("fetch", "poll", "blink", "append_only", "ring", "last_by", "hi
 _STREAM_VERBS: Final = ("blink", "append_only", "ring", "last_by")
 """The verbs of a WebSocket stream; `last_by` only where its rows name their symbol
 (`DatasetSpec.names_symbols`)."""
+
+_SPAN_WORDS: Final = {Timespan.SECOND: "1-second", Timespan.MINUTE: "1-minute"}
+"""How `streaming_bars` names a timespan the WebSocket streams."""
 
 
 def _serves(spec: DatasetSpec, verb: str) -> bool:
@@ -109,8 +116,8 @@ def query_class(spec: DatasetSpec) -> type[Query]:
 
     `DatasetSpec` rejects every other combination when it is created: a fetch path is a
     dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset
-    with channels gives `StreamHistoryQuery` whatever the call's timespan, so every `bars()`
-    has one return type; its stream methods refuse the bars that don't stream.
+    gives `HistoryQuery`, the class every `bars()` query is: Massive streams only some bars, so
+    `bar_query_class` picks `StreamHistoryQuery` for the calls whose bars stream.
 
     Args:
         spec: The dataset.
@@ -118,8 +125,49 @@ def query_class(spec: DatasetSpec) -> type[Query]:
     Returns:
         The query class its factory returns.
     """
+    if spec.is_bars:
+        return HistoryQuery
     if not spec.has_channels:
         return FetchQuery if spec.has_fetch else HistoryQuery
     if not spec.names_symbols:
         return StreamQuery
     return StreamHistoryQuery if spec.has_history else SymbolStreamQuery
+
+
+def bar_query_class(spec: DatasetSpec, timespan: Timespan, multiplier: int) -> type[HistoryQuery]:
+    """Return the query class of one `bars()` call, from the bars Massive streams.
+
+    Massive streams one bar of each timespan the dataset has a WebSocket channel for, at
+    `multiplier=1` (`streaming_bars`). Those bars give `StreamHistoryQuery`, with the stream
+    methods and `history()`; every other bar gives `HistoryQuery`, with `history()` only. The
+    timespan and multiplier are not judged here: a value Massive refuses reaches Massive, which
+    answers HTTP 400 when the query reads.
+
+    Args:
+        spec: A bars dataset.
+        timespan: The call's timespan.
+        multiplier: The call's multiplier.
+
+    Returns:
+        `StreamHistoryQuery` for bars that stream, else `HistoryQuery`.
+    """
+    if multiplier == 1 and timespan in spec.channels:
+        return StreamHistoryQuery
+    return HistoryQuery
+
+
+def streaming_bars(spec: DatasetSpec) -> str:
+    """Name the bars of a `bars` dataset that Massive streams over the WebSocket.
+
+    Massive streams one bar a second and one a minute, each its own channel; any other
+    timespan, or a multiplier above 1, exists only as history. `bar_query_class` gives these
+    bars `StreamHistoryQuery`, and the dataset list and reference name them with this text.
+
+    Args:
+        spec: A bars dataset with WebSocket channels.
+
+    Returns:
+        Such as `"1-second and 1-minute bars at multiplier=1"`.
+    """
+    spans = [_SPAN_WORDS[span] for span in Timespan if span in spec.channels]
+    return f"{' and '.join(spans)} bars at multiplier=1"

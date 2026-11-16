@@ -419,6 +419,19 @@ and after-hours sessions, so a table you start overnight stays empty until pre-m
 Crypto trades around the clock, and on Currencies Starter or higher,
 `m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()` streams at any hour.
 
+The example runs as written. A type checker rejects its `last_by()`, because `bars()` declares two
+classes and only `StreamHistoryQuery` has stream methods. You get that class for 1-second and
+1-minute bars at `multiplier=1`, which Massive streams. In type-checked code, check the class
+first:
+
+```python continues
+from deephaven_massive.queries import StreamHistoryQuery
+
+minute = m.stocks.bars(watchlist, dm.Timespan.MINUTE)
+assert isinstance(minute, StreamHistoryQuery)  # 1-minute bars stream
+latest = minute.last_by()
+```
+
 Next, a calculation on the live bars.
 
 <a id="change-since-close"></a>

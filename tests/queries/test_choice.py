@@ -1,5 +1,6 @@
 """Tests for `queries/_choice.py`: the query class each dataset and `bars()` call gets."""
 
+import dataclasses
 from typing import Any
 
 import pytest
@@ -10,7 +11,7 @@ from deephaven_massive._enums import (
     NotBars,
     Timespan,
 )
-from deephaven_massive._session import CATALOG
+from deephaven_massive._session import CATALOG, MassiveSession
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
@@ -19,8 +20,10 @@ from deephaven_massive.queries import (
     SymbolStreamQuery,
 )
 from deephaven_massive.queries._choice import (
+    bar_query_class,
     bar_stream_verbs,
     query_class,
+    streaming_bars,
     verbs,
 )
 from tests._fakes.queries import (
@@ -69,10 +72,54 @@ INDEX_BARS = DatasetSpec(
 )
 
 
-def test_every_bars_dataset_gives_one_streaming_class() -> None:
-    # Every call of `bars()` returns this class; its stream methods refuse bars that don't stream.
-    assert query_class(STOCK_BARS) is StreamHistoryQuery
-    assert query_class(FUTURES_BARS) is StreamHistoryQuery
+def test_a_bars_dataset_is_a_history_query() -> None:
+    # Every `bars()` query is a `HistoryQuery`; `bar_query_class` picks the subclass that
+    # streams for the bars Massive streams.
+    assert query_class(STOCK_BARS) is HistoryQuery
+    assert query_class(FUTURES_BARS) is HistoryQuery
+
+
+@pytest.mark.parametrize(
+    ("timespan", "multiplier", "expected"),
+    [
+        (Timespan.SECOND, 1, StreamHistoryQuery),
+        (Timespan.MINUTE, 1, StreamHistoryQuery),
+        (Timespan.SECOND, 2, HistoryQuery),
+        (Timespan.MINUTE, 5, HistoryQuery),
+        (Timespan.HOUR, 1, HistoryQuery),
+        (Timespan.DAY, 1, HistoryQuery),
+        (Timespan.SESSION, 1, HistoryQuery),
+    ],
+)
+def test_only_bars_with_a_channel_at_multiplier_one_stream(
+    timespan: Timespan, multiplier: int, expected: type[Query]
+) -> None:
+    assert bar_query_class(STOCK_BARS, timespan, multiplier) is expected
+    assert bar_query_class(FUTURES_BARS, timespan, multiplier) is expected
+
+
+def test_bars_stream_only_the_timespans_their_dataset_has_a_channel_for() -> None:
+    minute_only = dataclasses.replace(STOCK_BARS, channels={Timespan.MINUTE: "CA"})
+    assert bar_query_class(minute_only, Timespan.MINUTE, 1) is StreamHistoryQuery
+    assert bar_query_class(minute_only, Timespan.SECOND, 1) is HistoryQuery
+    # Bars with no channel at all only read history.
+    assert bar_query_class(INDEX_BARS, Timespan.MINUTE, 1) is HistoryQuery
+
+
+def test_streaming_bars_name_the_timespans_with_a_channel() -> None:
+    assert streaming_bars(STOCK_BARS) == "1-second and 1-minute bars at multiplier=1"
+    minute_only = dataclasses.replace(STOCK_BARS, channels={Timespan.MINUTE: "CA"})
+    assert streaming_bars(minute_only) == "1-minute bars at multiplier=1"
+
+
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_bars_that_do_not_stream_have_no_stream_methods(
+    massive_session: MassiveSession, verb: str
+) -> None:
+    hourly = massive_session.forex.bars("C:EURUSD", Timespan.HOUR)
+    assert type(hourly) is HistoryQuery
+    with pytest.raises(AttributeError, match=rf"'HistoryQuery' object has no attribute '{verb}'"):
+        getattr(hourly, verb)
 
 
 _FETCH = {"fetch_path": "/v2/last/trade/{stocksTicker}"}

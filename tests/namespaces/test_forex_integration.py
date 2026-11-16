@@ -27,6 +27,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._live import bad_values
 
 if TYPE_CHECKING:
@@ -509,7 +510,9 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     in the stream's error means topics must use another spelling.
     """
     quotes = live_session.forex.quotes(_PAIR).append_only()
-    bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE).append_only()
+    minute_bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE)
+    assert isinstance(minute_bars, StreamHistoryQuery)  # 1-minute bars stream
+    bars = minute_bars.append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
     status = market_status("fx")
     deadline = time.monotonic() + _STREAM_WAIT

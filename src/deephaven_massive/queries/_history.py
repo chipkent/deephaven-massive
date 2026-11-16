@@ -96,9 +96,10 @@ class HistoryQuery(Query):
     that range. The library reads them from Massive's REST API or its S3 flat files, whichever
     serves the range, unless you choose with `source`. Each call reads its range again.
 
-    Every dataset with history also streams today, so its method returns a
-    `StreamHistoryQuery`, a subclass of this class that adds the stream methods; code annotated
-    with `HistoryQuery` takes it.
+    A `bars()` call returns exactly this class for bars Massive doesn't stream, such as day bars.
+    Every other dataset with history also streams, so its method returns a `StreamHistoryQuery`,
+    a subclass of this class that adds the stream methods; code annotated with `HistoryQuery`
+    takes either.
 
     Import it as `from deephaven_massive.queries import HistoryQuery` to annotate your own code.
     You get one from a dataset method and never construct one.
@@ -555,9 +556,10 @@ class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     covers what the stream methods share, and `help(SymbolStreamQuery)` the symbols and
     watchlists they take.
 
-    A `bars()` query streams only 1-second and 1-minute bars at `multiplier=1`, which Massive
-    sends over its WebSocket; its stream methods refuse any other bars with `ValueError`, which
-    names the bars that stream. `history()` reads every bar.
+    A `bars()` call returns this class only for the bars Massive streams over its WebSocket,
+    1-second and 1-minute bars at `multiplier=1`; any other bars give a `HistoryQuery`, which
+    has `history()` only. Its declared return type names both classes, so check the class with
+    `isinstance(q, StreamHistoryQuery)` before you call a stream method on it.
 
     Import it as `from deephaven_massive.queries import StreamHistoryQuery` to annotate your own
     code. You get one from a dataset method and never construct one.
@@ -565,7 +567,7 @@ class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
     Example:
         ::
 
-            q = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE)
+            q = m.stocks.trades(["AAPL", "MSFT"])
             live = q.append_only()
             day = q.history("2025-03-03", "2025-03-03")
     """
