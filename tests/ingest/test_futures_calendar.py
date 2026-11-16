@@ -661,7 +661,7 @@ def test_each_lookup_is_charged_to_futures_in_a_lane_of_its_own(
 def test_closing_ends_a_lookup_still_waiting_for_the_rate_governor(
     fetch: FakeFetch, clock: Clock, held: str
 ) -> None:
-    # The lookup's token follows the calendar's: a lookup paced behind a Basic futures
+    # The lookup's token follows the calendar's: a lookup paced behind a limited futures
     # subscription's limit stops waiting the moment the calendar closes.
     calendar = FuturesCalendar(fetch, **PATHS, label="test", clock=clock)
     fetch.hold(held)

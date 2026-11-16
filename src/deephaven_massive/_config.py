@@ -324,8 +324,8 @@ class MassiveConfig:
             Raise it to run more at once, or lower it to open fewer connections. Both limits
             cover all the session's calls together. It also sets how many downloads of
             `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
-            the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
-            subscription still keeps to five requests a minute.
+            the others wait their turn, and `m.streams()` shows them `LOADING`. A subscription
+            with a request limit still keeps to it.
         flush_interval: Sets how many seconds pass between the batches of streamed rows added to
             live tables. Defaults to 0.05 seconds (50 ms).
 
@@ -1639,7 +1639,7 @@ class _Example(NamedTuple):
 _EXAMPLE_ACCOUNT: Final = (
     "This file sets every setting, and a line marked `# the default` can be left out. Its "
     "other values suit an account with Stocks Starter, Options Developer, and Indices Business, "
-    "and the free Basic plan of Currencies and Futures:"
+    "and Currencies and Futures limited to five requests a minute:"
 )
 """The sentence before the example settings file: the account its values agree with."""
 

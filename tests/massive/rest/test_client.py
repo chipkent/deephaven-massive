@@ -1418,7 +1418,7 @@ class _Call:
 
 
 def _full(clock: FakeClock, fake_rest: FakeRestServer) -> RequestGovernor:
-    """Return a governor whose Basic stocks bucket has spent its five slots."""
+    """Return a governor whose declared stocks bucket has spent its five slots."""
     governor = _governor(clock)
     governor.declare({"stocks": 5})
     fake_rest.reply("/v3/trades/AAPL", _ok())

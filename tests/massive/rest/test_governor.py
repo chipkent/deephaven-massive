@@ -1233,7 +1233,7 @@ def test_a_refusal_within_a_window_of_the_pause_continues_its_run() -> None:
 
 
 def test_a_pause_ends_with_one_probe_while_the_others_wait_for_its_answer() -> None:
-    # Massive's 429 lacks the Basic words, so the bucket stays unpaced. Without the probe,
+    # Massive's 429 lacks the per-minute words, so the bucket stays unpaced. Without the probe,
     # every waiting request would start when the pause ends and be refused again.
     clock = FakeClock(manual=True)
     governor = _governor(clock)
@@ -1839,3 +1839,21 @@ def test_a_minute_with_a_request_in_flight_is_kept_however_late_its_answer() -> 
     _refuse(governor, slow, message=PER_MINUTE)  # its 429 comes three minutes late
     _requests(governor, "stocks", 1)
     assert _state(governor).learned == 2
+
+
+def test_a_late_refusal_with_a_retry_after_after_its_run_teaches_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A 429 to a request of the learned minute lands after the run ended, asking for a pause:
+    # the answer that ends that pause must not learn from the old minute again.
+    clock = FakeClock()
+    governor = _governor(clock)
+    stale = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _requests(governor, "stocks", 5)
+    _learn_run(governor, retry_after=70.0)
+    assert _state(governor).learned == 5
+    clock.advance(120.0)
+    with caplog.at_level(logging.DEBUG, logger=_GOVERNOR_LOGGER):
+        _refuse(governor, stale, retry_after=30.0, message=PER_MINUTE)
+        _requests(governor, "stocks", 1)
+    assert not [r for r in caplog.records if " sent in the clock minute" in r.getMessage()]

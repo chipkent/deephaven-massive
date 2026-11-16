@@ -205,8 +205,10 @@ def _learning_text(
         declarable: Whether a limit may be declared for the bucket, which the remedy names.
 
     Returns:
-        INFO and the line when the minute held no answer, the learned limit changed, or a
-        declared limit is above the count; DEBUG and the line when the count changed nothing.
+        Without a declared limit: INFO and the line when the minute held no answer or the
+        learned limit changed; DEBUG when the count left it as it was. With one: INFO when the
+        count is below the declared limit and above zero; DEBUG otherwise, since the declared
+        limit paces the bucket either way.
     """
     said = f"Massive answered {count} {label} sent in the clock minute of its refusal"
     if declared is not None:
@@ -1074,9 +1076,8 @@ class RequestGovernor:
 
         Does nothing for a permit already reported. An answer that ends a pause's probing
         (the bucket's requests resume) logs one DEBUG line, and ends the run's learning (see
-        the module): a limit learned or lowered logs one INFO line with the count, the minute,
-        and the remedy, as does a minute with no answer; a count that changes nothing logs at
-        DEBUG.
+        the module): one line gives the count and the remedy, at the level `_learning_text`
+        chooses.
 
         Args:
             permit: The attempt's permit.
@@ -1194,8 +1195,8 @@ class RequestGovernor:
                     reason = f"{reason}; {honoured}"
                     state.pause(now + asked)
             # Learning reads the earliest refused minute of a run still going; a late refusal
-            # after its run ended, which set no pause, teaches nothing.
-            if per_minute and state.probing:
+            # after its run ended teaches nothing, even when its Retry-After pauses the bucket.
+            if per_minute and state.run_refusals > 0:
                 minute = int(permit.sent // _MINUTE)
                 if state.refused_minute is None or minute < state.refused_minute:
                     state.refused_minute = minute

@@ -120,7 +120,7 @@ Under `raise`:
 
 ### Every setting in one file
 
-This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account with Stocks Starter, Options Developer, and Indices Business, and the free Basic plan of Currencies and Futures:
+This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account with Stocks Starter, Options Developer, and Indices Business, and Currencies and Futures limited to five requests a minute:
 
 ```yaml
 # Plans that stream 15 minutes late: Stocks Starter and Options Developer.
@@ -283,8 +283,8 @@ of a live table reads REST whenever REST can serve it.
 Raise it to run more at once, or lower it to open fewer connections. Both limits
 cover all the session's calls together. It also sets how many downloads of
 `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
-the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
-subscription still keeps to five requests a minute.
+the others wait their turn, and `m.streams()` shows them `LOADING`. A subscription
+with a request limit still keeps to it.
 
 #### noncanonical_symbols
 
