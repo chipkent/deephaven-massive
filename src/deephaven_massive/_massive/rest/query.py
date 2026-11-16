@@ -37,8 +37,9 @@ def request_target(
         rest_path: The path, whose `params` say each parameter's kind and place.
         path_params: A value for every placeholder of the template, by wire name. Each is
             encoded by its kind and then percent-encoded whole (`I:SPX` is sent as
-            `I%3ASPX`). No value may contain `/`: Massive answers HTTP 404 for a segment
-            holding `%2F`, and no canonical symbol contains one (a forex pair is `C:EURUSD`).
+            `I%3ASPX`). No value may contain `/`: Massive serves no data for a segment
+            holding `%2F` (it has answered HTTP 404 and HTTP 307), and no canonical symbol
+            contains one (a forex pair is `C:EURUSD`).
         query_params: Query values by wire name, in the order to send them. A `None` value is
             left out.
 
