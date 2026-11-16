@@ -1,16 +1,20 @@
 """Live checks of what the futures session calendar reads from Massive: products and schedules.
 
 Streamed futures rows carry no session date, so the library dates them from Massive's futures
-schedules, after finding each contract's product in the contracts list. These tests record what
-that design depends on and Massive's docs leave open: whether combos have a product and a
-schedule, how many products, contracts, and schedule events there are, how long the lookups
-take, how often contracts are listed, whether every streamed ticker is listed, and whether any
-trade falls outside every session. Each test sends REST requests only and records what Massive
-sent (`evidence`), except the streamed-tickers test, which streams every futures trade on the
-key's WebSocket for 10 minutes: it is marked `integration_all_symbols`, so `-m integration`
-leaves it out and `-m integration_all_symbols` runs it. Every test is marked `settles`: its
-evidence, not a pass, answers its question. A request Massive refuses for want of entitlement
-skips the test with Massive's refusal. How to run these tests is in `docs/live-tests.md`.
+schedules, after finding each contract's product. These tests record what that design depends
+on and Massive's docs leave open: whether combos have a product and a schedule, and whether
+the contracts list holds them; how many products, contracts, and schedule events there are;
+what the contract and snapshot lookups cost, with a `date` and nested `fields` and without;
+whether a combo's snapshot product places its trades in Massive's own session; how often
+contracts are listed, and which tickers the snapshot or the contracts list lacks; how far
+ahead each product's schedule reaches; and whether any trade falls outside every session. Each
+test sends REST requests only and records what Massive sent (`evidence`), except the
+streamed-tickers test, which streams every futures trade on the key's WebSocket for 10
+minutes: it is marked `integration_all_symbols`, so `-m integration` leaves it out and
+`-m integration_all_symbols` runs it. Every test is marked `settles`: its evidence, not a
+pass, answers its question. A read cut short by its page or request cap says its counts are
+lower bounds. A request Massive refuses for want of entitlement skips the test with Massive's
+refusal. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import statistics
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
@@ -35,7 +39,9 @@ from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._massive import (
     RestClient,
+    RestPath,
     Transport,
+    WireAuthError,
     WireEntitlementError,
     WireError,
     source,
@@ -89,9 +95,11 @@ def _page(client: RestClient, path: str, *, query: Mapping[str, object]) -> list
 
 
 def _read_pages(
-    client: RestClient, path: str, query: Mapping[str, object], *, most: int
+    client: RestClient, path: str | RestPath, query: Mapping[str, object], *, most: int
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """Read up to `most` pages of a futures list, following each page's `next_url`.
+
+    The path is a key of the library's spec, or a spec path itself (`_with_fields`).
 
     Returns:
         The rows, the pages read, and whether the list ended within them (the last page read
@@ -99,7 +107,8 @@ def _read_pages(
     """
     rows: list[dict[str, Any]] = []
     read = 0
-    for page in client.pages(source(Transport.REST, path), {}, query, bucket="futures"):
+    rest_path = source(Transport.REST, path) if isinstance(path, str) else path
+    for page in client.pages(rest_path, {}, query, bucket="futures"):
         rows.extend(page.rows)
         read += 1
         if not (isinstance(page.body, dict) and page.body.get("next_url")):
@@ -220,9 +229,9 @@ def _one_per_form(combos: Sequence[_Combo], count: int) -> list[_Combo]:
 
 
 def _read_combos(
-    client: RestClient, evidence: Evidence
+    client: RestClient, evidence: Evidence, *, per_root: int
 ) -> tuple[list[_Combo], list[_Combo], dict[str, str]]:
-    """Read the snapshot of each of `_COMBO_ROOTS` and take its recently traded combos.
+    """Read the snapshot of each of `_COMBO_ROOTS` and take up to `per_root` recent combos of each.
 
     Returns:
         The combos taken, each prefix's most recent first; each prefix's most recent combo;
@@ -238,7 +247,7 @@ def _read_combos(
         rows = _page(client, _SNAPSHOT, query=query)
         products, recent = _snapshot_combos(rows, since)
         products_of.update(products)
-        picked = _one_per_form(recent, _COMBOS_PER_ROOT)
+        picked = _one_per_form(recent, per_root)
         full = " (a full page)" if len(rows) == _PRODUCTS_PAGE else ""
         evidence(
             f"snapshot {root} to {end}: {len(rows)} rows{full}, "
@@ -412,7 +421,7 @@ def test_products_schedules_and_contracts_of_futures_combos(
     evidence, never asserted. Sends 7 requests: two snapshot pages, the products, the
     schedules, the contracts, and two trades pages.
     """
-    combos, latest, products_of = _read_combos(live_rest, evidence)
+    combos, latest, products_of = _read_combos(live_rest, evidence, per_root=_COMBOS_PER_ROOT)
     assert combos, "no CL or GC combo traded within 7 days: nothing to judge"
     candidates = {
         combo.ticker: sorted(
@@ -901,6 +910,881 @@ def test_trades_outside_every_futures_session(
     assert gaps, "no product had a gap between two begun sessions"
 
 
+_FIELDS_TEMPLATE = "product_code.any_of"
+"""A list parameter every futures list path has, with no default, maximum, or values, whose
+copy under another name `_with_fields` adds."""
+
+
+def _with_fields(path: str) -> RestPath:
+    """Return a futures path's spec with Massive's `fields` query parameter added.
+
+    Massive's docs list `fields` (the fields to return for each result, nested ones by dot)
+    on the futures snapshot, contracts, and schedules paths, but the OpenAPI spec the
+    library's spec is generated from does not, so the REST client would refuse it. These
+    tests add it, as a comma-separated list like `product_code.any_of`, to ask Massive what
+    it does with it.
+
+    Returns:
+        The path, with one more parameter.
+    """
+    rest_path = source(Transport.REST, path)
+    template = next(param for param in rest_path.params if param.name == _FIELDS_TEMPLATE)
+    return replace(rest_path, params=(*rest_path.params, replace(template, name="fields")))
+
+
+def _refused(error: WireError) -> bool:
+    """Tell whether a wire error is Massive refusing a request, other than for the key.
+
+    Returns:
+        True for an HTTP 4xx answer that is neither an authentication nor an entitlement
+        refusal: one these tests record as evidence instead of failing.
+    """
+    keyed = isinstance(error, (WireAuthError, WireEntitlementError))
+    return not keyed and error.status is not None and 400 <= error.status < 500
+
+
+def _spread(items: Sequence[str], count: int) -> list[str]:
+    """Take `count` items spread evenly over a sorted list: the middle of each equal share.
+
+    Returns:
+        The items, in their order; all of them when there are no more than `count`.
+    """
+    if len(items) <= count:
+        return list(items)
+    return [items[(2 * n + 1) * len(items) // (2 * count)] for n in range(count)]
+
+
+_DAY_TRIES = 4
+"""The most days, from the calendar's today back, `_listed_day` asks the contracts list for."""
+
+
+def _listed_day(client: RestClient, evidence: Evidence) -> date:
+    """Find the latest day, from the calendar's today back, the contracts list holds.
+
+    The contracts list holds trading days only, and is updated daily, so the calendar's today
+    (a Saturday, or a Monday before the update) may hold no contract; a lookup with that
+    `date` would answer nothing, for want of the day rather than of the contract. Asks for
+    one contract of each day, today first, at most `_DAY_TRIES` days.
+
+    Returns:
+        The first day asked about that holds a contract, or the last asked when none does
+        (every lookup on it then answers nothing, which its evidence shows).
+    """
+    today = futures_session(datetime.now(UTC))  # the calendar's today
+    day = today
+    for back in range(_DAY_TRIES):
+        day = today - timedelta(days=back)
+        if _page(client, _CONTRACTS, query={"date": day, "limit": 1}):
+            break
+    evidence(f"contracts list day: {day:%a %Y-%m-%d} (the calendar's today is {today})")
+    return day
+
+
+_SNAPSHOT_PAGES = 3
+"""The most pages of the whole snapshot, 50,000 rows each, a check reads."""
+
+_SNAPSHOT_FIELDS = ["details.ticker", "details.product_code", "last_trade.last_updated"]
+"""The snapshot fields the whole-snapshot read asks for, to keep its pages small."""
+
+
+@dataclass(frozen=True)
+class _Listed:
+    """A snapshot row's facts: its ticker's product code and last trade."""
+
+    product_code: str
+    traded: int | None
+    """The last trade's `last_updated`, in epoch nanoseconds; None when it has none."""
+
+
+def _read_snapshot(client: RestClient, evidence: Evidence) -> dict[str, _Listed]:
+    """Read the whole futures snapshot, up to `_SNAPSHOT_PAGES` pages, with few fields.
+
+    Asks for `_SNAPSHOT_FIELDS` only; when Massive refuses `fields`, reads whole rows instead,
+    and says so.
+
+    Returns:
+        Each ticker's product code and last trade.
+
+    Raises:
+        WireError: When a read fails other than by Massive refusing `fields`.
+    """
+    query: dict[str, object] = {"fields": _SNAPSHOT_FIELDS, "limit": _PRODUCTS_PAGE}
+    how = f"fields {_SNAPSHOT_FIELDS}"
+    try:
+        rows, pages, ended = _read_pages(
+            client, _with_fields(_SNAPSHOT), query, most=_SNAPSHOT_PAGES
+        )
+    except WireError as error:
+        if not _refused(error):
+            raise
+        evidence(f"snapshot with fields {_SNAPSHOT_FIELDS}: refused: {error}; whole rows read")
+        query, how = {"limit": _PRODUCTS_PAGE}, "whole rows"
+        rows, pages, ended = _read_pages(client, _SNAPSHOT, query, most=_SNAPSHOT_PAGES)
+    listed: dict[str, _Listed] = {}
+    for row in rows:
+        details = row.get("details") or {}
+        ticker, traded = details.get("ticker"), (row.get("last_trade") or {}).get("last_updated")
+        if isinstance(ticker, str):
+            stamp = traded if isinstance(traded, int) else None
+            listed[ticker] = _Listed(str(details.get("product_code")), stamp)
+    evidence(
+        f"snapshot ({how}): {len(rows)} rows in "
+        f"{pages} pages ({'the whole snapshot' if ended else 'more follow: a lower bound'}), "
+        f"{len(listed)} tickers, {sum(t.traded is not None for t in listed.values())} with a "
+        f"last trade, first row {rows[0] if rows else None}"
+    )
+    return listed
+
+
+def _look_up(
+    client: RestClient,
+    path: str,
+    tickers: Sequence[str],
+    *,
+    query: Mapping[str, object],
+    most: int,
+) -> tuple[set[str], list[str]]:
+    """Ask a futures list for tickers by `ticker.any_of`, 100 a request, at most `most` requests.
+
+    When `most` requests cannot ask about every ticker, asks about as many as they can,
+    spread evenly over the sorted tickers (`_spread`).
+
+    Returns:
+        The tickers the list returned a row for, and the tickers asked about.
+    """
+    asked = _spread(sorted(tickers), _LOOKUP_CHUNK * most)
+    found: set[str] = set()
+    for start in range(0, len(asked), _LOOKUP_CHUNK):
+        chunk = asked[start : start + _LOOKUP_CHUNK]
+        for row in _page(client, path, query={**query, "ticker.any_of": chunk}):
+            ticker = (
+                (row.get("details") or {}).get("ticker") if path == _SNAPSHOT else row.get("ticker")
+            )
+            if isinstance(ticker, str):
+                found.add(ticker)
+    return found, asked
+
+
+def _share(asked: Sequence[str], of: Sequence[str]) -> str:
+    """Say how many of a set of tickers were asked about.
+
+    Returns:
+        Such as `"2000 of 5120 (spread evenly; a lower bound)"`, or `"all 80"`.
+    """
+    if len(asked) == len(of):
+        return f"all {len(of)}"
+    return f"{len(asked)} of {len(of)} (spread evenly; a lower bound)"
+
+
+_LAST_RUN_COMBOS = ("CLZ6-CLF7", "CL:BZ N7-Q7", "GCZ6-GCG7")
+"""The combos an earlier run asked the contracts list for together, on one full page that held
+none of `GCZ6-GCG7`'s rows."""
+
+_RECENT_COMBOS_PER_ROOT = 3
+"""The recently traded combos of each of `_COMBO_ROOTS` the one-at-a-time check asks about."""
+
+
+def _record_contract_rows(
+    label: str, rows: Sequence[Mapping[str, Any]], evidence: Evidence
+) -> None:
+    """Record what one contracts read returned: its rows' type, product code, and dates."""
+    kinds = sorted({(str(r.get("type")), str(r.get("product_code"))) for r in rows})
+    days = sorted(str(r.get("date")) for r in rows)
+    full = " (a full page: a lower bound)" if len(rows) == _LIST_PAGE else ""
+    evidence(
+        f"{label}: {len(rows)} rows{full}, (type, product_code) {kinds or 'none'}"
+        + (f", dates {days[0]} to {days[-1]}" if days else "")
+    )
+
+
+@pytest.mark.settles("129")
+@pytest.mark.requests(34)
+@pytest.mark.timeout(300)
+def test_combo_tickers_in_contracts_list_one_at_a_time(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the futures contracts list holds a combo, asked for that combo alone.
+
+    An earlier run asked the contracts list for three combos at once and got one full page of
+    1,000 rows, sorted by product code, none of them `GCZ6-GCG7`'s: that combo may have been
+    cut off by the page rather than missing. Reads the snapshot from `CL` up to `CM` and from
+    `GC` up to `GD`, and takes of each up to 3 combos traded within 7 days, one per ticker
+    form, beside `CLZ6-CLF7`, `CL:BZ N7-Q7`, and `GCZ6-GCG7`. Finds the latest day the
+    contracts list holds (`_listed_day`). Asks the contracts list for each combo alone three
+    ways: by `ticker` (every date), by `ticker` and that `date`, and by those and
+    `type=combo`; then for them all at once by `ticker.any_of` and that `date`. Records each
+    read's rows, their `type`, `product_code`, and dates, and whether its page was full (a
+    lower bound: a full every-date page may lack the latest dates).
+
+    A combo the one-ticker reads return no row for is missing from the contracts list; one
+    they return rows for and the `ticker.any_of` read does not was cut off by the page; a
+    combo with rows on other dates and none on the day asked was not listed that day.
+    Passes when every request is answered; the answers are evidence. Sends at most 34
+    requests.
+    """
+    combos, _, _ = _read_combos(live_rest, evidence, per_root=_RECENT_COMBOS_PER_ROOT)
+    tickers = sorted({*_LAST_RUN_COMBOS, *(combo.ticker for combo in combos)})
+    day = _listed_day(live_rest, evidence)
+    for ticker in tickers:
+        for label, query in (
+            ("every date", {"ticker": ticker, "limit": _LIST_PAGE}),
+            (f"date {day}", {"ticker": ticker, "date": day, "limit": _LIST_PAGE}),
+            (
+                f"date {day}, type combo",
+                {"ticker": ticker, "date": day, "type": "combo", "limit": _LIST_PAGE},
+            ),
+        ):
+            rows = _page(live_rest, _CONTRACTS, query=query)
+            _record_contract_rows(f"{ticker!r} alone, {label}", rows, evidence)
+    query = {"ticker.any_of": tickers, "date": day, "limit": _LIST_PAGE}
+    together = _page(live_rest, _CONTRACTS, query=query)
+    full = " (a full page: a lower bound)" if len(together) == _LIST_PAGE else ""
+    evidence(f"all {len(tickers)} by ticker.any_of, date {day}: {len(together)} rows{full}")
+    for ticker in tickers:
+        rows = [row for row in together if row.get("ticker") == ticker]
+        _record_contract_rows(f"{ticker!r} among all, date {day}", rows, evidence)
+
+
+_LOOKUP_SIZES = (1, 100, 500)
+"""The tickers per lookup the cost checks time."""
+
+_COST_RUNS = 5
+"""How many times the cost checks time each lookup."""
+
+_COST_PAGES = 5
+"""The most pages of one contracts lookup the cost check reads, each a request."""
+
+
+@dataclass(frozen=True)
+class _Timing:
+    """One timed read of a lookup: its rows, and the seconds of each page."""
+
+    rows: int
+    seconds: tuple[float, ...]
+    """Each page's seconds, from asking for it to its rows, in order."""
+    ended: bool
+    """Whether the lookup ended within the pages read."""
+
+
+def _timed_read(
+    client: RestClient, path: str, query: Mapping[str, object], *, most: int
+) -> _Timing:
+    """Read up to `most` pages of a futures lookup, timing each page.
+
+    Returns:
+        The rows read, each page's seconds, and whether the lookup ended within them.
+    """
+    rows = 0
+    seconds: list[float] = []
+    start = time.perf_counter()
+    for page in client.pages(source(Transport.REST, path), {}, query, bucket="futures"):
+        seconds.append(time.perf_counter() - start)
+        rows += len(page.rows)
+        if not (isinstance(page.body, dict) and page.body.get("next_url")):
+            return _Timing(rows, tuple(seconds), ended=True)
+        if len(seconds) == most:
+            break
+        start = time.perf_counter()
+    return _Timing(rows, tuple(seconds), ended=False)
+
+
+def _cost_sample(client: RestClient, evidence: Evidence) -> list[str]:
+    """Take the tickers the cost checks look up: 500 spread evenly over the whole snapshot.
+
+    Returns:
+        The tickers, sorted; of them, `_spread` takes 100 and 1 again.
+    """
+    sample = _spread(sorted(_read_snapshot(client, evidence)), _LOOKUP_SIZES[-1])
+    assert sample, "the futures snapshot lists no ticker"
+    evidence(f"tickers looked up: {len(sample)}, from {sample[0]!r} to {sample[-1]!r}")
+    return sample
+
+
+@pytest.mark.settles("130")
+@pytest.mark.requests(117)
+@pytest.mark.timeout(1200)
+def test_contracts_lookup_cost_with_and_without_date(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What a contracts lookup by `ticker.any_of` costs with a `date` and without one.
+
+    The calendar's lookup sends `ticker.any_of` and no `date`, so it pages through every
+    date of every contract; an earlier run timed it at 14 s for 100 tickers in four of five
+    runs and 0.45 s in the fifth, unexplained. Reads the whole snapshot, takes 500 tickers
+    spread evenly over it (singles and combos), and of them 100 and then 1, spread evenly
+    again; finds the latest day the contracts list holds (`_listed_day`). Then times six
+    lookups, each at the largest page and up to 5 pages: 1, 100, and 500 tickers, without
+    `date` and with that `date`. Each runs 5 times, the six taking turns, so a slow spell of
+    Massive's falls on all six alike (a cache of Massive's would still favor the later
+    runs). Records each lookup's rows, pages, seconds per run and per page, median, and
+    slowest. A run cut at 5 pages (as 100 and 500 tickers without `date` are likely to be)
+    says its rows and seconds are lower bounds, of its first pages only.
+
+    A lookup with `date` that returns fewer rows than tickers asked found some tickers not
+    listed that day. Seconds per page tell the causes apart: pages of like time mean the cost
+    is the rows `date` leaves out; one slow page among fast ones means Massive's variance.
+    Times include any wait for the key's rate limit. Passes when every request is answered;
+    the times are evidence. Sends at most 117 requests: up to 3 snapshot pages, up to 4 days
+    asked, then 5 runs of up to 22 pages.
+    """
+    sample = _cost_sample(live_rest, evidence)
+    day = _listed_day(live_rest, evidence)
+    lookups: dict[str, dict[str, object]] = {}
+    for size in _LOOKUP_SIZES:
+        tickers = _spread(sample, size)
+        query = {"ticker.any_of": tickers, "limit": _LIST_PAGE}
+        lookups[f"{len(tickers)} tickers, no date"] = query
+        lookups[f"{len(tickers)} tickers, date {day}"] = {**query, "date": day}
+    timings: dict[str, list[_Timing]] = {label: [] for label in lookups}
+    for _ in range(_COST_RUNS):
+        for label, query in lookups.items():
+            timings[label].append(_timed_read(live_rest, _CONTRACTS, query, most=_COST_PAGES))
+    for label, runs in timings.items():
+        totals = [sum(run.seconds) for run in runs]
+        capped = (
+            ""
+            if all(run.ended for run in runs)
+            else f" (a run stopped at {_COST_PAGES} pages: its rows and seconds are lower bounds)"
+        )
+        evidence(
+            f"contracts, {label}: rows {[run.rows for run in runs]}, pages "
+            f"{[len(run.seconds) for run in runs]}{capped}, seconds per run "
+            f"{[round(s, 3) for s in totals]}, median {statistics.median(totals):.3f}, slowest "
+            f"{max(totals):.3f}; seconds per page "
+            f"{[[round(s, 3) for s in run.seconds] for run in runs]}"
+        )
+
+
+_PRODUCT_FIELDS = ["details.ticker", "details.product_code"]
+"""The nested snapshot fields a product lookup needs."""
+
+
+@pytest.mark.settles("131")
+@pytest.mark.requests(33)
+@pytest.mark.timeout(600)
+def test_snapshot_lookup_by_ticker_list(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """What a snapshot lookup by `ticker.any_of` costs, and whether nested `fields` works.
+
+    The snapshot names each ticker's product in its row, so a calendar could find the
+    products of a batch of tickers in one request. Reads the whole snapshot and takes 500
+    tickers spread evenly over it, and of them 100 and then 1, spread evenly again. Then
+    times six lookups, each one page of up to 50,000 rows: 1, 100, and 500 tickers, without
+    `fields` and with `fields=details.ticker,details.product_code`. Each runs 5 times, the
+    six taking turns. Records each lookup's rows, how many of its tickers came back, its JSON
+    bytes, its first row, and its seconds per run, median, and slowest; and per size, whether
+    `fields` was honored: the rows hold `details` with `ticker` and `product_code` only, and
+    fewer bytes than the same lookup without it. A lookup Massive refuses with an HTTP 4xx
+    other than for the key (a URL too long, a `fields` it does not take) is recorded with
+    Massive's answer and not sent again.
+
+    Times include any wait for the key's rate limit. Passes when every request is answered
+    or refused as above; the times are evidence. Sends at most 33 requests: up to 3 snapshot
+    pages, then 30.
+
+    Raises:
+        WireError: When a lookup fails other than by such a refusal.
+    """
+    sample = _cost_sample(live_rest, evidence)
+    snapshot = _with_fields(_SNAPSHOT)
+    lookups: dict[tuple[int, bool], dict[str, object]] = {}
+    for size in _LOOKUP_SIZES:
+        query: dict[str, object] = {"ticker.any_of": _spread(sample, size), "limit": _PRODUCTS_PAGE}
+        lookups[size, False] = query
+        lookups[size, True] = {**query, "fields": _PRODUCT_FIELDS}
+    seconds: dict[tuple[int, bool], list[float]] = {key: [] for key in lookups}
+    first: dict[tuple[int, bool], list[dict[str, Any]]] = {}
+    refused: set[tuple[int, bool]] = set()
+    for _ in range(_COST_RUNS):
+        for key, query in lookups.items():
+            if key in refused:
+                continue
+            start = time.perf_counter()
+            try:
+                page = live_rest.get(snapshot, {}, query, bucket="futures")
+            except WireError as error:
+                if not _refused(error):
+                    raise
+                refused.add(key)
+                evidence(f"snapshot, {key[0]} tickers, fields {key[1]}: refused: {error}")
+                continue
+            seconds[key].append(time.perf_counter() - start)
+            if key not in first:
+                first[key] = page.rows
+                asked = set(_spread(sample, key[0]))
+                returned = {
+                    details.get("ticker")
+                    for row in page.rows
+                    if isinstance(details := row.get("details"), dict)
+                }
+                more = isinstance(page.body, dict) and page.body.get("next_url")
+                evidence(
+                    f"snapshot, {key[0]} tickers, fields {key[1]}: {len(page.rows)} rows"
+                    f"{' (more follow: a lower bound)' if more else ''}, "
+                    f"{len(returned & asked)} of {len(asked)} tickers returned, "
+                    f"{len(json.dumps(page.rows))} bytes, first row "
+                    f"{page.rows[0] if page.rows else None}"
+                )
+    for (size, fields), times in seconds.items():
+        if times:
+            evidence(
+                f"snapshot, {size} tickers, fields {fields}: seconds "
+                f"{[round(s, 3) for s in times]}, median {statistics.median(times):.3f}, "
+                f"slowest {max(times):.3f}"
+            )
+    for size in _LOOKUP_SIZES:
+        whole, chosen = first.get((size, False)), first.get((size, True))
+        if whole is None or chosen is None:
+            continue
+        keys = sorted({key for row in chosen for key in row})
+        nested = sorted({key for row in chosen for key in row.get("details") or {}})
+        evidence(
+            f"fields at {size} tickers: honored "
+            f"{keys == ['details'] and set(nested) <= {'ticker', 'product_code'}}: row keys "
+            f"{keys}, details keys {nested}; bytes {len(json.dumps(chosen))} with it, "
+            f"{len(json.dumps(whole))} without"
+        )
+
+
+_COMBO_POOL = 100
+"""The most combos the combo-dates check reads the schedules of, before picking."""
+
+_DATED_COMBOS = 30
+"""The most combos the combo-dates check reads trades of, a request each."""
+
+_COMBO_TRADES = 200
+"""The latest trades of each combo the combo-dates check places."""
+
+_COMBO_DAYS = timedelta(days=3)
+"""How far back the combo-dates check takes combos' trades."""
+
+_COMBO_SCHEDULE_PAGES = 10
+"""The most pages of the candidates' schedules the combo-dates check reads."""
+
+_PRODUCT_PAIR = re.compile(r"^([A-Z0-9]+):([A-Z0-9]+) ")
+"""The two product codes an inter-commodity combo may name before its months: `CL` and `BZ` of
+`CL:BZ N7-Q7` (`BF` of `CL:BF F7-G7-H7` names a butterfly, not a product)."""
+
+
+def _pool_combos(listed: Mapping[str, _Listed], since: int) -> list[str]:
+    """Order the combos traded since an instant, those most likely to tell products apart first.
+
+    A combo here is a ticker with a leg separator (`-`, `:`, or a space). First come those
+    whose ticker does not start with their product code, then inter-commodity spreads (a `:`,
+    or `-` legs of different products), then one per product code; each group most recent
+    trade first.
+
+    Returns:
+        Up to `_COMBO_POOL` tickers, in that order.
+    """
+    recent = sorted(
+        (
+            (ticker, found)
+            for ticker, found in listed.items()
+            if _LEG_SEPARATOR.search(ticker) and found.traded is not None and found.traded >= since
+        ),
+        key=lambda item: item[1].traded or 0,
+        reverse=True,
+    )
+
+    def mixed(ticker: str) -> bool:
+        legs = {listed[leg].product_code for leg in ticker.split("-") if leg in listed}
+        return ":" in ticker or len(legs) > 1
+
+    unprefixed = [ticker for ticker, found in recent if not ticker.startswith(found.product_code)]
+    inter = [ticker for ticker, _ in recent if mixed(ticker)]
+    one_per_code: dict[str, str] = {}
+    for ticker, found in recent:
+        one_per_code.setdefault(found.product_code, ticker)
+    return list(dict.fromkeys([*unprefixed, *inter, *one_per_code.values()]))[:_COMBO_POOL]
+
+
+def _candidates(ticker: str, listed: Mapping[str, _Listed], singles: set[str]) -> list[str]:
+    """Name the products whose schedule could date a combo's trades.
+
+    They are its snapshot product code, its first `-` leg's (`CLZ6` of `CLZ6-CLF7`), and
+    the two product codes an inter-commodity combo names (`_PRODUCT_PAIR`), each only when
+    `singles` (the single products listed) holds it.
+
+    Returns:
+        The codes, sorted.
+    """
+    codes = {listed[ticker].product_code}
+    leg = ticker.split("-", 1)[0]
+    if leg in listed:
+        codes.add(listed[leg].product_code)
+    pair = _PRODUCT_PAIR.match(ticker)
+    if pair:
+        codes |= set(pair.groups())
+    return sorted(code for code in codes if code == listed[ticker].product_code or code in singles)
+
+
+def _spans_differ(codes: Sequence[str], spans: Mapping[str, Mapping[str, tuple[int, int]]]) -> bool:
+    """Tell whether two candidates' sessions differ, so that a trade could tell them apart.
+
+    Returns:
+        True when some candidate's sessions, by `session_end_date` with their first and last
+        event, are not those of the first candidate.
+    """
+    return any(spans.get(code, {}) != spans.get(codes[0], {}) for code in codes[1:])
+
+
+def _candidate_sessions(
+    client: RestClient,
+    candidates: Mapping[str, Sequence[str]],
+    *,
+    today: date,
+    evidence: Evidence,
+) -> dict[str, dict[str, tuple[int, int]]]:
+    """Read the candidates' sessions from 4 days back to 1 ahead, to the end or 10 pages.
+
+    Returns:
+        The sessions, as `_schedule_spans` gives them.
+    """
+    query = {
+        "product_code.any_of": sorted({code for codes in candidates.values() for code in codes}),
+        "session_end_date.gte": today - timedelta(days=4),
+        "session_end_date.lte": today + timedelta(days=1),
+        "limit": _LIST_PAGE,
+    }
+    events, pages, ended = _read_pages(client, _SCHEDULES, query, most=_COMBO_SCHEDULE_PAGES)
+    spans = _schedule_spans(events)
+    evidence(
+        f"schedules of the candidates: {len(events)} events in {pages} pages "
+        f"({'all of them' if ended else 'more follow: a lower bound'}), {len(spans)} products"
+    )
+    return spans
+
+
+@dataclass(frozen=True)
+class _Candidates:
+    """A combo's candidate products: the snapshot's, every one, and whether they discriminate."""
+
+    product_code: str
+    codes: Sequence[str]
+    discriminating: bool
+    """Whether the candidates' sessions differ, so that a trade can tell them apart."""
+
+
+def _place_combo_trades(
+    client: RestClient,
+    ticker: str,
+    candidates: _Candidates,
+    *,
+    spans: Mapping[str, Mapping[str, tuple[int, int]]],
+    since: datetime,
+    evidence: Evidence,
+) -> Counter[str]:
+    """Read a combo's latest trades and place each in each candidate's session.
+
+    A trades read Massive refuses (`_refused`) is recorded, and places nothing.
+
+    Returns:
+        The trades by candidate (`product` for the snapshot's, `other`) and verdict (`agree`
+        with the trade's `session_end_date`, `disagree`, or `none` when no session holds it).
+
+    Raises:
+        WireError: When the read fails other than by such a refusal.
+    """
+    query = {
+        "ticker": ticker,
+        "timestamp.gte": since,
+        "sort": "timestamp.desc",
+        "limit": _COMBO_TRADES,
+    }
+    try:
+        trades = _page(client, _TRADES, query=query)
+    except WireError as error:
+        if not _refused(error):
+            raise
+        evidence(f"{ticker!r}: trades read refused: {error}")
+        return Counter()
+    tally: Counter[str] = Counter()
+    parts: Counter[str] = Counter()
+    unlike: list[tuple[str, str, str, str]] = []
+    for trade in trades:
+        stamp, day = trade.get("timestamp"), trade.get("session_end_date")
+        if not isinstance(stamp, int):
+            tally["no integer timestamp"] += 1
+            continue
+        local = _instant(stamp).astimezone(_CHICAGO)
+        parts[f"{local:%a} {'evening' if local.hour >= 17 else 'day'}"] += 1
+        for code in candidates.codes:
+            placed = _session_holding(spans.get(code, {}), stamp)
+            verdict = (
+                "agree" if placed == day else "none" if placed.startswith("none") else ("disagree")
+            )
+            tally[f"{'product' if code == candidates.product_code else 'other'} {verdict}"] += 1
+            if verdict == "disagree":
+                unlike.append((code, _chicago(stamp), str(day), placed))
+    evidence(
+        f"{ticker!r} (product {candidates.product_code!r}, candidates {list(candidates.codes)}, "
+        f"discriminating {candidates.discriminating}): {len(trades)} trades, {dict(tally)}, by "
+        f"part {dict(parts)}, disagreements (candidate, trade in Chicago, Massive's session, the "
+        f"schedule's) {unlike[:5]}"
+    )
+    return tally
+
+
+@pytest.mark.settles("132")
+@pytest.mark.requests(48)
+@pytest.mark.timeout(600)
+def test_combo_trade_sessions_by_snapshot_product(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether a combo's snapshot product code puts its trades in Massive's own session.
+
+    The calendar would date a combo's streamed rows by the schedule of the product its
+    snapshot row names. An earlier run checked three combos whose tickers start with their
+    product code, on a Sunday evening, when every product's trades fall in Monday's session:
+    that could not tell the product Massive names from any other. Reads the whole snapshot
+    and the single products listed on the latest day the contracts list holds
+    (`_listed_day`), and takes up to 100 combos
+    traded within 3 days: first those whose ticker does not start with their product code,
+    then inter-commodity spreads (`CL:BZ N7-Q7`, or legs of different products), then one per
+    product code. A combo's candidates are its snapshot product code, its first leg's
+    (`CLZ6` of `CLZ6-CLF7`), and the two codes an inter-commodity ticker names (`CL`, `BZ`),
+    when they are listed single products. Reads the candidates' schedules from 4 days back
+    to 1 ahead, to the end (up to 10 pages, else a lower bound). Picks 30 of the combos, first
+    those whose candidates' sessions differ (only their trades can tell one candidate from
+    another), and reads each one's latest 200 trades within 3 days. Places each trade in the
+    session of each candidate whose span (first event to last) holds it, beside the trade's
+    own `session_end_date`. Records per combo and in total: trades that agree, disagree
+    (each listed), and that no session holds, by candidate (the snapshot's product or
+    another), and the trades by Chicago weekday and part of the session (from 17:00, the
+    evening that belongs to the next day); and how many combos discriminate. A trades read
+    Massive refuses (a ticker it cannot take in the path) is recorded, not failed.
+
+    The snapshot's product dates combos when its trades agree; that settles it against the
+    other candidates only for the discriminating combos, so with none the evidence says the
+    question stays open. Run on a weekday, so trades from both parts of a session are read.
+    Passes when every request is answered or refused as above and a combo's trade is read;
+    the counts are evidence. Sends at most 48 requests.
+
+    Raises:
+        WireError: When a trades read fails other than by a refusal.
+    """
+    listed = _read_snapshot(live_rest, evidence)
+    now = datetime.now(UTC)
+    today = futures_session(now)  # the calendar's today
+    query = {"date": _listed_day(live_rest, evidence), "type": "single", "limit": _PRODUCTS_PAGE}
+    singles = {str(row.get("product_code")) for row in _page(live_rest, _PRODUCTS, query=query)}
+    pool = _pool_combos(listed, epoch_ns(now - _COMBO_DAYS))
+    assert pool, "no combo traded within 3 days: nothing to place"
+    candidates = {ticker: _candidates(ticker, listed, singles) for ticker in pool}
+    spans = _candidate_sessions(live_rest, candidates, today=today, evidence=evidence)
+    deciding = {ticker for ticker in pool if _spans_differ(candidates[ticker], spans)}
+    combos = list(dict.fromkeys([*sorted(deciding, key=pool.index), *pool]))[:_DATED_COMBOS]
+    evidence(
+        f"{len(singles)} single products; {len(pool)} combos in the pool, {len(deciding)} whose "
+        "candidates' sessions differ"
+    )
+    totals: Counter[str] = Counter()
+    for ticker in combos:
+        totals += _place_combo_trades(
+            live_rest,
+            ticker,
+            _Candidates(listed[ticker].product_code, candidates[ticker], ticker in deciding),
+            spans=spans,
+            since=now - _COMBO_DAYS,
+            evidence=evidence,
+        )
+    picked = len(deciding & set(combos))
+    evidence(
+        f"total over {len(combos)} combos, {picked} discriminating"
+        f"{'' if picked else ' (none: the snapshot product against the others stays open)'}: "
+        f"{dict(totals)}"
+    )
+    assert totals, "no combo trade was read"
+
+
+_LISTING_CONTRACT_PAGES = 40
+"""The most pages of the day's active contracts the listing-day check reads."""
+
+_CROSS_LOOKUPS = 20
+"""The most lookups, 100 tickers each, the listing-day check sends to the contracts list."""
+
+_LATE_LOOKUPS = 5
+"""The most lookups, 100 tickers each, the listing-day check sends for a week's listings."""
+
+_SNAPSHOT_LOOKUPS = 10
+"""The most lookups, 100 tickers each, the listing-day check sends to the snapshot."""
+
+_NEW_LISTING_DAYS = timedelta(days=3)
+"""How recent a contract's first trade date must be to count as a new listing."""
+
+
+def _read_active_contracts(
+    client: RestClient, day: date, evidence: Evidence
+) -> dict[str, dict[str, Any]]:
+    """Read the contracts active on a day, up to 40 pages, and count its new listings.
+
+    Returns:
+        Each contract's row, by ticker.
+    """
+    query = {"date": day, "active": True, "limit": _LIST_PAGE}
+    rows, pages, ended = _read_pages(client, _CONTRACTS, query, most=_LISTING_CONTRACT_PAGES)
+    contracts = {str(row.get("ticker")): row for row in rows}
+    firsts = Counter(str(row.get("first_trade_date")) for row in contracts.values())
+    recent = (day - _NEW_LISTING_DAYS).isoformat()
+    evidence(
+        f"contracts active on {day}: {len(contracts)} tickers in {pages} pages "
+        f"({'the whole list' if ended else 'more follow: a lower bound'}), by type "
+        f"{dict(Counter(str(row.get('type')) for row in contracts.values()))}; first traded on "
+        f"{day}: {firsts[day.isoformat()]}, since {recent}: "
+        f"{sum(n for first, n in firsts.items() if first >= recent)}"
+    )
+    return contracts
+
+
+def _record_traded_but_unlisted(
+    client: RestClient,
+    listed: Mapping[str, _Listed],
+    contracts: Mapping[str, object],
+    *,
+    day: date,
+    evidence: Evidence,
+) -> None:
+    """Record the snapshot's tickers traded in today's session that the contracts list lacks.
+
+    Asks the contracts list for those its pages read lacked, by `ticker.any_of` and `day`,
+    and for those still lacking by `ticker.any_of` and the week up to `day`.
+    """
+    today = futures_session(datetime.now(UTC))  # the calendar's today
+    traded = sorted(
+        ticker
+        for ticker, found in listed.items()
+        if found.traded is not None and futures_session(_instant(found.traded)) == today
+    )
+    unread = sorted(set(traded) - set(contracts))
+    query = {"date": day, "limit": _LIST_PAGE}
+    found, asked = _look_up(client, _CONTRACTS, unread, query=query, most=_CROSS_LOOKUPS)
+    lacking = sorted(set(asked) - found)
+    query = {"date.gte": day - timedelta(days=7), "date.lte": day, "limit": _LIST_PAGE}
+    later, again = _look_up(client, _CONTRACTS, lacking, query=query, most=_LATE_LOOKUPS)
+    evidence(
+        f"snapshot tickers traded in the session of {today}: {len(traded)}; not in the "
+        f"contracts pages read: {len(unread)}; asked about {_share(asked, unread)}: "
+        f"{len(found)} listed on {day}, {len(lacking)} not; of those, asked about "
+        f"{_share(again, lacking)} within the week before: {len(later)} listed, "
+        f"{len(set(again) - later)} not, e.g. {sorted(set(again) - later)[:40]}"
+    )
+
+
+@pytest.mark.settles("133")
+@pytest.mark.requests(82)
+@pytest.mark.timeout(900)
+def test_snapshot_and_contracts_list_differences_on_a_listing_day(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """How many futures tickers the snapshot holds and the contracts list lacks, and the reverse.
+
+    The calendar would find a ticker's product in the snapshot first and the contracts list
+    second. New contracts are listed in bursts (3,035 combos and 1,631 singles first traded on
+    Monday 2026-11-02, the month's first Monday; one on the Monday after), so the check means
+    most on such a day, and records how many contracts were first traded on its day to say
+    whether it was one. Finds the latest day the contracts list holds (`_listed_day`), reads
+    the whole snapshot and the contracts active that day (`date`, `active=true`, up to 40
+    pages, else a lower bound). Takes the snapshot's tickers whose last trade is in the
+    calendar's today's session; asks the contracts list, by `ticker.any_of` and that `date`,
+    for those its pages lacked (up to 20 requests of 100), and for those still lacking, by
+    `ticker.any_of` and a `date` within the week before (up to 5). Asks the snapshot, by
+    `ticker.any_of`, for the contracts list's tickers the snapshot lacked (up to 10). Where
+    the requests cannot ask about every ticker, they ask about some spread evenly, and the
+    evidence says what share (a lower bound). Records the counts and the tickers each list
+    lacks.
+
+    Passes when every request is answered and both lists hold a ticker; the counts are
+    evidence. Sends at most 82 requests.
+    """
+    day = _listed_day(live_rest, evidence)
+    listed = _read_snapshot(live_rest, evidence)
+    contracts = _read_active_contracts(live_rest, day, evidence)
+    assert listed, "the futures snapshot lists no ticker"
+    assert contracts, f"the contracts list holds no contract active on {day}"
+    _record_traded_but_unlisted(live_rest, listed, contracts, day=day, evidence=evidence)
+    unsnapped = sorted(set(contracts) - set(listed))
+    found, asked = _look_up(
+        live_rest, _SNAPSHOT, unsnapped, query={"limit": _PRODUCTS_PAGE}, most=_SNAPSHOT_LOOKUPS
+    )
+    missing = sorted(set(asked) - found)
+    recent = (day - _NEW_LISTING_DAYS).isoformat()
+    new = {t for t in missing if str(contracts[t].get("first_trade_date")) >= recent}
+    evidence(
+        f"contracts active on {day} not in the snapshot read: {len(unsnapped)}; asked the "
+        f"snapshot about {_share(asked, unsnapped)}: {len(found)} in it, {len(missing)} not, "
+        f"{len(new)} of them first traded since {recent}, e.g. {missing[:40]}"
+    )
+
+
+_HORIZON_PRODUCTS = 250
+"""The most products the horizon check asks the latest session of, a request each."""
+
+_HORIZON_TRADED = timedelta(days=7)
+"""How recent a ticker's last trade must be for its product to count as traded."""
+
+
+_DAY_RANGES = ((-1, "past"), (3, "0 to 3"), (9, "4 to 9"), (30, "10 to 30"), (365, "31 to 365"))
+"""The ranges of days ahead the horizon check counts products in, by their last day."""
+
+
+def _days_range(days: int | None) -> str:
+    """Name the range of `_DAY_RANGES` a count of days ahead falls in.
+
+    Returns:
+        Its name, `"over 365"` past them, or `"none"` for a product without a session.
+    """
+    if days is None:
+        return "none"
+    return next((name for last, name in _DAY_RANGES if days <= last), "over 365")
+
+
+@pytest.mark.settles("135")
+@pytest.mark.requests(253)
+@pytest.mark.timeout(1200)
+def test_schedule_horizon_per_traded_product(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """How many days ahead each traded futures product's schedule reaches.
+
+    The calendar dates a row only by a session Massive has published, and loads sessions up
+    to 10 days ahead. An earlier run found the latest session Massive holds for any product
+    (in 2028), and read a window cut by its page cap, so how far each product's schedule
+    reaches is unknown. Reads the whole snapshot, takes the product codes of the tickers
+    traded within 7 days (those whose rows the calendar dates), and asks each product's
+    latest session (`product_code`, `sort=session_end_date.desc`, `limit=1`): one request a
+    product, every session it holds considered, up to 250 products spread evenly (beyond
+    them the counts are a lower bound, and it says so). Records how many days ahead of the
+    calendar's today each product's latest session is, counted in ranges, and every product
+    whose latest session is fewer than 10 days ahead, or that has none. The sort names a
+    column Massive does not document; an earlier run's same sort was answered, and a
+    refusal fails the test with Massive's answer.
+
+    Passes when every request is answered and a product was asked about; the days are
+    evidence. Sends at most 253 requests.
+    """
+    listed = _read_snapshot(live_rest, evidence)
+    since = epoch_ns(datetime.now(UTC) - _HORIZON_TRADED)
+    traded = sorted(
+        {found.product_code for found in listed.values() if (found.traded or 0) >= since}
+    )
+    asked = _spread(traded, _HORIZON_PRODUCTS)
+    assert asked, "no futures ticker traded within 7 days"
+    today = futures_session(datetime.now(UTC))  # the calendar's today
+    ahead: dict[str, int | None] = {}
+    for code in asked:
+        query = {"product_code": code, "sort": "session_end_date.desc", "limit": 1}
+        rows = _page(live_rest, _SCHEDULES, query=query)
+        last = rows[0].get("session_end_date") if rows else None
+        ahead[code] = (date.fromisoformat(last) - today).days if isinstance(last, str) else None
+    counted = Counter(_days_range(days) for days in ahead.values())
+    evidence(
+        f"products traded within 7 days: {len(traded)}; asked about {_share(asked, traded)}; "
+        f"days ahead of {today} of their latest session, by range: {dict(counted)}"
+    )
+    short = sorted(
+        (code, days) for code, days in ahead.items() if days is None or days < _DAYS_AHEAD.days
+    )
+    evidence(f"products whose latest session is under 10 days ahead, or none: {short}")
+
+
 _STREAM_SECONDS = 600.0
 """How long the streamed-tickers check streams every futures trade."""
 
@@ -910,11 +1794,46 @@ _LOOKUP_CHUNK = 100
 _LOOKUP_CHUNKS = 30
 """The most contracts lookups the streamed-tickers check sends."""
 
+_STREAM_SNAPSHOT_LOOKUPS = 30
+"""The most snapshot lookups, 100 tickers each, the streamed-tickers check sends."""
+
+_STREAM_CONTRACT_LOOKUPS = 10
+"""The most contracts lookups by date, 100 tickers each, the streamed-tickers check sends."""
+
+
+def _record_streamed_in_neither(
+    client: RestClient, seen: Sequence[str], evidence: Evidence
+) -> None:
+    """Record the streamed tickers that neither the snapshot nor the contracts list holds.
+
+    Asks the snapshot for every ticker seen, singles and combos alike, by `ticker.any_of`;
+    then the contracts list, by `ticker.any_of` and the latest day it holds (`_listed_day`),
+    for those the snapshot lacks.
+    """
+    query: dict[str, object] = {"limit": _PRODUCTS_PAGE}
+    in_snapshot, asked = _look_up(
+        client, _SNAPSHOT, seen, query=query, most=_STREAM_SNAPSHOT_LOOKUPS
+    )
+    unsnapped = sorted(set(asked) - in_snapshot)
+    day = _listed_day(client, evidence)
+    query = {"date": day, "limit": _LIST_PAGE}
+    in_contracts, checked = _look_up(
+        client, _CONTRACTS, unsnapped, query=query, most=_STREAM_CONTRACT_LOOKUPS
+    )
+    neither = sorted(set(checked) - in_contracts)
+    evidence(
+        f"asked the snapshot about {_share(asked, seen)} tickers seen: {len(in_snapshot)} in "
+        f"it; asked the contracts list about {_share(checked, unsnapped)} it lacks: "
+        f"{len(in_contracts)} listed on {day}, {len(neither)} in neither"
+    )
+    for start in range(0, len(neither), _LOOKUP_CHUNK):
+        evidence(f"in neither: {neither[start : start + _LOOKUP_CHUNK]}")
+
 
 @pytest.mark.integration_all_symbols
-@pytest.mark.settles("127")
-@pytest.mark.requests(31)
-@pytest.mark.timeout(1200)
+@pytest.mark.settles("127", "134")
+@pytest.mark.requests(75)
+@pytest.mark.timeout(1500)
 def test_streamed_futures_tickers_are_listed(
     live_session: dm.MassiveSession,
     live_rest: RestClient,
@@ -923,19 +1842,24 @@ def test_streamed_futures_tickers_are_listed(
     skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
     evidence: Evidence,
 ) -> None:
-    """Whether the contracts list holds every single futures contract that trades.
+    """Whether the contracts list or the snapshot holds every futures ticker that trades.
 
     Streams every futures trade (`m.futures.trades(dm.ALL).last_by()`) on the key's WebSocket
     for 10 minutes, which takes over the key's own futures connection the whole time. Then
     looks up the single contract tickers seen in the contracts list, 100 a request as the
     calendar asks (`ticker.any_of`, the largest page), at most 30 requests: the first 3,000
     in sorted order. Records the tickers seen, singles and combos, how many were looked up,
-    and every one looked up that the list does not hold.
-    Skips at once when Massive's futures market status for ES is not `open`, and with
-    Massive's refusal when the stream is refused.
+    and every one looked up that the list does not hold. Then asks the snapshot for every
+    ticker seen, singles and combos alike (`ticker.any_of`, 100 a request, up to 30), and the
+    contracts list, by `ticker.any_of` and the latest day it holds, for those the snapshot
+    lacks (up to 10, after up to 4 requests to find that day); where they cannot ask about
+    every ticker, they ask about some spread evenly, and the evidence says what share (a
+    lower bound). Records every ticker in neither: the ones the calendar could not date. Means
+    most on a Monday that lists many contracts. Skips at once when Massive's futures market
+    status for ES is not `open`, and with Massive's refusal when the stream is refused.
 
     Passes when trades arrived, the stream never failed, and every lookup is answered; the
-    missing tickers are evidence. Sends at most 31 requests of its own: the market status
+    missing tickers are evidence. Sends at most 75 requests of its own: the market status
     and the lookups. The stream's own futures calendar also looks up the contracts it sees,
     100 a request, and loads their products' schedules, on the same futures rate limit;
     their number depends on how many contracts trade, and the timeout leaves 10 minutes for
@@ -981,4 +1905,5 @@ def test_streamed_futures_tickers_are_listed(
     )
     for start in range(0, len(missing), _LOOKUP_CHUNK):
         evidence(f"not in the contracts list: {missing[start : start + _LOOKUP_CHUNK]}")
+    _record_streamed_in_neither(live_rest, seen, evidence)
     assert seen, f"no futures trade arrived in {_STREAM_SECONDS:.0f} s, though trades were due"
