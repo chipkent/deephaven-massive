@@ -61,9 +61,3 @@ it costs, and what its result settles.
 - A new open question gets a new item file, with the next free number, in the format of that
   folder's README; a settled item gets its one-line settlement on its `Status:` line.
 - Each test's docstring says what its evidence means.
-- A live test knows no Massive plan (decision 114): it sends its requests whatever the key
-  holds, and takes what the key may read only from Massive's answers and the owner's settings
-  file (`live_config`). Never skip ahead of a request, name a plan, or branch on one. The hook
-  in `tests/conftest.py` (`pytest_runtest_call`) turns Massive's refusal into a skip quoting it
-  (`refused:`), and the library's refusal of data the settings don't list as delayed into a skip
-  `not listed as delayed:`; a stream or poll, which doesn't raise, calls `skip_if_not_entitled`.
