@@ -266,6 +266,25 @@ def test_a_refusal_naming_a_combo_and_a_longer_one_refuses_both() -> None:
     assert loop.refused == [((combo, longer), message)]
 
 
+@pytest.mark.parametrize("acked", [True, False], ids=["unsubscribed", "in-flight"])
+def test_a_late_refusal_of_a_removed_combo_spares_the_shorter_one(acked: bool) -> None:
+    # The longer combo leaves before Massive's refusal of it arrives, either after its
+    # unsubscription went out or while the step that sent it still awaits the shorter one.
+    combo, longer = "T.1Y:SA 03M", "T.1Y:SA 03M F6"
+    loop = make_loop()
+    loop.subs.add([combo, longer])
+    loop.subs.opened(1)
+    if acked:
+        loop.subs.status(ack(combo))
+    loop.subs.remove([longer])
+    loop.subs.reconcile()
+    assert loop.sender.take()[-1] == (
+        ("unsubscribe", 1, (longer,)) if acked else ("subscribe", 1, (combo, longer))
+    )
+    loop.subs.status(refusal("T.1Y:SA", message=f"not authorized: {longer}"))
+    assert loop.refused == []
+
+
 def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
     loop = make_loop()
     loop.subs.add(["T.*", "T.AAPL", "T.MSFT", "T.IBM"])

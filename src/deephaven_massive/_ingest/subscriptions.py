@@ -261,6 +261,7 @@ class Subscriptions:
         self._deferred: frozenset[str] = frozenset()
         self._admission_stale = False
         self._sent: set[str] = set()
+        self._spaced: set[str] = set()  # every topic with a space this connection subscribed
         self._acked: set[str] = set()
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
@@ -439,6 +440,7 @@ class Subscriptions:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
+            self._spaced.update(t for t in adds if " " in t)
             self._pending = set(adds)
             self._step = frozenset(adds)
             for topic in ordered:
@@ -523,12 +525,15 @@ class Subscriptions:
 
         A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
         word of the message, so it counts as named when the message holds it whole and no
-        longer wanted topic holds that place.
+        longer topic holds that place. The longer topics checked include every topic with a
+        space this connection ever subscribed, also one no stream wants any more: a late
+        refusal of `T.1Y:SA 03M F6`, removed meanwhile, must not fail `T.1Y:SA 03M`.
 
         Args:
             status: A `REFUSED` status.
         """
-        spaced = _named(status.message, (t for t in self._refs if " " in t))
+        known = self._spaced.union(t for t in self._refs if " " in t)
+        spaced = [t for t in _named(status.message, known) if t in self._refs]
         if status.topics or spaced:
             named = [t for t in status.topics if t in self._refs]
             self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
