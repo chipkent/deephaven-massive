@@ -679,7 +679,9 @@ class FlatFile:
         unread = pa.array([row in keyed for row in range(block.num_rows)]) if keyed else None
         for column in plan.columns:
             sent = block[column.header]
-            if unread is not None and column.read_type != pa.string():
+            if unread is not None and (
+                column.read_type != pa.string() or column.list_type is not None
+            ):
                 sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
