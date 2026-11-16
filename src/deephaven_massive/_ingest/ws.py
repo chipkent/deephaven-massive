@@ -113,6 +113,7 @@ from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
+from deephaven_massive._tables.transports import Unsplit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -122,7 +123,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.transports import HostDecision, StreamHandle, Unsplit
+    from deephaven_massive._tables.transports import HostDecision, StreamHandle
 
 __all__ = [
     "JOIN_TIMEOUT",
@@ -1020,12 +1021,14 @@ class WsConnections:
                 if error.source is ErrorSource.LIBRARY:
                     raise  # a defect is never retried or shown as a waiting pair
                 return split, unsplit, pending[index:], error
-            if not isinstance(found, tuple):
+            if isinstance(found, Unsplit):
                 unsplit[symbol] = found
-                continue
-            with self._lock:
-                self.group.pairs[symbol] = found
-            split.add(symbol)
+            elif isinstance(found, tuple):
+                with self._lock:
+                    self.group.pairs[symbol] = found
+                split.add(symbol)
+            else:
+                assert_never(found)  # a new outcome of a lookup is decided here
         return split, unsplit, [], None
 
     def _no_data(self, stream_id: int, no_data: Mapping[str, str], *, reader: str) -> bool:

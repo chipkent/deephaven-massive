@@ -2164,6 +2164,12 @@ def test_a_crypto_stream_names_every_form_of_symbols() -> None:
         )
 
 
+def test_a_lookup_with_an_outcome_no_case_names_is_refused(ws_session: WsSession) -> None:
+    ws_session.pair_answers["X:QQQUSD"] = "bogus"  # type: ignore[assignment]  # the point
+    with pytest.raises(AssertionError):
+        ws_session.connections._split(["X:QQQUSD"])
+
+
 def test_every_pair_is_looked_up_off_the_callers_thread(
     ws_session: WsSession, dh_input_table: Callable[..., InputTable]
 ) -> None:

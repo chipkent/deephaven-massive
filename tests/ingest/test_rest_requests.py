@@ -535,3 +535,15 @@ def test_a_pair_with_no_split_is_a_call_that_is_never_sent() -> None:
     assert [(call.symbol, call.path_params, call.unsplit) for call in calls] == [
         ("X:DOTUSD", {}, missing)
     ]
+
+
+def test_a_split_with_an_outcome_no_case_names_is_refused() -> None:
+    path = _rest_path(CRYPTO_LAST_PATH)
+    with pytest.raises(AssertionError):
+        rest_requests.plan_calls(
+            CRYPTO_LAST,
+            path,
+            Request(),
+            symbols=("X:DOTUSD",),
+            split=lambda _: None,  # type: ignore[arg-type,return-value]  # the point: refused
+        )

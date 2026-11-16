@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Final, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
 
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
 from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
@@ -39,6 +39,7 @@ from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import required, required_instance
 from deephaven_massive._massive import ParamKind, Transport
+from deephaven_massive._tables.transports import Unsplit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._massive import RestPath
-    from deephaven_massive._tables.transports import Unsplit
 
 __all__ = [
     "BARE_INDEX_PARAM",
@@ -437,8 +437,10 @@ def _symbol_request(
             currencies = _pair(spec, symbol, split)
             if isinstance(currencies, tuple):
                 path["from"], path["to"] = currencies
-            else:
+            elif isinstance(currencies, Unsplit):
                 unsplit = currencies
+            else:
+                assert_never(currencies)  # a new outcome of a split is decided here
         elif params[name].in_path:
             path[name] = symbol
         else:
