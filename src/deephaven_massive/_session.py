@@ -495,9 +495,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.
             - `SchemaDrift`: how Massive's messages differed from its documentation.
               `channel:field+` is a field the documentation lacks. `channel:field-` is a documented
-              field that was missing. `channel:field?` is a value that didn't fit its column and was
-              read as null. `channel:field~` is a whole number past 2**53, read rounded.
-              `channel:<n> rows dropped` counts rows whose symbol or time couldn't be read.
+              field that was missing. `channel:field?` is a value that didn't fit its column, and
+              `channel:field~` a whole number past 2**53 that its column would round: their rows
+              were withheld. A live table's row in `m.streams()` also counts the rows the library
+              couldn't read whole, which no table holds, as `<transport>:<n> rows withheld`.
 
         Raises:
             SessionClosedError: If the session is closed.

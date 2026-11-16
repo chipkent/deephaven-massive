@@ -77,7 +77,7 @@ condition is keyed by all of them, since Massive lists two stocks quote conditio
 
 
 def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
-    return {c.name: c.type for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns}
+    return {c.name: c.type for c in CATALOG.dataset_schema(spec).columns}
 
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
@@ -127,7 +127,7 @@ def test_ticker_events_take_the_symbol_from_the_request() -> None:
         "id", from_request=True
     )
     # The event's `Date` is the vendor's date, not a trading day: reference rows have none.
-    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
+    assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Date",
         "Type",
@@ -141,7 +141,7 @@ def test_related_companies_name_the_peer_and_the_company_asked_about() -> None:
     spec = reference.RELATED_COMPANIES
     keys = spec.keys_for(R, "/v1/related-companies/{ticker}")
     assert keys == SourceKeys(symbol=KeySpec("Ticker"), fanout=KeySpec("ticker", from_request=True))
-    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
+    assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Underlying",
         "TimestampInsert",
@@ -651,7 +651,6 @@ def test_related_companies_name_the_peer_and_the_ticker_asked_about(
     assert {k: v for k, v in out[0].items() if k != "TimestampInsert"} == {
         "Symbol": "MSFT",
         "Underlying": "AAPL",
-        "RawSymbol": None,
     }
 
 

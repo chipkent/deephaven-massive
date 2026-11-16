@@ -48,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Stock ticker symbol for the company." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). |
 | `PrimaryCategory` | String | Top-level risk category |
@@ -66,7 +65,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `Cik` | `cik` |
 | `FilingDate` | `filing_date` |
 | `PrimaryCategory` | `primary_category` |

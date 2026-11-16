@@ -77,20 +77,22 @@ a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` be
 value is then scaled to nanoseconds by its field's unit, with an overflow check, and must lie in
 1990 to 2100, so a value in another unit than documented is never served as a wrong instant.
 
-Schema drift is reported, not raised: a header the dataset does not document is dropped, a
-documented header the file lacks becomes a column of nulls, and a value that does not parse as
-its type, or an `Instant` other than the time column that fails the routine, is null; each
-logs one WARNING per (dataset, transport, header) through the session's `DriftRegistry`. A row
-whose key (its ticker, its time, or for futures its session) is empty, does not parse, or
-fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
-WARNING per dataset with the running count). A malformed line, one that is not UTF-8 text or
-does not split into the header's fields (too few or too many, or a quote that does not close),
-follows `ErrorPolicy.malformed_rows`: under `LOG`, the default, it is skipped and each file
-that had one logs one WARNING with the count and the first one's row number, never its text;
-under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with `RowDataError`. A file
-that lacks a key header fails the call with `MassiveError`, and so does a file whose every row
-is malformed or whose every row of the requested symbols was dropped, the sign of a change in
-the file's format rather than of one odd row.
+Schema drift is reported, not raised: a header the dataset does not document is dropped, and
+a documented header the file lacks becomes a column of nulls; each logs one WARNING per
+(dataset, transport, header) through the session's `DriftRegistry`. A row the library cannot
+read whole is withheld (`withheld.withhold_rows`) and counted (`DriftRegistry` logs one WARNING
+per dataset with the running count): a key (its ticker, its time, or for futures its session)
+that is empty, does not parse, or fails the routine; a ticker spelling it cannot read; a value
+that does not parse as its type, an `Instant` other than the time column that fails the
+routine, or a whole number its `double` column would round. A malformed line, one that is not
+UTF-8 text or does not split into the header's fields (too few or too many, or a quote that
+does not close), follows `ErrorPolicy.malformed_rows`: under `LOG`, the default, it is skipped
+and each file that had one logs one WARNING with the count and the first one's row number,
+never its text; under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with
+`RowDataError`. A file that lacks a key header fails the call with `MassiveError`, and so does a
+file whose every row is malformed; a file whose rows of the read's symbols and window the
+library could read none of whole fails it with `RowDataError`, the sign of a change in the
+file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
 the placeholder `{venue}`, `venues` (all four when the call left it out) picks the venues read,
@@ -140,12 +142,13 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
-from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT
 from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start, is_trading_day
 from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.history_source import current_partition
 from deephaven_massive._datasets.row_times import (
     DATE,
+    START,
     BarBounds,
     TimeRule,
     time_column,
@@ -162,7 +165,7 @@ from deephaven_massive._datasets.timestamps import (
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     log_unreadable,
-    unreadable_symbol_message,
+    unreadable_symbol_reason,
     wire_spellings,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
@@ -191,6 +194,7 @@ from deephaven_massive._massive import (
     DriftSample,
     ReadColumn,
     ReadPlan,
+    RowFault,
     Transport,
     WireAuthError,
     WireEntitlementError,
@@ -202,7 +206,18 @@ from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import FlatFileRead
-from deephaven_massive._tables.withheld import without_unread_keys
+from deephaven_massive._tables.withheld import (
+    MARK_COLUMNS,
+    Failure,
+    Withheld,
+    WithheldGroup,
+    failure_of,
+    in_window,
+    mark,
+    mark_failures,
+    with_marks,
+    withhold_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -519,7 +534,6 @@ class _Transform:
         symbols: How the files' tickers become canonical (`WireSymbols`).
         policy: The call's resolved policy (`Request.on_error`): what a ticker spelling the
             library cannot read, and a malformed line, do.
-        raw_symbol: Whether the schema has `RawSymbol`, which the session decides.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
@@ -542,7 +556,6 @@ class _Transform:
     time_name: str
     symbols: WireSymbols
     policy: ResolvedPolicy
-    raw_symbol: bool
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
 
@@ -555,7 +568,6 @@ class _Transform:
         prefix: str,
         request: Request,
         window: HistoryWindow,
-        raw_symbol: bool,
         warnings: BoundedLog,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
@@ -577,15 +589,13 @@ class _Transform:
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures named by date keep the rows of
                 `HistoryWindow.sessions`, by each row's own session.
-            raw_symbol: Whether the schema has the `RawSymbol` column
-                (`SessionCore.raw_symbol`).
             warnings: The session's once-per-session warnings, which the time rule logs to
                 (`row_times.time_rule`): that of a daily summary, and its bars' stamp rule.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=raw_symbol)
+        schema = catalog.dataset_schema(spec)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
         file_class = spec.single_class
@@ -637,43 +647,29 @@ class _Transform:
             time_name=time_name,
             symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
             policy=request.on_error,
-            raw_symbol=raw_symbol,
             bars=window.bars,
         )
 
-    def _unreadable(self, spellings: tuple[str, ...]) -> None:
-        """Apply the call's `unreadable_symbols` to a block's unreadable ticker spellings.
-
-        Args:
-            spellings: The distinct spellings, sorted; empty for a clean block.
-
-        Raises:
-            MassiveError: Under `RAISE`, for any spelling (`unreadable_symbol_message`); under
-                `LOG` and `IGNORE` each is logged once instead (`log_unreadable`).
-        """
-        if not spellings:
-            return
-        setting = self.policy.unreadable_symbols
-        if effect_of(setting).fails:
-            raise MassiveError(
-                unreadable_symbol_message(self.dataset, spellings),
-                source=ErrorSource.LIBRARY,  # a spelling the library cannot read
-            )
-        log_unreadable(self.dataset, spellings, setting, raw_symbol=self.raw_symbol)
-
     def apply(
-        self, batch: pa.RecordBatch, *, received: int, key: _Key
-    ) -> tuple[pa.RecordBatch, DriftReport]:
-        """Turn one batch of surviving rows into a block of the dataset's schema.
+        self, batch: pa.RecordBatch, marks: RowMarks, *, received: int, key: _Key
+    ) -> tuple[pa.RecordBatch, DriftReport, Withheld]:
+        """Turn one block of the reader's rows into a block of the dataset's schema.
 
         Pure Arrow: the timestamp routine on every epoch `Instant`, the merge's widening of a
         column whose source type is narrower than the dataset's, nulls for the schema
         columns the prefix does not carry, and the library's time columns
         (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
-        reader; every row whose key the reader could not read (its time included) was already
-        dropped by `_gather`. A bar whose
-        window does not lie in the window is dropped (`row_times.within`).
+        reader. A bar whose window does not lie in the window is dropped
+        (`row_times.within`).
+
+        Every row the library cannot read whole is withheld (`withheld.withhold_rows`) before
+        the time columns are filled: a key the reader could not read, its time included
+        (`unreadable_keys`); a ticker spelling the library cannot read
+        (`unreadable_symbols`); and a value that does not parse, an epoch value other than the
+        time that fails the timestamp routine, a whole number its `double` column would
+        round, or a bar of a day or longer at a stamp Massive is not known to use
+        (`unconvertible_values`).
 
         A futures row keeps its own session, the file's `session_end_date` header, in `Date`,
         whatever file it came from, and is kept only when that session was requested
@@ -681,65 +677,99 @@ class _Transform:
         per dataset per session, naming the file and the session found.
 
         Args:
-            batch: One block's surviving rows, with the plan's columns.
+            batch: One block's rows as the reader hands them on, with the plan's columns.
+            marks: The reader's marks of those rows.
             received: When the block was decoded, epoch nanoseconds: every row's
                 `TimestampInsert`.
             key: The file the block came from.
 
         Returns:
-            The block in the dataset's schema; and the drift of its timestamps and widening:
-            the headers of the epoch columns other than the time column that held a value the
-            routine cannot place (null), and those of the integer columns whose widening to a
-            `double` rounded a value (`RoundedFields`), each with its first such value.
-
-        A 1-day bar stamped at a time of day Massive is not known to use is served as sent and
-        logs the WARNING of `row_times.StampRule.stamp`.
-
-        Raises:
-            MassiveError: If a row's ticker is a spelling the library cannot read and the
-                call's `unreadable_symbols` is `RAISE`
-                (`wire_symbols.unreadable_symbol_message`); under `LOG` and `IGNORE` the row
-                keeps a null `Symbol`, and the text in `RawSymbol` where the schema has it.
+            The block's rows read whole, in the dataset's schema; the drift of its timestamps
+            and widening: the headers of the epoch columns other than the time column that
+            held a value the routine cannot place, and those of the integer columns whose
+            widening to a `double` rounded a value (`RoundedFields`), each with its first such
+            value; and the rows withheld.
         """
+        batch = with_marks(batch, marks, sent=batch["Symbol"])
         if self.session_header is not None:
             batch = self._own_sessions(batch, key)
         arrays: dict[str, pa.Array] = {}
-        raw = pa.nulls(batch.num_rows, pa.string())
         odd: dict[str, DriftSample] = {}
         rounded = RoundedFields()
+        failures: list[Failure] = []
         for column in self.columns:
             column_type, name, _ = column
             if name == OPTION_ROOT:
                 values = option_roots(arrays["Symbol"])
-            elif name == RAW_SYMBOL:
-                values = raw
             elif name == "Symbol":
-                read = self.symbols.read(batch["Symbol"], {})
-                self._unreadable(read.unreadable)
-                values, raw = read.symbols, read.raw
+                values = self._symbols(batch["Symbol"], failures=failures)
             else:
-                values = self._column(batch, column, odd=odd, rounded=rounded)
+                values = self._column(batch, column, odd=odd, rounded=rounded, failures=failures)
             # A field's column is widened already (`_column`); this casts the others.
-            arrays[name] = rounded.widen(values, column_type.arrow_type, wire_key=None)
+            arrays[name] = rounded.widen(values, column_type.arrow_type, wire_key=None, column=name)
         rows = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        stamps = self.times.stamps
-        if stamps is not None:
-            rows = stamps.stamp(self.dataset, rows, source=f"the flat files {self.prefix}")
-        filled = self.times.fill(rows, received=received)
+        for name in MARK_COLUMNS:
+            rows = rows.append_column(name, batch[name])
+        rows = mark_failures(self._stamped(rows), (*failures, *rounded.failures()))
+        withheld = withhold_rows(rows, symbol="Symbol")
+        filled = self.times.fill(withheld.rows, received=received)
         kept = filled if self.bars is None else within(filled, self.bars)
         drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
-        return kept, drift.merge(rounded.drift())
+        return kept, drift.merge(rounded.drift()), withheld
+
+    def _symbols(self, sent: pa.Array, *, failures: list[Failure]) -> pa.Array:
+        """Read a block's tickers into canonical symbols, noting the spellings it cannot read.
+
+        Args:
+            sent: The block's `Symbol` column, the tickers as the file writes them.
+            failures: Receives the rows whose spelling the library cannot read, to mark
+                `unreadable_symbols`.
+
+        Returns:
+            The canonical symbols, null for a spelling the library cannot read.
+        """
+        read = self.symbols.read(sent, {})
+
+        def reason(row: int) -> str:
+            return unreadable_symbol_reason(sent[row].as_py())
+
+        failures.append((RowFault.UNREADABLE_SYMBOLS, read.unreadable_rows, "Symbol", reason))
+        return read.symbols
+
+    def _stamped(self, rows: pa.RecordBatch) -> pa.RecordBatch:
+        """Stamp a block's bars at 00:00 of their days, marking a bar at an odd stamp.
+
+        Args:
+            rows: The block in the dataset's schema, with the mark columns.
+
+        Returns:
+            The rows, known stamps moved, and each bar at a stamp Massive is not known to use
+            marked `unconvertible_values`; the rows as they were for a dataset without stamps.
+        """
+        stamps = self.times.stamps
+        if stamps is None:
+            return rows
+        stamped, odd = stamps.stamp(self.dataset, rows, source=f"the flat files {self.prefix}")
+        starts = rows[START]
+
+        def reason(row: int) -> str:
+            stamp: int = starts[row].value
+            return stamps.reason(stamp)
+
+        return mark(stamped, RowFault.UNCONVERTIBLE_VALUES, odd, field=START, reason=reason)
 
     def _own_sessions(self, batch: pa.RecordBatch, key: _Key) -> pa.RecordBatch:
         """Keep a futures block's rows of the requested sessions; warn of a file's other sessions.
 
         Args:
-            batch: The block's rows, whose `Date` holds each row's own session date.
+            batch: The block's rows, whose `Date` holds each row's own session date, with the
+                mark columns.
             key: The file the block came from.
 
         Returns:
-            The rows whose session was requested; every row when the call names instants,
-            whose rows the reader already kept by time.
+            The rows whose session was requested, and a marked row whose session could not be
+            read (`withheld.in_window`); every row when the call names instants, whose rows
+            the reader already kept by time.
         """
         sessions = batch[DATE]
         own = pa.scalar(key.day, pa.date32())
@@ -761,9 +791,8 @@ class _Transform:
             return batch
         first = pa.scalar(self.sessions.first, pa.date32())
         last = pa.scalar(self.sessions.last, pa.date32())
-        return batch.filter(
-            pc.and_(pc.greater_equal(sessions, first), pc.less_equal(sessions, last))
-        )
+        inside = pc.and_(pc.greater_equal(sessions, first), pc.less_equal(sessions, last))
+        return batch.filter(in_window(batch, inside, keys=(DATE,)))
 
     def _column(
         self,
@@ -772,6 +801,7 @@ class _Transform:
         *,
         odd: dict[str, DriftSample],
         rounded: RoundedFields,
+        failures: list[Failure],
     ) -> pa.Array:
         """Convert one column's values to its type, or make the column of nulls it lacks.
 
@@ -780,8 +810,10 @@ class _Transform:
             column: The column's type, its name, and the source column that fills it, or None.
             odd: Updated with the header of an epoch column whose value the timestamp routine
                 cannot place, and its first such value.
-            rounded: Notes the header of an integer column whose widening to a `double`
-                rounded a value.
+            rounded: Notes the rows of an integer column whose widening to a `double` rounded a
+                value.
+            failures: Receives the rows of an epoch column other than the time column whose
+                value the routine cannot place, to mark `unconvertible_values`.
 
         Returns:
             An Arrow array of the column's type, one value per row of `batch`. In an `Instant`
@@ -800,12 +832,19 @@ class _Transform:
                 time_column=name == self.time_name,
                 label=f"{self.dataset}.{name}",
             )
-            first = first_failure(sent, failed)
+            # The reader marked a row whose time it could not place: no drift of the field.
+            first = None if name == self.time_name else first_failure(sent, failed)
             if first is not None:
                 odd[required(source.wire_key, f"column {name}'s field")] = DriftSample(
                     None, str(first)
                 )
-        return rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key)
+                label, unit = f"{self.dataset}.{name}", source.unit
+
+                def reason(row: int) -> str:
+                    return mismatch_message(label, unit, sent[row].as_py())
+
+                failures.append((RowFault.UNCONVERTIBLE_VALUES, failed, name, reason))
+        return rounded.widen(values, column_type.arrow_type, wire_key=source.wire_key, column=name)
 
 
 def _time_nanos(label: str, unit: TimeUnit, values: pa.Array) -> pa.Array:
@@ -927,7 +966,6 @@ class FlatFileHistory:
             prefix=prefix,
             request=request,
             window=window,
-            raw_symbol=self._core.raw_symbol,
             warnings=self._core.warnings,
         )
         tiled = not infer_holidays and _tiles(spec, request, window)
@@ -1581,11 +1619,15 @@ class FlatFileHistory:
     ) -> list[Table]:
         """Convert a file's batches to the schema and gather them into static tables.
 
+        Each block's rows the library cannot read whole are withheld (`_Transform.apply`):
+        under a cause the call's policy sets to `RAISE` the read fails at that block
+        (`withheld.failure_of`); otherwise, once the file is read, they count in its drift,
+        give the session their problem events, and log each unreadable ticker spelling once.
         Once the file is read, reports its drift (the blocks' drift and their timestamps')
         to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
         flat files show each extra, missing, or unconvertible header, and counts the rows
-        dropped for a key. A read that a dropped connection ends reports nothing, so a file
-        read again is counted once. A file with malformed lines (not UTF-8 text, or not the
+        withheld. A read that a dropped connection ends reports nothing, so a file read again
+        is counted once. A file with malformed lines (not UTF-8 text, or not the
         header's fields) follows the call's `malformed_rows` (`_log_malformed`): under `LOG`, it
         logs one WARNING with their count and the first one's row number and fault
         (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
@@ -1609,23 +1651,32 @@ class FlatFileHistory:
         Raises:
             RowDataError: Under `malformed_rows=RAISE`, at the first block handed on after the
                 file's first malformed line (`_malformed_message`); every chunk hands on one,
-                so a run of such lines fails the read before the file ends.
+                so a run of such lines fails the read before the file ends. Under a `RAISE`
+                cause, at the first block with a withheld row of that cause. And after the
+                last block, when the file held rows the read asked for and the library could
+                read none of them whole, the sign of a change in the file's format, whatever
+                the policy.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
         size = 0
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
-        served = 0
+        served = asked = 0
+        groups: list[WithheldGroup] = []
+        first = ""
         setting = transform.policy.malformed_rows
         with entered(self._core.exec_ctx):
             for read, drift, marks in batches:
                 if file.malformed_lines and effect_of(setting).fails:
                     raise RowDataError(_malformed_message(transform.dataset, file))
-                batch, unread = without_unread_keys(read, marks)
-                rows, odd = transform.apply(batch, received=time.time_ns(), key=key)
+                rows, odd, withheld = transform.apply(read, marks, received=time.time_ns(), key=key)
                 served += rows.num_rows
-                found = found.merge(drift).merge(unread).merge(odd)
+                asked += withheld.rows.num_rows + withheld.total
+                found = found.merge(drift).merge(odd)
+                _check_withheld(withheld, transform, where=file.location)
+                groups.extend(withheld.groups)
+                first = first or withheld.first_reason
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1641,20 +1692,71 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
+        every = Withheld(pa.table({}), tuple(groups), first)
+        if asked and every.total == asked:
+            raise RowDataError(
+                f"{transform.dataset}: the library could read none of the {asked} rows of the "
+                f"read's symbols and window in {file.location} whole, so Massive's format may "
+                f"have changed; the first: {first}"
+            )
+        if groups:
+            self._report_withheld(transform, every, where=file.location)
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
             _log_malformed(transform.dataset, file, setting)
         logger.debug(
-            "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d kept as "
-            "whole bars",
+            "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d withheld, %d "
+            "kept as whole bars",
             transform.dataset,
             file.location,
             file.rows_read,
             file.rows_of_symbols,
             file.rows_kept,
+            every.total,
             served,
         )
         return tables
+
+    def _report_withheld(self, transform: _Transform, withheld: Withheld, *, where: str) -> None:
+        """Report a file's withheld rows: drift, problem events, and unreadable spellings.
+
+        Args:
+            transform: The read's block transform, for its dataset and policy.
+            withheld: The file's withheld rows, every block's.
+            where: The file's location.
+        """
+        dataset = transform.dataset
+        self._core.drift.report(dataset, Transport.FLAT_FILES, withheld.drift, where=where)
+        spellings = sorted(
+            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
+        )
+        log_unreadable(dataset, spellings, transform.policy.unreadable_symbols)
+        self._core.problems(
+            withheld.events(
+                dataset=dataset, transport=Transport.FLAT_FILES, where=where, stream_id=None
+            )
+        )
+
+
+def _check_withheld(withheld: Withheld, transform: _Transform, *, where: str) -> None:
+    """Fail a read on a block's withheld rows of a cause its policy sets to `RAISE`.
+
+    Args:
+        withheld: The block's withheld rows.
+        transform: The read's block transform, for its dataset and policy.
+        where: The file's location, for the message.
+
+    Raises:
+        RowDataError: If a cause of a withheld row is `RAISE` (`withheld.failure_of`).
+    """
+    failure = failure_of(
+        withheld.counts(),
+        transform.policy,
+        dataset=transform.dataset,
+        first_reason=withheld.first_reason,
+    )
+    if failure is not None:
+        raise RowDataError(f"{failure} (in {where})")
 
 
 def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:

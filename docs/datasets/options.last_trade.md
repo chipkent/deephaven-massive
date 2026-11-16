@@ -46,7 +46,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
 | `Timestamp` | Instant | The row's event time. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Price` | double | The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract. |
 | `Size` | double | The size of a trade (also known as volume). |
 | `Conditions` | long[] | A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means. |
@@ -73,7 +72,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Date` |  |
 | `Timestamp` | `t` |
 | `OptionRoot` | `T` |
-| `RawSymbol` | `T` |
 | `Price` | `p` |
 | `Size` | `s` |
 | `Conditions` | `c` |

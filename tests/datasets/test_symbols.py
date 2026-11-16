@@ -807,7 +807,7 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
     reader = WireSymbols("partners.tmx.corporate_events", STK, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
-    assert read.unreadable == (" x",)
+    assert read.unreadable_rows.to_pylist() == [False, False, True]
 
 
 CONVERTERS = [

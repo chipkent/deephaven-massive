@@ -103,7 +103,14 @@ of three values:
 | `raise` | Fails whatever met the problem. |
 
 Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`. A symbol the library can't read logs an error instead of a warning.
+in `m.streams()`.
+
+A row of Massive's data the library can't read whole is never published, whatever the setting:
+the setting of its cause (`unreadable_keys`, `unreadable_symbols`, or `unconvertible_values`)
+decides only whether the table fails and how loudly the log reports the row. When Massive sends
+rows of your symbols inside your call's window and the library can read none of them whole, the
+call fails whatever the setting, since Massive's format has most likely changed. Rows outside
+the window count neither way.
 
 Under `raise`:
 
@@ -154,6 +161,10 @@ on_error:
   unreadable_symbols: log  # the default
   # A symbol Massive has no data for.
   unavailable_symbols: log  # the default
+  # A row of Massive's data whose key the library can't read.
+  unreadable_keys: log  # the default
+  # A row of Massive's data with a value the library can't read.
+  unconvertible_values: log  # the default
   # A flat-file line that isn't a readable row.
   malformed_rows: log  # the default
   # A futures exchange you name that the plan lacks.
@@ -202,6 +213,8 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | `on_error.noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read as Massive's ticker. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unreadable_keys` | Decides what happens to a row of Massive's data that the library can't place: its symbol, its time, or another key its dataset needs is missing, null, or not of its type. A time of 0 counts, and so does one outside 1990 to 2100. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unconvertible_values` | Decides what happens to a row of Massive's data holding a value the library can't read as its column's type. A whole number that a `double` column would round counts, and so does a time outside 1990 to 2100 in any column but the row's own time; a time of 0 there is null, as Massive means it. So does a bar of a day or longer stamped at a time Massive isn't known to use, whose day the library can't tell. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
@@ -304,12 +317,10 @@ ticker, or the call raises `ValueError`. A table whose every row is bad raises
 
 #### on_error.unreadable_symbols
 
-Set `raise` when a table must fail rather than keep such a row. By
-default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
-column. Such a symbol is a library bug. To report it, see
+The row is never published. Set `raise` when a table must fail on such
+a row rather than go on without it. Such a symbol is a library bug. To report it,
+see
 [Report a bug](troubleshooting.md#report-a-bug).
-Only the session's setting decides the column. Under `raise` in
-`MassiveConfig`, no table has a `RawSymbol` column, whatever a call sets.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
 written together. Under `log` or `ignore` it gets no rows. A
@@ -325,6 +336,17 @@ setting says.
 This setting also covers a watchlist symbol a `poll()` can't request with your
 arguments. For example, an indicator poll with `adjusted=False` can't request a
 crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
+
+#### on_error.unreadable_keys
+
+The row is never published. Set `raise` when a table must fail on such
+a row rather than go on without it.
+
+#### on_error.unconvertible_values
+
+The row is never published, so a table never holds a value the library made up.
+Set `raise` when a table must fail on such a row rather than go on
+without it.
 
 #### on_error.malformed_rows
 

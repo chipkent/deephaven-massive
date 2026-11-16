@@ -41,7 +41,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From WebSocket `pair`: "The crypto pair." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. |
 | `Timestamp` | Instant | The row's event time. From WebSocket `t`: "The Timestamp in Unix MS." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `BidPrice` | double | The bid price. |
 | `BidSize` | double | The bid size. |
 | `AskPrice` | double | The ask price. |
@@ -61,7 +60,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | `pair` |
 | `Date` |  |
 | `Timestamp` | `t` |
-| `RawSymbol` | `pair` |
 | `BidPrice` | `bp` |
 | `BidSize` | `bs` |
 | `AskPrice` | `ap` |

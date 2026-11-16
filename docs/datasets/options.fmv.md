@@ -44,7 +44,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
 | `Timestamp` | Instant | The row's event time. From WebSocket `t`: "The nanosecond timestamp." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Fmv` | double | Fair market value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. |
 
@@ -60,7 +59,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Date` |  |
 | `Timestamp` | `t` |
 | `OptionRoot` | `sym` |
-| `RawSymbol` | `sym` |
 | `Fmv` | `fmv` |
 | `TimestampInsert` |  |
 

@@ -57,7 +57,6 @@ import itertools
 import logging
 import threading
 import time
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -66,7 +65,6 @@ from typing import TYPE_CHECKING, Final, Protocol, assert_never
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.trading_hours import in_trading_hours
-from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
     NEW_SESSION,
@@ -121,7 +119,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import RowMark, RowMarks, Source, Status
+    from deephaven_massive._massive import RowMarks, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
@@ -899,10 +897,9 @@ class Connection:
     ) -> None:
         """Hand one channel's rows to the flush thread, and record the frame's drift.
 
-        A row whose key could not be read (marked `RowFault.UNREADABLE_KEYS`) is dropped here
-        and fails no stream: it is counted in the drift (`DriftReport.dropped_rows`, with the
-        first such row's reason), which the flush thread logs and counts for each dataset. A
-        row marked for another fault is handed on with its null.
+        Every row goes to the flush thread with the client's marks, which withholds each row
+        the library cannot read whole (`ChannelPlan.convert`). A row whose key could not be
+        read counts in the window's traffic as dropped, not as data heard.
 
         Args:
             channel: The channel.
@@ -919,19 +916,13 @@ class Connection:
             self._episodes.data_since_open = True
             self._check_recovered()
         unread = marks.get(RowFault.UNREADABLE_KEYS)
-        if unread is not None:
-            taken = set(unread.rows)
-            rows = [row for index, row in enumerate(rows) if index not in taken]
-            reason = f"dropped {unread.reasons[0]}"
-            drift = drift.merge(DriftReport(dropped_rows=len(unread.rows), dropped_reason=reason))
-        self._traffic.received(
-            channel, len(rows), 0 if unread is None else len(unread.rows), now=now
-        )
-        if rows:
-            self.flusher.rows(channel, rows, generation=generation)
-            self._arm_backlog_row()  # the row write below may be throttled
-        if drift.fields_drifted or drift.dropped_rows:
-            self._record_drift(channel, drift, dropped=self._dropped_symbols(unread))
+        dropped = 0 if unread is None else len(unread.rows)
+        self._traffic.received(channel, len(rows) - dropped, dropped, now=now)
+        # A channel's data in a frame holds at least one row.
+        self.flusher.rows(channel, rows, marks, generation=generation)
+        self._arm_backlog_row()  # the row write below may be throttled
+        if drift.fields_drifted:
+            self._record_drift(channel, drift)
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -1381,36 +1372,18 @@ class Connection:
             hint += " (index values may need business.massive.com)"
         return hint
 
-    def _record_drift(
-        self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
-    ) -> None:
+    def _record_drift(self, channel: str, drift: DriftReport) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
 
         Args:
             channel: The channel.
             drift: Its drift in the frame.
-            dropped: How many of the frame's dropped rows each canonical symbol had.
         """
         text = self._drift_seen.record(self.key, channel, drift)
         if text is not None:
             self._drift = text
             self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
-
-    def _dropped_symbols(self, unread: RowMark | None) -> dict[str, int]:
-        """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
-
-        Args:
-            unread: The frame's rows whose key could not be read, or None for none.
-
-        Returns:
-            Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
-            not text, or a spelling the library cannot read is left out (the dataset's own run
-            still counts it).
-        """
-        sent = () if unread is None else unread.symbols
-        found = (canonical_from_wire(self.asset_class, symbol) for symbol in sent if symbol)
-        return dict(Counter(symbol for symbol in found if symbol is not None))
+        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
 
     # --- loop thread: outages and notes --------------------------------------------------------
 

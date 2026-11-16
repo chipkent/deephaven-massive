@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -40,7 +40,7 @@ from deephaven_massive._errors import (
     RowDataError,
 )
 from deephaven_massive._ingest.rest import RestEndpoints
-from deephaven_massive._massive import Cancel, DriftReport, Transport
+from deephaven_massive._massive import Cancel, DriftReport, RowFault, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
     ResultRecord,
@@ -54,6 +54,9 @@ from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven_massive._tables.problem_events import ProblemEvent
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -316,7 +319,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     # left to aggregate, so the table holds each distinct row once, across cycles, with the
     # time of the latest cycle that returned it.
     spec = _session.CATALOG.by_name["reference.related_companies"]
-    schema = _session.CATALOG.dataset_schema(spec, raw_symbol=False)
+    schema = _session.CATALOG.dataset_schema(spec)
     assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
     deferred: list[LivenessScope] = []  # nothing fails the table: it stays empty
     scope = new_scope()
@@ -2172,9 +2175,13 @@ def test_a_cycle_with_odd_rows_keeps_the_table_and_shows_the_drift(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
 ) -> None:
-    # A row without its symbol is dropped, a value that does not fit is null, and the table
-    # keeps polling: one odd row never fails it.
-    rows = [{"id": "x"}, {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0}]
+    # A row without its symbol and one with a value that does not fit are withheld, and the
+    # table keeps polling with the readable row: one odd row never fails it.
+    rows = [
+        {"id": "x"},
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 4, "cash_amount": 2.0},
+    ]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60)
@@ -2182,7 +2189,8 @@ def test_a_cycle_with_odd_rows_keeps_the_table_and_shows_the_drift(
     (row,) = streams_of(rest_session, dh_to_pylist)
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("RUNNING", None, 1)
     assert "REST:frequency?" in row["SchemaDrift"]
-    assert [(r["Id"], r["Frequency"]) for r in dh_to_pylist(table)] == [("a", None)]
+    assert "REST:2 rows withheld" in row["SchemaDrift"]
+    assert [(r["Id"], r["Frequency"]) for r in dh_to_pylist(table)] == [("b", 4)]
     del table
 
 
@@ -2562,7 +2570,7 @@ def test_polled_rows_share_one_stored_string_per_date(
 
 
 @pytest.mark.parametrize("mode", list(PollMode))
-def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
+def test_an_unreadable_symbols_row_is_withheld_from_a_poll_table(
     *,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
@@ -2570,9 +2578,8 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
-    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
-    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
-    # merges with another such row, and REPLACE removes it by its text.
+    # A row Massive spelled in a way the library cannot read is withheld every cycle and
+    # reported; keyed on Symbol, the table holds the readable row and never fails.
     monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
@@ -2584,21 +2591,28 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m:
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
         q = build_query(m._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02")
         table = q.poll(60, mode=mode)
-        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
 
-        def held() -> list[tuple[str, str | None, str | None]]:
-            return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))
+        def held() -> list[tuple[str, str | None]]:
+            return sorted((r["Id"], r["Symbol"]) for r in dh_to_pylist(table))
 
-        until(lambda: held() == expected)
-        next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
+        until(lambda: held() == [("a", "AAPL")])
+        assert "RawSymbol" not in table.column_names
+        next_cycle(clock)
         until(lambda: len(fake_rest.requests) == 2)
-        until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
         assert m._core.diagnostics.wait_until_shown(30.0)
-        assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
+        assert held() == [("a", "AAPL")]
         failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
         assert not failed
+        until(lambda: len(events) == 3)
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (RowFault.UNREADABLE_SYMBOLS, "@@1", 1),
+        (RowFault.UNREADABLE_SYMBOLS, "@@2", 1),
+        (RowFault.UNREADABLE_SYMBOLS, "@@1", 1),
+    ]
 
 
 def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:

@@ -48,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker symbol of the IPO event." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AnnouncedDate` | String | The date when the IPO event was announced. |
 | `CurrencyCode` | String | Underlying currency of the security. |
 | `FinalIssuePrice` | double | The price set by the company and its underwriters before the IPO goes live. |
@@ -79,7 +78,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AnnouncedDate` | `announced_date` |
 | `CurrencyCode` | `currency_code` |
 | `FinalIssuePrice` | `final_issue_price` |

@@ -60,7 +60,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker symbol for the asset." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. Null on a row of any other class. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Value` | double | Value of Index. |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). |
 | `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
@@ -147,7 +146,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `ticker` |
 | `OptionRoot` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `Value` | `value` |
 | `BreakEvenPrice` | `break_even_price` |
 | `ContractType` | `details.contract_type` |

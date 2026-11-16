@@ -119,11 +119,7 @@ def test_values_history_is_flat_files_only() -> None:
 def _schema(spec: DatasetSpec) -> list[tuple[str, str]]:
     # The columns the dataset's own sources fill. A kind's schema also holds the columns only
     # its other members supply, which this dataset always leaves null.
-    return [
-        (c.name, c.type.value)
-        for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns
-        if c.supplied_by
-    ]
+    return [(c.name, c.type.value) for c in CATALOG.dataset_schema(spec).columns if c.supplied_by]
 
 
 def test_values_schema() -> None:
@@ -582,7 +578,6 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     ]
     assert out[0] == {
         "Symbol": "I:SPX",
-        "RawSymbol": None,
         "Error": None,
         "LastUpdated": 1748894400 * NS,
         "MarketStatus": "closed",
@@ -718,11 +713,13 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST, wait=True)) == []
     assert not stamp_warnings(caplog)
-    # A week bar at the close, or a day bar at 02:00, may be another cut: each keeps its stamp
-    # and ends a period later, past these ranges, so neither range holds it; each warns once.
-    assert rows(week.history(first, last, source=dm.HistorySource.REST, wait=True)) == []
+    # A week bar at the close, or a day bar at 02:00, may be another cut: each is withheld,
+    # so a page of no other bar fails the read; each warns once.
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        week.history(first, last, source=dm.HistorySource.REST, wait=True)
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    assert rows(q.history(day, day, source=dm.HistorySource.REST, wait=True)) == []
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        q.history(day, day, source=dm.HistorySource.REST, wait=True)
     week_warning, day_warning = stamp_warnings(caplog)
     assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
     assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
@@ -781,7 +778,6 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "Date": "2025-06-02",
         "TimestampStart": MIDNIGHT_MS * MS,
         "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
-        "RawSymbol": None,
         "High": 5940.35,
         "Low": 5876.0,
         "Open": 5896.68,
@@ -815,7 +811,6 @@ def wait_for(condition: Callable[[], bool]) -> None:
                 "Symbol": "I:SPX",
                 "Date": "2025-06-02",
                 "Timestamp": 1748894399000 * MS,
-                "RawSymbol": None,
                 "Value": 5935.94,
             },
         ),
@@ -990,7 +985,7 @@ def test_one_flat_file_round_trips(
     ] == expected
 
 
-def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_served_with_a_warning(
+def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_withheld_with_a_warning(
     *,
     s3_session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -999,15 +994,18 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_served_with_a_war
 ) -> None:
     caplog.set_level(logging.WARNING)
     odd = (MIDNIGHT_MS + 2 * 3_600_000) * MS  # 02:00 New York time
-    text = f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\n"
+    known = MIDNIGHT_MS * MS
+    text = (
+        f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\nI:NDX,1,2,3,0.5,{known}\n"
+    )
     fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-02.csv.gz", make_csv_gz(text))
     q = s3_session.indices.bars(dm.ALL, dm.Timespan.DAY)
     empty = "ticker,open,close,high,low,window_start\n"
     fake_s3.put("us_indices/day_aggs_v1/2025/06/2025-06-03.csv.gz", make_csv_gz(empty))
     out = rows(q.history("2025-06-02", "2025-06-03", source=dm.HistorySource.FLAT_FILES, wait=True))
-    # The bar keeps its stamp, ends a day later, and has no Date; the range holds that window.
-    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
-        ("I:SPX", None, odd, odd + 86_400 * 10**9)
+    # The bar at the odd stamp is withheld; the one beside it at a known stamp lands.
+    assert [(r["Symbol"], r["Date"], r["TimestampStart"]) for r in out] == [
+        ("I:NDX", "2025-06-02", known)
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(

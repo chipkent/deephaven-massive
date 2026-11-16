@@ -31,10 +31,7 @@ block then goes through pure Arrow operations, in this order:
 1. the symbol filter (`pyarrow.compute.is_in` on the symbol header);
 2. the key check on the surviving rows: a row whose key header (`ReadPlan.required`) is empty
    or does not parse as its type, or whose time header the plan's converter cannot place
-   (`ReadPlan.to_ns`), cannot be placed; if every row of the requested symbols in the whole
-   file has such a key, the file raises after its last block, since that is the sign of a
-   change in the file's format rather than of one odd row (one block can hold a single row of
-   an illiquid symbol, so the rule is never applied to a block alone);
+   (`ReadPlan.to_ns`), cannot be placed;
 3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds, which keeps a
    row whose time cannot be read, since no window can place it;
 4. on the rows left, the conversion of every header to its type, and the parsing of list
@@ -404,9 +401,7 @@ class FlatFile:
                 header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
                 the header names a column twice or lacks a key header of `plan.required`
                 (before the first block, naming the headers); or, after its last block, if
-                every row of the file was malformed, or the file held rows of the requested
-                symbols and every one of them had a key that cannot be read, naming the first
-                one's reason. Every message names the file.
+                every row of the file was malformed. Every message names the file.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
@@ -443,26 +438,15 @@ class FlatFile:
                     check_utf8=False,
                 ),
             )
-            # Rows of the requested symbols the file held, and how many had a key unread.
-            held = unread = 0
-            reason = ""
             for block in self._blocks(text, plan, options):
                 self.rows_read += block.read
                 self.rows_of_symbols += block.considered
                 self.rows_kept += block.rows.num_rows
-                held += block.considered
-                unread += block.unread
-                reason = reason or block.unread_reason
                 yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
                 raise self._error(
                     f"every one of its {self.malformed_lines} lines is malformed, so the file's "
                     f"format may have changed; the first: {self.malformed_reason}"
-                )
-            if held and unread == held:
-                raise self._error(
-                    f"every one of the {held} rows of the requested symbols was dropped, so the "
-                    f"file's format may have changed; the first: {reason}"
                 )
         except (
             pa.ArrowException,
@@ -638,17 +622,16 @@ class FlatFile:
 
         Returns:
             The block's kept rows, possibly none, in the plan's columns, with their drift and
-            marks, and its counts for the whole-file rule of `batches`.
+            marks, and its counts.
         """
         read = block.num_rows
         if plan.symbols is not None:
             block = block.filter(pc.is_in(block[plan.symbol_header], value_set=plan.symbols))
         considered = block.num_rows
         keys = self._keyed(block, plan)
-        first = keys.reasons[min(keys.reasons)][1] if keys.reasons else ""
         block, keyed = _windowed(block, keys, plan)
         rows, drift, marks = self._converted(block, keyed, plan)
-        return _Block(rows, drift, marks, considered, len(keys.reasons), first, read)
+        return _Block(rows, drift, marks, considered, read)
 
     def _converted(
         self, block: pa.RecordBatch, keyed: Mapping[int, tuple[str, str]], plan: ReadPlan
@@ -823,7 +806,7 @@ class _Keys:
 
 @dataclass(frozen=True, slots=True)
 class _Block:
-    """One block's rows as the reader hands them on, and its counts for the whole-file rule.
+    """One block's rows as the reader hands them on, and its counts.
 
     Attributes:
         rows: The kept rows, in the plan's columns.
@@ -831,8 +814,6 @@ class _Block:
             whose keys could be read.
         marks: The kept rows it could not read whole, by index into `rows`.
         considered: The block's rows of the requested symbols, before the window.
-        unread: How many of those had a key that cannot be read.
-        unread_reason: Why the first of them could not be read; `""` when none.
         read: The block's rows, every symbol's.
     """
 
@@ -840,8 +821,6 @@ class _Block:
     drift: DriftReport = dataclasses.field(default_factory=DriftReport)
     marks: RowMarks = dataclasses.field(default_factory=lambda: _NO_MARKS)
     considered: int = 0
-    unread: int = 0
-    unread_reason: str = ""
     read: int = 0
 
 

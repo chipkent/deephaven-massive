@@ -44,7 +44,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`: "The date requested." |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 UTC of `Date`. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 UTC of the next day. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Open` | double | The open price for the symbol in the given time period. |
 | `Close` | double | The close price for the symbol in the given time period. |
 | `ClosingTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |
@@ -64,7 +63,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Date` | `day` |
 | `TimestampStart` |  |
 | `TimestampEnd` |  |
-| `RawSymbol` | `symbol` |
 | `Open` | `open` |
 | `Close` | `close` |
 | `ClosingTrades` | `closingTrades` |

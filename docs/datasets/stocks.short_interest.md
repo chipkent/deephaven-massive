@@ -48,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. |
 | `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. |
@@ -64,7 +63,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AvgDailyVolume` | `avg_daily_volume` |
 | `DaysToCover` | `days_to_cover` |
 | `SettlementDate` | `settlement_date` |

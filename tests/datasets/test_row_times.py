@@ -439,74 +439,6 @@ def test_an_indicator_value_ends_where_a_bar_of_its_period_ends() -> None:
     assert fill(day, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-04T05:00:00+00:00"]
 
 
-def kept_as_sent(asset_class: AssetClass, timespan: Timespan, multiplier: int = 1) -> TimeRule:
-    # The rule of real bars, with the stamps their class is known to use.
-    spec = {A.STOCKS: stocks.BARS, A.INDICES: indices.BARS, A.CRYPTO: crypto.BARS}[asset_class]
-    request = Request(timespan=timespan, multiplier=multiplier)
-    rule = time_rule(spec, request, asset_class=asset_class, warnings=session_warnings())
-    assert rule.stamps is not None
-    return rule
-
-
-def test_a_bar_kept_at_an_unexpected_stamp_ends_a_period_later_and_has_no_date() -> None:
-    # A 1-day stock bar at 14:30 New York time might cover that day or the next: it keeps its
-    # stamp, ends a day later, which is no earlier than either day's end, and has no Date. A
-    # bar at a known stamp beside it is filled as usual.
-    rule = kept_as_sent(A.STOCKS, T.DAY)
-    sent = bars(["2025-03-03T19:30:00", "2025-03-04T05:00:00", None])
-    assert fill(rule, sent) == {
-        DATE: [None, "2025-03-04", None],
-        START: ["2025-03-03T19:30:00+00:00", "2025-03-04T05:00:00+00:00", None],
-        END: ["2025-03-04T19:30:00+00:00", "2025-03-05T05:00:00+00:00", None],
-    }
-    # A stock week stamped on a Wednesday keeps it, and ends seven days later; two weeks end
-    # fourteen days later.
-    wednesday = bars(["2025-03-05T05:00:00"])
-    assert fill(kept_as_sent(A.STOCKS, T.WEEK), wednesday) == {
-        DATE: [None],
-        START: ["2025-03-05T05:00:00+00:00"],
-        END: ["2025-03-12T04:00:00+00:00"],  # 00:00 New York time, daylight saving from 03-09
-    }
-    assert fill(kept_as_sent(A.STOCKS, T.WEEK, 2), wednesday)[END] == ["2025-03-19T04:00:00+00:00"]
-    # A crypto day at midnight New York time, as Massive's REST samples show, ends a day later.
-    crypto_day = fill(kept_as_sent(A.CRYPTO, T.DAY), bars(["2025-03-03T05:00:00"]))
-    assert crypto_day[END] == ["2025-03-04T05:00:00+00:00"]
-    assert crypto_day[DATE] == [None]
-    # An index day stamped at 02:00 New York time ends a day later, not at the index day's
-    # 01:00.
-    index_day = fill(kept_as_sent(A.INDICES, T.DAY), bars(["2025-03-03T07:00:00"]))
-    assert index_day[END] == ["2025-03-04T07:00:00+00:00"]
-
-
-@pytest.mark.parametrize(
-    ("timespan", "multiplier", "stamp", "end"),
-    [
-        # A day across the spring clock change keeps its wall-clock time, 23 hours later.
-        (T.DAY, 1, "2025-03-08T19:30:00", "2025-03-09T18:30:00"),
-        (T.DAY, 3, "2025-03-03T19:30:00", "2025-03-06T19:30:00"),
-        (T.MONTH, 1, "2025-03-03T19:30:00", "2025-04-03T18:30:00"),
-        # January 31 has no February twin: the end moves to March 1, later.
-        (T.MONTH, 1, "2025-01-31T19:30:00", "2025-03-01T19:30:00"),
-        # December 31 plus two months moves to March 1 of the next year.
-        (T.MONTH, 2, "2024-12-31T19:30:00", "2025-03-01T19:30:00"),
-        (T.QUARTER, 1, "2025-02-02T19:30:00", "2025-05-02T18:30:00"),
-        (T.QUARTER, 2, "2025-11-30T19:30:00", "2026-05-30T18:30:00"),
-        (T.YEAR, 1, "2024-02-29T19:30:00", "2025-03-01T19:30:00"),
-    ],
-)
-def test_a_kept_stamp_ends_its_period_later_on_the_wall_clock(
-    *, timespan: Timespan, multiplier: int, stamp: str, end: str
-) -> None:
-    rule = kept_as_sent(A.STOCKS, timespan, multiplier)
-    assert fill(rule, bars([stamp]))[END] == [f"{end}+00:00"]
-
-
-def test_a_kept_stamp_whose_end_falls_in_a_repeated_hour_takes_the_later_reading() -> None:
-    # 01:30 New York time on 2025-11-02 happens twice; the later one, 06:30 UTC, is the end.
-    rule = kept_as_sent(A.STOCKS, T.DAY)
-    assert fill(rule, bars(["2025-11-01T05:30:00"]))[END] == ["2025-11-02T06:30:00+00:00"]
-
-
 def test_a_rule_without_stamps_takes_every_stamp_as_known() -> None:
     # A rule made without the stamp rule, such as a stream's, labels by the day as before.
     rule = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.DAY, 1)
@@ -795,7 +727,15 @@ def stamped(
     rows = pa.RecordBatch.from_pydict(
         {"Symbol": pa.array(["AAPL"] * len(values)), START: pa.array(values, INSTANT)}
     )
-    return list(rule.stamp(label, rows, source="s").column(START).to_pylist())
+    return list(rule.stamp(label, rows, source="s")[0].column(START).to_pylist())
+
+
+def odd_stamps(rule: StampRule, values: Sequence[datetime | int | None]) -> list[object]:
+    # The mask of the rows whose stamp cannot be placed, for the transports to withhold.
+    rows = pa.RecordBatch.from_pydict(
+        {"Symbol": pa.array(["AAPL"] * len(values)), START: pa.array(values, INSTANT)}
+    )
+    return list(rule.stamp("stocks.bars", rows, source="s")[1].to_pylist())
 
 
 def test_known_stamps_move_to_the_days_start_and_log_nothing(
@@ -812,14 +752,14 @@ def test_known_stamps_move_to_the_days_start_and_log_nothing(
     assert not caplog.records
 
 
-def test_an_unexpected_stamp_is_kept_as_sent_with_one_warning_per_form(
+def test_an_unexpected_stamp_is_returned_to_withhold_with_one_warning_per_form(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     log = session_warnings()
     rule = stamp_rule(stocks.BARS, Request(timespan=Timespan.DAY), warnings=log)
     assert rule is not None
     # 14:30 on a full day is no stamp Massive is known to use: which day the bar covers would
-    # be a guess, so its stamp is kept, beside a bar at a known stamp that moves.
+    # be a guess, so its row is returned to withhold, beside a bar at a known stamp that moves.
     odd = datetime(2024, 11, 29, 14, 30, tzinfo=NEW_YORK)
     close = datetime(2024, 11, 27, 16, tzinfo=NEW_YORK)
     week = stamp_rule(stocks.BARS, Request(timespan=Timespan.WEEK, multiplier=2), warnings=log)
@@ -835,11 +775,10 @@ def test_an_unexpected_stamp_is_kept_as_sent_with_one_warning_per_form(
         # So does the same stamp of another dataset.
         assert stamped(week, [saturday], label="options.bars") == [saturday]
     assert moved == [datetime(2024, 11, 27, tzinfo=NEW_YORK), odd, None]
+    assert odd_stamps(rule, [close, odd, None]) == [False, True, False]
     served = (
-        "The library cannot tell which day it covers, so the row is served as sent: "
-        "TimestampStart is Massive's stamp, TimestampEnd that stamp plus {period} (no earlier "
-        "than the end of any such period that holds the stamp), and Date is left empty; "
-        "history() returns such a row only when its range holds that whole window. Please "
+        "The library cannot tell which day it covers, so the row is withheld rather than "
+        "published at a guessed day (bars of {period}). Please "
         f"report the stamp at {ISSUES_URL} so the day cut can be settled (logged once per "
         "dataset, bar length, and time of day of the stamp per session)"
     )
@@ -895,7 +834,7 @@ def test_each_distinct_odd_stamp_of_a_batch_warns() -> None:
     )
 
 
-def test_every_batch_with_a_kept_stamp_logs_its_count_at_debug(
+def test_every_batch_with_an_odd_stamp_logs_its_count_at_debug(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     sundays = frozenset({6})
@@ -905,25 +844,17 @@ def test_every_batch_with_a_kept_stamp_logs_its_count_at_debug(
         stamped(rule, [MARCH_3])
     debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
     first = (
-        "rows from s kept at Massive's stamp, which it is not known to use for a 2-week bar; the "
-        "first, of AAPL, at 2025-03-03T00:00:00+00:00"
+        "rows from s withheld for Massive's stamp, which it is not known to use for a 2-week "
+        "bar; the first, of AAPL, at 2025-03-03T00:00:00+00:00"
     )
     assert debug == [f"stocks.bars: 1 of 3 {first}", f"stocks.bars: 1 of 1 {first}"]
 
 
-def test_a_stamp_moved_to_its_day_is_still_expected() -> None:
-    # `TimeRule` asks again after the transports stamped the rows: a moved stamp keeps its
-    # day, and 00:00 is always expected; a stamp kept as sent is still unexpected.
-    rule = StampRule(NEW_YORK, frozenset({CLOSE}), "1-day bar", T.DAY, 1, session_warnings())
-    close = instant_ns(datetime(2025, 3, 3, 16, tzinfo=NEW_YORK))
-    [moved] = stamped(rule, [close])
-    assert isinstance(moved, datetime)
-    assert rule.expects(close)
-    assert rule.expects(instant_ns(moved))
-    assert not rule.expects(instant_ns(datetime(2025, 3, 3, 14, 30, tzinfo=NEW_YORK)))
-    week = StampRule(UTC, frozenset(), "bar", T.WEEK, 1, Mock(), weekdays=frozenset({6}))
-    assert week.expects(MARCH_3 - DAY_NS)  # a Sunday
-    assert not week.expects(MARCH_3)  # a Monday
+def test_the_reason_names_the_stamp_and_the_bar() -> None:
+    rule = StampRule(UTC, frozenset(), "bar", T.WEEK, 2, Mock(), weekdays=frozenset({6}))
+    assert rule.reason(MARCH_3) == (
+        "stamped at 2025-03-03T00:00:00+00:00, which Massive is not known to use for a 2-week bar"
+    )
 
 
 DAY_NS = 86_400 * 10**9

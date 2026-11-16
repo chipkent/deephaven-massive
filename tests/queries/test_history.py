@@ -346,8 +346,8 @@ def test_history_rejects_a_symbol_table_without_symbols(
 
 @pytest.mark.parametrize("unreadable", list(dm.OnError))
 def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
-    # The empty result of a window no row fits in has the session's columns, with RawSymbol
-    # exactly when the session keeps unreadable rows, as every other result of it does.
+    # The empty result of a window no row fits in has the session's columns, as every other
+    # result of it does, whatever the session's setting.
     config = dm.MassiveConfig(
         api_key="test-key", on_error=dm.ErrorPolicy(unreadable_symbols=unreadable)
     )
@@ -355,7 +355,7 @@ def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None
         q = trades(session)
         empty = q._empty_rows()
         names = [c.name for c in empty.columns]
-        assert ("RawSymbol" in names) is (unreadable is not dm.OnError.RAISE)
+        assert "RawSymbol" not in names
         assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
 
 

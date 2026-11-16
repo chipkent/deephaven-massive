@@ -13,13 +13,12 @@ batches of the dataset's merged schema, one page at a time:
   dataset through a projection.
 - `keep_window` and `whole_bars` keep the rows a `history()` window holds.
 
-An odd value never costs a page its other rows: a value that does not fit, outside the key
-columns, is null and reported as drift, and a row whose key cannot be read is dropped and
-counted. A page whose every row was dropped raises `RowDataError`, since that is the sign of a
-change in Massive's format. Everything here is pure: no request, no thread, and no state, and
-a converter is shared read-only by the
-worker threads of one read. The REST transport (`rest.py`) reads the pages, and the host
-decision (`host_decision.py`) uses the same error-row rule.
+An odd row never costs a page its other rows: a row the library cannot read whole (a key, a
+symbol, or a value) is marked by its fault (`withheld.mark`), and the REST transport withholds
+it and fails a page none of whose rows inside the window it could read. Everything here is
+pure: no request, no thread, and no state, and a converter is shared read-only by the worker
+threads of one read. The REST transport (`rest.py`) reads the pages, and the host decision
+(`host_decision.py`) uses the same error-row rule.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ from typing import TYPE_CHECKING, Final
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT
 from deephaven_massive._datasets.row_times import DATE, time_column, within
 from deephaven_massive._datasets.source_columns import (
     KEY_COLUMNS,
@@ -45,13 +44,16 @@ from deephaven_massive._datasets.timestamps import first_failure, masked_instant
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     index_underlyings,
-    log_unreadable,
-    unreadable_symbol_message,
+    unreadable_symbol_reason,
 )
-from deephaven_massive._errors import RowDataError
-from deephaven_massive._massive import DriftReport, DriftSample, to_batch
-from deephaven_massive._on_error import effect_of
-from deephaven_massive._tables.withheld import without_unread_keys
+from deephaven_massive._massive import DriftReport, DriftSample, RowFault, to_batch
+from deephaven_massive._tables.withheld import (
+    MARK_COLUMNS,
+    Failure,
+    in_window,
+    mark_failures,
+    with_marks,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -61,7 +63,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import ColumnType
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.timestamps import TimeUnit
-    from deephaven_massive._enums import OnError
     from deephaven_massive._massive import RestPath
 
 __all__ = [
@@ -99,9 +100,8 @@ class RowConverter:
         required_on_error: The required columns of an error row (`is_error_row`): only
             its symbol key, so a ticker the plan does not include keeps its row.
         symbols: How a symbol read from the rows becomes canonical (`WireSymbols`).
-        unreadable: The read's `unreadable_symbols` setting: what a spelling the library
-            cannot read does.
-        raw_symbol: Whether the schema has `RawSymbol`, which the session decides.
+        symbol_column: The long-form column of the rows' symbol field, or None when the symbol
+            is filled from the request.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
             from the request.
         time_name: The dataset's time column (`row_times.time_column`), whose epoch `0` is
@@ -115,36 +115,23 @@ class RowConverter:
     required: frozenset[str]
     required_on_error: frozenset[str]
     symbols: WireSymbols
-    unreadable: OnError
-    raw_symbol: bool
+    symbol_column: str | None
     symbol_key: str | None
     time_name: str
 
     @classmethod
-    def build(
-        cls,
-        catalog: Catalog,
-        spec: DatasetSpec,
-        rest_path: RestPath,
-        *,
-        unreadable_symbols: OnError,
-        raw_symbol: bool,
-    ) -> RowConverter:
+    def build(cls, catalog: Catalog, spec: DatasetSpec, rest_path: RestPath) -> RowConverter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
         Args:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
-            unreadable_symbols: The read's setting for a symbol spelling the library cannot
-                read.
-            raw_symbol: Whether the schema has the `RawSymbol` column
-                (`SessionCore.raw_symbol`).
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=raw_symbol)
+        schema = catalog.dataset_schema(spec)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -157,8 +144,7 @@ class RowConverter:
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
-            unreadable=unreadable_symbols,
-            raw_symbol=raw_symbol,
+            symbol_column=None if symbol_field is None else symbol_field.column,
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
         )
@@ -166,28 +152,26 @@ class RowConverter:
     def convert(
         self, rows: Sequence[Mapping[str, object]], symbol: str | None
     ) -> tuple[list[pa.RecordBatch], DriftReport, list[Mapping[str, object]]]:
-        """Convert one page's rows into batches of the dataset's schema.
+        """Convert one page's rows into batches of the dataset's schema, every row marked or whole.
 
         Error rows (`is_error_row`: a ticker the plan does not include) are decoded
         apart, with only their symbol required, and come after the page's other rows.
 
-        A row is dropped, and counted in the drift (`DriftReport.dropped_rows`), when a key the
-        dataset requires is absent, null, or does not fit (`to_batch`), or when its time column
-        overflows or lies outside 1990 to 2100. Any other value that does not fit, or any other
-        timestamp out of bounds, is null and reported in `DriftReport.unconvertible`.
+        Every row the page held is in the batches, with the mark columns
+        (`withheld.with_marks`): a row is marked when a key the dataset requires is absent,
+        null, or does not fit, or its time column overflows or lies outside 1990 to 2100
+        (`unreadable_keys`); when its symbol is a spelling the library cannot read
+        (`unreadable_symbols`); or when another value does not fit, an epoch value fails the
+        timestamp routine, or a whole number its `double` column would round
+        (`unconvertible_values`). The caller withholds the marked rows (`withhold_rows`).
 
         Args:
             rows: The page's rows.
             symbol: The request's one symbol, which fills the keys taken from the request.
 
         Returns:
-            The batches (none for an empty page), the page's drift, and the error rows.
-
-        Raises:
-            RowDataError: If the page had rows and every one of them was dropped, the sign of
-                a change in Massive's format (a renamed key, a new timestamp unit) rather than
-                of one odd row; the message names the dataset and the first row's reason. Also
-                the `RowDataError` of `_apply`, for a symbol spelling the library cannot read.
+            The batches (none for an empty page), with the mark columns; the page's drift (the
+            fields that drifted, with a sample each); and the error rows.
         """
         flagged = [row for row in rows if is_error_row(row)]
         good = [row for row in rows if not is_error_row(row)] if flagged else rows
@@ -196,56 +180,51 @@ class RowConverter:
         for part, required in ((good, self.required), (flagged, self.required_on_error)):
             if not part:
                 continue
-            decoded_rows, decoded, marks = to_batch(part, self.rest_path, required=required)
-            batch, unread = without_unread_keys(decoded_rows, marks)
-            batch, checked = self._apply(batch, symbol)
-            batches.append(batch)
-            drift = drift.merge(decoded).merge(unread).merge(checked)
-        if rows and not any(batch.num_rows for batch in batches):
-            raise RowDataError(
-                f"{self.dataset}: every row of a page of {len(rows)} was dropped, so Massive's "
-                f"format may have changed; the first: {drift.dropped_reason}"
+            decoded, found, marks = to_batch(
+                part, self.rest_path, required=required, symbol=self.symbol_column
             )
+            sent = (
+                pa.array([symbol] * decoded.num_rows, pa.string())
+                if self.symbol_column is None
+                else decoded.column(self.symbol_column)
+            )
+            batch, checked = self._apply(with_marks(decoded, marks, sent=sent), symbol)
+            batches.append(batch)
+            drift = drift.merge(found).merge(checked)
         return batches, drift, flagged
 
     def _apply(
         self, batch: pa.RecordBatch, symbol: str | None
     ) -> tuple[pa.RecordBatch, DriftReport]:
-        """Turn one decoded batch into a batch of the dataset's schema.
+        """Turn one decoded batch into a batch of the dataset's schema, marking what fails.
 
         Each epoch column runs through the masked timestamp routine
-        (`timestamps.masked_instants`): a row whose time column fails it is dropped, and any
-        other value that fails it is null.
+        (`timestamps.masked_instants`): a row whose time column fails it is marked
+        `unreadable_keys`, and one whose other epoch value fails it `unconvertible_values`. A
+        symbol spelling the library cannot read marks its row `unreadable_symbols`, and a whole
+        number a `double` column would round marks its row `unconvertible_values`.
 
         Args:
-            batch: The path's fields, by long-form column (`to_batch`).
+            batch: The path's fields, by long-form column (`to_batch`), with the mark columns.
             symbol: The value of the keys taken from the request.
 
         Returns:
-            The batch in the dataset's schema, with the derived columns (`OptionRoot`,
-            `RawSymbol`) computed from the symbols and an index `Underlying` given its `I:`
+            The batch in the dataset's schema, with the mark columns and the derived column
+            (`OptionRoot`) computed from the symbols, and an index `Underlying` given its `I:`
             prefix by the row's CFI code (`_canonical_underlyings`); and the drift of its
-            timestamps and widening: the rows dropped for their time column, the wire keys of
-            the other epoch fields that held a value out of bounds, and those of the `long`
-            fields whose cast to a `double` column rounded a value (`RoundedFields`), each with
-            its first such value.
-
-        Raises:
-            RowDataError: If a row's symbol is a spelling the library cannot read and the
-                read's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a row
-                keeps a null `Symbol`, and the text in `RawSymbol` where the schema has it.
+            timestamps and widening: the wire keys of the epoch fields other than the time
+            column that held a value out of bounds, and those of the `long` fields whose cast
+            to a `double` column rounded a value (`RoundedFields`), each with its first such
+            value.
         """
         rows = batch.num_rows
         arrays: dict[str, pa.Array] = {}
-        raw = pa.nulls(rows, pa.string())
-        dropped: pa.Array | None = None
         found = DriftReport()
         rounded = RoundedFields()
+        failures: list[Failure] = []
         for column_type, name, source in self.columns:
             if name == OPTION_ROOT:
                 values = option_roots(arrays["Symbol"])
-            elif name == RAW_SYMBOL:
-                values = raw
             elif source is None:
                 values = pa.nulls(rows, column_type.arrow_type)
             elif source.field is None:
@@ -253,57 +232,52 @@ class RowConverter:
             else:
                 values = batch.column(source.field.column)
                 if name == "Symbol":
-                    values, raw = self._read_symbols(values)
+                    values, unread = self._read_symbols(values)
+                    failures.append(unread)
                 if source.unit is not None:
                     values, failed, report = self._converted_instants(
                         values, name=name, unit=source.unit, wire_key=source.field.wire_key
                     )
                     found = found.merge(report)
-                    if failed is not None:
-                        dropped = failed
+                    failures.extend(failed)
             arrays[name] = rounded.widen(
-                values, column_type.arrow_type, wire_key=None if source is None else source.wire_key
+                values,
+                column_type.arrow_type,
+                wire_key=None if source is None else source.wire_key,
+                column=name,
             )
         self._canonical_underlyings(arrays)
         converted = pa.RecordBatch.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        drift = found.merge(rounded.drift())
-        if dropped is not None:
-            converted = converted.filter(pc.invert(dropped))
-            drift = drift.merge(DriftReport(dropped_rows=rows - converted.num_rows))
-        return converted, drift
+        for name in MARK_COLUMNS:
+            converted = converted.append_column(name, batch.column(name))
+        converted = mark_failures(converted, (*failures, *rounded.failures()))
+        return converted, found.merge(rounded.drift())
 
-    def _read_symbols(self, sent: pa.Array) -> tuple[pa.Array, pa.Array]:
+    def _read_symbols(self, sent: pa.Array) -> tuple[pa.Array, Failure]:
         """Read a page's symbols into the library's spellings (`symbols.read`).
 
         Args:
             sent: The `Symbol` column's values as sent.
 
         Returns:
-            The `Symbol` column and the `RawSymbol` column: the text of each symbol the
-            library cannot read, whose `Symbol` is null.
-
-        Raises:
-            RowDataError: If a symbol is a spelling the library cannot read and the read's
-                `unreadable_symbols` is `RAISE`; otherwise each such spelling is logged once
-                (`log_unreadable`).
+            The `Symbol` column, null for a spelling the library cannot read; and that failure,
+            to mark the rows `unreadable_symbols`.
         """
         read = self.symbols.read(sent, {})
-        if read.unreadable:
-            if effect_of(self.unreadable).fails:
-                raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
-            log_unreadable(
-                self.dataset, read.unreadable, self.unreadable, raw_symbol=self.raw_symbol
-            )
-        return read.symbols, read.raw
+
+        def reason(row: int) -> str:
+            return unreadable_symbol_reason(sent[row].as_py())
+
+        return read.symbols, (RowFault.UNREADABLE_SYMBOLS, read.unreadable_rows, "Symbol", reason)
 
     def _converted_instants(
         self, sent: pa.Array, *, name: str, unit: TimeUnit, wire_key: str
-    ) -> tuple[pa.Array, pa.Array | None, DriftReport]:
+    ) -> tuple[pa.Array, list[Failure], DriftReport]:
         """Convert one epoch column to instants, and classify the values that fail.
 
         Each value runs through the masked timestamp routine (`timestamps.masked_instants`),
-        and a value that fails it is null. A failure in the time column drops its row; one in
-        any other column is drift of its field.
+        and a value that fails it is null. A failure in the time column makes its row's key
+        unreadable; one in any other column is an unconvertible value, and drift of its field.
 
         Args:
             sent: The column's values as sent.
@@ -312,26 +286,25 @@ class RowConverter:
             wire_key: The wire key of the field behind the column.
 
         Returns:
-            The instants; the mask of the rows to drop, set only for the time column when a
-            value failed, else None; and the failures' drift: for the time column the
-            dropped rows' reason (their count is the caller's), for another column its wire key
-            as unconvertible with the first failing value; empty when nothing failed.
+            The instants; the failure to mark, or none; and the drift of a column other than
+            the time column, its wire key as unconvertible with the first failing value.
         """
+        label = f"{self.dataset}.{name}"
         values, failed = masked_instants(
-            unit, sent, time_column=name == self.time_name, label=f"{self.dataset}.{name}"
+            unit, sent, time_column=name == self.time_name, label=label
         )
         first = first_failure(sent, failed)
         if first is None:
-            return values, None, DriftReport()
+            return values, [], DriftReport()
+
+        def reason(row: int) -> str:
+            return mismatch_message(label, unit, sent[row].as_py())
+
         if name == self.time_name:
-            reason = mismatch_message(f"{self.dataset}.{name}", unit, first)
-            return values, failed, DriftReport(dropped_reason=reason)
+            return values, [(RowFault.UNREADABLE_KEYS, failed, name, reason)], DriftReport()
         sample = DriftSample(None, str(first))
-        return (
-            values,
-            None,
-            DriftReport(unconvertible=frozenset({wire_key}), samples={wire_key: sample}),
-        )
+        drift = DriftReport(unconvertible=frozenset({wire_key}), samples={wire_key: sample})
+        return values, [(RowFault.UNCONVERTIBLE_VALUES, failed, name, reason)], drift
 
     def _canonical_underlyings(self, arrays: dict[str, pa.Array]) -> None:
         """Give a page's index underlyings their `I:` prefix (`wire_symbols.index_underlyings`).
@@ -392,29 +365,36 @@ def keep_window(
     Without the column a bound is about, that bound keeps every row. It runs before the time
     columns are filled, so a bar of several sessions still carries its label here.
 
+    A marked row whose time or session could not be read stays (`withheld.in_window`), to be
+    withheld and reported.
+
     Args:
-        batch: Rows in the dataset's schema.
+        batch: Rows in the dataset's schema, with the mark columns.
         window: The `history()` window, or None for `fetch()` and `poll()`.
         time: The dataset's time column: `Timestamp`, or a bar's `TimestampStart`.
 
     Returns:
-        The rows inside the window.
+        The rows inside the window, and the marked rows it cannot place.
     """
     if window is None:
         return batch
     names = batch.schema.names
     masks = []
+    keys = []
     if window.sessions is not None and DATE in names:
+        keys.append(DATE)
         sessions = batch.column(DATE)
         masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first.isoformat())))
         masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last.isoformat())))
     if window.times is not None and time in names:
+        keys.append(time)
         times = batch.column(time)
         masks.append(pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type)))
         masks.append(pc.less(times, pa.scalar(window.times.end_ns, times.type)))
     if not masks:
         return batch
-    return batch.filter(functools.reduce(pc.and_, masks))
+    inside = functools.reduce(pc.and_, masks)
+    return batch.filter(in_window(batch, inside, keys=keys))
 
 
 def is_error_row(row: Mapping[str, object]) -> bool:

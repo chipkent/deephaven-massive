@@ -361,27 +361,25 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("timespan", "moment", "window"),
+    ("timespan", "moment", "known"),
     [
         # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day, so
-        # which day the value covers is not known. It keeps its stamp, ends a day later, and
-        # has no Date.
+        # which day the value covers is not known; beside it, a value at New York midnight.
         (
             dm.Timespan.DAY,
             datetime(2025, 1, 2, 3, tzinfo=UTC),
-            (None, datetime(2025, 1, 2, 3, tzinfo=UTC), datetime(2025, 1, 3, 3, tzinfo=UTC)),
+            datetime(2025, 1, 2, 5, tzinfo=UTC),
         ),
-        # Massive stamps a week value on its week's Sunday; one on a Wednesday keeps its stamp
-        # and ends a week later.
+        # Massive stamps a week value on its week's Sunday, not on a Wednesday.
         (
             dm.Timespan.WEEK,
             datetime(2025, 1, 8, 5, tzinfo=UTC),
-            (None, datetime(2025, 1, 8, 5, tzinfo=UTC), datetime(2025, 1, 15, 5, tzinfo=UTC)),
+            datetime(2025, 1, 5, 5, tzinfo=UTC),
         ),
     ],
     ids=["day", "week"],
 )
-def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warning(
+def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_warning(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -389,17 +387,17 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warn
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     timespan: dm.Timespan,
     moment: datetime,
-    window: tuple[str | None, datetime, datetime],
+    known: datetime,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    stamp = int(moment.timestamp() * 1000)
-    reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
-    fake_rest.reply("/v1/indicators/sma/AAPL", reply)
-    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch(wait=True))
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Value"]) for r in out] == [
-        (*window, 1.0)
+    values = [
+        {"timestamp": int(moment.timestamp() * 1000), "value": 1.0},
+        {"timestamp": int(known.timestamp() * 1000), "value": 2.0},
     ]
-    [warning] = stamp_warnings(caplog)
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": values})))
+    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch(wait=True))
+    assert [r["Value"] for r in out] == [2.0]
+    [warning] = stamp_warnings(caplog)  # the known stamp gives none
     assert warning.startswith(
         "indicators.sma: an indicator value of AAPL from /v1/indicators/sma/{stockTicker} is "
         "stamped "

@@ -46,7 +46,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `T`: "The exchange symbol that this item is traded under." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. |
 | `Timestamp` | Instant | The row's event time. From REST `t`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this message from the exchange which produced it." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `BidPrice` | double | The bid price. |
 | `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. |
 | `AskPrice` | double | The ask price. |
@@ -72,7 +71,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | `T` |
 | `Date` |  |
 | `Timestamp` | `t` |
-| `RawSymbol` | `T` |
 | `BidPrice` | `p` |
 | `BidSize` | `s` |
 | `AskPrice` | `P` |
