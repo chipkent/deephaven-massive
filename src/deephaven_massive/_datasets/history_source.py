@@ -181,7 +181,7 @@ class HistoryWindow:
             None for futures trades and quotes named by date, which are requested one
             session at a time.
         bars: For a dataset of bars, the window its bars must lie in once their time columns
-            are filled (`row_times.within`); the transports drop every other bar. None for
+            are filled (`row_times.whole`); the transports drop every other bar. None for
             ticks, which have no bar window.
         now: The instant the window was built for: the end of a range that ends now, and
             the instant by which a kept bar has ended. An aware UTC `datetime`.

@@ -61,6 +61,7 @@ from deephaven_massive._massive import (
     DriftReport,
     Field,
     RowFault,
+    RowMark,
     Source,
     Transport,
     WireType,
@@ -608,6 +609,59 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         }
     )
     assert transform.apply(batch, {}, received=7, key=STOCK_KEY)[0].num_rows == kept
+
+
+@pytest.mark.parametrize(("hours", "withheld_rows"), [(23, 0), (24, 1)], ids=["open", "ended"])
+def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
+    hours: int, withheld_rows: int
+) -> None:
+    # A day bar whose close can't be read is withheld only when the window holds it whole:
+    # a bar that has not ended by the window's latest end is not the read's, so it is neither
+    # reported, nor counted, nor judged by the read's policy.
+    midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
+    times = TimeRange(midnight, midnight + timedelta(days=1))
+    day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
+    window = HistoryWindow(day, times, None, times, bars, now=midnight + timedelta(days=2))
+    transform = flatfiles._Transform.build(
+        CATALOG,
+        STOCK_BARS,
+        prefix="us_stocks_sip/day_aggs_v1",
+        request=request(timespan=Timespan.DAY, adjusted=False),
+        window=window,
+        warnings=WARNINGS,
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL"],
+            "Volume": [1.0],
+            "Open": [1.0],
+            "Close": [None],
+            "High": [1.0],
+            "Low": [1.0],
+            "TimestampStart": [epoch_ns(midnight)],
+            "Transactions": [1],
+        },
+        schema=pa.schema(
+            [
+                ("Symbol", pa.string()),
+                ("Volume", pa.float64()),
+                ("Open", pa.float64()),
+                ("Close", pa.float64()),
+                ("High", pa.float64()),
+                ("Low", pa.float64()),
+                ("TimestampStart", pa.int64()),
+                ("Transactions", pa.int64()),
+            ]
+        ),
+    )
+    unfit = RowMark(
+        rows=(0,), fields=("close",), reasons=('close expects double, got "x"',), symbols=("AAPL",)
+    )
+    marks = {RowFault.UNCONVERTIBLE_VALUES: unfit}
+    rows, _, withheld = transform.apply(batch, marks, received=7, key=STOCK_KEY)
+    assert rows.num_rows == 0
+    assert withheld.total == withheld_rows
 
 
 def test_an_unreadable_spelling_is_withheld_beside_a_readable_row() -> None:

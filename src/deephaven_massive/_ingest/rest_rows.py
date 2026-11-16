@@ -11,7 +11,8 @@ batches of the dataset's merged schema, one page at a time:
   that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
   symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
   dataset through a projection.
-- `keep_window` and `whole_bars` keep the rows a `history()` window holds.
+- `keep_window` keeps the rows a `history()` window holds; the transports judge a bar's whole
+  window (`row_times.whole`) once its time columns are filled.
 
 An odd row never costs a page its other rows: a row the library cannot read whole (a key, a
 symbol, or a value) is marked by its fault (`withheld.mark`), and the REST transport withholds
@@ -31,7 +32,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT
-from deephaven_massive._datasets.row_times import DATE, time_column, within
+from deephaven_massive._datasets.row_times import DATE, time_column
 from deephaven_massive._datasets.source_columns import (
     KEY_COLUMNS,
     RoundedFields,
@@ -70,7 +71,6 @@ __all__ = [
     "RowConverter",
     "is_error_row",
     "keep_window",
-    "whole_bars",
 ]
 
 logger = logging.getLogger(__name__)
@@ -334,21 +334,6 @@ class RowConverter:
                 pc.filter(underlyings, changed)[0].as_py(),
             )
         arrays[UNDERLYING] = canonical
-
-
-def whole_bars(rows: pa.RecordBatch, window: HistoryWindow | None) -> pa.RecordBatch:
-    """Keep the bars of a `history()` window whose filled window lies in it (`row_times.within`).
-
-    Args:
-        rows: Rows with their time columns filled.
-        window: The `history()` window, or None for `fetch()` and `poll()`.
-
-    Returns:
-        The rows kept; every row where the window bounds no bar (ticks, `fetch()`, `poll()`).
-    """
-    if window is None or window.bars is None:
-        return rows
-    return within(rows, window.bars)
 
 
 def keep_window(
