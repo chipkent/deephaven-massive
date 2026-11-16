@@ -20,7 +20,7 @@ switches, and `__version__`.
 **Classes a user only receives, and names only to annotate their own code, are in a public
 package named for what it holds, and holding only that.** A user never constructs a query or a
 namespace: a dataset method returns the query, and the session creates its namespaces. They
-name these classes only in a type hint, such as a helper that takes any stream's query, so the
+name these classes only in a type hint, such as a helper that takes a stream's query, so the
 classes are grouped by what they are, out of the root's way:
 
 - `deephaven_massive.queries` holds the query classes, from the base `Query` to
