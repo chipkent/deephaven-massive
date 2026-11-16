@@ -1638,8 +1638,9 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 # --- Live integration tests --------------------------------------------------------------------
 # Live tests live in `tests/**/test_*_integration.py` and carry the `integration` marker, which
 # `addopts` deselects by default; `uv run pytest -m integration` runs them. Those that
-# deliberately exceed Massive's limits also carry `integration_limits` and run only when `-m`
-# names it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
+# deliberately exceed Massive's limits also carry `integration_limits`, and those that stream
+# every symbol of a class for minutes `integration_all_symbols`; each runs only when `-m` names
+# it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
 # observes is recorded with the `evidence` fixture: appended at once to the run's own evidence
 # file in the repository root, `live-evidence-<UTC time>.log`, flushed line by line, so a run cut
 # short keeps everything recorded before, and printed again in a "live evidence" section at the
@@ -1650,7 +1651,8 @@ _INTEGRATION = "integration"
 _LIMITS = "integration_limits"
 _SMOKE = "integration_smoke"
 _RATE_LIMITS = "integration_rate_limits"
-_SEPARATE = (_LIMITS, _SMOKE, _RATE_LIMITS)
+_ALL_SYMBOLS = "integration_all_symbols"
+_SEPARATE = (_LIMITS, _SMOKE, _RATE_LIMITS, _ALL_SYMBOLS)
 """The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
 
 _LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
@@ -1894,13 +1896,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Runs first (`tryfirst`), before the `-m` deselection, so the checks cover every collected
     test, also those a default run deselects; run later, a marked unit test would already be
     deselected and escape the check. A live test without the `integration` marker would run in
-    CI, and a marked test elsewhere would never run by default. Two tiers of live tests run
+    CI, and a marked test elsewhere would never run by default. Four tiers of live tests run
     apart: `integration_limits` (tests that deliberately exceed Massive's subscription and
     connection limits), `integration_smoke` (the unattended check that every dataset and
-    verb works), and `integration_rate_limits` (the checks that draw Massive's per-minute
-    refusals of a class on Basic on purpose). A test of any of them must also be a live test,
-    and it is deselected unless the `-m` expression names its tier: `-m integration` runs
-    every live test but those, and `-m integration_smoke`, for one, runs only that tier.
+    verb works), `integration_rate_limits` (the checks that draw Massive's per-minute
+    refusals of a class on Basic on purpose), and `integration_all_symbols` (the checks that
+    stream every symbol of a class for minutes, taking over the key's connection). A test of
+    any of them must also be a live test, and it is deselected unless the `-m` expression
+    names its tier: `-m integration` runs every live test but those, and
+    `-m integration_smoke`, for one, runs only that tier.
     Last, every soak test gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in
     place of the suite's 60 s.
 
@@ -1932,8 +1936,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     ]
     if unpaired:
         raise pytest.UsageError(
-            "a test marked integration_limits, integration_smoke, or integration_rate_limits "
-            "must also be marked "
+            "a test marked integration_limits, integration_smoke, integration_rate_limits, or "
+            "integration_all_symbols must also be marked "
             "integration: " + ", ".join(unpaired)
         )
     expression = config.option.markexpr or ""
@@ -2093,6 +2097,7 @@ _PLANS: Final = {
     "test_options_integration.py": "an Options plan that includes this data",
     "test_indices_integration.py": "an Indices plan that includes this data",
     "test_futures_integration.py": "a Futures plan that includes this data",
+    "test_futures_calendar_integration.py": "a Futures plan that includes this data",
     "test_reference_integration.py": "a plan that includes this reference data",
     "test_flatfiles_integration.py": "flat-file access to this dataset",
     "test_host_decision_integration.py": "the plan this check names in its docstring",
