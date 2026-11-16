@@ -619,17 +619,22 @@ def failed_after_flush(ws_session: WsSession, table: Table) -> bool:
     return bool(table.j_table.isFailed())
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise(
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     dh_input_table: Callable[..., InputTable],
+    raised_by: str,
 ) -> None:
-    ws_session = make_ws_session(on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE))
+    # RAISE set on the session, or on the call over a session that logs.
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=strict if raised_by == "session" else dm.ErrorPolicy())
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
-    result = ws_session.query(TRADES, watchlist).append_only()
+    call = strict if raised_by == "call" else None
+    result = ws_session.query(TRADES, watchlist, on_error=call).append_only()
     ws_session.subscribed("T.AAPL")
     watchlist.add(new_table([string_col("Symbol", ["msft"])]))
     wait_for(lambda: failed_after_flush(ws_session, result))

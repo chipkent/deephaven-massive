@@ -430,6 +430,7 @@ class ReadArguments(TypedDict, total=False):
     filters: Mapping[str, dm.FilterValue] | None
     limit: int | None
     values: ValueTable | None
+    on_error: dm.ErrorPolicy | None
 
 
 class QueryArguments(ReadArguments, total=False):
@@ -4585,6 +4586,56 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, UnavailableSymbolError)
     assert re.match(no_data, str(failed.error))
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.RAISE, dm.OnError.LOG])
+def test_each_rest_verb_follows_the_call_s_unavailable_symbols_over_the_session_s(
+    setting: dm.OnError, *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The session and the call disagree: the call's setting decides whether a symbol without
+    # data fails history() and fetch(), and, under RAISE, poll().
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    other = dm.OnError.LOG if setting is dm.OnError.RAISE else dm.OnError.RAISE
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=other),
+    )
+    call = dm.ErrorPolicy(unavailable_symbols=setting)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    serve_pairs(fake_rest)
+    day = date(2025, 3, 3)
+    with dm.MassiveSession(config) as m:
+        pair = query(
+            m, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": day}, on_error=call
+        )
+        assert isinstance(pair, FetchQuery)
+        if setting is dm.OnError.LOG:
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+            assert pair.fetch(wait=True).size == 0
+            return
+        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[ZZZZ \("):
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[X:DOTUSD \("):
+            pair.fetch(wait=True)
+        assert _failed_soon(pair.poll(60))
+
+
+def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The session keeps a row whose symbol the library cannot read; a call under RAISE fails.
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    params = {"from": "AUD", "to": "XXX"}
+    with dm.MassiveSession(config) as m:
+        with pytest.raises(dm.MassiveError, match=r"Massive sent the symbol 'not a pair'"):
+            fetch(m, CONVERSION, params=params, on_error=strict)
+        (row,) = fetch(m, CONVERSION, params=params)
+    assert (row["Symbol"], row["RawSymbol"]) == (None, "not a pair")
 
 
 def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
