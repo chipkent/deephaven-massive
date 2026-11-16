@@ -388,8 +388,8 @@ def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
     assert "An intraday bar ends at Massive's `e` where the WebSocket sends one" in stocks_end
     trades = description(futures.TRADES, "Date")
     assert "the session Massive's futures schedules place it in" in trades
-    assert "logs a WARNING (once per product and date)" in trades
-    assert "logs at DEBUG only" in trades
+    assert "is never published without a date" in trades
+    assert "`unlisted_contracts` and `unscheduled_products`" in trades
 
 
 def test_the_library_describes_its_time_columns() -> None:

@@ -154,6 +154,7 @@ __all__ = [
     "StartRule",
     "TimeRule",
     "day_starts",
+    "futures_rule_dates",
     "local_dates",
     "stamp_rule",
     "time_column",
@@ -254,6 +255,22 @@ class SessionDates(Protocol):
             the row.
         """
         ...
+
+
+def futures_rule_dates(ns: pa.Array) -> pa.Array:
+    """Return the 17:00 Chicago rule's futures session date of each instant.
+
+    The session ends at the next 17:00 Chicago time, and a Saturday's or Sunday's moves to
+    Monday. A futures flush passes these dates to its calendar (`SessionDates`), and again for
+    the rows it held until their schedule loaded.
+
+    Args:
+        ns: The instants, epoch nanoseconds, `int64`.
+
+    Returns:
+        The session dates, ISO text.
+    """
+    return _iso(weekday_sessions(session_days(_local_ns(ns, CHICAGO))))
 
 
 def _to_int(values: pa.Array | pa.ChunkedArray) -> pa.Array:
@@ -706,7 +723,7 @@ class TimeRule:
         sent = _column(rows, DATE)
         if sent.null_count == 0:
             return sent
-        ruled = _iso(weekday_sessions(session_days(_local_ns(ns, CHICAGO))))
+        ruled = futures_rule_dates(ns)
         if session_dates is not None:
             ruled = session_dates(_column(rows, "Symbol"), ns, ruled)
         return pc.coalesce(sent, ruled)

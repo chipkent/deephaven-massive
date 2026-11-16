@@ -1,10 +1,11 @@
-"""A problem with the feed, as plain data: what the library withheld, from where, and why.
+"""A problem with the feed, as plain data: what the library withheld or delays, where, and why.
 
 Each transport turns the rows it withholds from a payload (`withheld.withhold_rows`) into
-`ProblemEvent`s, one per cause, symbol as sent, and field, and hands them to its session's
-`ProblemSink` (`SessionCore.problems`). An event is immutable and holds no Deephaven object,
-lock, or secret, so any thread may build one and any thread may receive it. Until the session
-keeps a problems table, `LoggedProblems` logs each event at DEBUG.
+`ProblemEvent`s, one per cause, symbol as sent, and field, and a futures flush does the same
+for the rows it could not date or held too long (`futures_problems`); each hands them to its
+session's `ProblemSink` (`SessionCore.problems`). An event is immutable and holds no Deephaven
+object, lock, or secret, so any thread may build one and any thread may receive it. Until the
+session keeps a problems table, `LoggedProblems` logs each event at DEBUG.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ __all__ = [
     "EVENTS_PER_PAYLOAD",
     "LoggedProblems",
     "ProblemAction",
+    "ProblemCause",
     "ProblemEvent",
     "ProblemSink",
 ]
@@ -39,9 +41,26 @@ class ProblemAction(StrEnum):
 
     WITHHELD = "withheld"
     """The rows were left out of the table."""
+    DELAYED = "delayed"
+    """The rows wait, and are not lost: they publish once they can be read whole."""
     OVERFLOW = "overflow"
     """The rows were left out of the table, and the payload had more distinct problems of the
     cause than `EVENTS_PER_PAYLOAD`: this event counts the rest, with no symbol or field."""
+
+
+class ProblemCause(StrEnum):
+    """Why there is a problem that no `RowFault` names: so far, dating streamed futures rows."""
+
+    UNLISTED_CONTRACTS = "unlisted_contracts"
+    """Neither Massive's futures snapshot nor its contracts list has held a ticker it streams
+    for 30 minutes, so its rows were left out (`dm.ErrorPolicy.unlisted_contracts`)."""
+    UNSCHEDULED_PRODUCTS = "unscheduled_products"
+    """Massive's futures schedules give no session for rows it streams, none at all for their
+    product or none that holds them, so they were left out
+    (`dm.ErrorPolicy.unscheduled_products`)."""
+    UNDATED_ROWS = "undated_rows"
+    """A ticker's rows have waited over 15 seconds for its session date; they publish, dated,
+    once its schedule loads. No setting decides it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +68,7 @@ class ProblemEvent:
     """One problem of one payload: the rows of one cause, symbol, and field that were withheld.
 
     Attributes:
-        cause: The `dm.ErrorPolicy` cause.
+        cause: The cause: a `dm.ErrorPolicy` field, or `ProblemCause.UNDATED_ROWS`.
         action: What the library did with the rows.
         dataset: The dataset, such as `"stocks.trades"`.
         transport: The transport that served the rows.
@@ -67,7 +86,7 @@ class ProblemEvent:
         at: When the event was made, epoch nanoseconds.
     """
 
-    cause: RowFault
+    cause: RowFault | ProblemCause
     action: ProblemAction
     dataset: str
     transport: Transport

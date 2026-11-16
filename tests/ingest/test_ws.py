@@ -1741,15 +1741,15 @@ def test_an_ended_connection_holds_no_stream(
     del theirs
 
 
-# --- The futures schedule calendar --------------------------------------------------------------
+# --- The futures schedule calendar ---------------------------------------------------------------
 
 
 def looked_up(ws_session: WsSession, *tickers: str) -> None:
-    # Wait until the calendar has asked Massive's contracts for every ticker.
+    # Wait until the calendar has asked Massive's snapshot for every ticker.
     def asked() -> bool:
         sent: set[str] = set()
         for path, query in ws_session.fetched:
-            if path == "/futures/v1/contracts":
+            if path == "/futures/v1/snapshot":
                 asked_for = query["ticker.any_of"]
                 assert isinstance(asked_for, tuple)
                 sent.update(asked_for)
@@ -1758,108 +1758,48 @@ def looked_up(ws_session: WsSession, *tickers: str) -> None:
     ws_session.wait(lambda _: asked())
 
 
-def test_a_futures_stream_looks_up_its_contracts_as_it_opens(ws_session: WsSession) -> None:
+def test_a_futures_stream_looks_up_its_tickers_and_subscribes_at_once(
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Single contracts and combinations alike; the stream subscribes without waiting for the
+    # lookups, whose rows the flush holds until they are dated.
+    gate = threading.Event()
+    real = futures_calendar.FuturesCalendar._load_tickers
+
+    def held(
+        calendar: futures_calendar.FuturesCalendar,
+        tickers: set[str],
+        answers: futures_calendar._Answers,
+    ) -> None:
+        assert gate.wait(TIMEOUT)
+        real(calendar, tickers, answers)
+
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "_load_tickers", held)
     result = ws_session.query(FUTURES, ["ESZ5", "GCQ6-GCJ7"]).blink()
-    looked_up(ws_session, "ESZ5")
+    ws_session.subscribed("T.ESZ5", "T.GCQ6-GCJ7")  # while the lookup is still held
+    gate.set()
+    looked_up(ws_session, "ESZ5", "GCQ6-GCJ7")
     calendar = ws_session.connections.futures_calendar()
     assert calendar is ws_session.connections.futures_calendar()
-    assert calendar.wait_loaded(["ESZ5", "GCQ6-GCJ7"], 15.0, stop=threading.Event())
-    # A spread is not a contract: it is never looked up.
-    sent = [q["ticker.any_of"] for path, q in ws_session.fetched if path == "/futures/v1/contracts"]
-    assert sent == [("ESZ5",)]
-    ws_session.session.release(result)
-
-
-def test_a_futures_stream_loads_its_schedules_before_it_subscribes(
-    ws_session: WsSession,
-) -> None:
-    # The verb waits for the contract's product and schedule, so the first rows are dated.
-    ws_session.rows["/futures/v1/contracts"] = [{"ticker": "ESZ5", "product_code": "ES"}]
-    ws_session.rows["/futures/v1/schedules"] = [
-        {
-            "product_code": "ES",
-            "session_end_date": "2025-12-01",
-            "timestamp": "2025-11-30T23:00:00+00:00",
-        }
-    ]
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    assert ws_session.connections.futures_calendar().wait_loaded(
-        ["ESZ5"], 0, stop=threading.Event()
-    )
-    ws_session.session.release(result)
-
-
-def _slow_schedules(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    # Schedules that never load in time; returns the seconds each verb waited for them.
-    waits: list[float] = []
-
-    def wait_loaded(
-        _calendar: object, _contracts: object, timeout: float, *, stop: threading.Event
-    ) -> bool:
-        waits.append(timeout)
-        return False
-
-    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", wait_loaded)
-    return waits
-
-
-def test_a_futures_stream_whose_schedules_are_slow_says_so_once(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    waits = _slow_schedules(monkeypatch)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"):
-        result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    assert waits == [ws.SCHEDULE_WAIT]
-    assert [r.getMessage() for r in caplog.records] == [
-        (
-            "futures stream 1: the schedules of 1 [ESZ5] did not load within 15 s; their rows "
-            "get a null Date until they do"
-        )
-    ]
-    ws_session.session.release(result)
-
-
-def test_a_futures_stream_opened_holding_the_lock_waits_briefly_for_its_schedules(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # A console command holds the update graph's lock, so no live table updates while it
-    # waits; its rows get a null Date until the schedules load anyway.
-    waits = _slow_schedules(monkeypatch)
-    graph = ws_session.session._core.exec_ctx.update_graph
-    with (
-        caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.ws"),
-        update_graph.exclusive_lock(graph),
-    ):
-        result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    assert waits == [ws.SCHEDULE_WAIT_HOLDING_LOCK] == [1.0]
-    assert [r.getMessage() for r in caplog.records] == [
-        (
-            "futures stream 1: the schedules of 1 [ESZ5] did not load within 1 s, the most a "
-            "caller holding the update graph's lock waits; their rows get a null Date until "
-            "they do"
-        )
-    ]
     ws_session.session.release(result)
 
 
 @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
-def test_a_first_futures_stream_failing_in_its_schedule_wait_leaves_a_working_connection(
+def test_a_first_futures_stream_failing_as_it_looks_up_leaves_a_working_connection(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, error: type[BaseException]
 ) -> None:
-    # The first stream creates the connection and fails while it waits for its schedules; the
-    # next stream reuses that connection, which must be running to subscribe it.
-    real = ws.WsConnections._load_schedules
+    # The first stream creates the connection and fails as it asks for its lookups; the next
+    # stream reuses that connection, which must be running to subscribe it.
+    real = futures_calendar.FuturesCalendar.watch
     calls: list[int] = []
 
-    def interrupted(
-        self: ws.WsConnections, contracts: frozenset[str], *, stream_id: int, holding_lock: bool
-    ) -> None:
-        calls.append(stream_id)
+    def interrupted(calendar: futures_calendar.FuturesCalendar, symbols: Iterable[str]) -> None:
+        calls.append(1)
         if len(calls) == 1:
             raise error("interrupted")
-        real(self, contracts, stream_id=stream_id, holding_lock=holding_lock)
+        real(calendar, symbols)
 
-    monkeypatch.setattr(ws.WsConnections, "_load_schedules", interrupted)
+    monkeypatch.setattr(futures_calendar.FuturesCalendar, "watch", interrupted)
     # An interrupt passes through; any other exception is a bug in the library, raised as one.
     expected = error if not issubclass(error, Exception) else dm.MassiveError
     with pytest.raises(expected, match="interrupted"):
@@ -1868,39 +1808,6 @@ def test_a_first_futures_stream_failing_in_its_schedule_wait_leaves_a_working_co
     ws_session.subscribed("T.ESZ5")
     assert ws_session.connection("wss://socket.test/futures").leases == 1
     ws_session.session.release(result)
-
-
-def test_a_futures_watchlist_looks_up_the_contracts_it_adds(
-    ws_session: WsSession, dh_input_table: Callable[..., InputTable]
-) -> None:
-    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
-    result = ws_session.query(FUTURES, watchlist).blink()
-    looked_up(ws_session, "ESZ5")
-    watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
-    looked_up(ws_session, "NQZ5")
-    ws_session.session.release(result)
-
-
-class GatedSchedules:
-    """Schedules that load only once the test opens the gate; records each wait for them."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.gate = threading.Event()
-        self.waiting = threading.Event()
-        self.waits: list[tuple[list[str], float, str]] = []
-        lock = threading.Lock()
-
-        def wait_loaded(
-            _calendar: object, contracts: Iterable[str], timeout: float, *, stop: threading.Event
-        ) -> bool:
-            with lock:
-                self.waits.append((sorted(contracts), timeout, threading.current_thread().name))
-            self.waiting.set()
-            assert self.gate.wait(TIMEOUT)
-            return True
-
-        monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", wait_loaded)
 
 
 def topic_frames(fake_ws_server: FakeMassiveServer, topic: str) -> list[str]:
@@ -1912,116 +1819,53 @@ def topic_frames(fake_ws_server: FakeMassiveServer, topic: str) -> list[str]:
     ]
 
 
-def test_a_futures_watchlist_waits_for_its_first_contracts_schedules_before_it_subscribes(
+def test_a_futures_watchlist_looks_up_and_subscribes_the_tickers_it_adds_in_order(
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
-    monkeypatch: pytest.MonkeyPatch,
     *,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    # The contracts a watchlist holds when the stream opens wait for their schedules as
-    # explicit contracts do, on the symbol changes worker rather than the update graph.
-    schedules = GatedSchedules(monkeypatch)
+    # Changes go straight to the connection, in order: a removal never overtakes an addition.
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
-    result = ws_session.query(FUTURES, watchlist).blink()  # returns while the wait goes on
-    assert schedules.waiting.wait(TIMEOUT)
-    ((contracts, timeout, thread),) = schedules.waits
-    assert (contracts, timeout) == (["ESZ5"], ws.SCHEDULE_WAIT)
-    assert thread.startswith(f"{ws_session.session._core.thread_prefix} symbol changes")
-    settle(ws_session)
-    assert topic_frames(fake_ws_server, "T.ESZ5") == []  # nothing subscribed before the load
-    schedules.gate.set()
+    result = ws_session.query(FUTURES, watchlist).blink()
+    looked_up(ws_session, "ESZ5")
     ws_session.subscribed("T.ESZ5")
-    ws_session.session.release(result)
-
-
-def test_a_futures_watchlist_starts_each_lookup_while_an_earlier_change_waits(
-    ws_session: WsSession,
-    monkeypatch: pytest.MonkeyPatch,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # The worker waits for one change's schedules at a time, but every added contract's
-    # lookup starts as the change is reported, so lookups never queue behind a wait.
-    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
-    result = ws_session.query(FUTURES, watchlist).blink()
-    ws_session.subscribed("T.GCQ6-GCJ7")
-    schedules = GatedSchedules(monkeypatch)
-    watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
-    assert schedules.waiting.wait(TIMEOUT)  # the worker waits for ESZ5's schedule
     watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
-    looked_up(ws_session, "NQZ5")  # asked for while the worker still waits
-    assert [contracts for contracts, _, _ in schedules.waits] == [["ESZ5"]]
-    schedules.gate.set()
-    ws_session.subscribed("T.ESZ5", "T.NQZ5")
-    ws_session.session.release(result)
-
-
-def test_a_futures_removal_goes_through_the_worker_without_a_lookup(
-    ws_session: WsSession,
-    monkeypatch: pytest.MonkeyPatch,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # Reported on this thread, so its path is measured on every Python: a removal starts no
-    # lookup, and reaches the connection through the worker, in order with the additions.
-    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
-    result = ws_session.query(FUTURES, watchlist).blink()
-    ws_session.subscribed("T.GCQ6-GCJ7")
-    (stream_id,) = ws_session.connections.group.streams
-    posted = threading.Event()
-    changes: list[tuple[frozenset[str], frozenset[str]]] = []
-
-    def recorded(_stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
-        changes.append((added, removed))
-        posted.set()
-
-    monkeypatch.setattr(ws_session.connections, "_post_change", recorded)
-    ws_session.connections._symbols_changed(stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}))
-    assert posted.wait(TIMEOUT)
-    assert changes == [(frozenset(), frozenset({"GCQ6-GCJ7"}))]
-    assert not any(path == "/futures/v1/contracts" for path, _ in ws_session.fetched)
-    ws_session.session.release(result)
-
-
-def test_a_futures_watchlist_removal_never_overtakes_a_waiting_addition(
-    ws_session: WsSession,
-    fake_ws_server: FakeMassiveServer,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # A contract removed while its addition waits for its schedule is removed after it is
-    # added, never before, so the stream does not end up subscribed to a contract its table
-    # no longer holds.
-    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))  # a spread: no lookup
-    result = ws_session.query(FUTURES, watchlist).blink()
-    ws_session.subscribed("T.GCQ6-GCJ7")
-    schedules = GatedSchedules(monkeypatch)
-    watchlist.add(new_table([string_col("Symbol", ["NQZ5"])]))
-    assert schedules.waiting.wait(TIMEOUT)
     watchlist.delete(new_table([string_col("Symbol", ["NQZ5"])]))
-    schedules.gate.set()
+    looked_up(ws_session, "NQZ5")
     ws_session.unsubscribed("T.NQZ5")
     settle(ws_session)
     assert topic_frames(fake_ws_server, "T.NQZ5") == ["subscribe", "unsubscribe"]
     ws_session.session.release(result)
 
 
-@pytest.mark.parametrize("step", ["_symbols_changed", "_change_contracts"])
+def test_a_futures_removal_starts_no_lookup(
+    ws_session: WsSession, dh_input_table: Callable[..., InputTable]
+) -> None:
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    watchlist.add(new_table([string_col("Symbol", ["GCQ6-GCJ7"])]))
+    result = ws_session.query(FUTURES, watchlist).blink()
+    ws_session.subscribed("T.GCQ6-GCJ7")
+    looked_up(ws_session, "GCQ6-GCJ7")
+    asked = len(ws_session.fetched)
+    (stream_id,) = ws_session.connections.group.streams
+    ws_session.connections._symbols_changed(stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}))
+    ws_session.unsubscribed("T.GCQ6-GCJ7")
+    assert len(ws_session.fetched) == asked
+    ws_session.session.release(result)
+
+
 def test_a_futures_watchlist_change_during_a_close_is_dropped(
     ws_session: WsSession,
     *,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    step: str,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # The session closes after the change found the stream's connection, as the listener starts
-    # its lookups or as the worker waits: the change is dropped quietly, never raised into the
-    # watchlist's listener or lost on the worker, either of which would fail the stream.
+    # its lookups: the change is dropped quietly, never raised into the watchlist's listener,
+    # which would fail the stream.
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
     result = ws_session.query(FUTURES, watchlist).blink()
@@ -2033,7 +1877,7 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-        getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
+        ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
         f"is closing (MassiveSession #1 is closed; {NEW_SESSION})"
@@ -2041,9 +1885,8 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     ws_session.session.release(result)
 
 
-@pytest.mark.parametrize("step", ["_symbols_changed", "_change_contracts"])
 def test_a_futures_watchlist_change_that_meets_a_library_bug_raises_it(
-    ws_session: WsSession, *, monkeypatch: pytest.MonkeyPatch, step: str
+    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Only a closing session drops a change quietly: a bug is never taken for one.
     result = ws_session.query(FUTURES, ["ESZ5"]).blink()
@@ -2056,36 +1899,8 @@ def test_a_futures_watchlist_change_that_meets_a_library_bug_raises_it(
     with monkeypatch.context() as patched:
         patched.setattr(ws_session.connections, "futures_calendar", broken)
         with pytest.raises(dm.MassiveError) as raised:
-            getattr(ws_session.connections, step)(stream_id, frozenset({"NQZ5"}), frozenset())
+            ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
     assert raised.value is bug
-    ws_session.session.release(result)
-
-
-def test_a_futures_watchlist_change_whose_schedule_wait_a_close_ends_is_dropped(
-    ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # The session closes while the worker waits for the added contract's schedule: the close
-    # ends the wait, and the change is dropped quietly rather than posted to a closed stream.
-    result = ws_session.query(FUTURES, ["ESZ5"]).blink()
-    (stream_id,) = ws_session.connections.group.streams
-    waits: list[frozenset[str]] = []
-
-    def closed_during(
-        _calendar: object, contracts: Iterable[str], _timeout: float, *, stop: threading.Event
-    ) -> bool:
-        waits.append(frozenset(contracts))
-        ws_session.connections.close()
-        assert stop.is_set()
-        return False
-
-    monkeypatch.setattr(futures_calendar.FuturesCalendar, "wait_loaded", closed_during)
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-        ws_session.connections._change_contracts(stream_id, frozenset({"NQZ5"}), frozenset())
-    assert waits == [frozenset({"NQZ5"})]
-    assert (
-        f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        f"is closing ({ws_session.session._core.label} is closed; {NEW_SESSION})"
-    ) in caplog.text
     ws_session.session.release(result)
 
 
@@ -2564,46 +2379,6 @@ def test_a_defect_in_a_pair_lookup_fails_the_stream_and_is_never_retried(
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
 
 
-def test_a_close_ends_the_workers_wait_for_futures_schedules(
-    ws_session: WsSession,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    *,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # A second session keeps the group, and its schedule calendar, open after this one
-    # closes; the lookup never answers, so only the close can end the worker's wait.
-    other = join(ws_session)
-    answer = threading.Event()
-    asked = threading.Event()
-
-    def unanswered(
-        _template: str, _query: Mapping[str, object], *, bucket: str, cancel: object
-    ) -> list[dict[str, object]]:
-        asked.set()
-        answer.wait(TIMEOUT)
-        return []
-
-    monkeypatch.setattr(ws_session.connections, "fetch_rows", unanswered)
-    monkeypatch.setattr(clients(other)._streams, "fetch_rows", unanswered)
-    try:
-        watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-        watchlist.add(new_table([string_col("Symbol", ["ESZ5"])]))
-        ws_session.query(FUTURES, watchlist).blink()
-        assert asked.wait(TIMEOUT)
-        workers = list(ws_session.connections._changes._threads)
-        assert workers
-        with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-            ws_session.session.close()
-            for worker in workers:
-                worker.join(2.0)
-                assert not worker.is_alive()
-        assert any("was dropped; the session is closing" in r.getMessage() for r in caplog.records)
-    finally:
-        answer.set()
-        other.close()
-
-
 def test_closing_the_transport_stops_the_lookup_worker(ws_session: WsSession) -> None:
     ws_session.connections.close()
     with pytest.raises(RuntimeError, match="after shutdown"):
@@ -2636,13 +2411,11 @@ def test_an_unexpected_lookup_failure_fails_the_stream(
     ]
 
 
-@pytest.mark.parametrize("dataset", [CRYPTO, FUTURES], ids=["crypto", "futures"])
 def test_a_defect_after_the_lookup_fails_the_stream(
     ws_session: WsSession,
     *,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    dataset: DatasetSpec,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # Nothing reads the worker's futures: a defect anywhere in a change, past the lookup too,
@@ -2651,9 +2424,9 @@ def test_a_defect_after_the_lookup_fails_the_stream(
         raise RuntimeError("posting broke")
 
     monkeypatch.setattr(ws_session.connections, "_post_change", broken)
-    symbol = "X:BTCUSD" if dataset is CRYPTO else "GCQ6-GCJ7"
+    symbol = "X:BTCUSD"
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
-    result = ws_session.query(dataset, watchlist).append_only()
+    result = ws_session.query(CRYPTO, watchlist).append_only()
     watchlist.add(new_table([string_col("Symbol", [symbol])]))
     wait_for(lambda: failed_after_flush(ws_session, result))
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
