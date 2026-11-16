@@ -139,7 +139,7 @@ class Page:
         ::
 
             page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000}, bucket="stocks")
-            batch, drift = to_batch(page.rows, trades, required={"SipTimestamp"})
+            batch, drift, marks = to_batch(page.rows, trades, required={"SipTimestamp"})
     """
 
     status: str

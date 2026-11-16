@@ -31,6 +31,8 @@ from deephaven_massive._massive.spec.types import (
     DriftReport,
     DriftSample,
     Field,
+    RowFault,
+    RowMark,
     Source,
     Transport,
     WireType,
@@ -345,22 +347,24 @@ def test_a_row_with_an_odd_value_is_logged_whole_at_debug(
     ]
 
 
-def test_a_dropped_row_is_logged_whole_at_debug(
+def test_a_key_marked_row_is_logged_whole_at_debug(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
     decoder.set_required("T", frozenset({"SipTimestamp"}), symbol="Ticker")
     row = {"ev": "T", "sym": "AAPL", "t": 4.0}
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
         data = _decode_one(decoder, row)
-    assert _dicts(data) == []
-    [reject] = data.rejects
-    assert (reject.channel, reject.symbol) == ("T", "AAPL")
-    assert reject.error.message == (
-        "dropped a T row for AAPL from socket.massive.com/stocks: SipTimestamp (wire key 't') "
+    assert [r["SipTimestamp"] for r in _dicts(data)] == [None]
+    reason = (
+        "a T row for AAPL from socket.massive.com/stocks: SipTimestamp (wire key 't') "
         "expects epoch, got 4.0"
     )
-    assert reject.raw == '{"ev":"T","sym":"AAPL","t":4.0}'
-    assert caplog.messages == [f"{reject.error.message}; the row: {reject.raw}"]
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,), fields=("SipTimestamp",), reasons=(reason,), symbols=("AAPL",)
+        )
+    }
+    assert caplog.messages == [f'cannot place {reason}; the row: {{"ev":"T","sym":"AAPL","t":4.0}}']
 
 
 def test_an_odd_row_is_not_serialized_with_debug_off(
@@ -370,9 +374,12 @@ def test_an_odd_row_is_not_serialized_with_debug_off(
         raise AssertionError("the row was serialized with DEBUG off")
 
     monkeypatch.setattr(protocol, "row_excerpt", refuse)
-    # A dropped row's `Reject` always carries its text; a kept row's odd value needs none.
-    data = _decode_one(decoder, {"ev": "T", "p": "x", "t": 1})
+    # Neither a key-marked row nor a row with an odd value is serialized for its mark.
+    decoder.set_required("T", frozenset({"Ticker"}))
+    data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x", "t": 1})
     assert (len(_dicts(data)), data.drift.unconvertible) == (1, frozenset({"p"}))
+    data = _decode_one(decoder, {"ev": "T", "t": 1})
+    assert list(data.marks) == [RowFault.UNREADABLE_KEYS]
 
 
 def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
@@ -382,7 +389,7 @@ def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) 
     assert data.drift == DriftReport(missing=frozenset({"t"}))
 
 
-def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
+def test_a_key_marked_row_counts_in_the_drift_only_for_its_shape(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Ticker"}))
     [data] = decoder.decode(
         _frame(
@@ -392,9 +399,10 @@ def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
         )
     )
     assert isinstance(data, Data)
-    assert [r["Ticker"] for r in _dicts(data)] == ["A", "B"]
-    assert len(data.rejects) == 1
-    # The dropped row's extra key counts; its odd value does not, since no row reads it.
+    assert [r["Ticker"] for r in _dicts(data)] == ["A", None, "B"]
+    assert data.marks[RowFault.UNREADABLE_KEYS].rows == (1,)
+    assert data.marks[RowFault.UNCONVERTIBLE_VALUES].rows == (2,)
+    # The key-marked row's extra key counts; its odd value does not: its fault is its key.
     assert data.drift == DriftReport(
         extra=frozenset({"new", "z"}), missing=frozenset({"t"}), unconvertible=frozenset({"p"})
     )
@@ -473,6 +481,13 @@ def test_an_unconvertible_value_reads_as_null_and_is_drift(
     assert row[column] is None
     assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset({key}), 0)
     assert data.drift.samples[key] == DriftSample(None, quoted)  # no symbol column declared
+    [(fault, mark)] = data.marks.items()
+    assert (fault, mark.rows, mark.fields, mark.symbols) == (
+        RowFault.UNCONVERTIBLE_VALUES,
+        (0,),
+        (column,),
+        (None,),
+    )
 
 
 @pytest.mark.parametrize(
@@ -483,24 +498,29 @@ def test_an_unconvertible_value_reads_as_null_and_is_drift(
         ("sym", "Ticker", 5, "string", "5"),
     ],
 )
-def test_an_unconvertible_required_key_drops_its_row(
+def test_an_unconvertible_required_key_marks_its_row(
     decoder: FrameDecoder, case: tuple[str, str, object, str, str]
 ) -> None:
     key, column, value, expects, quoted = case
     decoder.set_required("T", frozenset({column}))
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
-    assert _dicts(data) == []
+    assert [r[column] for r in _dicts(data)] == [None]
     assert data.drift.unconvertible == frozenset()
-    [reject] = data.rejects
-    assert reject.channel == "T"
-    assert reject.symbol is None  # no symbol column was declared
-    assert (reject.error.host, reject.error.path, reject.error.status) == (HOST, PATH, None)
-    # The clause after the prefix is the one `spec.convert` shares with the REST decoder,
-    # quoting the value's JSON text.
-    assert reject.error.message == (
-        f"dropped a T row from socket.massive.com/stocks: "
-        f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
-    )
+    # No symbol column was declared. The clause after the prefix is the one `spec.convert`
+    # shares with the REST decoder, quoting the value's JSON text.
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,),
+            fields=(column,),
+            reasons=(
+                (
+                    f"a T row from socket.massive.com/stocks: "
+                    f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
+                ),
+            ),
+            symbols=(None,),
+        )
+    }
 
 
 def test_a_named_conversion_applies_to_its_field() -> None:
@@ -556,7 +576,7 @@ def test_an_odd_value_sample_quotes_at_most_200_characters(decoder: FrameDecoder
 # --- required keys and symbols ------------------------------------------------------------------
 
 
-def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
+def test_a_missing_required_key_marks_while_a_missing_optional_field_is_null(
     decoder: FrameDecoder,
 ) -> None:
     decoder.set_required("T", frozenset({"Ticker", "SipTimestamp"}), symbol="Ticker")
@@ -568,28 +588,39 @@ def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
         )
     )
     assert isinstance(data, Data)
-    assert _dicts(data) == [
-        {"Ticker": "AAPL", "Price": None, "Size": None, "SipTimestamp": 1, "Conditions": None}
-    ]
-    assert [(r.channel, r.symbol) for r in data.rejects] == [("T", "MSFT"), ("T", None)]
-    assert data.rejects[0].error.message == (
-        "dropped a T row for MSFT from socket.massive.com/stocks: "
-        "no SipTimestamp (wire key 't'), which the dataset needs"
-    )
-    assert data.rejects[1].error.message == (
-        "dropped a T row from socket.massive.com/stocks: "
-        "no Ticker (wire key 'sym'), which the dataset needs"
-    )
+    assert _dicts(data)[0] == {
+        "Ticker": "AAPL",
+        "Price": None,
+        "Size": None,
+        "SipTimestamp": 1,
+        "Conditions": None,
+    }
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(1, 2),
+            fields=("SipTimestamp", "Ticker"),
+            reasons=(
+                (
+                    "a T row for MSFT from socket.massive.com/stocks: "
+                    "no SipTimestamp (wire key 't'), which the dataset needs"
+                ),
+                (
+                    "a T row from socket.massive.com/stocks: "
+                    "no Ticker (wire key 'sym'), which the dataset needs"
+                ),
+            ),
+            symbols=("MSFT", None),
+        )
+    }
 
 
-def test_a_dropped_row_without_a_text_symbol_names_none(decoder: FrameDecoder) -> None:
+def test_a_key_marked_row_without_a_text_symbol_names_none(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
     data = _decode_one(decoder, {"ev": "T", "t": 3, "sym": 7})
-    [reject] = data.rejects
-    assert reject.symbol is None
-    assert reject.error.message == (
-        "dropped a T row from socket.massive.com/stocks: Ticker (wire key 'sym') expects "
-        "string, got 7"
+    mark = data.marks[RowFault.UNREADABLE_KEYS]
+    assert mark.symbols == (None,)
+    assert mark.reasons == (
+        "a T row from socket.massive.com/stocks: Ticker (wire key 'sym') expects string, got 7",
     )
 
 
@@ -883,16 +914,15 @@ _OBJECTS: tuple[dict[str, object], ...] = (
 
 
 def _events(decoder: FrameDecoder, frame: str) -> list[object]:
-    # Every event of a frame, compared whole: each value with its exact type, each reject by
-    # its fields, and each drift with its samples, which its equality leaves out.
+    # Every event of a frame, compared whole: each value with its exact type, the marks, and
+    # each drift with its samples, which its equality leaves out.
     events: list[object] = []
     for event in decoder.decode(frame):
         if isinstance(event, Status):
             events.append(event)
             continue
         rows = [[(type(v), v) for v in row] for row in event.rows]
-        rejects = [(r.channel, r.symbol, r.error.message, r.raw) for r in event.rejects]
-        events.append((event.channel, rows, rejects, event.drift, dict(event.drift.samples)))
+        events.append((event.channel, rows, event.marks, event.drift, dict(event.drift.samples)))
     return events
 
 
@@ -908,7 +938,7 @@ def test_frames_read_by_column_decode_exactly_as_one_by_one(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The same frames, read by column where the reading can vouch for them and one by one
-    # otherwise, and read one by one throughout: identical rows, rejects, drift, and samples.
+    # otherwise, and read one by one throughout: identical rows, marks, drift, and samples.
     # Every ordered pair of objects, repeated into frames of five; every run of one to twelve
     # objects of the list taken in turn; and each object six times alone.
     frames = [_frame(a, b, b, a, a) for a, b in itertools.product(_OBJECTS, repeat=2)]

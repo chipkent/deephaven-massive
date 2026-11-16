@@ -108,8 +108,12 @@ from deephaven_massive._datasets.timestamps import (
     masked_instants,
     mismatch_message,
 )
-from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
-from deephaven_massive._enums import NotBars, OnError
+from deephaven_massive._datasets.wire_symbols import (
+    WireSymbols,
+    log_unreadable,
+    unreadable_symbol_message,
+)
+from deephaven_massive._enums import NotBars
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorSource,
@@ -141,6 +145,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass, Recency
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -276,10 +281,10 @@ class Converted:
             fails the timestamp routine (`dropped_rows`, with the first one's reason), and
             the wire keys of the other epoch fields that held a value it fails, read as null
             (`unconvertible`, with the first such value).
-        unreadable: Under the session's `unreadable_symbols=RAISE`, the failure of the rows
-            whose symbol is a spelling the library cannot read, which were dropped: it fails
-            every stream of the dataset on the channel, since none can tell whose row it was;
-            `""` when there was none.
+        unreadable: The distinct symbol spellings the library cannot read, sorted; their rows
+            are kept with a null `Symbol`. Each stream applies its own `unreadable_symbols`:
+            under `RAISE` such a spelling fails it, since no stream can tell whose row it was
+            (`Flusher._publish_plan`). Empty when there was none.
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
         null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
@@ -290,7 +295,7 @@ class Converted:
 
     batch: pa.Table
     drift: DriftReport
-    unreadable: str = ""
+    unreadable: tuple[str, ...] = ()
     symbols: frozenset[str] = frozenset()
     null_symbols: bool = False
     dropped_symbols: Mapping[str, int] = dataclasses.field(default_factory=dict)
@@ -486,7 +491,7 @@ class ChannelPlan:
         spec: DatasetSpec,
         channel: str,
         *,
-        unreadable_symbols: OnError,
+        raw_symbol: bool,
     ) -> ChannelPlan:
         """Prepare the reading of a channel's rows for a dataset.
 
@@ -494,8 +499,8 @@ class ChannelPlan:
             catalog: The catalog, for the generated source and the dataset's merged schema.
             spec: A WebSocket dataset (with channels, so with an asset class).
             channel: One of its channels.
-            unreadable_symbols: The session's setting for a symbol spelling the library cannot
-                read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
+            raw_symbol: Whether the schema has the `RawSymbol` column
+                (`SessionCore.raw_symbol`).
 
         Returns:
             The plan.
@@ -519,7 +524,7 @@ class ChannelPlan:
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         # A decoded row holds its values in the order of the source's fields.
         position = {f.wire_key: i for i, f in enumerate(source.fields)}
-        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
+        schema = catalog.dataset_schema(spec, raw_symbol=raw_symbol)
         symbol_field = None if symbol is None else fields[key_column(spec, "symbol", symbol)][1]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
         span = next(span for span, name in spec.channels.items() if name == channel)
@@ -527,9 +532,7 @@ class ChannelPlan:
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
-            symbols=WireSymbols(
-                spec.name, asset_class, unreadable_symbols, spec.symbols_as_written
-            ),
+            symbols=WireSymbols(spec.name, asset_class, spec.symbols_as_written),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -569,9 +572,9 @@ class ChannelPlan:
         library's time columns are filled (`row_times.TimeRule.fill`). A row whose time column
         overflows or lies outside 1990 to 2100 is dropped and counted; any other timestamp that
         does is null and reported as drift. A row whose symbol is a spelling the library cannot
-        read is dropped and reported too, failing every stream of the dataset on the channel
-        (it cannot be routed to one), when the session's `unreadable_symbols` is `RAISE`; under
-        `LOG` and `IGNORE` it is kept with a null `Symbol` and the text in `RawSymbol`.
+        read is kept with a null `Symbol`, and the text in `RawSymbol` where the schema has it;
+        its spelling is returned for each stream to apply its own `unreadable_symbols`
+        (`Converted.unreadable`).
 
         Args:
             rows: The decoded rows, each a tuple of the values of the source's fields, in the
@@ -585,8 +588,8 @@ class ChannelPlan:
                 session dates; None keeps the 17:00 Chicago rule's.
 
         Returns:
-            The batch without the dropped rows, the drift of its timestamps, the failure of
-            its unreadable symbols, and the batch's distinct symbols.
+            The batch without the dropped rows, the drift of its timestamps, its unreadable
+            symbol spellings, and the batch's distinct symbols.
         """
         values = list(zip(*rows, strict=True)) if rows else None  # one tuple per source field
         wire = pa.Table.from_arrays(
@@ -601,7 +604,7 @@ class ChannelPlan:
         count = wire.num_rows
         dropped: pa.Array | None = None
         late: pa.Array | None = None  # the rows whose time column fails the routine
-        unreadable = ""
+        unreadable: tuple[str, ...] = ()
         found: list[DriftReport] = []
         arrays: dict[str, pa.Array] = {}
         raw = pa.nulls(count, pa.string())
@@ -615,7 +618,8 @@ class ChannelPlan:
             elif field is None:
                 values = pa.nulls(count, column_type.arrow_type)
             elif name == _SYMBOL:
-                values, raw, bad, unreadable = self._read_symbols(wire.column(field), symbols)
+                read = self.symbols.read(wire.column(field).combine_chunks(), symbols)
+                values, raw, unreadable = read.symbols, read.raw, read.unreadable
             elif unit is not None:
                 values, bad = self._instants(name, unit, wire.column(field), found=found)
                 late = bad if bad is not None else late
@@ -647,28 +651,6 @@ class ChannelPlan:
             null_symbols=None in distinct,
             dropped_symbols=_counted_symbols(arrays[_SYMBOL], late),
         )
-
-    def _read_symbols(
-        self, column: pa.ChunkedArray, symbols: dict[str, str | None]
-    ) -> tuple[pa.Array, pa.Array, pa.Array | None, str]:
-        """Read the rows' wire symbols; under `RAISE`, mark the rows of unreadable ones.
-
-        Args:
-            column: The rows' symbols as sent.
-            symbols: The flush thread's raw-to-canonical map (`convert`).
-
-        Returns:
-            The canonical symbols, the `RawSymbol` values, the mask of the rows to drop (None
-            when no row is dropped), and the failure of those rows, which fails every stream
-            of the dataset on the channel (`""` when none is dropped). Rows are dropped only
-            when the session's `unreadable_symbols` is `RAISE`.
-        """
-        read = self.symbols.read(column.combine_chunks(), symbols)
-        if not read.unreadable or self.symbols.keeps:
-            return read.symbols, read.raw, None, ""
-        bad = pc.call_function("is_valid", [read.raw])
-        message = unreadable_symbol_message(self.dataset, read.unreadable)
-        return read.symbols, read.raw, bad, message
 
     def _instants(
         self, name: str, unit: TimeUnit, column: pa.ChunkedArray, *, found: list[DriftReport]
@@ -749,8 +731,12 @@ class StreamSink:
 
     Attributes:
         stream_id: The stream's id.
-        plan: How the stream's dataset reads its channel.
+        plan: How the stream's dataset reads its channel. Streams of one dataset and channel
+            share it, whatever their policies.
         publisher: The stream's publisher.
+        policy: The stream's resolved policy (`Request.on_error`): its `unreadable_symbols`
+            decides whether a spelling the library cannot read fails it, and its
+            `noncanonical_symbols` what a watchlist row that is not a ticker does.
         rows_published: The rows published to it so far, held ones included.
         rows_generation: The generation of the socket its newest rows arrived on
             (`Flusher.rows`), 0 before its first row. Only the flush thread writes it; the
@@ -770,6 +756,7 @@ class StreamSink:
         "_version",
         "failed",
         "plan",
+        "policy",
         "publisher",
         "rows_generation",
         "rows_published",
@@ -784,6 +771,7 @@ class StreamSink:
         plan: ChannelPlan,
         publisher: Publisher,
         symbols: frozenset[str] | None,
+        policy: ResolvedPolicy,
     ) -> None:
         """Create the sink.
 
@@ -792,6 +780,7 @@ class StreamSink:
             core: The stream's session, which records its rows and its failure.
             plan: How the stream's dataset reads its channel.
             publisher: The stream's publisher.
+            policy: The stream's resolved policy (`Request.on_error`).
             symbols: The canonical symbols the stream receives; None for `dm.ALL`, which
                 receives every row of the channel.
         """
@@ -799,6 +788,7 @@ class StreamSink:
         self._core: Final = weakref.ref(core)
         self.plan: Final = plan
         self.publisher: Final = publisher
+        self.policy: Final = policy
         self._lock = threading.Lock()
         self._symbols = symbols
         self._version = 0
@@ -1609,9 +1599,10 @@ class Flusher:
             updates: Receives each stream's new published-row total and `Error` notes.
         """
         converted = self._convert(plan, batch.rows, arrived=batch.arrived)
-        if converted.unreadable:  # a spelling the library cannot read is its own defect
-            failure = MassiveError(converted.unreadable, source=ErrorSource.LIBRARY)
-            self._fail_each(readers, failure)
+        if converted.unreadable:
+            readers = self._unreadable(plan, converted.unreadable, readers)
+            if not readers:
+                return
         drift = converted.drift
         if drift.fields_drifted or drift.dropped_rows:
             where = f"{self._thread.name} channel {plan.channel}"
@@ -1625,6 +1616,38 @@ class Flusher:
                 plan, converted, readers=readers, updates=updates, generation=batch.generation
             )
         self._write_notes(readers, updates)
+
+    def _unreadable(
+        self, plan: ChannelPlan, spellings: tuple[str, ...], readers: list[StreamSink]
+    ) -> list[StreamSink]:
+        """Apply each stream's `unreadable_symbols` to a batch's unreadable symbol spellings.
+
+        A spelling the library cannot read is its own defect, and no stream can tell whose row
+        it was, so every stream under `RAISE` fails. The others keep the rows, and each new
+        spelling is logged once, at the loudest level among their settings: ERROR when one is
+        `LOG`, DEBUG when all are `IGNORE` (`log_unreadable`).
+
+        Args:
+            plan: The dataset's plan for the channel.
+            spellings: The distinct spellings, sorted.
+            readers: The dataset's streams on the channel.
+
+        Returns:
+            The streams that keep the rows.
+        """
+        failing = [r for r in readers if effect_of(r.policy.unreadable_symbols).fails]
+        if failing:
+            message = unreadable_symbol_message(plan.dataset, spellings)
+            self._fail_each(failing, MassiveError(message, source=ErrorSource.LIBRARY))
+        kept = [r for r in readers if r not in failing]
+        if kept:
+            loudest = max(
+                (r.policy.unreadable_symbols for r in kept),
+                key=lambda setting: effect_of(setting, level=logging.ERROR).level,
+            )
+            raw_symbol = RAW_SYMBOL in plan.arrow_schema.names
+            log_unreadable(plan.dataset, spellings, loudest, raw_symbol=raw_symbol)
+        return kept
 
     def _publish_batch(
         self,
@@ -1716,9 +1739,9 @@ class Flusher:
         if converted.batch.num_rows:
             self._runs.pop(plan, None)
             return False
+        # A flush that publishes no row dropped at least one: a batch holds a row or a lost one,
+        # and conversion keeps every row but those it counts as dropped.
         dropped = converted.drift.dropped_rows + lost.dropped_rows
-        if not dropped:
-            return False
         reason = lost.dropped_reason or converted.drift.dropped_reason
         ended = _extend_run(self._runs, plan, dropped=dropped, reason=reason)
         if ended is None:
@@ -2041,6 +2064,7 @@ def open_stream_tables(
     symbols: NormalizedSymbols,
     *,
     core: SessionCore,
+    policy: ResolvedPolicy,
     stream_id: int,
     host: str,
     path: str,
@@ -2068,6 +2092,7 @@ def open_stream_tables(
         symbols: The stream's symbols: a sorted tuple of canonical symbols, `dm.ALL`, or a
             reactive table's `SymbolTable` box.
         core: The stream's session, which its sink reports to.
+        policy: The stream's resolved policy (`Request.on_error`).
         stream_id: The id the session minted for the stream.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
@@ -2095,14 +2120,19 @@ def open_stream_tables(
             else:
                 received = frozenset() if isinstance(symbols, SymbolTable) else frozenset(symbols)
             sink = StreamSink(
-                stream_id, core=core, plan=plan, publisher=publisher, symbols=received
+                stream_id,
+                core=core,
+                plan=plan,
+                publisher=publisher,
+                symbols=received,
+                policy=policy,
             )
             if isinstance(symbols, SymbolTable):
                 rule = SymbolRowRule(
                     plan.dataset,
                     plan.asset_class,
                     plan.symbols.as_written,
-                    core.config.noncanonical_symbols,
+                    policy.noncanonical_symbols,
                 )
                 watch = SymbolWatch(
                     rule,

@@ -517,9 +517,6 @@ _RAISE_NOTHING = frozenset(
     {
         "deephaven_massive._dataset_list.datasets",
         "deephaven_massive._debug_log.disable_debug_logging",
-        "deephaven_massive.namespaces._options.OptionsNamespace.admin_messages",
-        "deephaven_massive.namespaces._reference.ReferenceNamespace.market_holidays",
-        "deephaven_massive.namespaces._reference.ReferenceNamespace.market_status",
     }
 )
 """The public functions that take no argument a caller can get wrong and raise nothing."""

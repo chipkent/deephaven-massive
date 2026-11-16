@@ -80,8 +80,7 @@ if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
 
     from deephaven_massive._massive.net.retry import Clock
-    from deephaven_massive._massive.spec.types import DriftReport, Source
-    from deephaven_massive._massive.ws.protocol import Reject
+    from deephaven_massive._massive.spec.types import DriftReport, RowMarks, Source
 
 __all__ = ["HANDSHAKE_TIMEOUT", "WsClient", "WsState"]
 
@@ -195,12 +194,12 @@ class WsClient:
     - `on_open(generation)`: Massive accepted the key on a new socket. Generations count from
       1. Subscriptions made before it are gone: the library sends its whole set again.
     - `on_status(generation, status)`: one decoded status object.
-    - `on_data(generation, channel, rows, rejects, drift)`: one channel's objects of one frame.
+    - `on_data(generation, channel, rows, marks, drift)`: one channel's objects of one frame.
       Each row is a tuple of the values of the channel's source's fields, in the order of
       `Source.fields`, `None` when absent or when the value does not fit; symbols are as the
-      wire spells them.
-      `rejects` are the rows dropped because a required key is absent, null, or does not fit;
-      `drift` is the `DriftReport` of the channel's objects in the frame.
+      wire spells them. Every object is a row. `marks` are the rows not read whole, by index
+      (`Data.marks`): a required key absent, null, or unfit, or another value unfit; `drift`
+      is the `DriftReport` of the channel's objects in the frame.
     - `on_state(state, detail)`: the detail is the next attempt's time in seconds since the
       Unix epoch for `RECONNECTING`, `WAITING_SLOT`, and `TAKEN`, the `WireError` for `FAILED`, and
       `None` for `CONNECTING` and `CLOSED`.
@@ -235,7 +234,7 @@ class WsClient:
         sources: Iterable[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_backoff: float,
         max_reconnect_backoff: float,
@@ -373,7 +372,7 @@ class WsClient:
 
         Call it before first subscribing the channel. The choice applies to every later frame,
         across reconnections, until replaced. A row missing a required key, holding null there,
-        or holding a value there that does not fit, becomes a `Reject` and is dropped; any
+        or holding a value there that does not fit, is marked `RowFault.UNREADABLE_KEYS`; any
         other absent field, or value that does not fit, becomes `None`. A channel never
         declared has no required keys and no symbol. A channel with no source, or a column
         not in it, raises `ValueError`.
@@ -381,8 +380,8 @@ class WsClient:
         Args:
             channel: The channel, such as `"T"`.
             keys: Long-form columns of the channel's source.
-            symbol: The long-form column holding the symbol, whose raw value each `Reject`
-                carries; `None` when the channel's rows carry none.
+            symbol: The long-form column holding the symbol, whose raw value each mark quotes;
+                `None` when the channel's rows carry none.
 
         Raises:
             RuntimeError: If called from another thread than the client's loop thread.
@@ -691,7 +690,7 @@ class WsClient:
                         self._on_status(generation.number, event)
                     else:
                         self._on_data(
-                            generation.number, event.channel, event.rows, event.rejects, event.drift
+                            generation.number, event.channel, event.rows, event.marks, event.drift
                         )
         except ConnectionClosed:
             pass  # an abnormal close; a clean one ends the iteration

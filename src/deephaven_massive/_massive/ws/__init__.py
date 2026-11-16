@@ -6,7 +6,7 @@ sources, and reconnects with backoff, all on its own thread. The library decides
 subscribe and where the rows go; this package only speaks the protocol.
 
 - `ws.client`: `WsClient`, its loop thread and lifecycle, and `WsState`.
-- `ws.protocol`: control frames, frame decoding into `Status`, rows, and `Reject`s, and the
+- `ws.protocol`: control frames, frame decoding into `Status`, rows, and their marks, and the
   classification of connection failures as fatal or retryable.
 - `ws.backoff`: how long to wait before the next attempt.
 
@@ -15,6 +15,6 @@ names through `deephaven_massive._massive`, never through this package.
 """
 
 from deephaven_massive._massive.ws.client import WsClient, WsState
-from deephaven_massive._massive.ws.protocol import Reject, Status, StatusKind
+from deephaven_massive._massive.ws.protocol import Status, StatusKind
 
-__all__ = ["Reject", "Status", "StatusKind", "WsClient", "WsState"]
+__all__ = ["Status", "StatusKind", "WsClient", "WsState"]

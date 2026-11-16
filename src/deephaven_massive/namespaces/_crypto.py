@@ -48,6 +48,7 @@ from deephaven_massive.queries import (
 if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["DATASETS", "CryptoNamespace"]
 
@@ -269,7 +270,9 @@ class CryptoNamespace(Namespace):
     _path: ClassVar[str] = "crypto"
 
     @raises_through(build_query)
-    def trades(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def trades(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
         Each row holds one trade on one exchange. `Timestamp` is the exchange's own time, and `Date`
@@ -278,13 +281,16 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` reads
                 `dm.ALL` only from the flat files.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.trades.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -295,10 +301,14 @@ class CryptoNamespace(Namespace):
 
                 live = m.crypto.trades(["X:BTCUSD", "X:ETHUSD"]).append_only()
         """
-        return build_query(self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def last_trade(self, symbols: SymbolsLike) -> FetchQuery:
+    def last_trade(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The latest trade of each crypto pair.
 
         Each row holds one pair's latest trade. A pair with no trade gets no row, and the library
@@ -308,13 +318,16 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair, use
                 `m.crypto.snapshots(dm.ALL)`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.last_trade.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -331,10 +344,11 @@ class CryptoNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.crypto.snapshots(dm.ALL).fetch()",
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def quotes(self, symbols: SymbolsLike) -> StreamQuery:
+    def quotes(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row holds one exchange's best bid and ask for one pair. Massive serves no crypto quote
@@ -342,13 +356,16 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.quotes.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -359,7 +376,9 @@ class CryptoNamespace(Namespace):
 
                 book = m.crypto.quotes("X:BTCUSD").last_by(["Symbol", "Exchange"])
         """
-        return build_query(self._core, QUOTES, query_type=StreamQuery, symbols=symbols)
+        return build_query(
+            self._core, QUOTES, query_type=StreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
     def bars(
@@ -368,6 +387,7 @@ class CryptoNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery | HistoryQuery:
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
@@ -379,6 +399,8 @@ class CryptoNamespace(Namespace):
                 `dm.ALL` for one-minute and one-day bars.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -408,10 +430,13 @@ class CryptoNamespace(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
+    def previous_day_bar(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The previous UTC day's open, high, low, close, and volume of each crypto pair.
 
         Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
@@ -420,13 +445,16 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair's bar of
                 one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.previous_day_bar.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -447,10 +475,11 @@ class CryptoNamespace(Namespace):
                 "every ticker's bar of that day"
             ),
             timespan=Timespan.DAY,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> StreamQuery:
+    def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
         Each row holds one update of Massive's own price estimate. Only Currencies Business includes
@@ -459,13 +488,16 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.fmv.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -476,10 +508,12 @@ class CryptoNamespace(Namespace):
 
                 fair = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=StreamQuery, symbols=symbols)
+        return build_query(
+            self._core, FMV, query_type=StreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
+    def snapshots(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """The current state of crypto pairs: today's, the last minute's, and yesterday's bars.
 
         Each row holds one pair's bar for today, its latest minute bar, and its previous day's bar.
@@ -489,13 +523,16 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every traded pair.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.snapshots.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -506,10 +543,12 @@ class CryptoNamespace(Namespace):
 
                 latest = m.crypto.snapshots(["X:BTCUSD", "X:ETHUSD"]).poll(5)
         """
-        return build_query(self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols)
+        return build_query(
+            self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(_require_enum)
-    def movers(self, direction: Direction) -> FetchQuery:
+    def movers(self, direction: Direction, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """The 20 crypto pairs that gained or lost the most since the previous day's close.
 
         Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
@@ -519,13 +558,16 @@ class CryptoNamespace(Namespace):
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.movers.md.
 
         Raises:
-            TypeError: If `direction` isn't a `dm.Direction`, such as the plain string `"gainers"`.
+            TypeError: If `direction` isn't a `dm.Direction`, such as the plain string `"gainers"`,
+                or `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -534,10 +576,14 @@ class CryptoNamespace(Namespace):
                 trades = m.crypto.trades(gainers).append_only()  # follows the top 20
         """
         side = _require_enum(direction, Direction, "direction")
-        return build_query(self._core, MOVERS, query_type=FetchQuery, params={"direction": side})
+        return build_query(
+            self._core, MOVERS, query_type=FetchQuery, params={"direction": side}, on_error=on_error
+        )
 
     @raises_through(build_query, day_argument)
-    def daily_open_close(self, symbols: SymbolsLike, date: DateLike) -> FetchQuery:
+    def daily_open_close(
+        self, symbols: SymbolsLike, date: DateLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
         Each row holds one pair's open and close for the UTC day. `OpenTrades` and `ClosingTrades`
@@ -548,13 +594,16 @@ class CryptoNamespace(Namespace):
                 one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             date: The UTC day, as a date such as `"2026-01-02"`. A `datetime` or an instant is
                 refused.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.daily_open_close.md.
 
         Raises:
-            TypeError: If `date` isn't a date or a time, or `symbols` has another type.
+            TypeError: If `date` isn't a date or a time, or `symbols` has another type, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of a crypto pair;
@@ -576,4 +625,5 @@ class CryptoNamespace(Namespace):
                 "every ticker's bar of that day"
             ),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+            on_error=on_error,
         )

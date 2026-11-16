@@ -8,4 +8,5 @@ The calendar finds a streamed contract's product in the contracts list; a traded
 list lacks cannot be dated. Unverified how many such contracts a live stream sees. Settled by
 `tests/ingest/test_futures_calendar_integration.py::test_streamed_futures_tickers_are_listed` (marked `integration_all_symbols`), which
 streams every futures trade for 10 minutes and looks up the single contracts seen, the first
-3,000 in sorted order (it records how many it looked up).
+3,000 in sorted order, among those listed in the week to the calendar's today, up to 3 pages a lookup (it
+records how many it looked up, and any lookup the cap cut).

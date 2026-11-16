@@ -41,6 +41,7 @@ from tests._fakes.queries import (
     last_trade,
     make,
     news,
+    strict,
     symbol_reads,
     trades,
     until,
@@ -669,3 +670,80 @@ def test_a_followed_fetch_names_a_listed_pair_whose_ticker_it_can_t_read_in_symb
     ]
     rest_session.release(result)
     follows(rest_session)
+
+
+RAISES = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+"""A call's policy that fails on a symbol-table row that is not Massive's ticker."""
+
+
+@pytest.mark.parametrize("refreshing", [False, True], ids=["static", "refreshing"])
+def test_fetch_and_poll_refuse_a_bad_symbol_row_when_the_call_raises_and_the_session_logs(
+    refreshing: bool,
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    rows = ["AAPL", "msft"]
+    table = live(*rows) if refreshing else new_table([string_col("Symbol", rows)])
+    q = massive_session.stocks.last_trade(table, on_error=RAISES)
+    refused = r"^stocks\.last_trade: a symbol table holds 'msft'"
+    with pytest.raises(ValueError, match=refused):
+        q.fetch(wait=True)
+    with pytest.raises(ValueError, match=refused):
+        q.poll(5)
+    assert (rest.calls, rest.fetched) == ([], [])
+
+
+@pytest.mark.parametrize("refreshing", [False, True], ids=["static", "refreshing"])
+def test_fetch_and_poll_refuse_a_bad_value_row_when_the_call_raises_and_the_session_logs(
+    refreshing: bool,
+    *,
+    live_codes: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    rows = ["ES", " CL"]
+    codes = live_codes(*rows) if refreshing else new_table([string_col("ProductCode", rows)])
+    q = massive_session.futures.products(product_code=codes, on_error=RAISES)
+    refused = r"^futures\.products: a symbol table holds ' CL'"
+    with pytest.raises(ValueError, match=refused):
+        q.fetch(wait=True)
+    with pytest.raises(ValueError, match=refused):
+        q.poll(5)
+    assert (rest.calls, rest.valued) == ([], [])
+
+
+def test_fetch_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
+    *, massive_session: dm.MassiveSession, rest: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strict(massive_session, monkeypatch)
+    logs = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.LOG)
+    symbols = new_table([string_col("Symbol", ["AAPL", "msft"])])
+    massive_session.stocks.last_trade(symbols, on_error=logs).fetch(wait=True)
+    codes = new_table([string_col("ProductCode", ["ES", " CL"])])
+    massive_session.futures.products(product_code=codes, on_error=logs).fetch(wait=True)
+    [(_, _, request, _)] = rest.calls
+    assert request.symbols == ("AAPL",)
+    [(values, _, _)] = rest.valued
+    assert values == ("ES",)
+
+
+def test_a_followed_fetch_fails_on_a_late_bad_row_when_the_call_raises_and_the_session_logs(
+    *,
+    live: Callable[..., InputTable],
+    live_codes: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    watchlist = live("AAPL")
+    by_symbol = massive_session.stocks.last_trade(watchlist, on_error=RAISES).fetch(wait=True)
+    codes = live_codes("ES")
+    by_value = massive_session.futures.products(product_code=codes, on_error=RAISES).fetch(
+        wait=True
+    )
+    watchlist.add(new_table([string_col("Symbol", ["msft"])]))
+    codes.add(new_table([string_col("ProductCode", [" CL"])]))
+    until(lambda: bool(by_symbol.j_table.isFailed()))
+    until(lambda: bool(by_value.j_table.isFailed()))
+    follows(massive_session)

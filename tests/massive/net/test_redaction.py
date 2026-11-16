@@ -39,12 +39,14 @@ from deephaven_massive._massive.spec.types import (
     Param,
     ParamKind,
     RestPath,
+    RowFault,
+    RowMarks,
     Source,
     Transport,
     WireType,
 )
 from deephaven_massive._massive.ws.client import WsClient, WsState
-from deephaven_massive._massive.ws.protocol import Reject, Status, StatusKind
+from deephaven_massive._massive.ws.protocol import Status, StatusKind
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply, envelope
 
@@ -351,7 +353,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
 ) -> None:
     received: list[Status] = []
     rows: list[dict[str, object]] = []
-    rejects: list[Reject] = []
+    marked: list[RowMarks] = []
     drifts: list[DriftReport] = []
     trades = Source(
         key="stocks/T",
@@ -366,19 +368,19 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         _generation: int,
         _channel: str,
         data: list[tuple[object, ...]],
-        rejected: list[Reject],
+        marks: RowMarks,
         drift: DriftReport,
     ) -> None:
         columns = [field.column for field in trades.fields]
         rows.extend(dict(zip(columns, row, strict=True)) for row in data)
-        rejects.extend(rejected)
+        marked.append(marks)
         drifts.append(drift)
 
     client = WsClient(
         fake_ws_server.url(),
         api_key=PLANTED_KEY,
         sources=(trades,),
-        # On the loop thread, before any frame: a row without its ticker is dropped.
+        # On the loop thread, before any frame: a row without its ticker is marked.
         on_open=lambda _generation: client.set_required("T", frozenset({"Ticker"})),
         on_status=lambda _generation, status: received.append(status),
         on_data=on_data,
@@ -394,7 +396,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
             f'[{{"ev":"status","status":"error","message":"refused for {spelled}"}},'
             f'{{"ev":"T","sym":"{spelled}"}},'
             # A row with a value that does not fit, whose whole text is logged, and an extra
-            # field; then a row dropped for its required key, whose whole text is kept.
+            # field; then a row marked for its required key, whose whole text is logged too.
             f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}},'
             f'{{"ev":"T","p":1,"echo":"{spelled}"}}]'
         )
@@ -405,14 +407,22 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         client.close()
         assert client.join(10.0)
     assert received == [Status(kind=StatusKind.REFUSED, message=f"refused for {REDACTED}")]
-    assert rows == [{"Ticker": REDACTED, "Price": None}, {"Ticker": "AAPL", "Price": None}]
+    assert rows == [
+        {"Ticker": REDACTED, "Price": None},
+        {"Ticker": "AAPL", "Price": None},
+        {"Ticker": None, "Price": 1.0},
+    ]
     assert drifts[0].samples["echo"].value == '"***"'
-    [reject] = rejects
-    assert reject.raw == '{"ev":"T","p":1,"echo":"***"}'
-    assert any(
-        record.getMessage().endswith('the row: {"ev":"T","sym":"AAPL","p":"bad","echo":"***"}')
-        for record in every_logger_at_debug.records
-    )
+    [marks] = marked
+    assert marks[RowFault.UNREADABLE_KEYS].rows == (2,)
+    for logged in (
+        '{"ev":"T","sym":"AAPL","p":"bad","echo":"***"}',
+        '{"ev":"T","p":1,"echo":"***"}',
+    ):
+        assert any(
+            record.getMessage().endswith(f"the row: {logged}")
+            for record in every_logger_at_debug.records
+        )
     _assert_no_secret(every_logger_at_debug)
 
 
@@ -426,7 +436,7 @@ def test_an_odd_rest_row_echoing_the_api_key_is_logged_cleaned(
         fields=(Field(wire_key="v", column="V", wire_type=WireType.LONG),),
         params=_TRADES.params,
     )
-    _, drift = to_batch(page.rows, path, required=())
+    _, drift, _ = to_batch(page.rows, path, required=())
     assert drift.samples["note"].value == '"***"'
     assert any('"note":"***"' in record.getMessage() for record in every_logger_at_debug.records)
     _assert_no_secret(every_logger_at_debug)

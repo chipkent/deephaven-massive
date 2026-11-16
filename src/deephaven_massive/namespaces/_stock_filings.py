@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries import FetchQuery
 
@@ -383,6 +384,7 @@ def _insider_query(
     order: Order | None,
     limit: int | None,
     filters: Mapping[str, FilterValue] | None,
+    on_error: ErrorPolicy | None,
 ) -> FetchQuery:
     """Build the query of an insider dataset that takes an issuer and an owner CIK.
 
@@ -400,6 +402,7 @@ def _insider_query(
         order: The sort direction, or None.
         limit: The cap on the total number of rows, or None.
         filters: The `filters` mapping, or None.
+        on_error: The call's policy, or None for none.
 
     Returns:
         The `FetchQuery`.
@@ -422,6 +425,7 @@ def _insider_query(
         order=order,
         limit=limit,
         filters=filters,
+        on_error=on_error,
     )
 
 
@@ -482,6 +486,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The index of SEC EDGAR filings by US-listed companies, one row per filing and filer.
 
@@ -499,6 +504,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -530,6 +537,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -543,6 +551,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The text of sections of 10-K annual reports, one row per filing and section.
 
@@ -559,6 +568,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"section": "risk_factors"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -591,6 +602,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -604,6 +616,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The item text of 8-K current reports, one row per filing and filer.
 
@@ -621,6 +634,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"form_type": "8-K/A"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -651,6 +666,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -664,6 +680,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Disclosures in 8-K current reports, classified by category, one row per disclosure.
 
@@ -682,6 +699,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"tertiary_category": "Dividends"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -713,6 +732,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -726,6 +746,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Risk factors disclosed in company filings, classified by category, one row each.
 
@@ -742,6 +763,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"cik": "0000320193"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -772,6 +795,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query, one_or_any_of)
@@ -785,6 +809,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Holdings that institutional managers report on Form 13-F, one row per position.
 
@@ -803,6 +828,8 @@ class StocksFilingsNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -832,6 +859,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_insider_query)
@@ -847,6 +875,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Initial insider ownership statements (SEC Form 3), one row per reported holding.
 
@@ -868,6 +897,8 @@ class StocksFilingsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -901,6 +932,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_insider_query)
@@ -916,6 +948,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Insider transactions (SEC Form 4), one row per reported transaction or holding.
 
@@ -938,6 +971,8 @@ class StocksFilingsNamespace(Namespace):
                 instead.
             filters: Further endpoint parameters, such as `{"transaction_code": "P"}` for
                 open-market purchases.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -969,6 +1004,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query, _ciks)
@@ -983,6 +1019,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Open-market insider purchases and sales, summed per company and transaction day.
 
@@ -1008,6 +1045,8 @@ class StocksFilingsNamespace(Namespace):
                 instead.
             filters: Takes no key today, since the arguments above cover every endpoint parameter.
                 Any key raises `ValueError`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1040,6 +1079,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_insider_query)
@@ -1055,6 +1095,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Each company's insiders and the shares each one holds now, one row per insider.
 
@@ -1082,6 +1123,8 @@ class StocksFilingsNamespace(Namespace):
                 instead.
             filters: Takes no key today, since the arguments above cover every endpoint parameter.
                 Any key raises `ValueError`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1114,6 +1157,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1124,6 +1168,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The taxonomy that classifies filing risk factors, one row per category.
 
@@ -1136,6 +1181,8 @@ class StocksFilingsNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"primary_category": "Financial"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1160,6 +1207,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1170,6 +1218,7 @@ class StocksFilingsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The taxonomy that classifies 8-K disclosures, one row per category.
 
@@ -1182,6 +1231,8 @@ class StocksFilingsNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"taxonomy": "1.0"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1206,6 +1257,7 @@ class StocksFilingsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
 

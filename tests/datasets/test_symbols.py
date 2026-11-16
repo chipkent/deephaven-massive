@@ -804,7 +804,7 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert canonical_from_wire(STK, bad, as_written=True) is None
         with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
             check_symbol(STK, bad, as_written=True)
-    reader = WireSymbols("partners.tmx.corporate_events", STK, OnError.RAISE, as_written=True)
+    reader = WireSymbols("partners.tmx.corporate_events", STK, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
     assert read.unreadable == (" x",)

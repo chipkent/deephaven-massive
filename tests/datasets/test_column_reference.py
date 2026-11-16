@@ -117,7 +117,10 @@ def test_every_dataset_has_a_page_after_the_index() -> None:
 def test_a_dataset_of_the_session_itself_has_a_page_of_its_own() -> None:
     page = rendered()["snapshots.md"]
     assert page.startswith("# m.snapshots\n")
-    assert "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)\n" in page
+    assert (
+        "\nm.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None, "
+        "on_error=None)\n" in page
+    )
     # `m.snapshots` is a method of the session, so the index lists it under no namespace, after
     # every namespace.
     index = rendered()[INDEX]

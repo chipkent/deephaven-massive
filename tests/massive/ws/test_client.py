@@ -26,6 +26,7 @@ from deephaven_massive._massive.spec.types import (
     DriftReport,
     DriftSample,
     Field,
+    RowFault,
     Source,
     Transport,
     WireType,
@@ -107,7 +108,7 @@ class Recorder:
         self._add(("status", generation, status))
 
     def on_data(self, *args: object) -> None:
-        # The arguments are the generation, channel, rows, rejects, and drift.
+        # The arguments are the generation, channel, rows, marks, and drift.
         self._add(("data", *args))
 
     def on_state(self, state: WsState, detail: float | WireError | None) -> None:
@@ -765,8 +766,8 @@ def test_an_odd_value_reads_as_null_alone_with_the_raw_symbol(
     h.on_loop(lambda: h.client.set_required("T", frozenset({"Ticker"}), symbol="Ticker"))
     fake_ws_server.send(load_fixture("massive/ws", "trades_with_bad_row.json").decode())
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
-    [(generation, channel, rows, rejects, drift)] = h.recorder.of("data")
-    assert (generation, channel, rejects) == (1, "T", [])
+    [(generation, channel, rows, marks, drift)] = h.recorder.of("data")
+    assert (generation, channel, marks[RowFault.UNCONVERTIBLE_VALUES].rows) == (1, "T", (1,))
     assert [(r[0], r[1]) for r in rows] == [  # the source's Ticker and Price
         ("AAPL", 114.125),
         ("BRK.A", None),
@@ -804,9 +805,10 @@ def test_required_keys_survive_a_reconnect(
     h.recorder.wait_open(2)
     fake_ws_server.send(json.dumps([{"ev": "T", "sym": "AAPL", "p": 1.0}]))
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
-    [(generation, _, rows, [reject], _)] = h.recorder.of("data")
-    assert (generation, rows, reject.symbol) == (2, [], "AAPL")
-    assert "no SipTimestamp (wire key 't'), which the dataset needs" in reject.error.message
+    [(generation, _, rows, marks, _)] = h.recorder.of("data")
+    mark = marks[RowFault.UNREADABLE_KEYS]
+    assert (generation, len(rows), mark.symbols) == (2, 1, ("AAPL",))
+    assert "no SipTimestamp (wire key 't'), which the dataset needs" in mark.reasons[0]
 
 
 def test_a_status_after_authentication_is_delivered_in_order_with_data(

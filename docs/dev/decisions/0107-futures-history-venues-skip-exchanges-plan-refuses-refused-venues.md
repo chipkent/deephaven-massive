@@ -2,7 +2,7 @@
 
 Date: 2026-11-13
 
-Status: accepted
+Status: partly superseded: the per-call `refused_venues` argument, by [111](0111-error-policy-on-error-session-and-per-call-settings.md)
 
 Massive publishes futures flat files per exchange, and a plan may include only some. The futures
 `trades`, `quotes`, and `bars` take `venues: AbstractSet[FuturesVenue] | None = None`, so a read of

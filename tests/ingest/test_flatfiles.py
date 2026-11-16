@@ -52,6 +52,7 @@ from deephaven_massive._enums import (
     OnError,
     Timespan,
 )
+from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
@@ -250,8 +251,10 @@ def request(
     *,
     timespan: Timespan | None = None,
     adjusted: bool | None = None,
+    on_error: dm.ErrorPolicy | None = None,
 ) -> Request:
-    return Request(symbols=symbols, timespan=timespan, adjusted=adjusted)
+    policy = resolve_policy(on_error, dm.ErrorPolicy())
+    return Request(symbols=symbols, timespan=timespan, adjusted=adjusted, on_error=policy)
 
 
 def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
@@ -391,6 +394,7 @@ def query(
     timespan: Timespan | None = None,
     adjusted: bool | None = None,
     filters: Mapping[str, dm.FilterValue] | None = None,
+    on_error: dm.ErrorPolicy | None = None,
 ) -> HistoryQuery:
     return build_query(
         m._core,
@@ -401,6 +405,7 @@ def query(
         timespan=timespan,
         adjusted=adjusted,
         filters=filters,
+        on_error=on_error,
     )
 
 
@@ -566,7 +571,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         prefix="us_stocks_sip/day_aggs_v1",
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
+        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -589,9 +594,9 @@ def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
-        request=request(dm.ALL),
+        request=request(dm.ALL, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        unreadable_symbols=dm.OnError.RAISE,
+        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -616,7 +621,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
+        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -651,7 +656,7 @@ def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported()
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        unreadable_symbols=dm.OnError.RAISE,
+        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -744,7 +749,9 @@ def test_malformed_lines_are_skipped_with_one_line_per_file_logged_by_the_settin
     # never its text, at WARNING under LOG and only at DEBUG under IGNORE.
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     with (
-        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=setting)) as m,
+        dm.MassiveSession(
+            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=setting))
+        ) as m,
         caplog.at_level(logging.DEBUG, logger=flatfiles.__name__),
     ):
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -761,18 +768,36 @@ def test_a_malformed_line_fails_the_read_under_raise(
 ) -> None:
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     with (
-        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m,
+        dm.MassiveSession(
+            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
+        ) as m,
         pytest.raises(dm.MassiveError) as info,
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
         f"stocks.trades: {LOCATION.format(TRADES_0303)} holds a malformed line, the first: row 2 "
         "after the header has 2 fields where the header has 13. To skip such lines and keep the "
-        "file's other rows, pass MassiveConfig(malformed_rows=dm.OnError.LOG), or write "
-        f"'malformed_rows: log' in the settings file. {LIBRARY_BUG}"
+        "file's other rows, pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the "
+        "dataset method or to MassiveConfig, or write 'on_error: {malformed_rows: log}' in the "
+        f"settings file. {LIBRARY_BUG}"
     )
     assert info.value.source is dm.ErrorSource.LIBRARY
     assert "SECRET" not in str(info.value)
+
+
+def test_a_call_s_malformed_rows_overrides_the_session_s(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # The session skips such lines; the call that asks for every row fails instead, and a
+    # call that sets nothing keeps the session's setting.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
+    with dm.MassiveSession(CONFIG) as m:
+        q = query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict)
+        with pytest.raises(dm.MassiveError, match="holds a malformed line"):
+            q.history("2025-03-03", "2025-03-03", wait=True)
+        kept = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+        assert kept.size > 0
 
 
 def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
@@ -786,7 +811,9 @@ def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
     bad = b"".join(trade(n, 1741012200000000000 + n, "\xff").encode("latin-1") for n in range(20))
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + good + bad))
     with (
-        dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m,
+        dm.MassiveSession(
+            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
+        ) as m,
         pytest.raises(dm.MassiveError, match=r"the first: row 21 after the header is not UTF-8"),
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
@@ -798,9 +825,11 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
     # A file is read once for every symbol, so its failure is each symbol's, and a retry would
     # meet the same line.
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
-    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3))
+    # The call's policy decides, whatever the session's.
+    strict = resolve_policy(dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE), dm.ErrorPolicy())
+    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3), on_error=strict)
     window = whole_days(STOCK_TRADES, "2025-03-03")
-    with dm.MassiveSession(dataclasses.replace(CONFIG, malformed_rows=dm.OnError.RAISE)) as m:
+    with dm.MassiveSession(CONFIG) as m:
         transport = files_transport(m)
         out = transport.history_by_symbol(
             STOCK_TRADES,
@@ -901,7 +930,9 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(dataclasses.replace(CONFIG, unreadable_symbols=dm.OnError.RAISE)) as m:
+    with dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE))
+    ) as m:
         every = query(m, STOCK_TRADES, symbols=dm.ALL)
         with pytest.raises(
             dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
@@ -2294,8 +2325,10 @@ def test_a_refused_futures_venue_names_the_venue(
                 r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
                 r"https://files\.massive\.com \(AccessDenied: Access Denied\); pass "
                 r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
-                r"includes, or leave venues out or pass refused_venues=dm\.OnError\.LOG to skip "
-                "the venues S3 refuses$"
+                r"includes, or leave venues out; to skip the venues S3 refuses, pass "
+                r"on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to the dataset "
+                r"method or to MassiveConfig, or write 'on_error: \{refused_venues: log\}' in the "
+                "settings file$"
             ),
         ):
             q.history("2025-03-04", "2025-03-04", wait=True)
@@ -2342,12 +2375,14 @@ def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_settin
     # Left out, venues reads every exchange the plan allows: a refused one is skipped with one
     # WARNING, even where the call and the session say RAISE.
     m = dm.MassiveSession(
-        dataclasses.replace(CONFIG, max_concurrency=1, refused_venues=OnError.RAISE)
+        dataclasses.replace(
+            CONFIG, max_concurrency=1, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE)
+        )
     )
     try:
         two_days_of_venues()
         fake_s3.refuse(REFUSED_0305, status=403, code="AccessDenied", message="Access Denied")
-        q = m.futures.trades(dm.ALL, refused_venues=OnError.RAISE)
+        q = m.futures.trades(dm.ALL, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE))
         with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.refused_venues"):
             t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
@@ -2390,7 +2425,9 @@ def test_a_venue_refused_on_one_day_is_skipped_for_the_whole_range(
     try:
         two_days_of_venues()
         fake_s3.refuse(REFUSED_0305, status=403, code="AccessDenied", message="Access Denied")
-        q = m.futures.trades(dm.ALL, venues=EVERY_VENUE, refused_venues=policy)
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=policy)
+        )
         with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
             t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
@@ -2411,7 +2448,9 @@ def test_a_read_under_log_that_s3_refuses_nothing_keeps_every_venue_quietly(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     two_days_of_venues()
-    q = session.futures.trades(dm.ALL, venues=EVERY_VENUE, refused_venues=OnError.LOG)
+    q = session.futures.trades(
+        dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+    )
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
         t = q.history("2025-03-04", "2025-03-04", wait=True)
     assert pick(t, "ReportSequence") == [(40,), (41,), (42,), (43,)]
@@ -2450,7 +2489,9 @@ def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
                     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
         later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
         fake_s3.refuse(later, status=403, code="AccessDenied", message="Access Denied")
-        q = m.futures.trades(dm.ALL, venues=EVERY_VENUE, refused_venues=OnError.LOG)
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
         with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
             t = q.history(start, end, wait=True)
         assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
@@ -2472,7 +2513,9 @@ def test_a_call_whose_only_venue_is_refused_past_the_range_end_raises(
     fake_s3.put(FUTURES_KEY.format("nymex", date(2025, 3, 4)), make_csv_gz(FUTURES_HEADER + row))
     later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
     fake_s3.refuse(later, status=403, code="AccessDenied", message="No")
-    q = session.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX}, refused_venues=OnError.IGNORE)
+    q = session.futures.trades(
+        dm.ALL, venues={FuturesVenue.NYMEX}, on_error=dm.ErrorPolicy(refused_venues=OnError.IGNORE)
+    )
     with pytest.raises(
         dm.EntitlementError,
         match=r"^the plan does not include the flat files of any venue requested \(NYMEX\): ",
@@ -2485,7 +2528,9 @@ def test_a_list_of_contracts_read_with_flat_files_forced_skips_a_refused_venue(
 ) -> None:
     two_days_of_venues()
     fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
-    q = session.futures.trades(["ESH5"], venues=EVERY_VENUE, refused_venues=OnError.LOG)
+    q = session.futures.trades(
+        ["ESH5"], venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+    )
     t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "ReportSequence") == [(40,), (41,), (43,)]
     assert "Massive refused the flat files of NYMEX" in t.attributes()["TableDescription"]
@@ -2509,7 +2554,9 @@ def test_a_refused_venues_rows_of_other_sessions_leave_no_session_uncertain(
         refused = FUTURES_KEY.format("nymex", date(2025, 3, 5))
         fake_s3.refuse(refused, status=403, code="AccessDenied", message="No")
         q = m.futures.trades(
-            dm.ALL, venues={FuturesVenue.CME, FuturesVenue.NYMEX}, refused_venues=OnError.LOG
+            dm.ALL,
+            venues={FuturesVenue.CME, FuturesVenue.NYMEX},
+            on_error=dm.ErrorPolicy(refused_venues=OnError.LOG),
         )
         t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (50,)]
@@ -2578,7 +2625,9 @@ def test_a_refused_venue_is_not_requested_again_in_the_call(
     try:
         two_days_of_venues()
         fake_s3.refuse("us_futures_cbot/", status=403, code="AccessDenied", message="Denied")
-        q = m.futures.trades(dm.ALL, venues=EVERY_VENUE, refused_venues=OnError.LOG)
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
         t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (42,), (43,), (50,), (52,), (53,)]
         # One reader at a time, in date and venue order: CBOT's second file is never asked for.
@@ -2592,7 +2641,9 @@ def test_a_refused_venue_is_not_requested_again_in_the_call(
 def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
     *, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
 ) -> None:
-    m = dm.MassiveSession(dataclasses.replace(CONFIG, refused_venues=OnError.IGNORE))
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=OnError.IGNORE))
+    )
     try:
         two_days_of_venues()
         for venue in ("cme", "nymex"):
@@ -2630,11 +2681,15 @@ def test_the_call_overrides_the_sessions_refused_venues(
     fake_s3: FakeS3,
     two_days_of_venues: Callable[[], None],
 ) -> None:
-    m = dm.MassiveSession(dataclasses.replace(CONFIG, refused_venues=configured))
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=configured))
+    )
     try:
         two_days_of_venues()
         fake_s3.refuse("us_futures_comex/", status=403, code="AccessDenied", message="No")
-        q = m.futures.trades(dm.ALL, venues=EVERY_VENUE, refused_venues=passed)
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=passed)
+        )
         if kept is not None:
             t = q.history("2025-03-04", "2025-03-04", wait=True)
             assert pick(t, "ReportSequence") == kept
@@ -2659,7 +2714,7 @@ def test_auto_reads_rest_for_a_refused_list_of_contracts_whatever_the_setting(
     two_days_of_venues()
     fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
     contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
-    q = session.futures.trades(contracts, refused_venues=OnError.LOG)
+    q = session.futures.trades(contracts, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG))
     t = q.history("2025-03-04", "2025-03-04", wait=True)
     assert pick(t, "Symbol") == [("from REST",)]
     assert len(rest.calls) == 1
@@ -3255,7 +3310,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         prefix="us_stocks_sip/trades_v1",
         request=request(dm.ALL),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
+        raw_symbol=False,
         warnings=WARNINGS,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
@@ -3285,7 +3340,7 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
             prefix="us_stocks_sip/trades_v1",
             request=request(dm.ALL),
             window=whole_days(STOCK_TRADES, "2025-03-03"),
-            unreadable_symbols=dm.OnError.RAISE,
+            raw_symbol=False,
             warnings=WARNINGS,
         )
         key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)

@@ -47,7 +47,7 @@ from deephaven import update_graph
 
 import deephaven_massive as dm
 from deephaven_massive._ingest import rate_limits
-from tests._live import doc_examples, streams, summary
+from tests._live import doc_examples, refusals, streams, summary
 from tests._live.calendar import NEW_YORK, is_trading_day
 from tests._live.tester.examples import guide_blocks
 
@@ -878,7 +878,10 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     bars to. Whatever Massive answered, the example must print its three lines (the latest
     trade, the live minute bars, the bars from 2015), and its `stocks.bars` stream must settle:
     `FAILED`, or running with its topic acknowledged or rows published; a missing line or an
-    unsettled stream fails the test. When Massive served either the bars of 2015 (the
+    unsettled stream fails the test. When a printed line is the library's refusal of data
+    Massive labels delayed and the example's default session does not list, the test skips,
+    quoting it: the guide's outcome needs a key Massive serves in real time or refuses. When
+    Massive served either the bars of 2015 (the
     example's line for them says no error) or the live bars (the stream runs), the test skips,
     saying what Massive served. Otherwise it passes when the latest trade and the bars from
     2015 are refused with `EntitlementError`, the live bars opened, and the `stocks.bars` row
@@ -916,6 +919,9 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     for start in _TESTER_LINES:
         label = start.split(": ")[0]
         assert any(line.startswith(f"{label}: ") for line in printed), f"no {label!r} line"
+    unlisted = [line for line in printed if refusals.is_not_listed_text(line)]
+    if unlisted:
+        pytest.skip(f"{summary.NOT_LISTED}{' '.join(unlisted[0].split())}")
     acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
     states = [row["State"] for row in rows]
     live = states == ["RUNNING"] and bool(acked or rows[0]["RowsPublished"])

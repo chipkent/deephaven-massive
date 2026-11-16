@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries import FetchQuery
 
@@ -122,6 +123,7 @@ def _statement_query(
     order: Order | None,
     limit: int | None,
     filters: Mapping[str, FilterValue] | None,
+    on_error: ErrorPolicy | None,
 ) -> FetchQuery:
     """Build the query of one financial statement, checking its `timeframe`.
 
@@ -136,6 +138,7 @@ def _statement_query(
         order: The sort direction, or None.
         limit: The cap on the total number of rows, or None.
         filters: The `filters` mapping, or None.
+        on_error: The call's policy, or None for none.
 
     Returns:
         The `FetchQuery`.
@@ -158,6 +161,7 @@ def _statement_query(
         order=order,
         limit=limit,
         filters=filters,
+        on_error=on_error,
     )
 
 
@@ -205,6 +209,7 @@ class StocksFinancialsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Balance sheets of US public companies, one row per filer and reporting period.
 
@@ -224,6 +229,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -263,6 +270,7 @@ class StocksFinancialsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_statement_query)
@@ -277,6 +285,7 @@ class StocksFinancialsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Income statements of US public companies, one row per filer and reporting period.
 
@@ -296,6 +305,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -327,6 +338,7 @@ class StocksFinancialsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_statement_query)
@@ -341,6 +353,7 @@ class StocksFinancialsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Cash flow statements of US public companies, one row per filer and reporting period.
 
@@ -360,6 +373,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -389,6 +404,7 @@ class StocksFinancialsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -400,6 +416,7 @@ class StocksFinancialsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 
@@ -414,6 +431,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -441,4 +460,5 @@ class StocksFinancialsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )

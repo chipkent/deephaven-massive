@@ -7,7 +7,7 @@ The specification of every futures product.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.products(*, product_code=None, as_of=None, sort=None, order=None, limit=None, filters=None)
+m.futures.products(*, product_code=None, as_of=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -28,6 +28,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of product codes caps every code's requests instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"sector": "precious"}`. Keys: `asset_class`, `asset_class_any_of`, `asset_sub_class`, `asset_sub_class_any_of`, `name`, `name_any_of`, `name_gt`, `name_gte`, `name_lt`, `name_lte`, `provider_id`, `sector`, `sector_any_of`, `sub_sector`, `sub_sector_any_of`, `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`, `type`, `type_any_of`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

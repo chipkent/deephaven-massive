@@ -567,13 +567,15 @@ def test_cash_dividends_are_never_adjusted(
 
     Finds the year's most recent special cash dividend of a common stock with no later split
     (`m.stocks.dividends`) and records the stock's day bars from a week before its ex-dividend
-    date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the ratio
-    of the adjusted to the as-traded close takes no step across the ex-dividend date: the same
-    ratio on every day, so `adjusted` concerns splits only, as the library documents, and an
-    adjustment for the dividend would show as a step on the ex-date. It tries up to three such
-    dividends, two requests each, after the run's search for them (`special_dividends`, up to
-    seven requests, sent once a run): at most 13 stock requests. Skips when the year had no such
-    dividend with bars.
+    date to two days after, with `adjusted=true` and `adjusted=false`, trying the next
+    dividend while a stock's bars differ by basis or miss a side of the ex-date (a thinly
+    traded stock may not trade for days). Passes when the ratio of the adjusted to the
+    as-traded close takes no step across the ex-dividend date: the same ratio on every day, so
+    `adjusted` concerns splits only, as the library documents, and an adjustment for the
+    dividend would show as a step on the ex-date. It tries up to three such dividends, two
+    requests each, after the run's search for them (`special_dividends`, up to seven requests,
+    sent once a run): at most 13 stock requests. Skips when no dividend tried has bars on both
+    sides.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -588,12 +590,17 @@ def test_cash_dividends_are_never_adjusted(
         traded = _days(
             live_session, dividend.symbol, span=span, adjusted=False, table_rows=table_rows
         )
-        if adjusted and adjusted.keys() == traded.keys():
+        ex_date = dividend.ex_date.isoformat()
+        both_sides = bool(adjusted) and min(adjusted) < ex_date <= max(adjusted)
+        if both_sides and adjusted.keys() == traded.keys():
             found = dividend, adjusted, traded
             break
-        evidence(f"{dividend.symbol} {span[0]}..{span[1]}: bars missing on a basis; next")
+        evidence(
+            f"{dividend.symbol} {span[0]}..{span[1]}: days {sorted(adjusted)} adjusted, "
+            f"{sorted(traded)} as traded: no bar on a basis or on a side of the ex-date; next"
+        )
     if found is None:
-        pytest.skip(f"no recent special cash dividend with bars: {dividends}")
+        pytest.skip(f"no recent special cash dividend with bars around it: {dividends}")
     dividend, adjusted, traded = found
     ratios = {
         day: float(adjusted[day]["Close"]) / float(traded[day]["Close"]) for day in sorted(adjusted)
@@ -604,8 +611,6 @@ def test_cash_dividends_are_never_adjusted(
     )
     before = [r for day, r in ratios.items() if day < dividend.ex_date.isoformat()]
     after = [r for day, r in ratios.items() if day >= dividend.ex_date.isoformat()]
-    assert before, f"no bar before the ex-date {dividend.ex_date}"
-    assert after, f"no bar on or after the ex-date {dividend.ex_date}"
     steps = [r / before[-1] - 1 for r in (*before, *after)]
     assert all(abs(step) <= _SAME_PRICE for step in steps), f"the ratio steps: {ratios}"
 
