@@ -35,9 +35,10 @@ block then goes through pure Arrow operations, in this order:
 3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds, which keeps a
    row whose time cannot be read, since no window can place it;
 4. on the rows left, the conversion of every header to its type, and the parsing of list
-   headers (`"12,37"` becomes `[12, 37]`): a value that does not parse is null, and its header
-   is reported in `DriftReport.unconvertible` with the first such text; then the rename from
-   CSV headers to the library's column names.
+   headers (`"12,37"` becomes `[12, 37]`): a value that does not parse, an integer text a
+   `double` header would round among them, is null, and its header is reported in
+   `DriftReport.unconvertible` with the first such text; then the rename from CSV headers to
+   the library's column names.
 
 A row left that the reader could not read whole is marked in the block's `RowMarks`:
 `RowFault.UNREADABLE_KEYS` for a key from step 2, else `RowFault.UNCONVERTIBLE_VALUES` for a
@@ -1112,15 +1113,61 @@ def _parsed(
     else:
         text = pc.utf8_trim_whitespace(text)
         convert = functools.partial(pc.cast, target_type=read_type)
-    try:
-        return convert(text), None
-    except pa.ArrowInvalid:
-        pass
+    rounded = _rounded_integers(text) if read_type == pa.float64() else None
+    if rounded is None:
+        try:
+            return convert(text), None
+        except pa.ArrowInvalid:
+            pass
     if list_type is None:
         failed = pc.invert(pc.fill_null(_parseable(text, read_type), fill_value=True))
     else:
         failed = _unparseable_lists(text, list_type.value_type)
+    if rounded is not None:
+        failed = pc.or_(failed, rounded)
     return convert(pc.if_else(failed, _NO_TEXT, text)), failed
+
+
+_LONG_INTEGER: Final = r"^[+-]?[0-9]{16,}$"
+"""An integer's text with enough digits that a double may not hold it exactly (past 2**53)."""
+
+
+def _rounded_integers(text: pa.Array) -> pa.Array | None:
+    """Find the integers' texts a double would round, which a `double` header must not take.
+
+    Arrow parses `9007199254740993` into a `double` as `9007199254740992.0`, a value Massive
+    never sent. Only a text of 16 digits or more can be past 2**53, so one vectorized match
+    finds the few candidates, and only those are checked in Python, exactly.
+
+    Args:
+        text: A `double` header's text, its spaces trimmed.
+
+    Returns:
+        The mask of the texts a double would round; None when there is none.
+    """
+    long = pc.fill_null(pc.match_substring_regex(text, _LONG_INTEGER), fill_value=False)
+    candidates = pc.indices_nonzero(long).to_pylist()
+    rounded = [row for row in candidates if _rounds(int(text[row].as_py()))]
+    if not rounded:
+        return None
+    marked = set(rounded)
+    return pa.array([row in marked for row in range(len(text))])
+
+
+def _rounds(value: int) -> bool:
+    """Tell whether a double holds an integer only rounded, or not at all.
+
+    Args:
+        value: The integer.
+
+    Returns:
+        True when its nearest double differs from it (Python compares the two exactly), or it
+        is beyond every finite double.
+    """
+    try:
+        return float(value) != value
+    except OverflowError:
+        return True
 
 
 def _parseable(text: pa.Array, read_type: pa.DataType) -> pa.Array:

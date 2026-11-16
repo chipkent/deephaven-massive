@@ -1162,3 +1162,23 @@ def test_a_row_whose_key_cannot_be_read_never_changes_how_other_rows_convert(
     assert batch["Price"].to_pylist() == [1.5, None]
     assert report.unconvertible == frozenset()
     assert marks[RowFault.UNREADABLE_KEYS].rows == (1,)
+
+
+def test_an_integer_a_double_would_round_is_marked_and_one_it_holds_reads(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow would read 9007199254740993 as ...992.0, a price Massive never sent; 2**60 and a
+    # decimal text are what Massive sent, so they read.
+    rows = "".join(
+        f",,4,{n},1,{price},1,1741012200000000000,10,1,AAPL,,\n"
+        for n, price in enumerate(
+            ("9007199254740993", str(2**60), "9007199254740993.5", "1" + "0" * 400), 1
+        )
+    )
+    with opened(KEY, TRADE_HEADER + rows) as file:
+        [(batch, report, marks)] = list(file.batches(plan()))
+    assert batch["Price"].to_pylist() == [None, 2.0**60, 9007199254740994.0, None]
+    assert report.unconvertible == frozenset({"price"})
+    mark = marks[RowFault.UNCONVERTIBLE_VALUES]
+    assert (mark.rows, mark.fields) == ((0, 3), ("Price", "Price"))
+    assert mark.reasons[0] == "price holds '9007199254740993', which is not double"
