@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._massive import RestPath
+    from deephaven_massive._tables.transports import Unsplit
 
 __all__ = [
     "BARE_INDEX_PARAM",
@@ -88,7 +89,7 @@ BARE_INDEX_PARAM: Final = "underlying_ticker"
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
 the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
 
-CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | str]"
+CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | Unsplit]"
 """Splits a crypto ticker into its base and quote currencies, or says why Massive has no data for
 it (`RestReader.crypto_pair`)."""
 
@@ -235,7 +236,7 @@ def _filter_days(
     return sent
 
 
-def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str] | str:
+def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str] | Unsplit:
     """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
 
     Args:
@@ -247,7 +248,7 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
 
     Returns:
         The base and quote currencies, such as `("EUR", "USD")`, or, for a crypto pair `split`
-        gives none for, why Massive has no data for it.
+        gives none for, why (`Unsplit`).
 
     Raises:
         ValueError: If the dataset's class has no currency pairs.
@@ -354,9 +355,10 @@ def _symbol_parts(
 
     Returns:
         `(symbol, path parameters, query parameters, no data)` per request: `symbol` is set for
-        a per-symbol request, and `no data` says why a pair `split` gives no currencies for has
-        no data (`Call.no_data`). Empty for an empty symbol tuple (a reactive table with no
-        valid row).
+        a per-symbol request, and `no data` says why Massive has no data for a pair `split`
+        gives no currencies for (`Call.no_data`). A pair whose currencies `split` cannot read
+        gets no request at all: the lookup has reported it. Empty for an empty symbol tuple (a
+        reactive table with no valid row).
 
     Raises:
         ValueError: If the path needs a symbol per request and the symbols are `dm.ALL` or
@@ -391,10 +393,11 @@ def _symbol_parts(
             for i in range(0, len(explicit), size)
         ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
-    return [
+    requests = [
         _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
         for symbol in explicit
     ]
+    return [request for request in requests if request is not None]
 
 
 def _symbol_request(
@@ -405,14 +408,14 @@ def _symbol_request(
     targets: Sequence[str],
     param: str | None,
     split: CryptoSplit,
-) -> tuple[str, dict[str, object], dict[str, object], str | None]:
+) -> tuple[str, dict[str, object], dict[str, object], str | None] | None:
     """Return the parameters of one symbol's request.
 
     The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
     path placeholder or a query parameter the symbol itself. The symbol parameter, when the
     path has one, takes the symbol too: as a one-symbol tuple when it takes a list. A crypto
-    pair `split` gives no currencies for leaves `{from}/{to}` unfilled and gets why it has no
-    data, so the call is never sent.
+    pair Massive has no data for leaves `{from}/{to}` unfilled and gets why, so the call is
+    never sent; a pair whose currencies `split` cannot read gets no request.
 
     Args:
         spec: The dataset, for messages.
@@ -424,8 +427,8 @@ def _symbol_request(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters, no data)`: why the symbol has no data, or
-        None.
+        `(symbol, path parameters, query parameters, no data)`, with why Massive has no data
+        for the symbol or None; None for a pair whose currencies cannot be read.
     """
     params = {p.name: p for p in rest_path.params}
     path: dict[str, object] = {}
@@ -434,10 +437,12 @@ def _symbol_request(
     for name in targets:
         if name == "from" and "to" in params:
             currencies = _pair(spec, symbol, split)
-            if isinstance(currencies, str):
-                no_data = currencies
-            else:
+            if isinstance(currencies, tuple):
                 path["from"], path["to"] = currencies
+            elif currencies.no_data:
+                no_data = currencies.why
+            else:
+                return None
         elif params[name].in_path:
             path[name] = symbol
         else:

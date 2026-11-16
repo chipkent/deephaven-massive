@@ -213,7 +213,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.transports import HostDecision, SymbolOutcome
+    from deephaven_massive._tables.transports import HostDecision, SymbolOutcome, Unsplit
 
 __all__ = [
     "RestEndpoints",
@@ -611,8 +611,10 @@ class RestReader:
         """
         return self.catalog.rest_path(template)
 
-    def crypto_pair(self, symbol: str, *, cancel: Cancel | None = None) -> tuple[str, str] | str:
-        """Return a crypto ticker's currencies, or why Massive has no data for it.
+    def crypto_pair(
+        self, symbol: str, *, cancel: Cancel | None = None
+    ) -> tuple[str, str] | Unsplit:
+        """Return a crypto ticker's currencies, or why it has none (`Unsplit`).
 
         The session's `CryptoTickerList.pair` (`_ingest/crypto_tickers.py`), read through this
         reader: it may read Massive's whole crypto ticker list, once per session, blocking the
@@ -2284,8 +2286,8 @@ class RestEndpoints:
         """
         return self._reader("schedules").rows(template, query, bucket=bucket, cancel=cancel)
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str] | str:
-        """Return a crypto ticker's base and quote, or why Massive has no data for it.
+    def crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
+        """Return a crypto ticker's base and quote, or why it has none (`Unsplit`).
 
         The WebSocket transport calls it on its `symbol changes` worker, for a crypto ticker
         (`RestReader.crypto_pair`), from the session's crypto ticker list, read once.

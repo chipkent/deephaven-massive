@@ -27,7 +27,7 @@ from deephaven_massive._enums import Recency
 from deephaven_massive._ingest import ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import NOT_LISTED
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive._tables.transports import HostDecision, Unsplit
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import SymbolStreamQuery
 
@@ -178,7 +178,7 @@ class WsSession:
         self._opens = 0
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
-        self.pair_answers: dict[str, tuple[str, str] | str | Exception] = dict(PAIRS)
+        self.pair_answers: dict[str, tuple[str, str] | Unsplit | Exception] = dict(PAIRS)
         self.config = dataclasses.replace(
             _DEFAULTS,
             flush_interval=flush_interval,
@@ -264,7 +264,7 @@ class WsSession:
             self.cond.notify_all()
             return list(self.rows.get(template, []))
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str] | str:
+    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.
 
         Returns:

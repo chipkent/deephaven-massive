@@ -1514,7 +1514,7 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
     calls = [call for _, calls in planned for call in calls]
     assert [(call.symbol, call.no_data) for call in calls] == [
         ("X:BTCUSD", None),
-        ("X:DOTUSD", NOT_LISTED),
+        ("X:DOTUSD", NOT_LISTED.why),
     ]
     assert left_out == []
     config = dm.MassiveConfig(
@@ -4773,7 +4773,7 @@ def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSe
     # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
     path = _endpoints(session)._reader("call-1").rest_path(CRYPTO_LAST_PATH)
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
-    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
+    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED.why)
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
 
 

@@ -36,6 +36,7 @@ from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, WireError
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.transports import Unsplit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,8 +65,8 @@ REREAD_AFTER: Final = 3600.0
 """The seconds after which a ticker the crypto list does not hold makes the session read the list
 again, so a pair Massive lists later is found without a restart, at most once an hour."""
 
-NOT_LISTED: Final = "Massive's crypto ticker list does not hold it"
-"""Why a pair the list does not hold has no data, for the log and a table's `Error`."""
+NOT_LISTED: Final = Unsplit("Massive's crypto ticker list does not hold it", no_data=True)
+"""A pair the list does not hold: one Massive has no data for."""
 
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
@@ -147,8 +148,8 @@ class CryptoTickerList:
         reader: TickerListReader,
         unreadable: OnError,
         cancel: Cancel | None = None,
-    ) -> tuple[str, str] | str:
-        """Return a crypto ticker's base and quote currencies, or why Massive has no data for it.
+    ) -> tuple[str, str] | Unsplit:
+        """Return a crypto ticker's base and quote currencies, or why it has none.
 
         The session reads Massive's whole list of crypto tickers once, on first need
         (`/v3/reference/tickers?market=crypto`, every page, first with `active=true` and then
@@ -167,7 +168,8 @@ class CryptoTickerList:
         A ticker the list does not hold is one Massive has no data for. A listed ticker whose
         currencies do not join to it is Massive's data in a form the library cannot read, a
         library bug, which follows `unreadable_symbols`: logged once at ERROR under `LOG`, at
-        DEBUG under `IGNORE`, and in both the pair has no split.
+        DEBUG under `IGNORE`, and in both the pair has no split, which is not Massive's
+        absence of data, so `unavailable_symbols` never applies to it.
 
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
@@ -180,8 +182,7 @@ class CryptoTickerList:
 
         Returns:
             `(base, quote)`, such as `("DOT", "USD")`; or, for a pair with no split, why
-            (`NOT_LISTED`, or the currencies that do not join), which the caller reports as a
-            symbol with no data.
+            (`NOT_LISTED`, or the currencies that do not join).
 
         Raises:
             RowDataError: Under `unreadable_symbols=RAISE`, for a listed ticker whose
@@ -211,6 +212,7 @@ class CryptoTickerList:
                 raise RowDataError(f"{where}: {entry}. {LIBRARY_BUG}")
             unjoined = _logged_unjoined if effect.level > logging.DEBUG else _ignored_unjoined
             unjoined.log(symbol, "%s: %s; the pair gets no rows. %s", where, entry, LIBRARY_BUG)
+            return Unsplit(entry, no_data=False)
         return entry
 
     def _listed(self, where: str, reader: TickerListReader, cancel: Cancel | None) -> CryptoTickers:
@@ -358,7 +360,7 @@ def recording_split(pair: CryptoSplit, recorded: dict[str, MassiveError]) -> Cry
         A split that returns `("", "")` for a pair it recorded.
     """
 
-    def split(symbol: str) -> tuple[str, str] | str:
+    def split(symbol: str) -> tuple[str, str] | Unsplit:
         try:
             return pair(symbol)
         except MassiveError as error:

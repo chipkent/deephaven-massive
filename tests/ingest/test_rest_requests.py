@@ -15,6 +15,7 @@ from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
+from deephaven_massive._tables.transports import Unsplit
 
 R = Transport.REST
 
@@ -522,3 +523,23 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     assert rest_requests._symbol_request(
         news, "AAPL", path, targets=[], param="ticker", split=split_pair
     ) == ("AAPL", {}, {"ticker": "AAPL"}, None)
+
+
+def test_a_pair_with_no_split_is_a_call_with_no_data_or_no_call() -> None:
+    # Massive has no data for a pair its list does not hold: a call that is never sent. A
+    # pair whose currencies cannot be read, which the lookup reported, gets no call.
+    path = _rest_path(CRYPTO_LAST_PATH)
+
+    def missing(_symbol: str) -> Unsplit:
+        return Unsplit("not listed", no_data=True)
+
+    def unreadable(_symbol: str) -> Unsplit:
+        return Unsplit("do not join", no_data=False)
+
+    assert rest_requests._symbol_request(
+        CRYPTO_LAST, "X:DOTUSD", path, targets=["from"], param=None, split=missing
+    ) == ("X:DOTUSD", {}, {}, "not listed")
+    calls = rest_requests.plan_calls(
+        CRYPTO_LAST, path, Request(), symbols=("X:DOTUSD",), split=unreadable
+    )
+    assert calls == []

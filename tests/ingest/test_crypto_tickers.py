@@ -17,17 +17,22 @@ from deephaven_massive._ingest.crypto_tickers import (
 )
 from deephaven_massive._ingest.rest_requests import largest_page
 from deephaven_massive._massive import Transport, source
+from deephaven_massive._tables.transports import Unsplit
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from concurrent.futures import Future
 
+
 LOGGER = "deephaven_massive._ingest.crypto_tickers"
 
 LIST_QUERY = {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}
 """The query of the first page of Massive's list of listed crypto tickers."""
-UNJOINED = "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not join to it"
+UNJOINED = Unsplit(
+    "Massive's reference data gives the currencies 'DOT' and 'USDT', which do not join to it",
+    no_data=False,
+)
 """Why `X:DOTUSD` has no split when Massive lists it as `DOT` and `USDT`."""
 DELISTED_QUERY = {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}
 """The query of the first page of Massive's list of delisted crypto tickers."""
@@ -72,7 +77,7 @@ def test_a_path_without_a_documented_page_size_is_refused() -> None:
 
 
 def test_a_recording_split_records_a_failed_lookup_and_passes_on_no_data() -> None:
-    def pair(symbol: str) -> tuple[str, str] | str:
+    def pair(symbol: str) -> tuple[str, str] | Unsplit:
         if symbol == "X:ABCUSD":
             return NOT_LISTED
         if symbol == "X:DEFUSD":
@@ -165,7 +170,7 @@ def test_a_crypto_pair_lookup_never_guesses(
     session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     rows: list[dict[str, object]],
-    message: str | None,
+    message: Unsplit | None,
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope(rows)), Reply(envelope([])))
     reader = _endpoints(session)._reader("call-1")
@@ -199,7 +204,9 @@ def test_a_listed_pair_whose_currencies_do_not_join_is_a_library_bug(
     try:
         reader = _endpoints(m)._reader("call-1")
         with caplog.at_level(logging.DEBUG, logger=LOGGER):
-            assert "do not join" in str(reader.crypto_pair("X:XYZUSD"))
+            found = reader.crypto_pair("X:XYZUSD")
+        assert isinstance(found, Unsplit)
+        assert (found.no_data, "do not join" in found.why) == (False, True)
         [record] = [r for r in caplog.records if "do not join" in r.getMessage()]
         assert record.levelno == level
         assert LIBRARY_BUG in record.getMessage()

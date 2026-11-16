@@ -59,7 +59,25 @@ __all__ = [
     "SymbolFailure",
     "SymbolOutcome",
     "SymbolRows",
+    "Unsplit",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class Unsplit:
+    """Why a crypto pair has no split into its two currencies (`RestTransport.crypto_pair`).
+
+    Attributes:
+        why: The reason, for the log and a table's `Error`, such as `"Massive's crypto ticker
+            list does not hold it"`.
+        no_data: True when Massive's crypto ticker list does not hold the pair: Massive has no
+            data for it, and `MassiveConfig.unavailable_symbols` applies. False when the list
+            holds it with currencies that do not join to it: data the library cannot read,
+            which the lookup has already reported under `unreadable_symbols`.
+    """
+
+    why: str
+    no_data: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +221,7 @@ class RestTransport(Protocol):
         """
         ...
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str] | str:
+    def crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote, or why Massive has no data for it.
 
         Called by the WebSocket transport for each crypto ticker of a stream, on its
@@ -217,7 +235,7 @@ class RestTransport(Protocol):
 
         Returns:
             `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`; or, for a ticker the list
-            gives no split for, why, such as `"Massive's crypto ticker list does not hold it"`.
+            gives no split for, why (`Unsplit`).
 
         A failed read raises a `MassiveError` naming the ticker.
         """

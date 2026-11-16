@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         FlatFileTransport,
         HostDecision,
         StreamTransport,
+        Unsplit,
     )
 
 __all__ = ["CONNECTION_SETTINGS", "SessionClients"]
@@ -218,7 +219,7 @@ class SessionClients:
         """
         return self.rest().resolve_host(asset_class, family)
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str] | str:
+    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote through the session's REST transport.
 
         Args:
@@ -226,7 +227,7 @@ class SessionClients:
 
         Returns:
             `(base, quote)`, from the list the REST transport keeps for the session, or why
-            Massive has no data for the pair.
+            the pair has none (`Unsplit`).
         """
         return self.rest().crypto_pair(symbol)
 

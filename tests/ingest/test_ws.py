@@ -48,7 +48,7 @@ from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
 from deephaven_massive._tables.execution_context import entered, update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.stream import open_stream_tables
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive._tables.transports import HostDecision, Unsplit
 from deephaven_massive._tables.watchlist import SymbolWatch
 from tests._fakes.clock import FakeClock
 from tests._fakes.ws_session import REALTIME, TIMEOUT
@@ -2157,6 +2157,11 @@ def test_a_crypto_stream_names_every_form_of_symbols() -> None:
             AssetClass.CRYPTO,
             ["X:BTCUSD"],  # type: ignore[arg-type]  # the point: refused at run time
         )
+    with pytest.raises(AssertionError):
+        ws._pairs_to_split(
+            "metals",  # type: ignore[arg-type]  # the point: a class no case names is refused
+            ("X:BTCUSD",),
+        )
 
 
 def test_every_pair_is_looked_up_off_the_callers_thread(
@@ -2177,9 +2182,7 @@ def test_every_pair_is_looked_up_off_the_callers_thread(
         ws_session.session.release(table)
 
 
-NO_DATA_ERROR = (
-    "Massive has no data for 1 [X:ETHTUSD (Massive's crypto ticker list does not hold it)]"
-)
+NO_DATA_ERROR = "skipped 1 [X:ETHTUSD (Massive's crypto ticker list does not hold it)]"
 
 
 @pytest.fixture
@@ -2393,6 +2396,49 @@ def test_a_pair_list_failure_no_retry_can_fix_fails_the_stream_at_once(
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
 
 
+def test_a_pair_whose_currencies_do_not_join_is_skipped_but_is_not_a_missing_symbol(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The lookup reported it under unreadable_symbols: unavailable_symbols=RAISE never fails
+    # the stream over it.
+    ws_session = make_ws_session(unavailable_symbols=dm.OnError.RAISE)
+    ws_session.pair_answers["X:DOTUSD"] = Unsplit("its currencies do not join", no_data=False)
+    result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    wait_for(
+        lambda: (
+            stream_error(ws_session, dh_to_pylist)
+            == "skipped 1 [X:DOTUSD (its currencies do not join)]"
+        )
+    )
+    ws_session.session.release(result)
+
+
+def test_waiting_pairs_fail_their_stream_at_max_outage_even_while_a_lookup_waits(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The outage's timer runs on the connection's loop, not the worker, so a lookup that
+    # waits out a rate-limit pause cannot hold the stream past max_outage. A timer of an
+    # outage that ended, or of none, changes nothing.
+    result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    connections = ws_session.connections
+    (stream_id,) = connections._mine
+    connections._pairs_expired(stream_id, 1.0)  # no wait: nothing
+    with connections._lock:
+        state = connections._pair_states[stream_id]
+        state.waiting, state.since = {"X:DOTUSD"}, 5.0
+        state.failure = dm.MassiveError("HTTP 503: busy", status=503)
+    connections._pairs_expired(stream_id, 4.0)  # another wait's timer: nothing
+    assert not failed_after_flush(ws_session, result)
+    connections._pairs_expired(stream_id, 5.0)
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert "longer than MassiveConfig.max_outage" in row["Error"]
+
+
 def test_a_pair_removed_while_it_waits_is_never_subscribed(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -2439,7 +2485,7 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     connections._schedule_retry(999, 0.0)
     connections._fail(999, dm.MassiveError("gone"))
     state = ws._PairState()
-    assert connections._wait(999, state, no_data={}, waiting=[], failure=None) is None
+    assert connections._wait(999, state, skipped={}, waiting=[], failure=None) is None
     assert ws._PairState().note() is None
     result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
@@ -2447,7 +2493,7 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     updates: list[object] = []
     monkeypatch.setattr(ws_session.session._core, "update_streams", updates.append)
     monkeypatch.setattr(connections, "_core", lambda: None)
-    connections._show_pairs(stream_id, ws._PairState(no_data={"X:ETHTUSD": "not listed"}))
+    connections._show_pairs(stream_id, ws._PairState(skipped={"X:ETHTUSD": "not listed"}))
     monkeypatch.undo()
     assert updates == []
     ws_session.session.release(result)
@@ -2626,7 +2672,7 @@ def test_a_removal_never_overtakes_a_slow_lookup_of_the_same_pair(
     change = ws_session.connections._change_pairs
     done: list[tuple[list[str], list[str]]] = []
 
-    def slow(symbol: str) -> tuple[str, str] | str:
+    def slow(symbol: str) -> tuple[str, str] | Unsplit:
         if symbol == "X:DOTUSD":
             started.set()
             assert gate.wait(TIMEOUT)
