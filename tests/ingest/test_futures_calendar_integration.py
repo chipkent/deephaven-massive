@@ -8,7 +8,8 @@ what the contract and snapshot lookups cost, with a `date` and nested `fields` a
 whether a combo's snapshot product places its trades in Massive's own session; whether the
 trades path reads a combo whose ticker holds `:` or a space, and spelled how; how often
 contracts are listed, and which tickers the snapshot or the contracts list lacks; how far
-ahead each product's schedule reaches; and whether any trade falls outside every session. Each
+ahead each product's schedule reaches; whether any trade falls outside every session; and
+Massive's whole answers where those checks found data missing, to quote to Massive. Each
 test sends REST requests only and records what Massive sent (`evidence`), except the
 streamed-tickers test, which streams every futures trade on the key's WebSocket for 10
 minutes: it is marked `integration_all_symbols`, so `-m integration` leaves it out and
@@ -2216,3 +2217,151 @@ def test_streamed_futures_tickers_are_listed(
     _record_unlisted_singles(live_rest, singles, evidence)
     _record_streamed_in_neither(live_rest, seen, evidence)
     assert seen, f"no futures trade arrived in {_STREAM_SECONDS:.0f} s, though trades were due"
+
+
+_TAS_UNDERLYINGS = {
+    "BZT": "BZ",
+    "CLT": "CL",
+    "GFT": "GF",
+    "HET": "HE",
+    "HG0": "HG",
+    "HGT": "HG",
+    "HOT": "HO",
+    "KET": "KE",
+    "LET": "LE",
+    "NGT": "NG",
+    "PAT": "PA",
+    "PLT": "PL",
+    "RBT": "RB",
+    "SBT": "ZS",
+    "SIT": "SI",
+    "ZCT": "ZC",
+    "ZLT": "ZL",
+    "ZMT": "ZM",
+    "ZWT": "ZW",
+}
+"""The products two runs found traded within 7 days with no schedule, each with the product of
+the futures contract it settles to. CME's contract specifications name `CLT`, `HGT`, and `HG0`
+as Trade at Settlement (TAS) products; the others are taken to be TAS products from CME notices
+and filings."""
+
+_UNLISTED_STREAMED = ("6E:XF:EURUSD:Z6", "SR1H7-ZQH7", "0BTZ9", "0NANHZ601")
+"""Tickers a run streamed that neither the snapshot nor the contracts list held: a CME FX Link
+spread, a 1-Month SOFR against 30-Day Fed Funds spread, and two single contracts."""
+
+_SPACED_COMBO = "CL:BZ F7-G7"
+"""A combo whose ticker holds `:` and a space, for which a run read no trades."""
+
+_DASHED_COMBO = "CLZ7-CLM8"
+"""A combo whose ticker holds neither, traded the same second, for which that run read 10."""
+
+
+def _record_body(
+    client: RestClient,
+    label: str,
+    path: str,
+    *,
+    query: Mapping[str, object],
+    evidence: Evidence,
+) -> dict[str, Any] | None:
+    """Read one page of a futures path and record its whole body, or Massive's refusal.
+
+    The query's `ticker` fills a path's `{ticker}`, which the REST client percent-encodes.
+
+    Returns:
+        The body, or None when Massive refused the request (`_refused`).
+
+    Raises:
+        WireError: When the read fails other than by a refusal.
+    """
+    path_params = {"ticker": query["ticker"]} if "{ticker}" in path else {}
+    rest = {key: value for key, value in query.items() if key not in path_params}
+    try:
+        page = client.get(source(Transport.REST, path), path_params, rest, bucket="futures")
+    except WireError as error:
+        if not _refused(error):
+            raise
+        evidence(f"{label}: refused: {error}")
+        return None
+    body = page.body if isinstance(page.body, dict) else {"body": page.body}
+    evidence(f"{label}: {json.dumps(body, default=str)}")
+    return body
+
+
+def _record_first_singles(
+    client: RestClient, codes: Sequence[str], *, day: date, evidence: Evidence
+) -> None:
+    """Record the first single contract a day's contracts list holds for each product.
+
+    Asks for the products' single contracts on `day`, up to 2 pages, and records how many
+    rows each product had and its first row whole.
+    """
+    query = {"product_code.any_of": list(codes), "date": day, "type": "single", "limit": _LIST_PAGE}
+    rows, pages, ended = _read_pages(client, _CONTRACTS, query, most=2)
+    firsts: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        firsts.setdefault(str(row.get("product_code")), row)
+    evidence(
+        f"single contracts of {list(codes)} on {day}: {len(rows)} rows in {pages} pages "
+        f"({'the whole list' if ended else 'more follow: a lower bound'}), by product "
+        f"{dict(Counter(str(row.get('product_code')) for row in rows))}"
+    )
+    for code in codes:
+        evidence(f"first single contract of {code}: {json.dumps(firsts.get(code), default=str)}")
+
+
+@pytest.mark.settles("134", "135", "136", "137")
+@pytest.mark.requests(15)
+@pytest.mark.timeout(300)
+def test_response_bodies_of_futures_gaps(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """Record Massive's whole answers where earlier runs found futures data missing.
+
+    Earlier runs recorded counts only: products with no schedule, taken to be CME Trade at
+    Settlement (TAS) products; streamed tickers that neither the snapshot nor the contracts
+    list held; and a combo whose ticker holds `:` and a space, whose trades path read nothing.
+    This records the bodies themselves, to quote to Massive. Asks the schedules for the latest
+    session of `CLT` and of its underlying `CL` (`sort=session_end_date.desc`, `limit=1`); the
+    products records of the 19 TAS products and their 18 underlyings, in one request; the
+    contracts active on the latest day the contracts list holds for the TAS products, and the
+    first such single contract of each underlying (up to 2 pages); the snapshot and that day's
+    contracts for two of the streamed tickers in neither, an FX Link spread and a SOFR against
+    Fed Funds spread, with the two single contracts beside them; and the snapshot and the
+    latest 10 trades of `CL:BZ F7-G7` and of `CLZ7-CLM8`, each ticker as the library sends it.
+    Records each body whole, or Massive's refusal; for the underlyings' contracts, the first
+    row of each product and the count of rows.
+
+    Passes when every request is answered or refused; the bodies are evidence. Sends at most
+    15 requests: up to 4 to find the contracts list's latest day, and 11 more.
+
+    Raises:
+        WireError: When a read fails other than by a refusal.
+    """
+    for code in ("CLT", "CL"):
+        schedules = {"product_code": code, "sort": "session_end_date.desc", "limit": 1}
+        _record_body(
+            live_rest, f"schedules of {code}", _SCHEDULES, query=schedules, evidence=evidence
+        )
+    tas = sorted(_TAS_UNDERLYINGS)
+    underlyings = sorted(set(_TAS_UNDERLYINGS.values()))
+    products: dict[str, object] = {"product_code.any_of": tas + underlyings, "limit": 100}
+    _record_body(live_rest, "products", _PRODUCTS, query=products, evidence=evidence)
+    day = _listed_day(live_rest, evidence)
+    contracts: dict[str, object] = {"product_code.any_of": tas, "date": day, "limit": _LIST_PAGE}
+    _record_body(
+        live_rest, "contracts of the TAS products", _CONTRACTS, query=contracts, evidence=evidence
+    )
+    _record_first_singles(live_rest, underlyings, day=day, evidence=evidence)
+    unlisted: dict[str, object] = {"ticker.any_of": list(_UNLISTED_STREAMED), "limit": _LIST_PAGE}
+    label = f"of {list(_UNLISTED_STREAMED)}"
+    _record_body(live_rest, f"snapshot {label}", _SNAPSHOT, query=unlisted, evidence=evidence)
+    listed = {**unlisted, "date": day}
+    _record_body(
+        live_rest, f"contracts {label} on {day}", _CONTRACTS, query=listed, evidence=evidence
+    )
+    combos = [_SPACED_COMBO, _DASHED_COMBO]
+    snapshot: dict[str, object] = {"ticker.any_of": combos}
+    _record_body(live_rest, f"snapshot of {combos}", _SNAPSHOT, query=snapshot, evidence=evidence)
+    for ticker in combos:
+        trades = {"ticker": ticker, "sort": "timestamp.desc", "limit": 10}
+        label = f"trades of {ticker!r}, path {quote(ticker, safe='')}"
+        _record_body(live_rest, label, _TRADES, query=trades, evidence=evidence)
