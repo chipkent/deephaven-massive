@@ -455,7 +455,9 @@ class SymbolConvention(StrEnum):
     - `CMS`: the root, a space, and a suffix, as many broker and FIX systems write it; a class
       is ` B` (`BRK B`), a preferred ` PR` and its optional series (`BAC PRL`).
 
-    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only.
+    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only. Each names a source of symbols, not an
+    exchange: pick the one the tickers came from, not where the stock trades. `NASDAQ` reads
+    `BRK-B` as a preferred, `BRKpB`, whatever exchange lists Berkshire.
 
     Example:
         ::

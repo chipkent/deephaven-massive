@@ -1303,7 +1303,7 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
