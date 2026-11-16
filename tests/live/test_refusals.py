@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from deephaven_massive import Subscription
 from deephaven_massive._errors import EntitlementError, ErrorSource
 from deephaven_massive._ingest.host_decision import require_real_time
-from deephaven_massive._ingest.recency_labels import DelayedDataError
+from deephaven_massive._ingest.recency_labels import DelayedDataError, delayed_refusal
 from deephaven_massive._massive import WireEntitlementError
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 from tests._live import refusals
@@ -102,3 +103,14 @@ def test_the_librarys_refusal_of_a_real_time_only_stream_is_matched() -> None:
 def test_only_massives_own_refusal_counts_as_massives(error: Exception, *, massive: bool) -> None:
     """An entitlement error the library built, with no status or another source, is not one."""
     assert refusals.is_massive_refusal(error) is massive
+
+
+@pytest.mark.parametrize("streams", [True, False])
+def test_the_settings_refusal_of_delayed_data_is_matched_by_its_text(*, streams: bool) -> None:
+    # A background read reports the library's refusal only as its streams row's text.
+    error = delayed_refusal(
+        Subscription.STOCKS, "stocks.snapshots data", "timeframe=DELAYED", streams=streams
+    )
+    assert refusals.is_not_listed_text(f"read failed: {error}")
+    assert not refusals.is_not_listed_text("HTTP 403 from GET /v3/x on api.massive.com: no")
+    assert not refusals.is_not_listed_text(None)

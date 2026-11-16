@@ -459,7 +459,8 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     A run whose feed crosses from one session to another while it watches is skipped after
     the checks that hold at any hour. When Massive refuses Example 7's snapshot or Example
     12's streams, whose tables fail in the background, the test skips, quoting Massive,
-    before checking that example.
+    before checking that example; so too when the library refuses them as delayed data the
+    settings file does not list, quoting the library.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     delayed = dm.Subscription.STOCKS in live_config.delayed_subscriptions
@@ -539,9 +540,10 @@ def _check_snapshot(
 ) -> None:
     """Check Example 7: a snapshot of three stocks, with the columns its text names.
 
-    The snapshot reads in the background, so Massive's refusal fails its table instead of
-    raising: the check waits for rows or a failed read in `m.streams()`, skips, quoting
-    Massive, on a refusal, and fails on any other failed read. Massive empties its snapshots
+    The snapshot reads in the background, so a refusal fails its table instead of raising:
+    the check waits for rows or a failed read in `m.streams()`, skips on Massive's refusal,
+    quoting Massive, or on delayed data the settings file does not list, quoting the library,
+    and fails on any other failed read. Massive empties its snapshots
     from 03:30 to 04:00 New York time, and on the delayed feed refills them later by a lag the
     tests do not know, so there an empty snapshot is recorded, not failed.
 
@@ -549,7 +551,8 @@ def _check_snapshot(
         ran: Example 7's `m` and `snapshot`.
         delayed: Whether the settings file lists stocks as delayed.
         table_rows: Snapshots a table into rows.
-        skip_if_not_entitled: Skips when Massive refused a read of the session.
+        skip_if_not_entitled: Skips when Massive or the settings refused a read of the
+            session.
         evidence: Records what the snapshot held.
     """
     session, snapshot = ran["m"], ran["snapshot"]
@@ -806,14 +809,15 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     Runs the example as the guide gives it with the main key. It sends the key's stocks two
     requests, each of which may wait out a limited subscription's pace inside the console's
     patience. The guide describes a key Massive refuses the bars of 2015 and the live minute
-    bars to: when Massive served either, shown by the example's line for the bars of 2015, or
-    by a running `stocks.bars` stream whose topic Massive acknowledged or that published rows,
-    the test records the printed lines and skips, saying what Massive served. Otherwise it
-    passes when it prints the guide's three lines (the latest trade and the bars from 2015
-    refused with `EntitlementError`, the live bars opened), and the `stocks.bars` row of
-    `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
-    `AM.AAPL`, or Massive's rejection of the key. A missing line or a stream that settled
-    neither way fails it.
+    bars to. Whatever Massive answered, the example must print its three lines (the latest
+    trade, the live minute bars, the bars from 2015), and its `stocks.bars` stream must settle:
+    `FAILED`, or running with its topic acknowledged or rows published; a missing line or an
+    unsettled stream fails the test. When Massive served either the bars of 2015 (the
+    example's line for them says no error) or the live bars (the stream runs), the test skips,
+    saying what Massive served. Otherwise it passes when the latest trade and the bars from
+    2015 are refused with `EntitlementError`, the live bars opened, and the `stocks.bars` row
+    of `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
+    `AM.AAPL`, or Massive's rejection of the key.
     """
     code = guide_blocks(TESTER_GUIDE.read_text(encoding="utf-8"))[10]
     run = _console(tmp_path, console_command, evidence)
@@ -843,11 +847,17 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     finally:
         run.console.close()
     evidence(f"stocks.bars: {[(row['State'], row['Error']) for row in rows]}")
+    for start in _TESTER_LINES:
+        label = start.split(": ")[0]
+        assert any(line.startswith(f"{label}: ") for line in printed), f"no {label!r} line"
+    acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
+    states = [row["State"] for row in rows]
+    live = states == ["RUNNING"] and bool(acked or rows[0]["RowsPublished"])
+    assert live or states == ["FAILED"], f"stocks.bars settled neither way: {states}"
     served = []
     if any(line.startswith(_SERVED_2015) for line in printed):
         served.append("the bars from 2015")
-    acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
-    if [row["State"] for row in rows] == ["RUNNING"] and (acked or rows[0]["RowsPublished"]):
+    if live:
         served.append("the live minute bars")
     if served:
         pytest.skip(

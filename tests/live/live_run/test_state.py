@@ -281,3 +281,23 @@ def test_an_unknown_status_is_refused_and_leaves_the_check_as_it_was() -> None:
         record(state, check, status="skiped", reason="closed market", day=DAY)
     assert repr(check) == before
     assert check.condition_skips == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "counts"),
+    [
+        ("passed", (0, 0, run_state.ROW_RULES)),
+        ("failed", (1, 0, 0)),
+        ("error", (1, 0, 0)),
+        ("refused", (0, 0, 0)),
+        ("skipped", (0, 1, 0)),
+    ],
+)
+def test_each_status_moves_its_own_count(status: str, counts: tuple[int, int, int]) -> None:
+    """Each stored status is handled by name: only a plain skip counts as a condition skip."""
+    state = _state()
+    check = check_of(state, "evidence", "t")
+    reason = REFUSAL if status == "refused" else "market closed"
+    record(state, check, status=status, reason=reason, day=DAY)
+    assert (check.status, check.last_run) == (status, DAY)
+    assert (check.failures, check.condition_skips, check.passed_rules) == counts

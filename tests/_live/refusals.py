@@ -7,7 +7,8 @@ request reaching beyond the history the key keeps (`is_timeframe_refusal`) also 
 earliest day the request asked for (`refused_request`), so a reader can judge it. The library's
 own refusal of a stream Massive serves only in real time, on a key whose data Massive labels
 delayed, carries no status (`is_real_time_only_refusal`), so it is not Massive's refusal
-(`is_massive_refusal`).
+(`is_massive_refusal`). Nor is the library's refusal of delayed data the owner's settings do
+not list (`is_not_listed_text`), which a background read reports only as text.
 
 `tests/conftest.py` calls these from its hook and fixtures, and the live run's and tester's
 example runners from their verdicts. Every function here is pure.
@@ -35,6 +36,11 @@ REAL_TIME_ONLY_PHRASE: Final = "streams only in real time, and Massive labels th
 """The library's words when it refuses a stream Massive serves only in real time (fair market
 value, the options admin messages) because Massive labels the key's data of its subscription
 delayed, before the stream opens (`host_decision.require_real_time`)."""
+
+NOT_LISTED_PHRASE: Final = "is not in MassiveConfig.delayed_subscriptions"
+"""The library's words when the owner's settings refuse delayed data: Massive labels a
+subscription's data delayed and `MassiveConfig.delayed_subscriptions` does not list it
+(`recency_labels.delayed_refusal`)."""
 
 _REQUEST_TARGET: Final = re.compile(r" from GET (\S+) on ")
 """Where a wire error's message names the request's target (path and query)."""
@@ -100,6 +106,21 @@ def is_real_time_only_refusal(error: BaseException) -> bool:
         and error.status is None
         and REAL_TIME_ONLY_PHRASE in str(error)
     )
+
+
+def is_not_listed_text(text: object) -> bool:
+    """Return whether a failed stream's or read's error text is the settings' delayed refusal.
+
+    A read in the background fails its table instead of raising, so a test sees only the
+    `Error` text of its row in `m.streams()`, not the error's class or source.
+
+    Args:
+        text: The error text, or None.
+
+    Returns:
+        True when it holds `NOT_LISTED_PHRASE`.
+    """
+    return isinstance(text, str) and NOT_LISTED_PHRASE in text
 
 
 def refused_request(error: BaseException) -> tuple[str | None, date | None]:

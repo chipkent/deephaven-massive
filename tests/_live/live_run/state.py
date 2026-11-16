@@ -57,9 +57,6 @@ MAX_FAILURES: Final = 2
 MAX_CONDITION_SKIPS: Final = 3
 """Attempts a check skipped for a condition gets before the skip is final."""
 
-STATUSES: Final = frozenset({"passed", "failed", "error", "refused", "skipped", "interrupted"})
-"""The results a runner reports for a check (`record`)."""
-
 ROW_RULES: Final = 1
 """The version of the rule that a stream check passes only when rows reached its table. Before
 it, a stream passed on Massive's acknowledgement alone, which Massive sends with the market
@@ -348,31 +345,36 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
         day: The New York date of the run, ISO.
 
     Raises:
-        ValueError: When the status is none of `STATUSES`; the check is left as it was.
+        ValueError: When the status is none of those above; the check is left as it was.
     """
-    if status not in STATUSES:
-        msg = f"{check.name}: unknown status {status!r}; expected one of {sorted(STATUSES)}"
-        raise ValueError(msg)
     if status == "interrupted":
         return
-    check.last_run, check.rerun = day, False
     if status == "skipped" and check.status == "passed":
+        check.last_run, check.rerun = day, False
         return
     unlisted = status == "skipped" and reason.startswith(NOT_LISTED)
     cleared = status in {"passed", "failed"} or (unlisted and check.status == "refused")
-    if is_daily(check) and cleared and check.subscription:
-        for other in state.checks.values():
-            if other is not check and is_daily(other):
-                other.rerun = other.rerun or other.subscription == check.subscription
-    check.status, check.reason = status, reason
+    freed = check.subscription if is_daily(check) and cleared else ""
     if status == "refused" or unlisted:
         check.subscription = refused_subscription(check.name, reason)
     elif status == "passed":
         check.passed_rules = ROW_RULES
     elif status in {"failed", "error"}:
         check.failures += 1
-    else:  # "skipped", the one status left, for a condition of the moment
+    elif status == "skipped":
         check.condition_skips += 1
+    else:
+        msg = (
+            f"{check.name}: unknown status {status!r}; expected passed, failed, error, "
+            "refused, skipped, or interrupted"
+        )
+        raise ValueError(msg)
+    check.last_run, check.rerun = day, False
+    check.status, check.reason = status, reason
+    if freed:
+        for other in state.checks.values():
+            if other is not check and is_daily(other):
+                other.rerun = other.rerun or other.subscription == freed
 
 
 def reruns(state: RunState, group: str) -> bool:
