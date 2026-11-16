@@ -67,7 +67,7 @@ def test_every_fmv_stream_reads_the_fmv_channel_and_its_one_host() -> None:
 
 def test_an_fmv_page_with_several_hosts_is_a_defect(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(feeds, "channel_only_host", lambda *_: None)
-    with pytest.raises(BrokenGuaranteeError, match="the stocks FMV page documents several"):
+    with pytest.raises(BrokenGuaranteeError, match="stocks FMV page does not document one host"):
         fmv_host(AssetClass.STOCKS)
 
 

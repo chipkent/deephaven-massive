@@ -188,7 +188,9 @@ FEED_RECENCY: Final[Mapping[Feed, Recency]] = {
     Feed.REAL_TIME: Recency.REALTIME,
     Feed.DELAYED: Recency.DELAYED,
     # The fair-market-value channels' feed, which Massive's FMV pages document only in real
-    # time. A host pinned to it for another channel is shown real-time too.
+    # time. A host pinned to it for another channel is shown real-time too, though the label
+    # does not say so: Massive's index value page lists only this feed, yet gives one plan
+    # those values 15 minutes late, and such a key's pinned index values still show REALTIME.
     Feed.BUSINESS: Recency.REALTIME,
 }
 """The recency a host's data is shown with, by the feed Massive's pages give the host."""

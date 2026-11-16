@@ -114,7 +114,7 @@ def fmv_host(asset_class: AssetClass) -> str:
     host = channel_only_host(asset_class, FMV_CHANNEL)
     if host is None:
         raise BrokenGuaranteeError(
-            library_bug(f"the {asset_class.value} {FMV_CHANNEL} page documents several hosts")
+            library_bug(f"the {asset_class.value} {FMV_CHANNEL} page does not document one host")
         )
     return host
 

@@ -559,6 +559,7 @@ def test_a_refusal_names_the_one_host_a_channel_s_page_documents(
     )
     connection._refused(topics, "not authorized")
     assert connection._last_error is not None
+    # The generated host, which test_generate ties to the channel's vendored page.
     only = channel_only_host(asset_class, channel)
     assert connection._last_error.endswith(
         f" (Massive documents the {asset_class.value} {channel} channel only on {only})"
