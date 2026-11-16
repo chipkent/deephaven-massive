@@ -924,8 +924,7 @@ def instant_bound(
         instant = day_start(asset_class, value + _ONE_DAY if upper else value)
     if name.rpartition(".")[2] not in ("gt", "lte"):
         return instant
-    # Nanoseconds have no `datetime` step, and no parameter counts in `MS_OR_NS`: any other
-    # unit must have its step in `_UNIT_STEPS`.
+    # Nanoseconds have no `datetime` step; every other unit has its step in `_UNIT_STEPS`.
     step = None if unit is None or unit is WireUnit.NS else _UNIT_STEPS[unit]
     if step is None:
         sent = "ISO-8601 instants of no documented precision" if unit is None else "nanoseconds"

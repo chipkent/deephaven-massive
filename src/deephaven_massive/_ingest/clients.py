@@ -26,7 +26,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import NEW_SESSION, SessionClosedError
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         FlatFileTransport,
         HostDecision,
         StreamTransport,
+        Unsplit,
     )
 
 __all__ = ["CONNECTION_SETTINGS", "SessionClients"]
@@ -106,12 +107,12 @@ class SessionClients:
             The core.
 
         Raises:
-            MassiveError: If the core has been garbage-collected: the session is gone, as if
-                closed (`"MassiveSession #1 is closed"`).
+            SessionClosedError: If the core has been garbage-collected: the session is gone, as
+                if closed (`"MassiveSession #1 is closed; ..."`).
         """
         core = self._core()
         if core is None:
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
         return core
 
     def rest(self) -> RestEndpoints:
@@ -218,14 +219,15 @@ class SessionClients:
         """
         return self.rest().resolve_host(asset_class, family)
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote through the session's REST transport.
 
         Args:
             symbol: A canonical crypto ticker.
 
         Returns:
-            `(base, quote)`, cached for the session by the REST transport.
+            `(base, quote)`, from the list the REST transport keeps for the session, or why
+            the pair has none (`Unsplit`).
         """
         return self.rest().crypto_pair(symbol)
 

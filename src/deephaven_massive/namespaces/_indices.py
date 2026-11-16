@@ -21,9 +21,9 @@ The five datasets and what serves them:
 - `indices.daily_open_close`: one index's open, close, high, low, pre-market, and after-hours
   values for one day.
 
-Index symbols are Massive's tickers, with the `I:` prefix (`"I:SPX"`); `"SPX"` is sent as
-written, and `dm.canonical_symbol_index` adds the prefix. An index endpoint whose rows carry a
-ticker without it gets the prefix from the endpoint's class, never from the name.
+Index symbols are Massive's tickers, with the `I:` prefix (`"I:SPX"`); `"SPX"` is refused, and
+`dm.canonical_symbol_index` adds the prefix. An index endpoint whose rows carry a ticker without
+it gets the prefix from the endpoint's class, never from the name.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ class IndicesNamespace(Namespace):
             TypeError: If `symbols` has another type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `I:`;
+                - a ticker isn't Massive's exact ticker of an index;
                 - a table has no `Symbol` column.
 
         Example:
@@ -246,7 +246,7 @@ class IndicesNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `I:`;
+                - a ticker isn't Massive's exact ticker of an index;
                 - a table has no `Symbol` column.
 
         Example:
@@ -282,7 +282,7 @@ class IndicesNamespace(Namespace):
             TypeError: If `symbols` has another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `I:`;
+                - a ticker isn't Massive's exact ticker of an index;
                 - a table has no `Symbol` column.
 
         Example:
@@ -337,7 +337,7 @@ class IndicesNamespace(Namespace):
                 `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `I:`;
+                - a ticker isn't Massive's exact ticker of an index;
                 - a table has no `Symbol` column;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -377,7 +377,7 @@ class IndicesNamespace(Namespace):
             TypeError: If `date` isn't a date type, or `symbols` has another type.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `I:`;
+                - a ticker isn't Massive's exact ticker of an index;
                 - a table has no `Symbol` column;
                 - `date` is a `datetime`, or isn't a date.
 

@@ -20,12 +20,11 @@ from deephaven_massive._datasets.symbols import SymbolsLike
 from deephaven_massive._enums import (
     AssetClass,
     NotBars,
-    OnError,
     PollMode,
     Timespan,
 )
 from deephaven_massive._ingest import history_reads
-from deephaven_massive._ingest.flatfiles import FlatFileHistory
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.publisher import BlinkPublisher
@@ -129,7 +128,6 @@ class Recorder:
         self.call_ids: list[int] = []
         # The request checks a background read made on the calling thread.
         self.checks: list[tuple[str, DatasetSpec, Request]] = []
-        self.split_pairs: list[bool] = []
         # Each read by symbol (a followed history()): its symbols, window, and thread.
         self.by_symbol: list[tuple[tuple[str, ...], HistoryWindow, str]] = []
         # The outcome of a symbol's read by symbol, by symbol; rows of none otherwise.
@@ -140,8 +138,6 @@ class Recorder:
         self.gates: dict[str, list[threading.Event]] = {}
         # A followed fetch() read's outcome of a symbol, one per read, in turn; then `outcomes`.
         self.turns: dict[str, list[SymbolOutcome]] = {}
-        # The unlisted_symbols setting each static fetch() passed.
-        self.unlisted: list[OnError] = []
         # Each read of a value table's values: the values, the request, and the thread.
         self.valued: list[tuple[tuple[str, ...], Request, str]] = []
         # Raised by every read by symbol, when set: a failure of every symbol alike.
@@ -159,10 +155,8 @@ class Recorder:
         *,
         call: int,
         stop: threading.Event | None = None,
-        unlisted: OnError,
     ) -> Table:
         self.call_ids.append(call)
-        self.unlisted.append(unlisted)
         return self._record("fetch", spec, request, **({} if stop is None else {"stop": stop}))
 
     def fetch_by_symbol(
@@ -205,15 +199,11 @@ class Recorder:
         empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
         return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
 
-    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         self.checks.append(("fetch", spec, request))
-        self.split_pairs.append(split_pairs)
 
-    def check_history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
-    ) -> None:
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
         self.checks.append(("history", spec, request))
-        self.split_pairs.append(split_pairs)
 
     def poll(
         self,
@@ -270,6 +260,7 @@ class FlatFiles:
         self.core = core
         self.unread = unread
         self.inferred: list[bool] = []
+        self.logged: list[LoggedKeys] = []
 
     def history(
         self,
@@ -280,8 +271,10 @@ class FlatFiles:
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
+        del logged
         self.inferred.append(infer_holidays)
         table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
         return FlatFileRead(((date.min, table),), table, self.unread)
@@ -296,17 +289,14 @@ class FlatFiles:
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         del dates, forced
+        self.logged.append(logged)
         return self.recorder.history_by_symbol(
             spec, request, window, symbols=symbols, call=call, stop=stop
         )
-
-    def _as_files(self) -> FlatFileHistory:
-        """Return this recorder as the flat-file transport `read_history` reads from."""
-        files: FlatFileHistory = self  # type: ignore[assignment]  # a fake with its read methods
-        return files
 
     def read_history(
         self,
@@ -324,7 +314,7 @@ class FlatFiles:
             request,
             window,
             core=self.core,
-            files=self._as_files(),
+            files=self,
             dates=dates,
             call=call,
             forced=forced,
@@ -383,7 +373,7 @@ def feed(session: dm.MassiveSession) -> FetchQuery:
 
 def strict(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> None:
     # The session's rule for symbol-table rows becomes RAISE.
-    config = dataclasses.replace(session._core.config, unsendable_symbols=dm.OnError.RAISE)
+    config = dataclasses.replace(session._core.config, noncanonical_symbols=dm.OnError.RAISE)
     monkeypatch.setattr(session._core, "config", config)
 
 

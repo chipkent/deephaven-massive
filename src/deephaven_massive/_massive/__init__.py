@@ -16,6 +16,8 @@ imports only the standard library, `urllib3`, `websockets`, `certifi`, `orjson`,
 Interface:
     - `WireError`, `WireAuthError`, `WireEntitlementError`: the errors every client raises;
       `deephaven_massive._errors.from_wire` turns each into its public counterpart.
+    - `WireFailure`: what kind of failure a wire error is, whether Massive answered and, if
+      not, why not; every wire error has exactly one.
     - `source`, `sources`: the generated description of each REST path, WebSocket channel,
       and flat-file prefix, loaded once from the committed `spec/*.json`, each field carrying
       its description (the vendor's, or the refresh's correction where the vendor's is clearly
@@ -40,6 +42,8 @@ Interface:
     - `Patience`: how long one read waits out its buckets' pauses, shared by its requests.
     - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
       per minute) and the seconds a finished request holds its slot (61).
+    - `RETRYABLE_STATUSES`: the HTTP statuses whose request may succeed when sent again later
+      (429, 500, 502, 503, 504), which the library reports as retryable.
     - `Cancel`: the cancellation token that ends a request's waits.
     - `set_reply_capture`, `CapturedReply`: an optional process-wide sink that receives every
       raw reply the REST and WebSocket clients read (each REST body, refusals included, and
@@ -70,13 +74,15 @@ Importing the package imports every client and its dependencies, and never Deeph
 Example:
     ::
 
-        from deephaven_massive._massive import Transport, WireError, source
+        from deephaven_massive._massive import Transport, WireError, WireFailure, source
 
         trades = source(Transport.REST, "/v3/trades/{stockTicker}")
         assert trades.field("Price").wire_key == "price"
 
         try:
-            raise WireError("HTTP 503 from GET /v3/trades/AAPL", status=503)
+            raise WireError(
+                "HTTP 503 from GET /v3/trades/AAPL", status=503, kind=WireFailure.REFUSED
+            )
         except WireError as error:
             assert error.status == 503
 """
@@ -92,9 +98,11 @@ from deephaven_massive._massive.net.errors import (
     WireAuthError,
     WireEntitlementError,
     WireError,
+    WireFailure,
 )
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
+from deephaven_massive._massive.net.retry import RETRYABLE_STATUSES
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import (
@@ -124,6 +132,7 @@ from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, 
 __all__ = [
     "BASIC_REQUESTS_PER_MINUTE",
     "RATE_WINDOW",
+    "RETRYABLE_STATUSES",
     "BucketState",
     "Cancel",
     "CapturedReply",
@@ -149,6 +158,7 @@ __all__ = [
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireFailure",
     "WireType",
     "WireUnit",
     "WsClient",

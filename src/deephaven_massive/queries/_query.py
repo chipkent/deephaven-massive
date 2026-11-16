@@ -27,13 +27,9 @@ from typing import TYPE_CHECKING, Concatenate, Final, ParamSpec, TypeVar
 from typing_extensions import override
 
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import (
-    OnError,
-)
 from deephaven_massive._errors import (
-    ErrorCause,
     MassiveError,
-    UnlistedPairError,
+    every_symbol_failed,
     failure_text,
     raises_through,
 )
@@ -126,13 +122,13 @@ def _read_symbol_table(
 
     The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
     on the caller thread, inside the session's execution context, with no library lock held.
-    A row no request can carry follows `MassiveConfig.unsendable_symbols`:
+    A row that is not Massive's exact ticker follows `MassiveConfig.noncanonical_symbols`:
     under `RAISE` it fails the call; under `LOG` and `IGNORE` it is skipped (and logged once).
     Every live verb calls it before it starts; a static verb (`fetch()`, `history()`) uses the
     symbols it returns.
 
     Args:
-        core: The session core, for its execution context and its `unsendable_symbols`.
+        core: The session core, for its execution context and its `noncanonical_symbols`.
         spec: The dataset, whose asset class the rows must follow.
         symbols: The boxed table, static or refreshing.
         query: The `repr` of the query whose verb reads it, which the messages name.
@@ -140,22 +136,23 @@ def _read_symbol_table(
             it as rows arrive.
 
     Returns:
-        The table's symbols, sorted and de-duplicated; null and skipped rows are
+        The table's canonical symbols, sorted and de-duplicated; null and skipped rows are
         left out.
 
     Raises:
-        ValueError: If the table has rows and none of them can be sent, so the result
+        ValueError: If the table has rows and none of them is Massive's ticker, so the result
             would follow nothing (`LOG` and `IGNORE`), or, for a static verb, if the table
             holds no symbol at all, as an empty symbol list does.
 
-    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names the row.
+    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names
+    `dm.canonicalize_symbols`.
     """
-    rule = SymbolRowRule.of(spec, core.config.unsendable_symbols)
+    rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, symbols.table, stream_id=None)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the symbol table can be sent, so the result "
+            f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
             f"would follow nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
@@ -181,7 +178,7 @@ def _log_failure(call: int, elapsed: float, error: BaseException) -> None:
         error: What the call raised.
     """
     if isinstance(error, MassiveError):
-        level = logging.DEBUG if error.cause is ErrorCause.EXPECTED else logging.ERROR
+        level = logging.DEBUG if not error.is_bug else logging.ERROR
         logger.log(level, "call %d failed after %.3f s: %s", call, elapsed, failure_text(error))
     else:
         logger.debug(
@@ -355,17 +352,6 @@ class Query:
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
 
-    @property
-    def _splits_pairs_at_call(self) -> bool:
-        """True when a crypto pair Massive does not list raises at the call.
-
-        So it does for a pair passed in code under `MassiveConfig.unlisted_symbols=RAISE`;
-        under `LOG` and `IGNORE` the read leaves such a pair out, and a table's pair is split
-        when the read reads the table.
-        """
-        in_code = not isinstance(self._request.symbols, SymbolTable)
-        return in_code and self._core.config.unlisted_symbols is OnError.RAISE
-
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
 
@@ -419,10 +405,7 @@ class Query:
     def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...], *, verb: str) -> FirstRead:
         """Read the call-time symbols of a followed `history()` or `fetch()` now, as one read.
 
-        The read of `wait=True`, on the caller thread. A crypto pair Massive's crypto ticker
-        list does not hold raises its error under `MassiveConfig.unlisted_symbols=RAISE`;
-        under `LOG` and `IGNORE` the read gives it no rows, as a ticker with no data, so it is
-        no failure here.
+        The read of `wait=True`, on the caller thread.
 
         Args:
             plan: How the symbols are read.
@@ -433,9 +416,9 @@ class Query:
             Each symbol's outcome, with when the read began and how long it took.
 
         Raises:
-            MassiveError: The first symbol's error, when every symbol failed; under
-                `unlisted_symbols=RAISE`, the first unlisted pair's. A failure of every symbol
-                alike (a rejected key, a closed session) propagates from the read.
+            MassiveError: The first symbol's error, retryable only when every symbol's is,
+                when every symbol failed. A failure of every symbol alike (a rejected key, a
+                closed session) propagates from the read.
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
@@ -445,13 +428,9 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        pairs = [
-            name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
-        ]
-        if pairs:  # only under RAISE: otherwise such a pair has no rows, and no failure
-            raise failed[pairs[0]].error
         if len(failed) == len(call_time):
-            raise failed[call_time[0]].error
+            first = every_symbol_failed([failed[name].error for name in call_time])
+            raise first from failed[call_time[0]].error
         if failed:
             logger.warning(
                 "%s %s: %d of the %d symbols of the call failed and are left out of the "

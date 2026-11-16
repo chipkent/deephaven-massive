@@ -18,16 +18,12 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import (
-    HistorySource,
-    OnError,
     PollMode,
 )
-from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolRows,
 )
@@ -42,11 +38,9 @@ from tests._fakes.queries import (
     Recorder,
     feed,
     follows,
-    join_reads,
     last_trade,
     make,
     news,
-    released,
     symbol_reads,
     trades,
     until,
@@ -178,30 +172,6 @@ def test_a_one_row_fetch_passes_its_symbols(
     ]
 
 
-@pytest.mark.parametrize(
-    ("setting", "split"), [(OnError.RAISE, [True, False, True]), (OnError.LOG, [False] * 3)]
-)
-def test_only_symbols_in_code_under_raise_have_their_crypto_pairs_split_at_the_call(
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    setting: OnError,
-    split: list[bool],
-) -> None:
-    # Under RAISE a pair in code Massive does not list raises at the call; otherwise, and for
-    # a table's pairs, the read leaves it out as MassiveConfig.unlisted_symbols says.
-    core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
-    in_code = news(massive_session).fetch()
-    table = new_table([string_col("Symbol", ["AAPL"])])
-    from_table = trades(massive_session, table).history("2025-03-03", source=HistorySource.REST)
-    listed = trades(massive_session).history("2025-03-03", source=HistorySource.REST)
-    join_reads(massive_session)
-    assert rest.split_pairs == split
-    released(massive_session, in_code, from_table, listed)
-
-
 def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
     # A symbol's static rows, as a read returns them: `count` rows of nulls.
     schema = m._core.dataset_schema(spec)
@@ -209,16 +179,12 @@ def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
         return SymbolRows(dh_arrow.to_table(schema.to_arrow([{}] * count)))
 
 
-def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
-    *, massive_session: dm.MassiveSession, rest: Recorder
-) -> None:
+def test_a_static_fetch_is_unchanged(*, massive_session: dm.MassiveSession, rest: Recorder) -> None:
     static = new_table([string_col("Symbol", ["AAPL"])])
     q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
     assert isinstance(q, FetchQuery)
     assert not q.fetch(wait=True).is_refreshing
     assert not last_trade(massive_session).fetch(wait=True).is_refreshing
-    # Crypto pairs follow the session's setting, in a table or in code.
-    assert rest.unlisted == [OnError.LOG, OnError.LOG]
     assert rest.fetched == []
 
 
@@ -312,7 +278,7 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
-    rest.outcomes = {"AAPL": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    rest.outcomes = {"AAPL": SymbolFailure(refusal)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, FetchQuery)
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
@@ -333,24 +299,28 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     follows(massive_session)
 
 
-def test_a_followed_fetch_s_unlisted_pair_raises_under_raise(
-    *,
-    live: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_followed_fetch_whose_every_symbol_failed_is_retryable_only_when_each_is(
+    *, live: Callable[..., Table], massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
-    # Under LOG and IGNORE the read gives such a pair no rows instead, so it fails nothing.
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, unlisted_symbols=OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
-    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
-    rest.outcomes = {"DOT": SymbolFailure(error, FailureKind.PERMANENT)}
-    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
-    assert isinstance(q, FetchQuery)
-    with pytest.raises(UnlistedPairError, match="does not list it"):
-        q.fetch(wait=True)
-    rest.outcomes = {}  # the raised error's traceback holds the session
+    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    refusal = dm.EntitlementError("HTTP 403: not in the plan", status=403)
+    rest.outcomes = {
+        "AAPL": SymbolFailure(busy),
+        "MSFT": SymbolFailure(busy),
+    }
+    both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
+    assert isinstance(both, FetchQuery)
+    with pytest.raises(dm.MassiveError, match="busy") as retried:
+        both.fetch(wait=True)
+    assert retried.value.is_retryable
+    rest.outcomes["MSFT"] = SymbolFailure(refusal)
+    with pytest.raises(dm.MassiveError, match="busy") as mixed:
+        both.fetch(wait=True)
+    # AAPL's error, the first, but calling again cannot help MSFT.
+    assert (mixed.value.status, mixed.value.is_retryable) == (503, False)
+    assert mixed.value.__cause__ is busy
+    rest.outcomes = {}  # the raised errors' tracebacks hold the session
+    follows(massive_session)
 
 
 def test_a_followed_fetch_groups_symbols_only_where_a_request_names_many() -> None:
@@ -521,7 +491,7 @@ def test_a_static_table_of_values_fails_when_one_value_fails(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
-    rest.outcomes = {"NQ": SymbolFailure(refusal, FailureKind.PERMANENT)}
+    rest.outcomes = {"NQ": SymbolFailure(refusal)}
     codes = new_table([string_col("ProductCode", ["ES", "NQ"])])
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         massive_session.futures.products(product_code=codes).fetch(wait=True)
@@ -546,11 +516,11 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
     empty = new_table([string_col("ProductCode", [None])])
     with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
         massive_session.futures.products(product_code=empty).fetch(wait=True)
-    unsendable = new_table([string_col("Symbol", ["AAPL,MSFT"])])
-    q = massive_session.options.chain(unsendable)
-    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
+    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
+    q = massive_session.options.chain(options)
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
         q.fetch(wait=True)
-    with pytest.raises(ValueError, match="no row of the underlying table can be sent"):
+    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
         q.poll(5)
     assert rest.valued == []
 
@@ -659,5 +629,43 @@ def test_a_followed_fetch_of_a_pair_massive_does_not_list_ends_done_with_no_rows
         return {r["Symbol"]: (r["State"], r["Rows"]) for r in rows}
 
     until(lambda: states().get("X:DOTUSD") == ("DONE", 0))
+    rest_session.release(result)
+    follows(rest_session)
+
+
+def test_a_followed_fetch_names_a_listed_pair_whose_ticker_it_can_t_read_in_symbol_reads(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Massive's crypto ticker list gives X:DOTUSD the currencies DOT and USDT, which don't make
+    # up its ticker: no request is sent for it, and its m.symbol_reads() row says why, as a
+    # stream's and a poll's Error do. A pair the list reads is read with no Error.
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    unjoined = {"ticker": "X:DOTUSD", "base_currency_symbol": "DOT", "currency_symbol": "USDT"}
+    fake_rest.reply(
+        "/v3/reference/tickers", Reply(envelope([listed, unjoined])), Reply(envelope([]))
+    )
+    last = {"status": "OK", "symbol": "BTC-USD", "last": {"price": 1.0, "timestamp": 1741000000000}}
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    result = rest_session.crypto.last_trade(live("X:BTCUSD", "X:DOTUSD")).fetch(wait=True)
+    assert [r["Symbol"] for r in dh_to_pylist(result)] == ["X:BTCUSD"]
+
+    def reads() -> dict[str, tuple[str, int, str | None]]:
+        rows = dh_to_pylist(rest_session.symbol_reads())
+        return {r["Symbol"]: (r["State"], r["Rows"], r["Error"]) for r in rows}
+
+    until(lambda: reads().get("X:DOTUSD", ("", 0, None))[0] == "DONE")
+    state, rows, error = reads()["X:DOTUSD"]
+    assert (state, rows) == ("DONE", 0)
+    assert error is not None
+    assert error.startswith("skipped: ")
+    assert "the pair gets no rows" in error
+    assert reads()["X:BTCUSD"] == ("DONE", 1, None)
+    assert [p for p, _ in fake_rest.get_queries() if p != "/v3/reference/tickers"] == [
+        "/v1/last/crypto/BTC/USD"
+    ]
     rest_session.release(result)
     follows(rest_session)

@@ -1,6 +1,6 @@
 ---
 name: writing-to-the-owner
-description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', questions placed in a PR description or review reply, and questions from subagents or reviewers that you pass on. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
+description: "Use this skill whenever you write anything the project owner must read and act on: a question, a decision with options, a design or contract change to approve, a protection (a check, refusal, validation, test, setting, or guard) you want to drop, a conflict between a rule and the request, whether a requested change breaks users' code, a recommendation, a status report, a list of what waits on them, a summary of what a PR does, or a reminder of an unanswered question. That includes replies to 'status?', 'what needs me?', 'do you need anything from me?', 'is X ready to merge?' and 'what does #N do?', and questions from subagents or reviewers that you pass on; a question for the owner never waits in a PR description, a review reply, or an issue. Use it even for a short message: the owner usually lacks the context you have. It settles whether to ask at all, checks the facts live, and makes each question stand alone every time it is asked, repeats included: the thing being decided shown (the text, diff, signature, or names, before and after), the problem with a concrete user example, what Massive or Python precedent says, then the question, options with their consequences, and a recommendation, checked by asking whether the owner could decide from that message alone. Not for docstrings, PR descriptions (writing-a-pr-description), or briefs to other agents."
 ---
 
 # Writing to the owner
@@ -33,10 +33,18 @@ certain, is.
   and tests must work with whatever the owner's key has;
 - outward actions: merging, publishing, posting upstream;
 - loosening a check: a `tests/test_layout.py` rule removed or widened, a lint limit raised or a
-  rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, an entry under
-  an existing rule, and a dependency the change needs are not questions: name them under Check
-  before merging;
-- every lint or type-check suppression, with its reason and why the design can't avoid it;
+  rule turned off, coverage, a hook, `check.sh`, or a CI job. A stricter check, a rule replaced
+  by one that checks the same or more, an entry under an existing rule, and a dependency the
+  change needs are not questions: name them under Check before merging;
+- dropping a protection: removing a check, refusal, validation, test, setting, or guard while
+  the mistake it catches stays possible (`AGENTS.md`, Dropping a protection needs the owner's
+  yes). A rule you read as allowing the removal, or a broad ruling ("simplify", "let Massive
+  judge it"), is the reason to ask, not an answer: the owner approves the removal of this
+  guard, by name, or it stays. A test deleted with the code it tested, or a check replaced by
+  one that catches the same mistake or more, drops nothing: say what replaced it in the PR, and
+  don't ask. Section 4 says how to present a real removal;
+- every lint or type-check suppression, with its reason and why the design can't avoid it
+  (not an import after a Deephaven server start, which `AGENTS.md` accepts in advance);
 - a column suspected but not proven to be a field another dataset already names, with both
   fields' documentation quoted;
 - a conflict: a rule against the request, two instructions against each other, or code bent
@@ -57,16 +65,20 @@ value chosen), not just that a choice was made.
 
 **Closed subjects:** never raise licensing, legal, affiliation, or "what users may post"
 questions. Decide them yourself and do the useful thing. A check that needs Massive's API with a key
-becomes a live test and a verification item (`docs/dev/verification-items.md`), and the claim it
+becomes a live test and a verification item (`docs/dev/verification-items/`), and the claim it
 supports is marked unverified until it runs. Either the owner runs one with their key, or you run it
 after their yes in the session (`AGENTS.md`, Limits). When a decision waits on the result, ask:
 give the exact command, what it costs (key use, and any WebSocket connection it takes from their
 live tables), and what the result settles.
 
-**Never re-ask what the owner already decided.** Before asking, check `docs/dev/decisions.md`,
-`AGENTS.md`, the skills, the issue and its comments (`gh issue view <n> --comments`), and the
-owner's earlier answers. If an earlier answer settles the case, follow it and cite it; if it
-may cover the case but leaves a gap, quote it and ask only about the gap.
+**Never re-ask what the owner already decided.** Before asking, list the decisions
+(`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read every one whose name touches the
+subject; then check `AGENTS.md`, the skills, the issue and its comments
+(`gh issue view <n> --comments`), and the owner's earlier answers. If an earlier answer settles the case, follow it and cite it; if it
+may cover the case but leaves a gap, quote it and ask only about the gap. A ruling the owner
+gives becomes a record (`writing-a-record`) in the PR that acts on it: your message's question,
+options, and recommendation are its Question and Options, so write them once, and read the
+record's wording back to the owner before the file is written.
 
 **A question from the owner is a question, not an instruction.** Answer it; change nothing
 unless they say so. **If you can do a decided task yourself, do it** rather than handing it over.
@@ -89,16 +101,27 @@ Not from memory or an agent's report:
 
 ## 3. Vet a design before the owner sees it
 
-A design or contract change the owner must approve (`AGENTS.md`, The public API and the data)
-reaches them only after it survives these steps: options built straight from raw research come
-out incomplete, and a long list of questions goes unread.
+A design or contract change the owner must approve (`AGENTS.md`, The public API and the data,
+and any design that drops a protection) reaches them before any code is written, as a short
+page: the calls a user types, what the library refuses and why, the settings, and which files
+change. The owner can judge that page;
+a public shape first seen as a diff of a hundred files is judged whole, and a rejection then
+costs everything built on it (`AGENTS.md`, Workflow, Design before code). It reaches them only
+after it survives these steps: options built straight from raw research come out incomplete,
+and a long list of questions goes unread.
 
 1. **A Fable agent proposes the complete design, and separate Fable critics attack it.** Revise
    until the critics run out of substantive objections. Every item a top-1% developer would find
    obvious is decided there and listed under **Decided**; only what is still a matter of taste,
    product, or reversing an owner decision reaches the owner, ideally fewer than five items.
-2. **Complete.** Each option covers every dataset and case it touches, defines every term, and
-   shows the calls a user writes.
+   A choice the design and its critic can't settle between them, or a point the request leaves
+   ambiguous, is one of those items: ask it with the options and a recommendation, and build
+   nothing that depends on it (`AGENTS.md`, Workflow, Design before code). This step is for
+   any change beyond a small fix, public or not; a private design the critics accept, and
+   that drops no protection, goes under Decisions in the PR, not to the owner.
+2. **Complete in the design, short in the message.** Each option covers every dataset and
+   case it touches, in a file the message links. The message itself states each option's
+   rule, the calls a user writes, and the one case that decides between them.
 3. **Researched, not assumed.** A choice of format, standard, or convention cites what widely
    used comparable tools do; convenience to us is not a reason. A rule about data correctness
    (a trading day, a time zone, a stamp) cites primary sources (Massive's docs and knowledge
@@ -148,9 +171,23 @@ have never seen. Each question carries everything needed to decide it, in this o
    before they have to ask.
 5. **The question**, in one sentence: "Should the README keep this paragraph?"
 6. **Two to four options**, with "do nothing" when it is real. Each says what the user sees (an
-   example call and result), what changes in the project, and what it costs or risks.
+   example call and result), what changes in the project, and what it costs or risks. An
+   option that removes, weakens, or stops checking something names each thing by name, with
+   what then goes uncaught; "nothing else is checked" or "the rest stays" hides a list the
+   owner cannot see.
 7. **A recommendation**, and why it beats the next-best option on the property that matters.
 8. **What waits on the answer.** Silence is not consent: the question stays open.
+
+**A removal leads.** When a change drops a protection (a guard removed while the mistake it
+catches stays possible), the removal is the heading and the first thing shown, never one line
+in a list of changes, a row in a Check before merging table, or a clause in a question about
+something else: a removal the owner reads past is one they never approved. Show the guard (its
+code, or the test's name and what it asserts), the mistake it catches today with a call a user
+could make, what that user sees once it is gone, and the evidence, already in hand, that
+dropping it is safe (Massive's answer from a live check already run, or a test that pins the
+same property another way). Then ask whether to remove it. The owner's yes to the
+wider change is not a yes to this; a removal found during the work gets its own question, even
+when the design was already approved.
 
 **Every time you ask, ask in full.** A question repeated in a later message (a reminder, a
 status report, a list of what is still open) restates all of the above, because the earlier
@@ -182,12 +219,16 @@ is missing. The usual gaps:
 - a label or name this message does not define;
 - a repeat that points back instead of restating.
 
-When a message holds three or more decisions, or any public-API or design decision, also have a
-Fable agent with no other context read it and list every question it could not answer from the
-message alone. Fix those before sending.
+When a message holds three or more decisions, or any public, design, removal, or rule
+decision, also have a Fable agent that has not seen your reasoning read it with the diff and
+the record and report two lists: each question it could not decide from the message alone,
+and each claim in it (a fact about the code, a quote, a "nothing else changes") it could not
+confirm. Fix both before sending.
 
 ## 5. Words
 
+- [How an editor writes](../../../docs/dev/user-docs.md#method): the rule first, one case
+  per sentence, cases as a table.
 - Answer first. Background in a few sentences. No process narrative (which agent did what,
   which review round).
 - Plain words, short sentences, the user's view before the implementation. File and function

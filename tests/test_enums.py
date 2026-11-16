@@ -314,6 +314,9 @@ _REFERENCE_ENUMS = "namespaces/test_reference.py::test_enums_reject_text"
 _FUTURES_ENUMS = "namespaces/test_futures.py::test_enum_parameters_reject_plain_strings"
 
 _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
+_CONVERTER_ON_ERROR = (
+    "datasets/test_symbols.py::test_a_converter_refuses_an_on_error_that_is_no_member"
+)
 _ON_ERROR_SETTINGS = "test_config.py::test_on_error_settings_are_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
@@ -325,8 +328,7 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.unsendable_symbols": _ON_ERROR_SETTINGS,
-    "MassiveConfig.__init__.unlisted_symbols": _ON_ERROR_SETTINGS,
+    "MassiveConfig.__init__.noncanonical_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
     "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
@@ -334,6 +336,17 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
+    "canonical_symbol.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_crypto.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_forex.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_future.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_future_spread.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_index.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_option.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_stock.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_stock_cms.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_stock_nasdaq.on_error": _CONVERTER_ON_ERROR,
+    "canonical_symbol_stock_yahoo.on_error": _CONVERTER_ON_ERROR,
     "canonicalize_symbols.asset_class": _CANONICALIZE_ENUMS,
     "canonicalize_symbols.convention": _CANONICALIZE_ENUMS,
     "canonicalize_symbols.on_error": _CANONICALIZE_ENUMS,

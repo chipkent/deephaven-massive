@@ -25,7 +25,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
 )
 from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery, _history
@@ -297,7 +296,7 @@ def test_history_reads_a_static_symbol_table_once_for_every_source(
     assert rest.calls[1][2].symbols == ("AAPL", "MSFT")  # AUTO: the dataset has no flat files
 
 
-def test_history_refuses_a_symbol_table_row_no_request_can_carry_under_raise(
+def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
@@ -305,28 +304,28 @@ def test_history_refuses_a_symbol_table_row_no_request_can_carry_under_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     strict(massive_session, monkeypatch)
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA", None])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
     for source in HistorySource:
         with pytest.raises(
             ValueError,
-            match=r"^stocks\.trades: a symbol table holds 'MSFT,NVDA', which no request",
+            match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
         ):
             q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
 
 
-def test_history_skips_a_symbol_table_row_no_request_can_carry(
+def test_history_skips_a_symbol_table_row_that_is_not_canonical(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
-    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "MSFT,NVDA", None])]))
+    q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
     q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[0][2].symbols == ("AAPL",)
     assert flat.calls == []
-    only_bad = trades(massive_session, new_table([string_col("Symbol", ["MSFT,NVDA"])]))
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     with pytest.raises(
         ValueError,
-        match=r"^m\.stocks\.trades\(\): no row of the symbol table can be sent",
+        match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
     ):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
 
@@ -480,7 +479,6 @@ def test_a_background_flat_file_read_checks_the_rest_it_may_read_at_the_call(
     forced = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
     join_reads(s3_session)
     assert [check[0] for check in rest.checks] == ["history"]
-    assert rest.split_pairs == [False]  # a parameter check: the files read the pairs whole
     assert [call[0] for call in flat.calls] == ["history", "history"]
 
     def refuse(*_: object, **__: object) -> None:
@@ -625,6 +623,32 @@ def test_history_forced_to_flat_files_reads_the_waiting_symbols_in_one_scan(
     follows(s3_session)
 
 
+def test_a_followed_flat_file_history_keeps_one_record_of_what_it_logged_per_call(
+    live: Callable[..., InputTable],
+    *,
+    s3_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every read of a call shares the call's record, so a refused venue is logged once per
+    # call, and the next call starts its own; the result holds the record, not the process.
+    flat = Recorder(s3_session._core.catalog)
+    files = FlatFiles(flat, s3_session._core)
+    monkeypatch.setattr(s3_session._core, "flat_file_transport", lambda: files)
+    watchlist = live("AAPL")
+    q = make(s3_session, TRADES_FILES_SPEC, symbols=watchlist)
+    assert isinstance(q, HistoryQuery)
+    first = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+    watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
+    until(lambda: len(files.logged) == 2)
+    second = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+    one, again, other = files.logged
+    assert one is again
+    assert other is not one
+    s3_session.release(first)
+    s3_session.release(second)
+    follows(s3_session)
+
+
 def test_history_forced_to_rest_follows_from_rest(
     live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
@@ -702,8 +726,8 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")
     rest.outcomes = {
-        "AAPL": SymbolFailure(refusal, FailureKind.PERMANENT),
-        "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other"), FailureKind.PERMANENT),
+        "AAPL": SymbolFailure(refusal),
+        "MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: other")),
     }
     with pytest.raises(dm.EntitlementError, match="not in the plan"):
         trades(massive_session, live("AAPL", "MSFT")).history("2025-03-03", "2025-03-03", wait=True)
@@ -722,11 +746,7 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest.outcomes = {
-        "MSFT": SymbolFailure(
-            dm.EntitlementError("HTTP 403: not in the plan"), FailureKind.PERMANENT
-        )
-    }
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: not in the plan"))}
     with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True
@@ -778,14 +798,12 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    only_bad = live("MSFT,NVDA")
-    with pytest.raises(ValueError, match="no row of the symbol table can be sent"):
+    only_bad = live("msft")
+    with pytest.raises(ValueError, match="no row of the symbol table is a ticker"):
         trades(massive_session, only_bad).history("2025-03-03", "2025-03-03", wait=True)
     strict(massive_session, monkeypatch)
-    with pytest.raises(ValueError, match="a symbol table holds 'MSFT,NVDA'"):
-        trades(massive_session, live("AAPL", "MSFT,NVDA")).history(
-            "2025-03-03", "2025-03-03", wait=True
-        )
+    with pytest.raises(ValueError, match="a symbol table holds 'msft'"):
+        trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03", wait=True)
     assert rest.by_symbol == []
 
 

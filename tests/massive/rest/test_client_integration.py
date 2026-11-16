@@ -10,8 +10,9 @@ Each test first lets a minute pass, so earlier requests no longer count, then se
 requests (one attempt each, no retry, outside the run's rate governor) and records each
 answer's status, its rate-limit headers, and its message. Which requests count against which
 limit is recorded, never asserted: the library's own rules for data outside every
-subscription may change while the evidence stays the same. How to run these tests is in
-`docs/live-tests.md`.
+subscription may change while the evidence stays the same. One more test, outside the rate
+limits, records what a later page's `next_url` answers at once and after a wait. How to run
+these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import json
 import threading
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import pytest
 import urllib3
@@ -261,3 +263,56 @@ def by_class() -> dict[str, Request]:
         "currencies": ("/v2/aggs/ticker/{forexTicker}/prev", {"forexTicker": "C:EURUSD"}, {}),
         "futures": ("/futures/v1/products", {}, {"limit": 1}),
     }
+
+
+_CURSOR_WAIT = 90.0
+"""Seconds the cursor test waits before it asks for the same later page a second time."""
+
+
+@pytest.mark.needs("stocks:basic")
+@pytest.mark.settles("117")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(200)
+def test_why_a_later_page_answers_404(live_config: MassiveConfig, evidence: Evidence) -> None:
+    """What a later page's `next_url` answers now, and again after a wait: its cursor's lifetime.
+
+    A paged REST read that meets HTTP 404 on a later page raises `CutShortError`, which the
+    library calls retryable: a new call starts over with a new cursor. That assumes the 404
+    means the cursor expired or its page moved, which nothing has verified. Reads the first
+    page of the ticker list (`/v3/reference/tickers`, `limit=5`), then asks for its
+    `next_url` at once and again after `_CURSOR_WAIT` seconds, each a single raw request with
+    no retry, and records each status and message. Settles nothing by itself: a 404 on the
+    later request supports the lifetime explanation; two 200s show the cursor outlives the
+    wait, and the 404's cause stays open.
+    """
+    pool = urllib3.PoolManager(ssl_context=new_ssl_context(), retries=False)
+    headers = {"Authorization": f"Bearer {live_config.api_key}"}
+    origin = urlsplit(live_config.rest_base_url)[:2]
+
+    def get(url: str) -> tuple[int, dict[str, object]]:
+        if urlsplit(url)[:2] != origin:  # the key goes only where the client would send it
+            pytest.fail(f"refusing to send the API key to {url!r}: not the REST base URL's origin")
+        response = pool.request("GET", url, headers=headers)
+        try:
+            body = json.loads(response.data)
+        except ValueError:
+            body = {"body": response.data[:200].decode("utf-8", "replace")}
+        return response.status, body if isinstance(body, dict) else {"body": body}
+
+    try:
+        status, first = get(f"{live_config.rest_base_url}/v3/reference/tickers?limit=5")
+        rows = first.get("results")
+        evidence(f"first page: HTTP {status}, {len(rows) if isinstance(rows, list) else 0} rows")
+        later = first.get("next_url")
+        assert status == 200
+        assert isinstance(later, str), "the first page has no next_url to follow"
+        status, body = get(later)
+        evidence(f"its next_url at once: HTTP {status}, message {body.get('message')!r}")
+        time.sleep(_CURSOR_WAIT)
+        status, body = get(later)
+        evidence(
+            f"the same next_url after {_CURSOR_WAIT:.0f} s: HTTP {status}, "
+            f"message {body.get('message')!r}"
+        )
+    finally:
+        pool.clear()

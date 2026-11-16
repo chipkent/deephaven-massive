@@ -476,9 +476,9 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
         massive_session.stocks.trades(table)
 
 
-def test_a_lower_case_ticker_is_sent_as_written(massive_session: dm.MassiveSession) -> None:
-    # Massive answers it; the library judges no ticker's shape.
-    assert massive_session.stocks.trades("spy")._request.symbols == ("spy",)
+def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match=r"^'spy' is not a Massive stock ticker: .*use 'SPY'"):
+        massive_session.stocks.trades("spy")
 
 
 @pytest.mark.parametrize(
@@ -599,10 +599,10 @@ def test_movers_take_a_direction(massive_session: dm.MassiveSession) -> None:
     ],
 )
 def test_daily_open_close_names_a_new_york_day(
-    massive_session: dm.MassiveSession, day: object, expected: date
+    massive_session: dm.MassiveSession, day: dm.DateLike, expected: date
 ) -> None:
     open_close = massive_session.stocks.daily_open_close
-    query = open_close("AAPL", day, adjusted=False)  # type: ignore[arg-type]  # a Java time, which the types do not name
+    query = open_close("AAPL", day, adjusted=False)
     assert type(query) is FetchQuery
     assert dict(query._request.params) == {"date": expected}
     assert query._request.adjusted is False

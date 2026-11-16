@@ -11,9 +11,10 @@ Test modules never import from this file; they request its fixtures by name. Fak
 The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
 the marker checks, the key skip, the Basic plan's pacing (the skip of a test that would wait
 more than a minute, and a terminal line for each wait), live sessions and wire clients, raw
-flat-file and REST readers, the run's plans, dates, and corporate actions, and the `evidence`
-recorder, which writes each run's own `live-evidence-<time>.log` as it goes and closes the
-terminal summary. The
+flat-file and REST readers, the run's source of plans, dates, and corporate actions, and the
+`evidence` recorder, which writes each run's own `live-evidence-<time>.log` as it goes and
+closes the terminal summary. The `live_plans` fixture itself, with the key check that comes
+before it, is in the plugin `tests/_live/key_check.py`, which this module registers. The
 logic behind the plans, pacing, dates, contracts, and corporate actions lives in
 `tests/_live/`, where it is unit-tested against the fakes; the fixtures here only call it.
 
@@ -91,6 +92,7 @@ from tests._live import (
     contracts,
     debug_log_file,
     events,
+    key_check,
     pacing,
     parallel,
     plans,
@@ -126,18 +128,22 @@ def pytest_configure(config: pytest.Config) -> None:
 
     The `-p` plugin `tests/embedded_server.py` has already started the server, in every
     process of the run. This registers `tests/_live/parallel.py` as a plugin, whose hook
-    refuses a parallel run that selects a live test, then checks that the update graph runs
-    the cycle the tests are written for, then records Deephaven's fatal errors
-    (`_record_jvm_fatal_errors`) and the library's liveness-scope releases made without the
-    update graph's lock (`_record_unlocked_library_releases`).
+    refuses a parallel run that selects a live test, and `tests/_live/key_check.py`, whose
+    `live_plans` fixture learns the run's plans from `_plans_of_key` past its key check, then
+    checks that the update graph runs the cycle the tests are written for, then records
+    Deephaven's fatal errors (`_record_jvm_fatal_errors`) and the library's liveness-scope
+    releases made without the update graph's lock (`_record_unlocked_library_releases`).
 
     Args:
-        config: The pytest configuration, whose plugin manager takes the refusal's plugin.
+        config: The pytest configuration, whose plugin manager takes the two plugins and whose
+            stash takes the source of plans.
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
     config.pluginmanager.register(parallel, parallel.PLUGIN_NAME)
+    config.stash[key_check.PLANS_SOURCE] = _plans_of_key
+    config.pluginmanager.register(key_check, key_check.PLUGIN_NAME)
     atexit.register(_final_jvm_exit)
     periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
     j_update_graph = dh_execution_context.get_exec_ctx().update_graph.j_update_graph
@@ -277,12 +283,30 @@ _SESSIONS: list[pytest.Session] = []
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Remember the session so the exit handler can read its final exit status.
+    """Remember the session so the exit handler can read its final exit status, and warm up.
+
+    A process that runs tests also compiles its first formula here (`_warm_formula_compiler`);
+    the pytest-xdist controller runs none, so it skips that.
 
     Args:
         session: The pytest session that is starting.
     """
     _SESSIONS.append(session)
+    # pytest-xdist names each worker in this variable; a run with `-n` 1 or more has a `dist`.
+    worker = "PYTEST_XDIST_WORKER" in os.environ
+    if worker or session.config.getoption("dist", "no") == "no":
+        _warm_formula_compiler()
+
+
+def _warm_formula_compiler() -> None:
+    """Compile one formula, so no test pays for the process's first compile.
+
+    Deephaven compiles each new formula with the JDK's compiler, and a process's first compile
+    also loads and warms the compiler itself: several times as long as a later compile, and
+    over 10 seconds on a loaded machine. Paid before the first test, it falls outside every
+    test's time limit instead of inside the limit of whichever test happens to run first.
+    """
+    table_factory.empty_table(1).update("Warm = i")
 
 
 @pytest.hookimpl(wrapper=True, trylast=True)
@@ -1011,8 +1035,11 @@ def _collect_cycles(before: _Running) -> set[str]:
     """Collect garbage, and name the sessions the test started that only a cycle held.
 
     Collects with `gc.DEBUG_SAVEALL`, so what the collector would free stays in `gc.garbage`
-    to be inspected; then empties it, which frees it. A session in that garbage was reachable
-    only through a reference cycle, which reference counting never frees.
+    to be inspected; then empties it and collects again without the flag, which frees it.
+    Emptying the list alone frees nothing: the cycles still hold each other, so every later
+    look would find them again, and a worker's garbage, and the time to inspect it, would grow
+    with every test it runs. A session in that garbage was reachable only through a reference
+    cycle, which reference counting never frees.
 
     Args:
         before: What ran when the test started.
@@ -1037,7 +1064,10 @@ def _collect_cycles(before: _Running) -> set[str]:
     # cycle. That is how Python works, not a leak, so the references out of frames and
     # tracebacks are not followed, and only a session another cycle holds is named.
     cyclic = _held_by_cycles(garbage, follow=_not_a_traceback) & set(wanted)
+    found = bool(garbage)
     del garbage
+    if found:
+        gc.collect()
     return {wanted[key] for key in cyclic}
 
 
@@ -1608,8 +1638,9 @@ def fake_s3(monkeypatch: pytest.MonkeyPatch, no_aws_settings: None) -> FakeS3:
 # --- Live integration tests --------------------------------------------------------------------
 # Live tests live in `tests/**/test_*_integration.py` and carry the `integration` marker, which
 # `addopts` deselects by default; `uv run pytest -m integration` runs them. Those that
-# deliberately exceed Massive's limits also carry `integration_limits` and run only when `-m`
-# names it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
+# deliberately exceed Massive's limits also carry `integration_limits`, and those that stream
+# every symbol of a class for minutes `integration_all_symbols`; each runs only when `-m` names
+# it. Each live test skips without `MASSIVE_API_KEY`, and always under CI. What a test
 # observes is recorded with the `evidence` fixture: appended at once to the run's own evidence
 # file in the repository root, `live-evidence-<UTC time>.log`, flushed line by line, so a run cut
 # short keeps everything recorded before, and printed again in a "live evidence" section at the
@@ -1620,7 +1651,8 @@ _INTEGRATION = "integration"
 _LIMITS = "integration_limits"
 _SMOKE = "integration_smoke"
 _RATE_LIMITS = "integration_rate_limits"
-_SEPARATE = (_LIMITS, _SMOKE, _RATE_LIMITS)
+_ALL_SYMBOLS = "integration_all_symbols"
+_SEPARATE = (_LIMITS, _SMOKE, _RATE_LIMITS, _ALL_SYMBOLS)
 """The live tiers that `-m integration` leaves out: each runs only when `-m` names it."""
 
 _LEASES: Final = pytest.StashKey["tuple[GovernorRegistry, int]"]()
@@ -1711,25 +1743,23 @@ def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
     )
 
 
-@pytest.fixture(scope="session")
-def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
+def _plans_of_key(pytestconfig: pytest.Config, api_key: str) -> plans.LivePlans:
     """Return the plans of the run's key: declared, cached within the hour, or probed now.
 
-    `MASSIVE_LIVE_PLANS`, when set, overrides everything and nothing is probed. Otherwise the plans
-    come from `.live-plans.json` in the repository root when it was probed less than
-    `probe.CACHE_LIFETIME` ago, in this layout, for the same API key and S3 access key id (a line on
-    the terminal then says so, when, and how to probe again), and else from a probe: per class, a
-    snapshot of one liquid ticker (Starter), its trades (Developer) and quotes (Advanced), and the
-    snapshot's `fmv` field (Business, for stocks, options, and currencies); then one file of every
-    flat-file prefix. The probe writes the cache, which holds digests, never the credentials. The
-    plans are recorded as evidence under "live plans". Only the live tests request this fixture, so
-    a unit run never probes. Being session-scoped, it is set up before any function-scoped fixture
-    of the first live test that needs it, the autouse key check included, so it makes the same check
-    first itself: under CI, or without `MASSIVE_API_KEY`, the test skips before anything reaches
-    Massive.
+    This is the run's source of plans (`key_check.PLANS_SOURCE`), which the `live_plans` fixture
+    (`tests/_live/key_check.py`) asks only past its key check. `MASSIVE_LIVE_PLANS`, when set,
+    overrides everything and nothing is probed. Otherwise the plans come from `.live-plans.json` in
+    the repository root when it was probed less than `probe.CACHE_LIFETIME` ago, in this layout, for
+    the same API key and S3 access key id (a line on the terminal then says so, when, and how to
+    probe again), and else from a probe: per class, a snapshot of one liquid ticker (Starter), its
+    trades (Developer) and quotes (Advanced), and the snapshot's `fmv` field (Business, for stocks,
+    options, and currencies); then one file of every flat-file prefix. The probe writes the cache,
+    which holds digests, never the credentials. The plans are recorded as evidence under "live
+    plans".
 
     Args:
         pytestconfig: The pytest configuration, for the repository root and the stash.
+        api_key: The key `key_check.live_key` returned.
 
     Returns:
         The plans.
@@ -1738,7 +1768,6 @@ def live_plans(pytestconfig: pytest.Config) -> plans.LivePlans:
         pytest.UsageError: When a probe's answer proves nothing (`probe.PlanProbeError`):
             the run cannot tell the plans and asks for `MASSIVE_LIVE_PLANS`.
     """
-    api_key = _live_key()
     declared = os.environ.get(plans.PLANS_VARIABLE, "").strip()
     if declared:
         run_plans = plans.declared_plans(declared)
@@ -1867,13 +1896,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Runs first (`tryfirst`), before the `-m` deselection, so the checks cover every collected
     test, also those a default run deselects; run later, a marked unit test would already be
     deselected and escape the check. A live test without the `integration` marker would run in
-    CI, and a marked test elsewhere would never run by default. Two tiers of live tests run
+    CI, and a marked test elsewhere would never run by default. Four tiers of live tests run
     apart: `integration_limits` (tests that deliberately exceed Massive's subscription and
     connection limits), `integration_smoke` (the unattended check that every dataset and
-    verb works), and `integration_rate_limits` (the checks that draw Massive's per-minute
-    refusals of a class on Basic on purpose). A test of any of them must also be a live test,
-    and it is deselected unless the `-m` expression names its tier: `-m integration` runs
-    every live test but those, and `-m integration_smoke`, for one, runs only that tier.
+    verb works), `integration_rate_limits` (the checks that draw Massive's per-minute
+    refusals of a class on Basic on purpose), and `integration_all_symbols` (the checks that
+    stream every symbol of a class for minutes, taking over the key's connection). A test of
+    any of them must also be a live test, and it is deselected unless the `-m` expression
+    names its tier: `-m integration` runs every live test but those, and
+    `-m integration_smoke`, for one, runs only that tier.
     Last, every soak test gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in
     place of the suite's 60 s.
 
@@ -1905,8 +1936,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     ]
     if unpaired:
         raise pytest.UsageError(
-            "a test marked integration_limits, integration_smoke, or integration_rate_limits "
-            "must also be marked "
+            "a test marked integration_limits, integration_smoke, integration_rate_limits, or "
+            "integration_all_symbols must also be marked "
             "integration: " + ", ".join(unpaired)
         )
     expression = config.option.markexpr or ""
@@ -1964,21 +1995,21 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
     """Skip a live test under CI, without a key, short of its plans, or too slow on Basic.
 
-    It runs before the test's own function-scoped fixtures. The session-scoped `live_plans`
-    fixture, which probes the key's plans for the first live test of a run, is set up before
-    it, and so makes the same check (`_live_key`) first. A test's `needs` markers name the plans
-    it needs; one the run's plans do not meet skips, naming the plan and its monthly price. A
-    test that reads a class the key holds on Basic and declares more than 5 requests skips too
-    (`pacing.skip_reason`), since every request after the fifth would wait for a later minute.
-    That check needs the plans, which the run learns only when its first live test starts, so
-    it sits here rather than in the collection hook.
+    It runs before the test's own function-scoped fixtures. The session-scoped `live_plans` fixture
+    (`tests/_live/key_check.py`), which learns the key's plans for the first live test of a run, is
+    set up before it, and so makes the same check (`key_check.live_key`) first. A test's `needs`
+    markers name the plans it needs; one the run's plans do not meet skips, naming the plan and its
+    monthly price. A test that reads a class the key holds on Basic and declares more than 5
+    requests skips too (`pacing.skip_reason`), since every request after the fifth would wait for a
+    later minute. That check needs the plans, which the run learns only when its first live test
+    starts, so it sits here rather than in the collection hook.
 
     Args:
         request: The requesting test, for its markers and the `live_plans` fixture.
     """
     if request.node.get_closest_marker(_INTEGRATION) is None:
         return
-    _live_key()
+    key_check.live_key()
     run_plans: plans.LivePlans = request.getfixturevalue("live_plans")
     requirements = _requirements(request.node)
     unmet = plans.unmet(requirements, run_plans)
@@ -2057,36 +2088,6 @@ def _write_live_line(config: pytest.Config, prefix: str, line: str) -> None:
         reporter.write_line(f"{prefix}{line}")
 
 
-def _live_key() -> str:
-    """Return the API key a live test may use, or skip the test when it may reach no server.
-
-    Every fixture that sets up a live test calls this before anything reaches Massive: under
-    CI (`CI` set to anything but blank) live tests never run, so a key added to CI's secrets
-    later still never reaches Massive from CI, and without `MASSIVE_API_KEY` they cannot.
-
-    Returns:
-        The key, stripped of surrounding whitespace.
-    """
-    if os.environ.get("CI", "").strip():
-        pytest.skip("live tests never run in CI")
-    return _required_env("MASSIVE_API_KEY")
-
-
-def _required_env(name: str) -> str:
-    """Return an environment variable's value, or skip the test when it is unset or blank.
-
-    Args:
-        name: The variable, such as `"MASSIVE_API_KEY"`.
-
-    Returns:
-        The value, stripped of surrounding whitespace.
-    """
-    value = os.environ.get(name, "").strip()
-    if not value:
-        pytest.skip(f"{name} is not set")
-    return value
-
-
 _PLANS: Final = {
     "test_crypto_integration.py": "a Currencies plan that includes this data",
     "test_forex_integration.py": "a Currencies plan that includes this data",
@@ -2096,6 +2097,7 @@ _PLANS: Final = {
     "test_options_integration.py": "an Options plan that includes this data",
     "test_indices_integration.py": "an Indices plan that includes this data",
     "test_futures_integration.py": "a Futures plan that includes this data",
+    "test_futures_calendar_integration.py": "a Futures plan that includes this data",
     "test_reference_integration.py": "a plan that includes this reference data",
     "test_flatfiles_integration.py": "flat-file access to this dataset",
     "test_host_decision_integration.py": "the plan this check names in its docstring",
@@ -2359,6 +2361,39 @@ def own_governors(rest_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> Gov
     registry: GovernorRegistry = rate_limits.GovernorRegistry()
     monkeypatch.setattr(rate_limits, "GOVERNORS", registry)
     return registry
+
+
+@pytest.fixture
+def futures_spread_reads(
+    classes_on_basic: frozenset[str],
+) -> Callable[[Sequence[Mapping[str, Any]]], tuple[list[ticker_lists.SpreadRead], list[str]]]:
+    """Return a function that chooses the reads of futures combo contracts, one per venue.
+
+    With Futures on Basic it keeps 4 reads, the four exchanges' (CME, CBOT, NYMEX, COMEX), so
+    the products read and the contracts reads make 5 requests (`ticker_lists.spread_reads`).
+
+    Args:
+        classes_on_basic: The classes on Basic.
+
+    Returns:
+        A function taking the combo products and returning the reads and the venues left out.
+    """
+    reads = 4 if "futures" in classes_on_basic else None
+    return functools.partial(ticker_lists.spread_reads, reads=reads)
+
+
+@pytest.fixture
+def futures_spread_report() -> Callable[
+    [Sequence[Mapping[str, Any]], Mapping[str, Sequence[Mapping[str, Any]]]], list[str]
+]:
+    """Return a function that describes the futures spread tickers read, by venue and form.
+
+    Returns:
+        A function taking the combo products and the combo contracts by venue, and returning
+        evidence lines (`ticker_lists.spread_report`) judged by the library's
+        `canonical_symbol_future_spread`.
+    """
+    return functools.partial(ticker_lists.spread_report, spread=dm.canonical_symbol_future_spread)
 
 
 @pytest.fixture
@@ -2662,7 +2697,7 @@ def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
         The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
     """
     config: MassiveConfig = dm.MassiveConfig(
-        api_key=_required_env("MASSIVE_API_KEY"),
+        api_key=key_check.required_env("MASSIVE_API_KEY"),
         rest_basic_subscriptions=_basic_subscriptions(run_plans),
         delayed_subscriptions=_delayed_subscriptions(run_plans),
     )

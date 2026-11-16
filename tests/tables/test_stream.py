@@ -30,7 +30,13 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars, OnError, Recency
-from deephaven_massive._errors import LIBRARY_BUG, MassiveError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    ErrorSource,
+    MassiveError,
+    SessionClosedError,
+)
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import DriftReport, DriftSample, Transport, sources
 from deephaven_massive._tables import stream
@@ -56,6 +62,7 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 
@@ -230,11 +237,6 @@ FOREX_ROWS = [
 ]
 
 
-def quote(ticker: str, **fields: object) -> dict[str, object]:
-    # One forex quote as Massive's WebSocket writes it, the pair as given.
-    return {**FOREX_ROWS[0], "Ticker": ticker, **fields}
-
-
 @pytest.mark.parametrize(
     ("mode", "level"), [(OnError.LOG, logging.ERROR), (OnError.IGNORE, logging.DEBUG)]
 )
@@ -375,15 +377,13 @@ def make_sink(
     plan: ChannelPlan | None = None,
     *,
     stream_id: int = 1,
-    spec: DatasetSpec = TRADES,
 ) -> tuple[StreamSink, Table]:
-    # A trades stream, or one of `spec`; streams given one `plan` share each flush's batch, as
-    # one dataset's do.
+    # A trades stream; streams given one `plan` share each flush's batch, as one dataset's do.
     if plan is None:
         plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
     opened = open_stream_tables(
         plan,
-        core.catalog.dataset_schema(spec, raw_symbol=False),
+        core.catalog.dataset_schema(TRADES, raw_symbol=False),
         symbols,
         core=core,
         stream_id=stream_id,
@@ -458,14 +458,10 @@ def test_a_failed_sink_drops_the_rows_it_held(massive_session: dm.MassiveSession
 
 
 def shared_batch(
-    plan: ChannelPlan,
-    rows: list[dict[str, object]],
-    *,
-    splits: bool = True,
-    source_key: str = "stocks/T",
+    plan: ChannelPlan, rows: list[dict[str, object]], *, splits: bool = True
 ) -> stream.SharedBatch:
     # A flush's batch of the rows, as the flusher shares it among its streams.
-    converted = plan.convert(frame(rows, source_key), {}, arrived=arrivals(rows))
+    converted = plan.convert(frame(rows), {}, arrived=arrivals(rows))
     return stream.SharedBatch(to_table(converted.batch), converted, splits=splits)
 
 
@@ -494,16 +490,15 @@ def test_a_sink_selects_its_rows_without_work_per_row(massive_session: dm.Massiv
     assert some._select(batch) is batch.table
     some.set_symbols(frozenset())
     assert some._select(batch) is None
-    # A session that keeps unreadable forex pairs (`LOG`) gives their rows a null Symbol: a
-    # stream that holds every readable symbol of the batch still needs the filter to leave
-    # them out.
-    warned = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.LOG)
-    nameless = shared_batch(warned, FOREX_ROWS, source_key="forex/C")
+    # A session that keeps unreadable symbols (`LOG`) gives their rows a null Symbol: a stream
+    # that holds every readable symbol of the batch still needs the filter to leave them out.
+    warned = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.LOG)
+    nameless = shared_batch(warned, [trade("AAPL"), trade("MSFT"), trade("not a symbol")])
     assert nameless.converted.null_symbols
-    some.set_symbols(frozenset({"C:EURUSD"}))
+    some.set_symbols(frozenset({"AAPL", "MSFT"}))
     filtered = some._select(nameless)
     assert filtered is not None
-    assert filtered.size == 1
+    assert filtered.size == 2
 
 
 def test_streams_of_one_batch_symbol_share_one_partition(
@@ -616,7 +611,7 @@ def test_a_failed_sink_publishes_nothing_and_fails_once(
     assert sink.rows_published == 1
 
 
-def test_one_failure_of_many_streams_is_logged_once_at_the_level_of_its_cause(
+def test_one_failure_of_many_streams_is_logged_once_at_the_level_its_bug_flag_gives(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     core = massive_session._core
@@ -793,7 +788,11 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     with caplog.at_level(logging.DEBUG, logger=stream.__name__):
         gate.set()
         drain()
-    assert failures == ["the symbol table failed, so the result can no longer follow it"]
+    assert [str(e) for e in failures] == [
+        "the symbol table failed, so the result can no longer follow it"
+    ]
+    assert isinstance(failures[0], MassiveError)
+    assert failures[0].source is ErrorSource.USER  # the table is the user's to fix
     reported = (
         "test.trades stream 1 failed: the symbol table failed, so the result can no longer "
         "follow it"
@@ -801,14 +800,14 @@ def test_a_failed_watchlist_fails_its_stream_on_the_reaper(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.ERROR, reported)]
 
 
-def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _record_failures(sink: StreamSink, monkeypatch: pytest.MonkeyPatch) -> list[Exception]:
     # Records the error each `publish_failure` of the sink's publisher fails its table with.
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = sink.publisher
 
     class _Recording:
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
     monkeypatch.setattr(sink, "publisher", _Recording())
@@ -825,11 +824,12 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
         assert sink.fail(MassiveError("a failure that raced the close"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], SessionClosedError)
     assert not caplog.records
     assert not sink.fail(MassiveError("again"))  # once only
 
@@ -1339,17 +1339,17 @@ def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
     massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
 ) -> None:
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.RAISE)
-    every, _ = make_sink(core, ALL, plan, spec=FOREX)
-    flusher.routes.add("C", every)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    every, _ = make_sink(core, ALL, plan)
+    flusher.routes.add("T", every)
     limit = stream.DROPPED_RUN_LIMIT
-    rows = [quote("EUR/USD"), *[quote("GBP/USD", ParticipantTimestamp=5)] * limit]
-    flusher.rows("C", frame(rows, "forex/C"), generation=1)
+    flusher.rows(
+        "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), generation=1
+    )
     flusher.flush()
     with caplog.at_level(logging.INFO, logger=stream.__name__):
-        # A pair the library cannot read fails the stream before GBP/USD's row could publish.
-        rows = [quote("GBP/USD"), quote("nonsense pair")]
-        flusher.rows("C", frame(rows, "forex/C"), generation=1)
+        # A spelling the library cannot read fails the stream before ILLQ's row could publish.
+        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]), generation=1)
         flusher.flush()
     assert every.failed
     assert "published again" not in caplog.text
@@ -1454,35 +1454,35 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
     # Deephaven refuses one stream's failure for an unreadable symbol, which fails every stream
     # of the dataset on the channel: the other stream is failed all the same.
     core = massive_session._core
-    plan = ChannelPlan.build(core.catalog, FOREX, "C", unreadable_symbols=OnError.RAISE)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
 
     def sink(stream_id: int, symbol: str) -> StreamSink:
         # The two streams share the dataset's plan, as the streams of one connection do.
         opened = open_stream_tables(
             plan,
-            core.catalog.dataset_schema(FOREX, raw_symbol=False),
+            core.catalog.dataset_schema(TRADES, raw_symbol=False),
             (symbol,),
             core=core,
             stream_id=stream_id,
             host="socket.test",
             evidence="test host",
             recency=Recency.REALTIME,
-            path="/forex",
+            path="/stocks",
             on_shutdown=lambda: None,
             on_symbols=lambda *_: None,
         )
         opened.sink.publish_held()
         return opened.sink
 
-    aapl, msft = sink(1, "C:EURUSD"), sink(2, "C:GBPUSD")
+    aapl, msft = sink(1, "AAPL"), sink(2, "MSFT")
 
     def refused(_: Exception) -> None:
         raise RuntimeError("refused")
 
     monkeypatch.setattr(aapl, "publisher", types.SimpleNamespace(publish_failure=refused))
-    flusher.routes.add("C", aapl)
-    flusher.routes.add("C", msft)
-    flusher.rows("C", frame([quote("!!"), quote("GBP/USD")], "forex/C"), generation=1)
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    flusher.rows("T", frame([trade("!!"), trade("MSFT")]), generation=1)
     flusher.flush()
     assert aapl.failed
     assert msft.failed
@@ -1689,13 +1689,32 @@ class _DyingFlusher(Flusher):
         raise _Fatal
 
 
-class _Stubborn:
-    # A routed stream whose failure raises.
-    stream_id = 2
-    plan = None  # read by the flush that forgets the plans no longer routed
+class _Unfailable:
+    # A stream's publisher whose failure raises; its stream is routed no rows.
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
 
-    def fail(self, error: MassiveError) -> bool:
+    def publish_failure(self, error: Exception) -> None:
         raise RuntimeError(f"cannot fail: {error}")
+
+
+class _FailureLog:
+    # A stream's publisher that records the errors its table is failed with; its stream is
+    # routed no rows.
+    def __init__(self) -> None:
+        self.errors: list[Exception] = []
+
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
+
+    def publish_failure(self, error: Exception) -> None:
+        self.errors.append(error)
+
+
+def _sink_of(core: SessionCore, stream_id: int, publisher: Publisher) -> StreamSink:
+    # A trades stream that publishes to `publisher`, outside the session's registry.
+    plan = ChannelPlan.build(core.catalog, TRADES, "T", unreadable_symbols=OnError.RAISE)
+    return StreamSink(stream_id, core=core, plan=plan, publisher=publisher, symbols=None)
 
 
 def test_a_dying_flush_thread_fails_its_streams(
@@ -1708,8 +1727,7 @@ def test_a_dying_flush_thread_fails_its_streams(
     core = massive_session._core
     healthy, _ = make_sink(core, ALL)
     f = _DyingFlusher(core.exec_ctx)
-    stubborn: StreamSink = _Stubborn()  # type: ignore[assignment]  # a sink whose failure raises
-    f.routes.add("T", stubborn)
+    f.routes.add("T", _sink_of(core, 2, _Unfailable()))
     f.routes.add("T", healthy)
     with caplog.at_level(logging.ERROR):
         f.start()
@@ -1730,18 +1748,6 @@ def test_a_dying_flush_thread_fails_its_streams(
     assert [args.exc_type for args in escaped] == [_Fatal]
 
 
-class _Recording:
-    # A routed stream that records the errors it is failed with.
-    def __init__(self, stream_id: int) -> None:
-        self.stream_id = stream_id
-        self.plan = None  # read by the flush that forgets the plans no longer routed
-        self.errors: list[MassiveError] = []
-
-    def fail(self, error: MassiveError) -> bool:
-        self.errors.append(error)
-        return True
-
-
 def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
@@ -1754,12 +1760,10 @@ def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     core = massive_session._core
     healthy, healthy_blink = make_sink(core, ALL)
     shown = blink_to_append_only(healthy_blink)
-    recording = _Recording(3)
+    recording = _FailureLog()
     flusher.routes.add("T", healthy)
-    stubborn: StreamSink = _Stubborn()  # type: ignore[assignment]  # a sink whose failure raises
-    recorded: StreamSink = recording  # type: ignore[assignment]  # a sink that records failures
-    flusher.routes.add("Q", stubborn)
-    flusher.routes.add("Q", recorded)
+    flusher.routes.add("Q", _sink_of(core, 2, _Unfailable()))
+    flusher.routes.add("Q", _sink_of(core, 3, recording))
     flusher.fail([2], MassiveError("refused"))
     flusher.fail([3], MassiveError("also refused"))
     flusher.rows("T", frame([trade("AAPL")]), generation=1)
@@ -1961,10 +1965,9 @@ def test_benchmark_symbol_split(
 
 def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
     # The JVM may report a listener's error after the stream's sink is gone.
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the sink was collected
 
-    gone: weakref.ref[StreamSink] = weakref.ref(_Gone())  # type: ignore[arg-type]  # a dead sink
     stream._fail_later(gone, "late")
 
 
@@ -1986,10 +1989,9 @@ def test_skipped_watchlist_rows_reach_the_streams_error(
 
 
 def test_skipped_watchlist_rows_of_a_finished_stream_do_nothing() -> None:
-    class _Gone:
-        pass
+    def gone() -> None:
+        return None  # the sink was collected
 
-    gone: weakref.ref[StreamSink] = weakref.ref(_Gone())  # type: ignore[arg-type]  # a dead sink
     stream._show_skipped(gone, ("msft",))
 
 

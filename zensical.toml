@@ -1,0 +1,95 @@
+# The documentation site: the user pages and an API reference generated from the docstrings,
+# built by Zensical (https://zensical.org). docs/dev/docs-site.md explains how to build and
+# preview it, and how .github/workflows/docs-site.yml publishes it to GitHub Pages.
+
+[project]
+site_name = "deephaven-massive"
+site_description = "Live and static Deephaven tables for Massive.com (formerly Polygon.io) market data."
+site_url = "https://chipkent.github.io/deephaven-massive/"
+repo_url = "https://github.com/chipkent/deephaven-massive"
+repo_name = "chipkent/deephaven-massive"
+# The site reads the pages where they are, from the repository root, so every relative link
+# works the same on GitHub and on the site. exclude_docs, in .gitignore syntax, publishes only
+# the pages below; a link from one of them to any other page fails the strict build.
+docs_dir = "."
+site_dir = "site"
+exclude_docs = """
+/*
+!/README.md
+!/docs/
+/docs/*
+!/docs/troubleshooting.md
+!/docs/configuration.md
+!/docs/datasets/
+!/docs/images/
+!/docs/api/
+"""
+nav = [
+  { "Home" = "README.md" },
+  { "Datasets" = "docs/datasets/README.md" },
+  { "Configuration" = "docs/configuration.md" },
+  { "Troubleshooting" = "docs/troubleshooting.md" },
+  { "API reference" = [
+    { "deephaven_massive" = "docs/api/deephaven_massive.md" },
+    { "deephaven_massive.queries" = "docs/api/queries.md" },
+    { "deephaven_massive.namespaces" = "docs/api/namespaces.md" },
+  ] },
+]
+
+[project.theme]
+features = ["navigation.sections", "navigation.top", "search.highlight", "content.code.copy"]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+# The pages are GitHub Markdown, so the extensions are the ones that render it as GitHub does,
+# in place of Zensical's defaults.
+[project.markdown_extensions]
+tables = {}
+attr_list = {}
+# Renders the Markdown inside the dataset pages' <details markdown="1"> folds.
+md_in_html = {}
+# GitHub's heading anchors: lowercase, punctuation dropped, spaces to hyphens.
+toc.permalink = true
+toc.slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
+pymdownx.highlight = {}
+# relaxed_headers accepts fences such as ```python continues, which the docs tests read.
+pymdownx.superfences.relaxed_headers = true
+pymdownx.magiclink = {}
+# GitHub strikes ~~text~~ through and has no subscript.
+pymdownx.tilde.subscript = false
+
+[project.plugins.mkdocstrings.handlers.python]
+# Griffe reads the source without importing it, so the build needs no Deephaven server.
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+# A Returns section is one value; its bullets describe it rather than list several.
+docstring_options = { returns_multiple_items = false }
+# Renders the docstrings' reST literal blocks (a `::` and the indented block after it) as code.
+extensions = ["scripts/site_literal_blocks.py"]
+# Each package page lists the names in its __all__, headed by the class or function name.
+filters = ["!^_"]
+show_root_heading = true
+show_root_full_path = true
+show_root_members_full_path = false
+show_category_heading = true
+members_order = "source"
+show_source = false
+show_bases = false
+separate_signature = true
+show_signature_annotations = true
+merge_init_into_class = true
+# A class shows the methods it inherits too, such as StreamHistoryQuery's history() and
+# last_by(), which it gets from its base classes.
+inherited_members = true

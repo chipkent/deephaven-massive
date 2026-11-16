@@ -26,7 +26,8 @@ EXPECTED_EXPORTS = [
     "MassiveError",
     "AuthenticationError",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
+    "SessionClosedError",
     "ALL",
     "AllSymbols",
     "AssetClass",
@@ -50,10 +51,13 @@ EXPECTED_EXPORTS = [
     "SymbolConvention",
     "OnError",
     "canonical_symbol",
+    "canonical_symbol_stock",
     "canonical_symbol_stock_yahoo",
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_cms",
     "canonical_symbol_option",
+    "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_forex",
     "canonical_symbol_crypto",
@@ -74,7 +78,7 @@ def test_version_is_the_installed_distribution_version() -> None:
 
 
 def test_all_is_exactly_the_public_api() -> None:
-    assert len(EXPECTED_EXPORTS) == 45
+    assert len(EXPECTED_EXPORTS) == 49
     assert sorted(dm.__all__) == sorted(EXPECTED_EXPORTS)
 
 

@@ -27,7 +27,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
-from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._massive import DriftReport, DriftSample, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
@@ -59,10 +59,11 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
     gaps_text,
     shown_query,
+    thread_died,
 )
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.publisher import BlinkPublisher, Publisher, blink_publisher
 from deephaven_massive._tables.symbol_read_rows import (
     SYMBOL_READ_KEYS,
     SYMBOL_READS,
@@ -408,16 +409,18 @@ def test_failed_writes_are_logged_and_the_writer_continues(
 
 class _BrokenPublisher:
     # A diagnostics table's publisher whose add fails.
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         raise RuntimeError("the streams table is broken")
+
+    def publish_failure(self, error: Exception) -> None:
+        raise AssertionError(error)  # the writer lives: nothing fails the table
 
 
 def test_a_failing_table_does_not_cost_the_other_its_rows(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
-    broken: BlinkPublisher = _BrokenPublisher()  # type: ignore[assignment]  # a fake whose add fails
-    diagnostics._streams.publisher = broken
+    diagnostics._streams.publisher = _BrokenPublisher()
     connection = ConnectionRow(
         transport=Transport.WS, asset_class=AssetClass.STOCKS, family=ChannelFamily.TICK
     )
@@ -433,7 +436,7 @@ def test_a_failing_table_does_not_cost_the_other_its_rows(
 class _CountingPublisher:
     # Wraps a publisher, records when each `add` began and ended, and holds the first one until
     # released, so rows queued meanwhile reach the writer as one batch.
-    def __init__(self, publisher: BlinkPublisher, *, hold: bool = True) -> None:
+    def __init__(self, publisher: Publisher, *, hold: bool = True) -> None:
         self.publisher = publisher
         self.adds: list[float] = []
         self.ends: list[float] = []
@@ -442,18 +445,20 @@ class _CountingPublisher:
         if not hold:
             self.gate.set()
 
-    def add(self, rows: Table) -> None:
+    def add(self, table: Table) -> None:
         self.adds.append(time.monotonic())
         self.entered.set()
         assert self.gate.wait(TIMEOUT)
-        self.publisher.add(rows)
+        self.publisher.add(table)
         self.ends.append(time.monotonic())
+
+    def publish_failure(self, error: Exception) -> None:
+        self.publisher.publish_failure(error)
 
 
 def _count_adds(diagnostics: Diagnostics, *, hold: bool = True) -> _CountingPublisher:
     counting = _CountingPublisher(diagnostics._streams.publisher, hold=hold)
-    publisher: BlinkPublisher = counting  # type: ignore[assignment]  # a fake that counts adds
-    diagnostics._streams.publisher = publisher
+    diagnostics._streams.publisher = counting
     return counting
 
 
@@ -1364,6 +1369,18 @@ def test_the_tables_are_created_under_the_update_graphs_shared_lock(
     diagnostics = _diagnostics(dh_exec_ctx)
     assert blink_creations == [True, True, True, True]
     diagnostics.release()
+
+
+def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
+    died = thread_died("MassiveSession #1", "reaper", RuntimeError("boom"))
+    assert str(died) == (
+        "MassiveSession #1: its reaper thread died (RuntimeError('boom')); this table no longer "
+        f"updates. {LIBRARY_BUG}"
+    )
+    assert (died.source, died.is_bug) == (dm.ErrorSource.LIBRARY, True)
+    # An interrupt ends the thread too, but is no bug of the library.
+    interrupted = thread_died("MassiveSession #1", "reaper", KeyboardInterrupt())
+    assert (interrupted.source, interrupted.is_bug) == (dm.ErrorSource.USER, False)
 
 
 def test_an_item_the_writer_has_no_rule_for_is_a_defect(dh_exec_ctx: ExecutionContext) -> None:

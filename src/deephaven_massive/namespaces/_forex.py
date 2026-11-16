@@ -203,7 +203,7 @@ CONVERSION: Final = DatasetSpec(
     # The vendor's own `symbol` field is generated as `Symbol`, so the key uses it as is.
     keys={(_REST, _CONVERSION): SourceKeys(symbol=KeySpec("Symbol"))},
     # The quote the conversion used: an explicit APPEND poll appends each new conversion.
-    revision_keys=("LastTimestamp",),
+    revision_keys=("LastQuoteParticipantTimestamp",),
 )
 """`m.forex.conversion`: one conversion between two currencies at the latest quote."""
 
@@ -291,7 +291,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`;
+                - a ticker isn't Massive's exact ticker of a currency pair;
                 - a table has no `Symbol` column.
 
         Example:
@@ -321,7 +321,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`;
+                - a ticker isn't Massive's exact ticker of a currency pair;
                 - a table has no `Symbol` column.
 
         Example:
@@ -368,7 +368,7 @@ class ForexNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`.
+                - a ticker isn't Massive's exact ticker of a currency pair.
 
         Example:
             ::
@@ -405,7 +405,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`;
+                - a ticker isn't Massive's exact ticker of a currency pair;
                 - a table has no `Symbol` column.
 
         Example:
@@ -443,7 +443,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`;
+                - a ticker isn't Massive's exact ticker of a currency pair;
                 - a table has no `Symbol` column.
 
         Example:
@@ -471,7 +471,7 @@ class ForexNamespace(Namespace):
             TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
             ValueError: If:
                 - `symbols` is None or empty;
-                - a ticker is empty, holds `,` or `*`, or lacks `C:`;
+                - a ticker isn't Massive's exact ticker of a currency pair;
                 - a table has no `Symbol` column.
 
         Example:

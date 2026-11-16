@@ -46,6 +46,8 @@ class FakeStreamTransport:
         self.shutdown: dict[int, threading.Event] = {}
         self.shutdown_calls: dict[int, int] = {}
         self.failed: dict[int, str] = {}
+        # The error each stream failed with, by stream.
+        self.errors: dict[int, MassiveError] = {}
         # The stream of each `publish_held` call, in order.
         self.published_held: list[int] = []
         self._lock = threading.Lock()
@@ -63,19 +65,16 @@ class FakeStreamTransport:
             if stream_id in self.failed:
                 return False
             self.failed[stream_id] = str(error)
+            self.errors[stream_id] = error
         core = self._core()
         assert core is not None  # a stream's record keeps its session alive
-        core.fail_stream(stream_id, str(error))
+        core.fail_stream(stream_id, error)
         self.publishers[stream_id].publish_failure(error)
         return True
 
     def _publish_held(self, stream_id: int) -> None:
         with self._lock:
             self.published_held.append(stream_id)
-
-    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
-        # Every pair is listed here; `tests/ingest/test_ws.py` tests the real lookups.
-        return symbols
 
     def open_stream(
         self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int

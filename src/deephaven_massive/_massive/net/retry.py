@@ -14,8 +14,10 @@ clients do the waiting, through a `Clock`, so tests replace time with a fake and
   (`rate_limit_wait`): what the response's `Retry-After` header asks, in either of its forms
   (a number of seconds or an HTTP date), and without a usable header 15, 30, then 60 seconds
   by the number of refusals in the run.
-- **TLS certificate failures** are never retried: the certificate will not change between
-  attempts. `net.errors.is_tls_failure` recognises one however deeply a library wrapped it.
+- **TLS certificate failures**, a certificate for another name included, are never retried:
+  the certificate will not change between attempts. Any other failed TLS handshake is retried
+  as a connection failure. `net.errors.is_certificate_failure` tells the two apart for every
+  client.
 - **Proxy credential refusals** (a proxy answering a tunnel request with HTTP 407) are never
   retried either: the same credentials would be refused again, and a corporate proxy may lock
   the account after a few refusals. `net.errors.is_proxy_auth_failure` recognises one.
@@ -41,6 +43,7 @@ __all__ = [
     "JITTER",
     "MAX_RETRIES",
     "RATE_LIMIT_WAITS",
+    "RETRYABLE_STATUSES",
     "SYSTEM_CLOCK",
     "TRANSIENT_STATUSES",
     "TRANSIENT_WAITS",
@@ -60,6 +63,10 @@ MAX_RETRIES = 3
 
 TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
 """The HTTP statuses that mean the server failed for now and a retry may succeed."""
+
+RETRYABLE_STATUSES = frozenset({429, *TRANSIENT_STATUSES})
+"""The HTTP statuses whose request may succeed when it is sent again later: a rate limit and
+the transient statuses. A caller that gets one of them after the clients gave up may try again."""
 
 TRANSIENT_WAITS = (0.5, 1.0, 2.0)
 """The base wait in seconds before each retry of a transient failure, before jitter."""

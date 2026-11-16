@@ -252,3 +252,8 @@ live-debug-logs/
 
 # Extra project environments, such as the free-threaded one (UV_PROJECT_ENVIRONMENT=.venv-314t).
 .venv-*/
+
+# The PR-description draft the writing-a-pr-description skill has each agent write at the root
+# of its worktree, and any log: a run's output, never source.
+.git-pr-body.md
+*.log

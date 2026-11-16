@@ -3,7 +3,7 @@
 `deephaven-massive` turns Massive.com (formerly Polygon.io) market data into live and static
 Deephaven tables: a Python library managed with `uv`. Its user contract is the user docs
 (`README.md`, `docs/troubleshooting.md`, `docs/configuration.md`, the generated
-`docs/datasets/`) and the public docstrings; tests enforce it, and `docs/dev/decisions.md`
+`docs/datasets/`) and the public docstrings; tests enforce it, and `docs/dev/decisions/`
 records why it is what it is. Each rule states its intent: apply it as written, and let the
 intent settle only what the words leave open. Procedures live in the skills, named where they
 apply.
@@ -25,8 +25,8 @@ apply.
   exception) only to pass it. Name both sides and why they clash, ask the owner before doing
   the contested part, propose the edit to the instruction that ends the conflict, and meanwhile
   work only on what the answer can't change. Reviews flag bent code and raise the rule the same
-  way. An owner answer that sets a rule aside for a step settles it for that step; quote it
-  under Check before merging. Not conflicts: a rule that only adds work, a fact about Python,
+  way. An owner answer that sets a rule aside for a step settles it for that step; show it,
+  with its question and date, under Check before merging. Not conflicts: a rule that only adds work, a fact about Python,
   Deephaven, or Massive, and code a rule prescribes (objects passed down, an `OnError` setting,
   a decision entry). Text elsewhere that states an older form of a rule here (a code comment,
   a doc, an old issue, a config comment) is stale, not a conflict: follow this file and fix the
@@ -36,15 +36,36 @@ apply.
   owner the step to take themselves, and propose the edit if they want the Limit changed.
 - **Ask, and keep working.** Ask with `writing-to-the-owner` (a subagent asks the agent that
   started it, in its report if it has no other channel), and keep working on what the answer
-  can't change.
+  can't change. The PR opens, or its next push goes up, after the answer: a description, a
+  review reply, or an issue never holds a question for the owner.
 - **The owner decides first**: a public change the request doesn't cover, a break the owner
-  hasn't accepted, loosening a check, every lint or type-check suppression, reversing an owner decision, and dropping or narrowing a
-  requirement. **Only the owner's own message approves** a release, a run against Massive's API
-  with a key, posting outside this repository, closing or deleting an issue, PR, pushed branch,
-  or release, and spending money or changing access. A brief may relay an owner decision quoted
-  verbatim with where the owner said it; a paraphrase relays nothing, and no brief grants these
-  approvals. Everything else the request needs (edits, tests, commits, opening a PR, pushing in
-  batches, review replies, issues here, private names, a needed dependency) needs no approval.
+  hasn't accepted, loosening a check, dropping a protection (below), every lint or type-check
+  suppression but the server-start import below, reversing an owner decision, and dropping or
+  narrowing a requirement. **Only the owner's own message approves** a release, a run against
+  Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
+  pushed branch, or release, and spending money or changing access. **An approval is a
+  decision file or the owner's answer to a question.** Cite the decision file that records
+  the ruling by its number (`decision 97`); a file the same PR adds does not count. Before a
+  file exists, show the question as it was
+  asked together with the owner's answer, as written and dated, from a message in the session;
+  a question alone approves nothing. A GitHub comment under the owner's login counts only once
+  the owner confirms it in the session, since an agent may have posted it. "Owner-approved",
+  "the owner decided", and a paraphrase claim nothing, and no brief grants an approval. An
+  answer covers what its question asked: never widened into a rule, never narrowed to the
+  case you asked about. Everything else
+  the request needs (edits, tests, commits, opening a PR, pushing in batches, review replies,
+  issues here, private names, a needed dependency) needs no approval.
+- **Dropping a protection needs the owner's yes.** A safeguard is a check, refusal,
+  validation, test, setting, or guard that catches a mistake a user or the code can still make.
+  Deleting one together with the code it guarded, or replacing it with one that catches the
+  same mistake or more, loses no protection and needs no approval: say in the PR what replaced
+  it. Removing one while the mistake stays possible loses protection, and that is the owner's
+  call, however clearly a rule or a broad ruling ("simplify", "let Massive judge it") seems to
+  allow it: whoever wrote those words may not have had this guard in mind. Ask before removing
+  it, as its own question (`writing-to-the-owner`): the guard, the mistake it catches, an
+  example of what would then go uncaught, and the evidence, already in hand, that dropping it
+  is safe. Symbol checks removed on one reading of a rule took a week to restore and
+  re-research.
 
 ## Commands
 
@@ -104,10 +125,10 @@ These protect the owner's repository, money, and secrets.
   PR. A public change is approved only by the owner's message naming that change, after seeing
   what it adds, removes, or alters for users. A work list, a plan, or "start the work" never
   approves the public changes inside it; each gets its own question. Each public change ships
-  with its user docs, docstrings, and tests. `docs/dev/decisions.md` records
+  with its user docs, docstrings, and tests. `docs/dev/decisions/` records
   broad decisions only: a rule or contract set or changed, a break, or a design choice worth
   remembering; not each new name. When the request leaves a public name or shape open, choose it as `writing-to-the-owner` §3 says, record it
-  under Decisions, and list it under Check before merging, where the owner judges it; no list
+  under Decisions with the alternatives you weighed, and the owner judges it in review; no list
   of public modules decides it. A fix that makes code do what its docs say is not a public
   change.
 - **Compatibility starts at `0.1.0`.** Release candidates owe none: until `v0.1.0` is tagged
@@ -134,16 +155,31 @@ These protect the owner's repository, money, and secrets.
   and what the data is. The library owns everything between the user and Massive: building
   correct requests, connections, rate limits, retries, converting data faithfully into tables,
   and telling the user clearly what happened. So:
-  - **Massive's answer is the error.** The library sends the request and reports Massive's
-    refusal as Massive's (its status and text), naming the call that caused it; it never
-    reinterprets or guesses. A ticker Massive has no data for is not an error: it gives no
-    rows, as Massive answered, and `m.symbol_reads()` shows it; the library never looks a
-    ticker up to second-guess it. Users check Massive's lists (`m.reference.tickers()`,
-    `m.options.contracts()`, `m.futures.contracts()`).
-  - **The library refuses a value itself only** when it is the wrong Python type, when the
-    library cannot express it in a request, or when sending it would return wrong data with no
-    error (each such check says which, with its evidence). It never encodes the shape of
-    Massive's tickers or other data particulars.
+  - **The code never knows Massive's plans** (decision 114). Massive decides what each key
+    may read, how late, and how fast, and changes its plans over time. The library and its
+    tests learn these only from Massive's answers (an entitlement refusal, a rate-limit
+    answer) and from settings the user gives, never from a plan's name, a probe for a plan,
+    or a built-in table of what a plan includes. They work for whatever plans a user holds.
+    A live test sends its requests and, on an entitlement refusal, skips and quotes Massive.
+    User docs may still say which plans include a dataset, generated from Massive's spec so
+    they follow Massive's changes.
+  - **Massive's answer is the error.** The library reports Massive's refusal as Massive's: its
+    status, its text, and the call that caused it. It never reinterprets or guesses.
+  - **A ticker Massive has no data for gives no rows by default** (decision 104), because that
+    is Massive's answer, not an error. `unavailable_symbols` governs an HTTP 404 and a crypto
+    pair missing from Massive's crypto ticker list. An empty 200 is no rows under any setting.
+  - **The library never sends a request only to check a ticker**, because whether a ticker
+    exists is Massive's answer to give. Users check Massive's lists, such as
+    `m.reference.tickers()`.
+  - **The library takes only Massive's canonical ticker as a symbol** (decisions 58 and 104),
+    because most of Massive's endpoints answer an unknown ticker with an empty 200
+    (verification item 62), so a typo looks like a quiet day. In code, a non-canonical symbol
+    raises `ValueError`. In a table, its row follows `noncanonical_symbols`. A form on
+    Massive's ticker lists that the library refuses is a library defect.
+  - **The library refuses any other value only** when it is the wrong Python type, when the
+    library can't express it in a request, or when sending it would return wrong data with no
+    error. Each such check says which, with its evidence. Beyond ticker spelling, the library
+    never encodes Massive's data particulars.
   - **The library's own errors are its own:** a transport failure after retries, a closed
     session, a misuse of the API, or a library defect, each saying it is the library's.
 - **Supply Massive's data; never repair it.** Users must see what Massive sent: convert
@@ -202,16 +238,27 @@ These protect the owner's repository, money, and secrets.
   None` after the check that guarantees it), for readers and the type checker; it never
   validates input or guards anything at run time, since `python -O` removes it. Prefer it to a
   `cast`, which asserts the same fact without checking it.
+- **Every choice over a closed set handles each case by name** (an enum's members, a union of
+  types, the forms of `symbols`, a fixed set of values), so a new member or type fails loudly in
+  a test instead of corrupting data or dropping rows. A `match` or `if` chain ends in
+  `assert_never` where mypy can check it, or else raises `BrokenGuaranteeError`; a lookup table
+  over an enum has a test that every member is in it. No `else` or default case, `dict.get`
+  default, type-filtering comprehension, or silent `except` absorbs a value nobody planned for;
+  an intended fallback (a documented `OnError` behavior, an optional field Massive may omit)
+  says why in a comment.
 - **Lint size and complexity limits flag smells**: fix the design. A suppression at a site
   needs the owner's acceptance first, asked with its reason; never raise a global limit to make
   code pass. Too-many-arguments is off because
   keyword-only optional parameters are the API style; positional parameters are capped at three.
   Every suppression (`# noqa`, `# type: ignore[code]`, `# pragma: no cover`) has its reason on
-  its line.
+  its line. One case is accepted in advance: a script that starts the Deephaven server imports
+  what loads Deephaven after the start, each line with `# noqa: E402 - needs the server above`.
 - **The checks are the owner's rules**: `tests/test_layout.py`, the ruff, mypy, and coverage
-  settings, the hooks, `check.sh`, and CI. A stricter check and an entry under an existing rule whose stated purpose
+  settings, the hooks, `check.sh`, CI, and the PR-description check (`scripts/check_pr_body.py`). A stricter check and an entry under an existing rule whose stated purpose
   covers the case (a helper package, an approved exception) are ordinary edits, named under
-  Check before merging; an entry added only so new code passes is bent code. Loosening a rule
+  Check before merging; an entry, exception, or rule edit made only so code passes, new or
+  already on `main`, is bent code: fix the code, or ask the owner which to change, and never
+  write the exception unasked. Loosening a rule
   (removing a check, raising a limit, turning a rule off project-wide) needs the owner first.
 - **Dependencies**: a new dependency or raised floor a change needs goes in that change's PR,
   named under Check before merging; only a dependency-only change is its own `chore(deps):` PR.
@@ -222,6 +269,31 @@ These protect the owner's repository, money, and secrets.
 
 ## Workflow
 
+- **Design before code, for every change.** Write down what will change and why before
+  writing it, sized to the change: a one-line fix gets a few lines (the cause, the fix, the
+  test that catches it); a feature, a new module, or a change across many files gets a short
+  design (the calls a user types, what is refused and why, the settings, which files change).
+  The costly failures of one week were code written before its design settled: a public shape
+  the owner first met as a 184-file diff, and a PR whose rules changed twice after it opened,
+  each change paid for in merges and reviews. So for anything beyond a small fix, draft the
+  design with the most capable model available (Fable) and have a second Fable instance attack
+  it as an adversary before any code: a flaw found on paper costs a paragraph, and the same
+  flaw found in the diff costs the diff. Where the design is ambiguous, or the design and its
+  critic can't agree on a choice, stop and ask (the owner, or the coordinator for a subagent)
+  with the options and a recommendation, instead of picking one and building; keep working
+  only on what the answer can't change. A public change, and any dropped protection, goes to
+  the owner in that design form before any code is written (`writing-to-the-owner` §3). Every
+  other design the critic accepts is yours to settle: record it in the PR under Decisions and
+  start.
+- **One PR per change that can merge on its own.** A PR holds one change with everything it
+  needs to be correct: the code, its tests, and its docs together (a new column lands with its
+  docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a
+  regeneration, one rule applied everywhere) is right by itself, so it goes in its own PR and
+  merges first: rename the setting across 80 files in one PR, then change what it covers in
+  the next, so the rename never waits on a design question and the behavior PR stays small.
+  Never split one behavior into parts that are each wrong until the others land, such as the
+  REST half of a new rule in one PR and the WebSocket half in another: neither can merge alone.
+  Unrelated fixes found on the way go in their own PR or an issue, however small.
 - Branch `<type>/<topic>` from `origin/main` after `git fetch`, or from the PR below in a
   stack. Commits and PR titles follow Conventional Commits and the Title section of
   `docs/dev/pull-requests.md`.
@@ -229,19 +301,56 @@ These protect the owner's repository, money, and secrets.
   one-word doc fix skips it. It holds the push procedure: push in batches (each push runs paid
   CI and review bots), answer every review comment, and keep the description current. Every CI
   job must pass, the free-threaded 3.14t job too.
-- Before starting, check open PRs that change your files (`gh pr list`, `gh pr diff <n>
-  --name-only`). Stack on one only when yours needs its content: branch from its branch, open
-  with `gh pr create --base <its branch>`, link with `gh stack link <PRs bottom to top>`, and
-  name the merge order in your PR body (`plan-parallel-prs` §3 has more).
+- **Branch from another PR only when yours needs its code.** Before starting, check the open
+  PRs that change your files (`gh pr list`, `gh pr diff <n> --name-only`). If your change calls
+  a function or uses a type that an open PR adds, branch from that PR's branch, open with
+  `gh pr create --base <its branch>`, link with `gh stack link <PRs bottom to top>`, and name
+  the merge order in your PR body (`plan-parallel-prs` §3 has more). If you only touch the same
+  files, branch from `main` as usual: basing on the other PR to avoid a merge conflict makes
+  yours wait on its review and inherit each merge of `main` it makes, which costs more than
+  resolving the conflict once when the second PR lands. Don't start a wide change (many files,
+  or a rewrite of a module) while an open PR is changing the same files; wait for it to land,
+  or join it. A PR that moves or renames files merges before the PRs it would conflict with,
+  not after them, so no other PR merges `main` to follow the move.
+- **Stop and re-plan a PR that has drifted.** Three signs: the owner changed the design after
+  the PR opened; the diff grew past the request (a three-file fix now touches twenty); or the
+  PR is merging `main` a second time. Each means the PR carries more than one change, or waits
+  on something it can't settle, and every further push pays for all of it. Land what is settled
+  now, as a PR that is correct by itself, and move the rest to an issue with what you learned.
+  One merge of `main` to resolve a conflict is normal; the second is the sign.
 - Merge `main` or your base branch only to resolve a merge conflict, or after an open PR that
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
   generated file instead of merging it, and say in the PR body how you resolved it.
-- A new decision or verification item takes the number the coordinator reserved, or else the
-  next after the highest on `main` and in every open PR's diff. Both files are append-only.
+- **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
+  user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
+  owner's ruling that set one, and the rule links it (`decision N`). A verification item is a
+  fact about Massive or Deephaven that only a live read settles and whose answer changes the
+  code.
+  Each decision is one file, `docs/dev/decisions/NNNN-slug.md`, and each verification item one
+  file in `docs/dev/verification-items/`; the folder README gives the format, and
+  `writing-a-record` says how to write one. The slug says when
+  a reader needs the entry, in the words they would search for. A new entry takes the number the
+  coordinator reserved, or the next after the highest on `main` and in every open PR. Never
+  rename or delete an entry, except to renumber one of two that landed with the same number: a
+  changed decision is a new file, and the old one's `Status:` line names it; settling an item
+  changes its `Status:` line. Before citing decisions, asking the owner, or removing or
+  weakening anything, list them (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read
+  every entry whose name touches the subject. An owner ruling that sets, changes, or reverses
+  a rule or contract becomes a decision file in the next PR on the subject (the coordinator's
+  own `docs:` PR when none is open): a ruling that lives only in chat is broken again by the
+  next agent, who never saw it. The file states the ruling in plain words, with no quotation:
+  the question asked, the ruling, its reason, its date, and where it was decided. Read its
+  wording back to the owner before writing it (a subagent, through the agent that started
+  it), and show its text in the PR, so a stretched meaning is caught before merge. A PR that
+  changes a rule in this file or a skill shows the question and the owner's dated answer for
+  it and, when it rewrites or removes a rule, says under Check before merging which decisions
+  it touches (`Decisions touched: 58, 66` or `none`), each given a new `Status:` line;
+  `scripts/check_pr_body.py` fails without the line and the answer.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
-  `writing-a-pr-description` for PR descriptions, issue bodies, and reports, and
-  `writing-user-docs` for a user page or any change to what one describes.
+  `writing-a-pr-description` for PR descriptions, issue bodies, and reports,
+  `writing-a-record` for a decision or verification item, and `writing-user-docs` for a user
+  page or any change to what one describes.
 
 ## Deephaven invariants
 

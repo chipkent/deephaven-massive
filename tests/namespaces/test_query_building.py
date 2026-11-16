@@ -179,7 +179,8 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     # Indicators, reference data, and the unified snapshot span asset classes.
     q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
-    assert build(massive_session, INDICATOR, symbols=["i:spx"])._request.symbols == ("i:spx",)
+    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+        build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
 def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) -> None:
@@ -213,9 +214,7 @@ def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession)
     assert q._request.timespan is Timespan.DAY
 
 
-def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
-    massive_session: dm.MassiveSession,
-) -> None:
+def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> None:
     fx = DatasetSpec(
         name="forex.quotes",
         summary="A dataset for the tests.",
@@ -223,11 +222,12 @@ def test_symbols_are_sent_as_written_unless_no_request_can_carry_them(
         channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
-    with pytest.raises(ValueError, match=r"^cannot send the symbol 'EUR,USD' to Massive"):
-        build(massive_session, fx, symbols="EUR,USD")
-    # Every ticker is sent as written, whatever its shape: Massive answers it.
+    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+        build(massive_session, fx, symbols="EUR/USD")
+    # A dataset without an asset class reads the class from each prefix; none is a stock.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
-    assert build(massive_session, INDICATOR, symbols="aapl")._request.symbols == ("aapl",)
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        build(massive_session, INDICATOR, symbols="aapl")
 
 
 def test_none_is_refused_where_the_dataset_needs_symbols(
@@ -348,11 +348,12 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
 ) -> None:
     # The indicator timestamps take whole milliseconds, as their ISO-8601 text does.
     instant = to_j_instant("2025-01-02T14:30:00.001Z")
+    assert instant is not None
     filters = build(
         massive_session,
         INDICATOR,
         filters={
-            "timestamp_gte": instant,  # type: ignore[dict-item]  # a Java time, which the types do not name
+            "timestamp_gte": instant,
             "timestamp_lt": pd.Timestamp("2025-01-02T14:30:00.002Z"),
         },
     )._request.filters
@@ -361,15 +362,17 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
         ("timestamp_lt", datetime(2025, 1, 2, 14, 30, 0, 2000, tzinfo=UTC)),
     )
     assert all(type(value) is datetime for _, value in filters)
-    for day in (to_j_local_date("2025-01-02"), np.datetime64("2025-01-02")):
+    java_day = to_j_local_date("2025-01-02")
+    assert java_day is not None
+    for day in (java_day, np.datetime64("2025-01-02")):
         assert build(
             massive_session,
             INDICATOR,
-            filters={"timestamp_gte": day},  # type: ignore[dict-item]  # a Java time, which the types do not name
+            filters={"timestamp_gte": day},
         )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
     # A Java day in a list is a day; the next element is the first the list refuses.
     with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
-        build(massive_session, DIVIDENDS, filters={"a": [to_j_local_date("2025-01-02"), 1]})  # type: ignore[list-item]  # a Java time, which the types do not name; 1 is refused
+        build(massive_session, DIVIDENDS, filters={"a": [java_day, 1]})
     # An instant between two microseconds rounds outward: an upper bound up, any other down,
     # whether the name is a filter key or a wire name.
     between = to_j_instant("2025-01-02T14:30:00.000001001Z")
@@ -546,23 +549,13 @@ def test_a_column_of_tickers_or_codes_must_hold_text(
     with pytest.raises(
         ValueError, match=r"^the ProductCode column of a table passed as product_code must be a"
     ):
-        value_table(
-            numbers,
-            argument="product_code",
-            parameter="product_code",
-            underlying=False,
-            pairs_refused=False,
-        )
+        value_table(numbers, argument="product_code", parameter="product_code", underlying=False)
     # A pandas Series of tickers is a sequence of str, so it reads as a list does.
     texts = new_table([string_col("Symbol", ["AAPL"])])
     assert build(massive_session, TRADES_SPEC, symbols=pd.Series(["AAPL"])) == build(
         massive_session, TRADES_SPEC, symbols=["AAPL"]
     )
-    boxed = value_table(
-        texts, argument="underlying", parameter="u", underlying=True, pairs_refused=True
-    )
-    assert boxed.table is texts
-    assert boxed.pairs_refused
+    assert value_table(texts, argument="underlying", parameter="u", underlying=True).table is texts
 
 
 # The query class of a dataset.)
@@ -1098,7 +1091,7 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
     # A streaming dataset declared as a REST one would lie to its caller.
     with pytest.raises(dm.MassiveError) as info:
         build_query(massive_session._core, TRADES_SPEC, query_type=FetchQuery, symbols=["AAPL"])
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
     assert str(info.value).startswith(
         "m.stocks.trades gives a SymbolStreamQuery, not the FetchQuery it declares. "
     )

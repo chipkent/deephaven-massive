@@ -54,7 +54,12 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from deephaven_massive._massive.net import USER_AGENT
 from deephaven_massive._massive.net.capture import capture_frame
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireAuthError, WireError
+from deephaven_massive._massive.net.errors import (
+    LIBRARY_BUG_REPORT,
+    WireAuthError,
+    WireError,
+    WireFailure,
+)
 from deephaven_massive._massive.net.http import ssl_context
 from deephaven_massive._massive.net.redaction import Redactor
 from deephaven_massive._massive.net.retry import SYSTEM_CLOCK
@@ -484,11 +489,11 @@ class WsClient:
                 f"error: {error!r}",
                 host=self._host,
                 path=self._path,
-                client_defect=True,
+                kind=WireFailure.CLIENT_DEFECT,
             )
             failure.__cause__ = error
         else:
-            if failure is not None:  # the library logs it, at the level its cause gives
+            if failure is not None:  # the library logs it, at the level its `is_bug` gives
                 logger.debug("the WebSocket client for %s failed: %s", self._url, failure)
         if failure is None:
             logger.info("closed the WebSocket client for %s", self._url)

@@ -4,12 +4,12 @@ import threading
 import pytest
 
 from deephaven_massive import _log_limits
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, MassiveError
 from deephaven_massive._log_limits import (
     LIST_LIMIT,
     BoundedLog,
+    LoggedKeys,
     bounded_list,
-    first_seen,
     log_failure,
     log_once,
     mark_failure_logged,
@@ -29,7 +29,7 @@ def test_bounded_list_shows_the_count_and_the_first_items() -> None:
 def test_log_once_logs_each_key_once(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     log = logging.getLogger("test.log_once")
     with caplog.at_level(logging.DEBUG, logger="test.log_once"):
         log_once(log, "a", "first %s", 1)
@@ -41,22 +41,24 @@ def test_log_once_logs_each_key_once(
     ]
 
 
-def test_first_seen_marks_new_keys_shared_with_log_once(
+def test_logged_keys_mark_new_keys_for_their_owner_only(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
-    assert first_seen(["a", "b", "a"]) == ["a", "b"]
-    assert first_seen(["b", "c"]) == ["c"]
-    log = logging.getLogger("test.first_seen")
-    with caplog.at_level(logging.INFO, logger="test.first_seen"):
-        log_once(log, "a", "already seen")
-    assert caplog.records == []
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
+    logged = LoggedKeys()
+    assert logged.first_seen(["a", "b", "a"]) == ["a", "b"]
+    assert logged.first_seen(["b", "c"]) == ["c"]
+    assert LoggedKeys().first_seen(["a"]) == ["a"]  # another owner has seen nothing
+    log = logging.getLogger("test.logged_keys")
+    with caplog.at_level(logging.INFO, logger="test.logged_keys"):
+        log_once(log, "a", "the process has not logged it")  # an owner's keys are its own
+    assert caplog.messages == ["the process has not logged it"]
 
 
 def test_log_once_is_once_across_threads(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     log = logging.getLogger("test.log_once.threads")
     start = threading.Barrier(16)
 
@@ -107,16 +109,17 @@ def test_a_failure_is_logged_once_however_many_tables_it_fails(
     ("error", "level", "text"),
     [
         (MassiveError("refused"), logging.DEBUG, "refused"),  # the caller's chosen level
-        (MassiveError("fix it", cause=ErrorCause.USER_DEFECT), logging.ERROR, "fix it"),
+        (MassiveError("fix it", source=ErrorSource.USER, is_bug=True), logging.ERROR, "fix it"),
+        (MassiveError("no key", source=ErrorSource.USER), logging.DEBUG, "no key"),  # no bug
         (
-            MassiveError("row broke", cause=ErrorCause.LIBRARY_DEFECT),
+            MassiveError("row broke", source=ErrorSource.LIBRARY),
             logging.ERROR,
             f"row broke. {LIBRARY_BUG}",
         ),
         (KeyError("k"), logging.ERROR, f"KeyError: 'k'. {LIBRARY_BUG}"),
     ],
 )
-def test_a_failure_is_logged_at_the_level_its_cause_gives(
+def test_a_failure_is_logged_at_error_only_when_it_is_a_bug(
     caplog: pytest.LogCaptureFixture, *, error: BaseException, level: int, text: str
 ) -> None:
     log = logging.getLogger("causes")
@@ -127,10 +130,28 @@ def test_a_failure_is_logged_at_the_level_its_cause_gives(
     assert record.exc_info is not None
 
 
+@pytest.mark.parametrize(
+    ("error", "traced"),
+    [
+        (MassiveError("broke", source=ErrorSource.LIBRARY), True),
+        (MassiveError("fix it", source=ErrorSource.USER, is_bug=True), True),
+        (KeyError("k"), True),
+        (MassiveError("refused"), False),
+    ],
+)
+def test_a_bug_is_logged_with_its_traceback_though_the_caller_passes_none(
+    caplog: pytest.LogCaptureFixture, *, error: BaseException, traced: bool
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="traced"):
+        log_failure(logging.getLogger("traced"), error, "failed: %s")
+    [record] = caplog.records
+    assert (record.exc_info is not None) is traced
+
+
 def test_a_failure_marked_as_logged_is_logged_by_log_failure_at_debug_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    defect = MassiveError("broke", cause=ErrorCause.LIBRARY_DEFECT)
+    defect = MassiveError("broke", source=ErrorSource.LIBRARY)
     assert mark_failure_logged(defect)
     assert not mark_failure_logged(defect)
     assert mark_failure_logged(KeyError("k"))  # only a MassiveError is remembered

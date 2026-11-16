@@ -672,5 +672,5 @@ def test_date_like_alias() -> None:
 
 def test_every_unit_but_nanoseconds_has_its_step() -> None:
     # A `.gt` or `.lte` bound steps back one unit; a new unit must name its step, never be
-    # refused as nanoseconds. No parameter counts in the field-only `MS_OR_NS`.
+    # refused as nanoseconds. No parameter takes the field-only `MS_OR_NS` (`Param` refuses it).
     assert set(dates_module._UNIT_STEPS) == set(WireUnit) - {WireUnit.NS, WireUnit.MS_OR_NS}

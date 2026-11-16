@@ -1,17 +1,17 @@
 """A symbol's transport spellings, both ways: reading what Massive sends, writing what it takes.
 
-Every symbol the library takes or shows is spelled as Massive's REST tickers are, but Massive
-itself writes a few symbols differently per transport: `EUR/USD` in WebSocket forex
+Every symbol the library takes or shows is Massive's canonical REST ticker (`symbols.py`), but
+Massive itself writes a few symbols differently per transport: `EUR/USD` in WebSocket forex
 frames, `BTC-USD` in WebSocket crypto frames, `X:EUR-USD` in the forex quotes flat-file sample.
 This module holds both directions of that mapping, which every transport applies:
 
-- **Reading.** `canonical_from_wire` reads those spellings into the REST ticker's and keeps
-  every other symbol as Massive wrote it, and `WireSymbols` applies it to a column of rows
-  (`ReadSymbols`) and the session's `unreadable_symbols` setting to a forex or crypto pair it
-  cannot read: a bounded ERROR record per spelling under `LOG`, a bounded DEBUG record under
-  `IGNORE`, or the failure `unreadable_symbol_message` words under `RAISE`. An index endpoint
-  may send an index without its `I:` prefix, so `canonical_from_wire` adds it there,
-  from the endpoint's class alone: no conversion ever looks a name up.
+- **Reading.** `canonical_from_wire` reads every spelling the library knows into the canonical
+  form, and `WireSymbols` applies it to a column of rows (`ReadSymbols`) and the session's
+  `unreadable_symbols` setting to what it cannot read: a bounded ERROR record per spelling
+  under `LOG`, a bounded DEBUG record under `IGNORE`, or the failure
+  `unreadable_symbol_message` words under `RAISE`. An index endpoint may send an index without its
+  `I:` prefix, so `canonical_from_wire` adds it there, from the endpoint's class alone: no
+  conversion ever looks a name up.
 - **Writing.** `wire_spellings` lists every spelling a flat file may write, for its row
   filter, and `ws_symbol` writes the WebSocket topic form. A joined crypto ticker is never
   split by guessing where its quote starts: the transports take every split from Massive's
@@ -22,7 +22,7 @@ This module holds both directions of that mapping, which every transport applies
   `index_underlyings` reads its rows' underlyings back into the canonical form, by the CFI
   code each row carries.
 
-The pair readers and the converters are `symbols.py`'s. Every
+The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
 function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
 process-wide bound on the records of unreadable spellings.
 """
@@ -37,6 +37,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.symbols import (
+    AS_WRITTEN,
+    CANONICAL_GRAMMARS,
     forex_codes,
     read_crypto_pair,
     read_forex_pair,
@@ -45,6 +47,7 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -65,32 +68,42 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def canonical_from_wire(asset_class: AssetClass | ClassFromPrefix, raw: str) -> str | None:
-    """Read a symbol as a Massive transport sent it, in the spelling of Massive's REST tickers.
+def canonical_from_wire(
+    asset_class: AssetClass | ClassFromPrefix, raw: str, *, as_written: bool = False
+) -> str | None:
+    """Read a symbol as a Massive transport sent it, in the canonical form.
 
-    Only the spellings a transport writes differently from the REST ticker are read: forex
-    pairs as `C:EURUSD`, `EUR/USD`, `EUR-USD`, `EURUSD`, or `X:EUR-USD` (the forex quotes
-    flat-file sample); crypto pairs as `X:BTCUSD`, `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV
-    frames), whatever the quote currency; and an index without its prefix (`SPX`) on a dataset
-    of the indices class, which then gets `I:` from the dataset's class, never from the name.
-    Every other symbol is kept exactly as Massive wrote it. Case is never folded.
+    The spellings the library knows: forex pairs as `C:EURUSD`, `EUR/USD`, `EUR-USD`,
+    `EURUSD`, or `X:EUR-USD` (the forex quotes flat-file sample); crypto pairs as `X:BTCUSD`,
+    `BTC-USD`, `BTC/USD`, or `X:BTC-USD` (FMV frames), whatever the quote currency; an index
+    without its prefix (`SPX`) on a dataset of the indices class, which then gets `I:` from the
+    dataset's class, never from the name. A futures row keeps any ticker as Massive writes it,
+    spreads of a form not yet seen included, and so does a dataset kept as written; every other
+    class takes only its canonical text. Case is never
+    folded.
 
     Args:
         asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans classes:
-            the prefix then selects the class, and text without one is kept as written.
+            the prefix then selects the class, and text without one is read as a stock.
         raw: The wire text.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`is_canonical`).
 
     Returns:
-        The ticker, or None for a forex or crypto spelling that is no pair the library can read.
+        The canonical ticker, or None for a spelling the library does not know.
     """
+    if as_written:
+        return raw if AS_WRITTEN.fullmatch(raw) is not None else None
     resolved = symbol_class(raw) if asset_class is ClassFromPrefix.ANY else asset_class
     if resolved is AssetClass.FOREX:
         return read_forex_pair(raw, ("C:", "X:"))
     if resolved is AssetClass.CRYPTO:
         return read_crypto_pair(raw, ("X:",))
+    if resolved is AssetClass.FUTURES:
+        return raw if AS_WRITTEN.fullmatch(raw) is not None else None
     if asset_class is AssetClass.INDICES and not raw.startswith("I:"):
-        return f"I:{raw}"
-    return raw
+        raw = f"I:{raw}"
+    return raw if CANONICAL_GRAMMARS[resolved](raw) else None
 
 
 def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
@@ -107,41 +120,36 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
     Args:
         asset_class: The dataset's class; every flat-file dataset has one (`DatasetSpec`
             refuses `ClassFromPrefix.ANY` with flat files).
-        symbol: A symbol of the class.
+        symbol: A canonical symbol of the class.
 
     Returns:
         The spellings, each of which `canonical_from_wire(asset_class, spelling)` reads as
-        `symbol`; only the symbol itself for one without its class's prefix (`BTCUSD` on the
-        crypto class), which goes on the wire as written.
+        `symbol`.
     """
+    prefixes: tuple[str, ...]
     if asset_class is AssetClass.FOREX:
-        codes = forex_codes(symbol)
-        if codes is not None:
-            base, quote = codes
-            prefixes: tuple[str, ...] = ("C:", "X:", "")
-            return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
+        base, quote = forex_codes(symbol)
+        prefixes = ("C:", "X:", "")
     elif asset_class is AssetClass.CRYPTO:
-        if symbol.startswith("X:"):
-            prefixes = ("X:", "")
-            # The joined ticker does not say where the pair splits, so the file may separate it
-            # at any point: every cut is looked for, and each reads back as this one symbol.
-            body = symbol[2:]
-            cuts = [(body[:i], body[i:]) for i in range(1, len(body))]
-            joined = tuple(f"{p}{body}" for p in prefixes)
-            dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
-            return (*joined, *dashed)
+        prefixes = ("X:", "")
+        # The joined ticker does not say where the pair splits, so the file may separate it at
+        # any point: every cut is looked for, and each reads back as this one symbol.
+        body = symbol[2:]
+        cuts = [(body[:i], body[i:]) for i in range(1, len(body))]
+        joined = tuple(f"{p}{body}" for p in prefixes)
+        dashed = (f"{p}{b}{s}{q}" for p in prefixes for b, q in cuts for s in ("/", "-"))
+        return (*joined, *dashed)
     elif asset_class is AssetClass.INDICES:
-        if symbol.startswith(_INDEX_PREFIX):
-            return symbol, symbol.removeprefix(_INDEX_PREFIX)
-    elif not (
+        return symbol, symbol[2:]
+    elif (
         asset_class is AssetClass.STOCKS
         or asset_class is AssetClass.OPTIONS
         or asset_class is AssetClass.FUTURES
     ):
+        return (symbol,)  # the files write these classes' canonical text
+    else:
         assert_never(asset_class)  # a new class needs its spellings here
-    # The files write a stock, option, or futures symbol as its canonical text, and a symbol
-    # without its class's prefix goes on the wire as written.
-    return (symbol,)
+    return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
 
 
 def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[str, str]]) -> str:
@@ -174,8 +182,8 @@ def ws_symbol(asset_class: AssetClass, symbol: str, pairs: Mapping[str, tuple[st
         # The `ticker` parameter of every forex channel is "{from}-{to}": see
         # vendor/massive/websocket/forex/quotes.md, aggregates-per-minute.md,
         # aggregates-per-second.md, and fair-market-value.md.
-        codes = forex_codes(symbol)
-        return symbol if codes is None else f"{codes[0]}-{codes[1]}"
+        base, quote = forex_codes(symbol)
+        return f"{base}-{quote}"
     if asset_class is AssetClass.CRYPTO:
         base, quote = pairs[symbol]
         return f"{base}-{quote}"
@@ -243,8 +251,8 @@ _ignored_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=lo
 def unreadable_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
     """Say which symbols Massive sent in a spelling the library cannot read, and what to do.
 
-    Such a spelling is a gap in the library's pair readers, never the caller's fault, so the
-    message asks for a bug report and names the setting that keeps the rows meanwhile.
+    Such a spelling is a gap in the library's grammar, never the caller's fault, so the message
+    asks for a bug report and names the setting that keeps the rows meanwhile.
 
     Args:
         dataset: The dataset that received them, such as `forex.quotes`.
@@ -299,11 +307,14 @@ class WireSymbols:
             text, and under `IGNORE` at DEBUG (a bounded number per process); under both its
             rows keep the text in `ReadSymbols.raw`. Under `RAISE` the caller fails the request
             or stream with `unreadable_symbol_message`.
+        as_written: True for a dataset whose symbols are kept as Massive writes them
+            (`canonical_from_wire`).
     """
 
     dataset: str
     asset_class: AssetClass | ClassFromPrefix
     unreadable: OnError
+    as_written: bool = False
 
     @property
     def keeps(self) -> bool:
@@ -312,7 +323,7 @@ class WireSymbols:
         Returns:
             True under `OnError.LOG` and `IGNORE`; False under `RAISE`, which fails it.
         """
-        return self.unreadable is not OnError.RAISE
+        return not effect_of(self.unreadable).fails
 
     def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -334,7 +345,9 @@ class WireSymbols:
         texts = distinct.to_pylist()
         for text in texts:
             if text is not None and text not in known:
-                known[text] = canonical_from_wire(self.asset_class, text)
+                known[text] = canonical_from_wire(
+                    self.asset_class, text, as_written=self.as_written
+                )
         mapped = pa.array([None if t is None else known[t] for t in texts], pa.string())
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)
@@ -343,7 +356,8 @@ class WireSymbols:
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
         kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
         if self.keeps:
-            spellings = _logged_spellings if self.unreadable is OnError.LOG else _ignored_spellings
+            level = effect_of(self.unreadable, level=logging.ERROR).level
+            spellings = _logged_spellings if level > logging.DEBUG else _ignored_spellings
             for text in unreadable:
                 spellings.log(
                     f"{self.dataset}\0{text}",

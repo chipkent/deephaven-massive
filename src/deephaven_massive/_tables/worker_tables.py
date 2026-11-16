@@ -26,7 +26,7 @@ import weakref
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol, TypeVar
 
-from deephaven_massive._errors import MassiveError, required
+from deephaven_massive._errors import NEW_SESSION, MassiveError, SessionClosedError, required
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import FINAL_STATES, StreamRow, StreamState
 from deephaven_massive._tables.liveness import release_scope
@@ -70,7 +70,7 @@ _ACTIVE: Final = frozenset({StreamState.RUNNING, StreamState.LOADING})
 
 
 def _worker_table_shut_down(
-    tables_ref: weakref.ref[WorkerTables],
+    tables_ref: Callable[[], WorkerTables | None],
     stream_id: int,
     *,
     record: Callable[[WorkerTables, int], None],
@@ -88,7 +88,8 @@ def _worker_table_shut_down(
     nothing to record.
 
     Args:
-        tables_ref: The session's worker-table registry, weakly.
+        tables_ref: Returns the session's worker-table registry, or None once it is freed: a
+            weak reference.
         record: `WorkerTables._shut_down`, unbound.
         stream_id: The table's `StreamId`.
         stop: The thread's stop token.
@@ -208,8 +209,8 @@ class WorkerTables:
             The worker, not yet started.
 
         Raises:
-            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`), before
-                the row was registered or after.
+            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`),
+                before the row was registered or after.
         """
         worker: _W | None = None
         registered: list[int] = []  # the stream id, as soon as `_register` stores the row
@@ -231,7 +232,7 @@ class WorkerTables:
             logger.debug("%s: stream %d opened as the session closed", self._label, row.stream_id)
             worker.abandon()
             self._results.release(result)
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
         return worker
 
     def shutdown_callback(self, stream_id: int, stop: threading.Event) -> Callable[[], None]:
@@ -289,12 +290,12 @@ class WorkerTables:
                 leaves the caller a row to release.
 
         Raises:
-            MassiveError: If the session is closed (`"MassiveSession #1 is closed"`): the table
-                must not start its thread then.
+            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`): the
+                table must not start its thread then.
         """
         with self._lock:
             if core.closed:
-                raise MassiveError(f"{self._label} is closed")
+                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
             self._workers[row.stream_id] = _WorkerState(row, fail)
             registered.append(row.stream_id)  # before any call: an interrupt still releases it
             self._diagnostics.write(row)

@@ -273,8 +273,9 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
     each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
-    four previous closes. Example 13 and Example 6's edit run as written; what they do is the
-    library's, which `tests/test_docs.py` checks.
+    four previous closes, and the previous closes of the three Yahoo tickers that end it,
+    under Massive's spellings. Example 13 and Example 6's edit run as written; what they do is
+    the library's, which `tests/test_docs.py` checks.
     """
     ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
     keep = {
@@ -295,6 +296,11 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
     evidence(f"example 6: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
     assert filled, f"Example 6's closes did not fill within {_FILL_WAIT:.0f} s"
     run.paste([edit], "drive-with-a-watchlist edit")
+    yahoo = run.section("convert-symbols", "yahoo_closes")["yahoo_closes"]
+    converted = {"AAPL", "BRK.B", "BACpL"}
+    filled = _wait(lambda: _symbols(table_rows(yahoo)) == converted, _FILL_WAIT)
+    evidence(f"example 6, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
+    assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
     run.section("stop-live-tables")
 
 

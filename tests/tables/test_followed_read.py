@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import logging
+import re
 import threading
 import weakref
 from collections.abc import Callable, Mapping
@@ -27,7 +29,7 @@ from deephaven.update_graph import exclusive_lock, shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import AuthenticationError, MassiveError
+from deephaven_massive._errors import NEW_SESSION, AuthenticationError, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator, followed_read
 from deephaven_massive._tables.execution_context import entered
@@ -41,12 +43,12 @@ from deephaven_massive._tables.liveness import (
 )
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
-    FailureKind,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
+from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -160,7 +162,7 @@ def follow(
         call=core.next_stream_id(),
         query="m.test.trades(<table>)",
         symbol_table=table,
-        rule=SymbolRowRule.of(SPEC, core.config.unsendable_symbols),
+        rule=SymbolRowRule.of(SPEC, core.config.noncanonical_symbols),
         reread=reread,
         plan=plan,
         note=note,
@@ -427,18 +429,20 @@ def test_a_bad_row_added_under_raise_fails_the_table(
     stream_rows: Rows,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = dataclasses.replace(massive_session._core.config, unsendable_symbols=dm.OnError.RAISE)
+    config = dataclasses.replace(
+        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
+    )
     monkeypatch.setattr(massive_session._core, "config", config)
     script = Script(massive_session)
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
-    add(wl, "MSFT,NVDA")
+    add(wl, "msft")
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
-    assert "a symbol table holds 'MSFT,NVDA'" in stream_rows()[0]["Error"]
+    assert "a symbol table holds 'msft'" in stream_rows()[0]["Error"]
 
 
-def test_a_row_no_request_can_carry_is_skipped_and_listed(
+def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
     *,
     watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
@@ -446,11 +450,11 @@ def test_a_row_no_request_can_carry_is_skipped_and_listed(
     dh_to_pylist: ToList,
 ) -> None:
     script = Script(massive_session)
-    wl = watchlist("AAPL", "MSFT,NVDA")
+    wl = watchlist("AAPL", "msft")
     result = follow(massive_session, wl, script)
     wait_rows(dh_to_pylist, result, {"AAPL": 2})
-    until(lambda: "'MSFT,NVDA'" in (stream_rows()[0]["Error"] or ""))
-    delete(wl, "MSFT,NVDA")
+    until(lambda: "'msft'" in (stream_rows()[0]["Error"] or ""))
+    delete(wl, "msft")
     until(lambda: stream_rows()[0]["Error"] is None)
     assert script.calls == [("AAPL",)]
     massive_session.release(result)
@@ -603,11 +607,39 @@ def test_an_interrupt_while_the_watch_starts_releases_the_result(
     assert script.calls == []
 
 
+def test_an_interrupt_after_the_blink_table_is_made_stops_no_watch(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    drain: Callable[[], None],
+) -> None:
+    # The build is undone after its blink table exists but before the watch does, as a
+    # test timeout's signal or a Ctrl-C can do: the table shuts down before `attach` runs.
+    script = Script(massive_session)
+    wl = watchlist("AAPL")
+
+    def interrupted(*_args: object, **_kwargs: object) -> Table:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(followed_read, "describe", interrupted)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        with pytest.raises(KeyboardInterrupt):
+            follow(massive_session, wl, script)
+        drain()  # the shutdown's work on the reaper has run
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert "shut down before its watch was made; no watch to stop" in caplog.text
+    assert massive_session._core.workers._workers == {}
+    assert massive_session._core.follows.following == 0
+    assert script.calls == []
+
+
 def test_a_closed_session_refuses_to_follow(
     watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     massive_session.close()
-    with pytest.raises(MassiveError, match=r"is closed$"):
+    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
 
 
@@ -627,7 +659,7 @@ def test_a_close_racing_the_registration_releases_the_result(
         return record
 
     monkeypatch.setattr(ResultRegistry, "track", track_then_close)
-    with pytest.raises(MassiveError, match=r"is closed$"):
+    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
     assert core.follows.thread is None
 
@@ -659,10 +691,7 @@ def test_a_download_is_never_published_after_the_table_failed(
 def test_the_router_drops_a_report_for_a_collected_result(
     massive_session: dm.MassiveSession,
 ) -> None:
-    class Gone:
-        pass
-
-    gone: followed_read.FollowedRead = Gone()  # type: ignore[assignment]  # a read that dies
+    gone = QuietRead()
     router = followed_read._WatchRouter(massive_session._core.follows, gone, lambda: 1)
     router.finish(gone)
     del gone
@@ -676,9 +705,7 @@ def test_a_failure_during_the_first_read_is_kept_for_the_coordinator(
     dh_to_pylist: ToList,
     drain: Callable[[], None],
 ) -> None:
-    failure = SymbolFailure(
-        MassiveError("HTTP 403: not in the plan", status=403), FailureKind.PERMANENT
-    )
+    failure = SymbolFailure(MassiveError("HTTP 403: not in the plan", status=403))
     first = FirstRead(
         {"AAPL": SymbolRows(rows_of(massive_session, "AAPL", 1)), "MSFT": failure}, 1, 0.1
     )
@@ -898,14 +925,10 @@ class _Heard:
 
 def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> None:
     # The listener reports from an update-graph thread; here a plain thread stands in for it.
-    class Read:
-        pass
-
-    read: followed_read.FollowedRead = Read()  # type: ignore[assignment]  # only its identity
+    read = QuietRead()
     heard = _Heard()
-    coordinator: follow_coordinator.FollowCoordinator = heard  # type: ignore[assignment]  # records
     step = [7]  # the update cycle the update graph's clock shows
-    router = followed_read._WatchRouter(coordinator, read, lambda: step[0])
+    router = followed_read._WatchRouter(heard, read, lambda: step[0])
     router.on_change(frozenset({"AAPL", "MSFT"}), frozenset())  # the replay, on this thread
     step[0] = 8
 
@@ -931,7 +954,7 @@ def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> No
 def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSession) -> None:
     coordinator = massive_session._core.follows
     coordinator.stop()
-    read: followed_read.FollowedRead = object()  # type: ignore[assignment]  # never followed
+    read = QuietRead()  # never followed
     coordinator.follow(read, None)  # the session closed: nothing starts
     coordinator.changed(read, frozenset({"AAPL"}), frozenset(), step=1)
     coordinator.invalid(read, "a bad row")
@@ -1001,9 +1024,9 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
     massive_session: dm.MassiveSession, drain: Callable[[], None]
 ) -> None:
     # Deephaven runs it on whichever thread shut the table down; here, on the test thread.
-    class Read:
+    class Read(QuietRead):
         def __init__(self) -> None:
-            self.stop_token = threading.Event()
+            super().__init__()
             self.shut_down_event = threading.Event()
             self.watch_stopped = threading.Event()
 
@@ -1011,11 +1034,10 @@ def test_the_shutdown_callback_stops_following_and_tells_the_session(
             self.watch_stopped.set()
 
     read = Read()
-    fake: followed_read.FollowedRead = read  # type: ignore[assignment]  # records its shutdown
     core = massive_session._core
     followed_read._shut_down(
         weakref.ref(core),
-        weakref.ref(fake),
+        weakref.ref(read),
         worker_shut_down=core.workers.shutdown_callback(12_345, read.stop_token),
     )
     assert read.stop_token.is_set()

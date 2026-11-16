@@ -88,6 +88,10 @@ fails on a cited page or anchor that does not exist, and on a bare path instead 
 
 ## Style
 
+- Write to [How an editor writes](../../../docs/dev/user-docs.md#method): the rule in the
+  first sentence, then the exception a caller hits; one case per sentence; three or more
+  cases as a list. A setting's docstring is its reference entry on `docs/configuration.md`,
+  so it keeps that entry's budget: about 120 words after the one-line summary.
 - Examples are real code that runs against the documented API.
 - Never restate the signature, use filler ("This function…"), or leave a term undefined.
 - Pass the terminology test of `docs/dev/user-docs.md`: use the word of the community that

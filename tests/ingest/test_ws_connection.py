@@ -10,7 +10,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, TypeAlias
@@ -974,14 +974,16 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
             return None
 
         @staticmethod
-        def fetch_rows(path: str, _query: object, **_charging: object) -> list[dict[str, object]]:
-            reads.append(path)
+        def fetch_rows(
+            template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
+        ) -> list[dict[str, object]]:
+            del query, bucket, cancel
+            reads.append(template)
             return []
 
     group = ws_session.connections.group
     real = group.sessions
-    freed: ws.WsConnections = _Freed()  # type: ignore[assignment]  # a fake: a session that closed
-    group.sessions = {freed}
+    group.sessions = {_Freed()}
     try:
         with pytest.raises(dm.MassiveError, match="connection group has closed"):
             group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
@@ -1112,13 +1114,12 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    error = _massive.WireError("dropped")
+    error = _massive.WireError("dropped", kind=_massive.WireFailure.UNREADABLE)
     rejects = [
         _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
         for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
     ]
-    # Every ticker counts as written; a missing one counts under none.
-    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1, "not a symbol": 1}
+    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1}
     del result
 
 
@@ -1422,6 +1423,9 @@ def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
     assert [r["State"] for r in rows] == ["FAILED", "FAILED"]
     since = _since(rows[0]["Error"])
     assert [r["Error"] for r in rows] == [_outage_failure(since, "300")] * 2
+    failure = connection._episodes.failure
+    assert failure is not None
+    assert (failure.source, failure.is_retryable) == (dm.ErrorSource.NETWORK, True)
     # An expected failure: one WARNING for both streams, never an ERROR.
     failures = [r for r in caplog.records if "longer than MassiveConfig.max_outage" in r.message]
     assert [r.levelno for r in failures] == [logging.WARNING]

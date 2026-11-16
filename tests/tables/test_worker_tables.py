@@ -34,7 +34,6 @@ from deephaven_massive._tables.liveness import new_scope
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from deephaven_massive._tables.worker_tables import WorkerTables
 
 TIMEOUT = 30.0
 
@@ -78,16 +77,13 @@ def test_a_worker_shutdown_after_its_session_was_freed_only_stops_the_thread() -
     # A finished background read's record leaves the session once its result is released, so
     # its session may be freed while a derived table still uses the read's blink table; the
     # table's shutdown callback then has no session to tell.
-    class Gone:
-        pass
+    def gone() -> None:
+        return None  # the registry was freed with its session
 
-    gone = Gone()
-    tables_ref: weakref.ref[WorkerTables] = weakref.ref(gone)  # type: ignore[arg-type]  # it dies
-    del gone
     stop = threading.Event()
     told: list[int] = []
     _worker_tables._worker_table_shut_down(
-        tables_ref, 7, record=lambda _, stream_id: told.append(stream_id), stop=stop
+        gone, 7, record=lambda _, stream_id: told.append(stream_id), stop=stop
     )
     assert stop.is_set()
     assert told == []
