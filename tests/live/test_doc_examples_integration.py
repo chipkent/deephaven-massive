@@ -562,7 +562,8 @@ def _check_snapshot(
         return [str(row["Error"]) for row in table_rows(reads) if row["State"] == "FAILED"]
 
     def done() -> bool:
-        return all(row["State"] == "DONE" for row in table_rows(reads))
+        states = [row["State"] for row in table_rows(reads)]
+        return bool(states) and all(state == "DONE" for state in states)
 
     _wait(lambda: bool(failed()) or bool(table_rows(snapshot)) or done(), _FILL_WAIT)
     errors = failed()
