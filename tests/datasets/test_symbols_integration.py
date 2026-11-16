@@ -51,7 +51,7 @@ _OPTION_UNDERLYINGS: Final = (
 `GOOGL`, `GOOG`), the common stocks behind preferreds the stock lists hold (`BAC`, `KIM`,
 `WFC`), and index options, which the contracts list takes by their bare ticker (`SPX`)."""
 
-_TODAY: Final = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+_TODAY: Final = datetime.now(ZoneInfo("America/New_York")).date()
 """Today in New York, the day whose tradeable futures contracts are read: without a day, the
 futures contracts list holds each contract once for every day of its history."""
 
