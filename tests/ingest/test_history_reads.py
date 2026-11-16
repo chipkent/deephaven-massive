@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
@@ -22,17 +23,21 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import Timespan
+from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
 from deephaven_massive._log_limits import LoggedKeys
+from deephaven_massive._massive import RowFault
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import (
     FlatFileRead,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
+from deephaven_massive._tables.withheld import Withheld, WithheldGroup
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -514,3 +519,78 @@ def test_a_missing_day_of_daily_bars_keeps_only_that_day_from_rest(
     )
     assert _dates(out["AAPL"]) == ["2025-03-03", "2025-03-04"]
     assert rest.by_symbol == [(MONDAY, TUESDAY, ("AAPL",))]
+
+
+def _lost(rows: int) -> Withheld:
+    # `rows` rows withheld for a price that is no number.
+    group = WithheldGroup(RowFault.UNCONVERTIBLE_VALUES, "AAPL", "AAPL", "Price", rows, "x")
+    return Withheld(pa.table({"x": pa.array([], pa.int64())}), (group,), "x")
+
+
+class _LostFiles(_Files):
+    # The flat files of `answer`, whose every row of the read was withheld.
+    @override
+    def history(self, *_: object, infer_holidays: bool, **kwargs: object) -> FlatFileRead:
+        tally = kwargs["tally"]
+        assert isinstance(tally, ReadTally)
+        tally.add(1, _lost(1), source="the flat files")
+        return super().history(infer_holidays=infer_holidays)
+
+
+def test_a_symbol_with_no_data_keeps_its_rows_when_the_read_fails(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The files hold no row of either symbol; REST withholds AAPL's only row of the missing
+    # day and answers HTTP 404 for MSFT. The read fails AAPL, and MSFT keeps its empty rows.
+    class Rest(_Rest):
+        @override
+        def history_by_symbol(
+            self, spec: DatasetSpec, *_: object, symbols: Sequence[str], tally: object, **__: object
+        ) -> dict[str, SymbolOutcome]:
+            assert isinstance(tally, ReadTally)
+            tally.add(1, _lost(1), source="GET /v3/trades/{stockTicker}")
+            empty = _rows(self.session, [], spec=spec)
+            return {s: SymbolRows(empty, no_data=s == "MSFT") for s in symbols}
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    empty = _rows(massive_session, [], MONDAY)
+    out = _by_symbol(massive_session, FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolFailure)
+    assert isinstance(aapl.error, RowDataError)
+    assert isinstance(msft, SymbolRows)
+    assert msft.no_data
+
+
+def test_rest_day_bars_of_the_files_days_never_count_as_read(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every row of the files is withheld. REST reads day bars over the whole range: Monday's
+    # bar, which the files' day already covers and the read drops, reads whole, and the missing
+    # Tuesday's is withheld. No row the call keeps was read whole, so the call fails.
+    class Rest(_Rest):
+        @override
+        def history(self, spec: DatasetSpec, *_: object, tally: object, **__: object) -> Table:
+            assert isinstance(tally, ReadTally)
+            tally.add(2, _lost(1), source="GET /v2/aggs/...")
+            return _rows(self.session, ["AAPL"], MONDAY, spec=spec)
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    request = Request(
+        symbols=("AAPL",), start=MONDAY, end=TUESDAY, timespan=Timespan.DAY, multiplier=1
+    )
+    window = history_window(BARS, request, start=MONDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=BARS)
+    files = _LostFiles(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+        read_history(
+            BARS,
+            request,
+            window,
+            core=massive_session._core,
+            files=files,
+            dates=(MONDAY, TUESDAY),
+            call=1,
+            stop=None,
+            forced=False,
+        )

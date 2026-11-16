@@ -48,9 +48,9 @@ class ErrorPolicy:
     reports it. When the library can read none of the rows of your symbols inside your call's
     window whole, across all the pages or files the call read, the call fails whatever the
     setting, since Massive's format has most likely changed. Rows outside the window count
-    neither way. A live stream judges runs of rows instead, and a few reads are still judged in
-    parts: https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error
-    lists each.
+    neither way. A live stream judges runs of rows instead:
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error lists
+    how each read and stream judges.
 
     Set a session's policy with `dm.MassiveConfig(on_error=...)`. Set one call's policy with any
     dataset method's `on_error=` argument. Each cause takes the first setting it finds: the

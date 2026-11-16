@@ -67,7 +67,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.read_tally import ReadTally
-from deephaven_massive._tables.transports import SymbolFailure
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
     import threading
@@ -488,10 +488,13 @@ def _rest_days(
             tables.append(rest.history(spec, one, one_window, call=call, tally=tally, stop=stop))
             continue
         # `days` limits an all-symbol read of bars to one grouped-daily request per missing
-        # day instead of one per day of the range.
-        rows = rest.history(spec, one, one_window, call=call, tally=tally, stop=stop, days=days)
+        # day instead of one per day of the range. Only the kept days' rows count as read.
+        part = ReadTally()
+        rows = rest.history(spec, one, one_window, call=call, tally=part, stop=stop, days=days)
         with entered(core.exec_ctx):
-            tables.append(rows.where_in(keep, "Date"))
+            kept = rows.where_in(keep, "Date")
+        tally.absorb(part, kept=kept.size)
+        tables.append(kept)
     return tables
 
 
@@ -593,7 +596,7 @@ def read_history_by_symbol(
             core, spec, symbols=ordered, tables=tables, failures={}, call=call, source=flat
         )
         return tally.judge(spec.name, outcomes)
-    merged, failures = _rest_days_by_symbol(
+    merged, failures, no_data = _rest_days_by_symbol(
         spec,
         asked,
         window,
@@ -613,6 +616,13 @@ def read_history_by_symbol(
         call=call,
         source=f"{flat} and REST",
     )
+    # A symbol Massive had no data for keeps its empty rows, as a REST read by symbol keeps them.
+    outcomes = {
+        symbol: replace(outcome, no_data=True)
+        if symbol in no_data and isinstance(outcome, SymbolRows)
+        else outcome
+        for symbol, outcome in outcomes.items()
+    }
     return tally.judge(spec.name, outcomes)
 
 
@@ -651,7 +661,7 @@ def _rest_days_by_symbol(
     call: int,
     tally: ReadTally,
     stop: threading.Event | None,
-) -> tuple[dict[str, Table], dict[str, MassiveError]]:
+) -> tuple[dict[str, Table], dict[str, MassiveError], set[str]]:
     """Read the days the flat files lack from REST for each symbol, and merge each symbol's rows.
 
     Logs the WARNING of `_warn_rest_served` naming the days. A symbol whose REST read of a day
@@ -670,22 +680,27 @@ def _rest_days_by_symbol(
         stop: A read's stop token, or None.
 
     Returns:
-        Each symbol that did not fail with its rows from both sources in time order, and each
-        symbol that failed with its error.
+        Each symbol that did not fail with its rows from both sources in time order; each
+        symbol that failed with its error; and the symbols Massive had no data for: no row in
+        the files, and HTTP 404 from every REST read (`SymbolRows.no_data`).
     """
     missing = bounded_list(day.isoformat() for day in days)
     _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
     rest = core.rest_transport()
     pieces = {symbol: [table] for symbol, table in tables.items()}
     failures: dict[str, MassiveError] = {}
+    no_data = {symbol for symbol, table in tables.items() if not table.size}
     with entered(core.exec_ctx):
         reads = _rest_day_reads(spec, request, window, days=days)
     for one, one_window, keep in reads:
         left = [symbol for symbol in tables if symbol not in failures]
+        part = ReadTally()
         outcomes = rest.history_by_symbol(
-            spec, one, one_window, symbols=left, call=call, tally=tally, stop=stop
+            spec, one, one_window, symbols=left, call=call, tally=part, stop=stop
         )
-        _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
+        kept = _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
+        tally.absorb(part, kept=kept)
+        no_data &= {s for s, o in outcomes.items() if isinstance(o, SymbolRows) and o.no_data}
     with entered(core.exec_ctx):
         # The files' days and REST's tile, so sorting by the time column puts every row of a
         # symbol in time order across the sources.
@@ -694,7 +709,7 @@ def _rest_days_by_symbol(
             for symbol, parts in pieces.items()
             if symbol not in failures
         }
-    return merged, failures
+    return merged, failures, no_data - failures.keys()
 
 
 def _gather(
@@ -704,7 +719,7 @@ def _gather(
     keep: Table | None,
     pieces: dict[str, list[Table]],
     failures: dict[str, MassiveError],
-) -> None:
+) -> int:
     """Add one REST day read's outcomes to each symbol's rows or failure.
 
     Args:
@@ -713,7 +728,11 @@ def _gather(
         keep: The `Date` labels of the rows to keep, or None to keep every row.
         pieces: Each symbol's tables so far, which receive the read's rows.
         failures: Each failed symbol's error, which receives the read's failures.
+
+    Returns:
+        How many of the read's rows were kept.
     """
+    kept = 0
     for symbol, outcome in outcomes.items():
         if isinstance(outcome, SymbolFailure):
             failures[symbol] = outcome.error
@@ -723,6 +742,8 @@ def _gather(
             with entered(core.exec_ctx):
                 rows = rows.where_in(keep, "Date")
         pieces[symbol].append(rows)
+        kept += rows.size
+    return kept
 
 
 def _warn_rest_served(core: SessionCore, spec: DatasetSpec, why: str) -> None:
