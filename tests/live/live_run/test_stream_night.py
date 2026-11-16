@@ -27,6 +27,7 @@ import deephaven_massive as dm
 from tests._live.live_run import stream_capture, stream_night
 from tests._live.live_run.stream_capture import Clock, Stream
 from tests._live.live_run.stream_night import Boundary
+from tests._live.summary import NOT_LISTED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -245,13 +246,14 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
     def verdict(
         *,
         failures: tuple[str, ...] = (),
+        opened: tuple[str, ...] = (),
         delayed: bool = False,
         gaps: timedelta = timedelta(),
         errors: tuple[str, ...] = (),
         quiet: tuple[datetime, ...] = (),
         wrong: tuple[dict[str, object], ...] = (),
     ) -> tuple[str, str]:
-        refused, broken = stream_capture.split_failures(list(failures), [])
+        refused, broken = stream_capture.split_failures(list(failures), list(opened))
         return stream_night.night_verdict(
             refused=refused,
             broken=broken,
@@ -276,6 +278,9 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
     assert verdict(failures=("socket closed",)) == ("failed", "a stream failed: socket closed")
     assert verdict(failures=("HTTP 403", "HTTP 403")) == ("refused", "refused: HTTP 403")
     assert verdict(failures=("HTTP 403",)) == ("passed", "a stream refused: HTTP 403")
+    listed = f"{NOT_LISTED}crypto-trades: add crypto to delayed_subscriptions"
+    assert verdict(opened=(listed, listed)) == ("skipped", listed)
+    assert verdict(opened=(listed,)) == ("passed", f"a stream {listed}")
     assert verdict(gaps=timedelta(minutes=31)) == ("failed", "gaps 31")
     assert verdict(errors=("crypto-trades: KeyError",)) == ("failed", "crypto-trades: KeyError")
     why = "no rows in 2 hour(s) its market was open, the first from Wed 22:00 EST"

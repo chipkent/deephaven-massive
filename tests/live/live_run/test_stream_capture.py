@@ -29,6 +29,7 @@ import deephaven_massive as dm
 from tests._fakes.rest import Reply, envelope
 from tests._live.live_run import stream_capture
 from tests._live.live_run.stream_capture import Clock, Recorder, Stream
+from tests._live.summary import NOT_LISTED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -759,16 +760,38 @@ def _raise(error: Exception) -> None:
     raise error
 
 
-def test_massives_refusal_as_a_stream_opens_is_recorded_and_another_raises() -> None:
+def test_a_refusal_as_a_stream_opens_is_recorded_by_whose_it_is_and_another_raises() -> None:
+    """Massive's refusal and the settings' are recorded apart; the library's own still raises."""
     refused: dict[str, list[str]] = {}
     with stream_capture.refusal_recorded("stocks-trades", "stocks", refused):
         _raise(dm.EntitlementError("not\n entitled", status=403))
-    assert refused == {"stocks": ["stocks-trades: not entitled"]}
+    with stream_capture.refusal_recorded("stocks-quotes", "stocks", refused):
+        _raise(dm.EntitlementError("add to\n delayed_subscriptions", source=dm.ErrorSource.USER))
+    assert refused == {
+        "stocks": [
+            "stocks-trades: not entitled",
+            f"{NOT_LISTED}stocks-quotes: add to delayed_subscriptions",
+        ]
+    }
     with (
-        pytest.raises(dm.EntitlementError, match="delayed_subscriptions"),
+        pytest.raises(dm.EntitlementError, match="a defect"),
         stream_capture.refusal_recorded("stocks-trades", "stocks", refused),
     ):
-        _raise(dm.EntitlementError("delayed_subscriptions", source=dm.ErrorSource.USER))
+        _raise(dm.EntitlementError("a defect", source=dm.ErrorSource.LIBRARY))
+
+
+def test_a_unit_none_of_whose_streams_opened_skips_as_not_listed_unless_massive_refused() -> None:
+    """The settings' refusal skips the unit as the pytest run's does; Massive's comes first."""
+    listed = f"{NOT_LISTED}stocks-trades: add stocks to delayed_subscriptions"
+    assert _verdict(opened=(listed,), rows=0) == ("skipped", listed)
+    assert _verdict(opened=(listed, "stocks-bars: no"), streams=2, rows=0) == (
+        "refused",
+        "refused: stocks-bars: no",
+    )
+    assert _verdict(opened=(listed,), streams=2) == (
+        "passed",
+        f"a stream {listed}",
+    )
 
 
 @pytest.mark.jvm_held
@@ -805,11 +828,19 @@ def test_a_stream_massive_refused_as_it_opened_refuses_its_unit_and_the_others_s
     def refuse(_m: MassiveSession) -> None:
         raise dm.EntitlementError("not entitled", status=403)
 
-    streams = [Stream("stocks-trades", "stocks", refuse), Stream("x-trades", "x", refuse)]
+    def not_listed(_m: MassiveSession) -> None:
+        raise dm.EntitlementError("delayed_subscriptions", source=dm.ErrorSource.USER)
+
+    streams = [
+        Stream("stocks-trades", "stocks", refuse),
+        Stream("x-trades", "x", refuse),
+        Stream("y-trades", "y", not_listed),
+    ]
     with stream_capture.held_streams(massive_session, streams, Recorder(tmp_path)) as opened:
         assert opened == {
             "stocks": ["stocks-trades: not entitled"],
             "x": ["x-trades: not entitled"],
+            "y": [f"{NOT_LISTED}y-trades: delayed_subscriptions"],
         }
 
 

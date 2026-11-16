@@ -27,12 +27,15 @@ they list in `delayed_subscriptions` streams from the delayed feed.
   the time since the last sample in `gaps.csv`; more than 30 minutes of gaps fails the day.
 - **Refusals.** Massive's refusal of a stream, whether its stream fails with it or it raises as
   the stream opens, and its refusal of the options chain, are the unit's alone: the other units
-  stream on.
-- **Verdicts.** A unit whose streams Massive all refused is `refused`, quoting the refusal; one
-  of whose streams Massive refused while others delivered passes, and its reason quotes the
-  refusal. A unit whose acknowledged streams recorded no row all day fails, once its class's
-  session has opened (`SESSION_OPENS`), even when Massive refused its other streams: an
-  acknowledged subscription that never delivers is a failure, not a quiet pass. A unit the
+  stream on. So is the library's refusal of data Massive labels delayed while the owner's
+  settings do not list its subscription in `delayed_subscriptions` (not listed).
+- **Verdicts.** A unit none of whose streams could open, each refused or not listed, records no
+  row: it is `refused`, quoting Massive's refusal, when Massive refused any of them, and
+  otherwise skipped as not listed (`unopened_verdict`). One of whose streams could not open
+  while others delivered passes, and its reason quotes why (`refusal_note`). A unit whose
+  acknowledged streams recorded no row all day fails, once its class's session has opened
+  (`SESSION_OPENS`), even when Massive refused its other streams: an acknowledged
+  subscription that never delivers is a failure, not a quiet pass. A unit the
   owner lists as delayed skips instead, since the delayed feed's lag is not known in advance.
 
 `throughput` holds, from 09:15, the busiest streams of every symbol (`dm.ALL`) as `last_by()`
@@ -40,7 +43,7 @@ tables: second bars of every stock, every crypto trade, and every forex quote. I
 the rows a second of each stream over the measured hour (09:45 to 10:45 when the owner lists
 stocks as delayed, 09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects,
 and any `SchemaDrift`, in `summary.json`; it passes when it sampled the whole hour without a gap,
-and a unit whose streams Massive all refused is `refused`.
+and a unit none of whose streams could open is `refused` or skipped as not listed.
 
 The overnight group (`stream_night`) reuses the recorder, the sampler, the gap records, and
 the stream holding (`held_streams`) of the stream day.
@@ -70,7 +73,7 @@ import numpy as np
 import deephaven_massive as dm
 from tests._live.calendar import NEW_YORK
 from tests._live.contracts import front_contract
-from tests._live.summary import REFUSED
+from tests._live.summary import NOT_LISTED, REFUSED
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +151,8 @@ def split_failures(failed: list[str], opened: list[str]) -> tuple[list[str], lis
 
     Args:
         failed: The errors of its failed streams (`failed_streams`).
-        opened: Massive's refusals of its streams, or of what they need, as they opened
-            (`refusal_recorded`).
+        opened: The refusals of its streams, or of what they need, as they opened
+            (`refusal_recorded`), Massive's and the settings' alike.
 
     Returns:
         The refusals, those at opening first, and the other failures. A stream refused as it
@@ -164,32 +167,69 @@ def split_failures(failed: list[str], opened: list[str]) -> tuple[list[str], lis
 
 @contextlib.contextmanager
 def refusal_recorded(name: str, unit: str, refused: dict[str, list[str]]) -> Iterator[None]:
-    """Record Massive's refusal of what a block opens as its unit's, and go on.
+    """Record a refusal of what a block opens as its unit's, and go on.
 
     A stream Massive refuses as it opens, or the options chain the options unit's contracts
-    come from, raises at once instead of failing a stream later. Recording the refusal lets the
-    group's other units stream on.
+    come from, raises at once instead of failing a stream later. So does one whose data Massive
+    labels delayed while the owner's settings do not list its subscription as delayed: the
+    library refuses it with an `EntitlementError` whose source is `ErrorSource.USER`.
+    Recording either lets the group's other units stream on.
 
     Args:
         name: What the block opens, such as `"stocks-trades"` or `"options chain"`.
         unit: The unit it belongs to.
-        refused: Receives the refusal, `"<name>: <the error on one line>"`, under the unit.
+        refused: Receives the refusal under the unit: Massive's as `"<name>: <the error on one
+            line>"`, the settings' as the same text after `summary.NOT_LISTED`.
 
     Yields:
         Control to the block.
 
     Raises:
-        EntitlementError: When the block raises one whose source is not Massive: the owner's
-            settings refusing delayed data, which is theirs to fix.
+        EntitlementError: When the block raises one whose source is neither Massive nor the
+            user, such as a library defect.
     """
     try:
         yield
     except dm.EntitlementError as error:
-        if error.source is not dm.ErrorSource.MASSIVE:
-            raise
         text = f"{name}: {' '.join(str(error).split())}"
-        logger.info("Massive refused the %s unit's %s", unit, text)
+        if error.source is dm.ErrorSource.MASSIVE:
+            logger.info("Massive refused the %s unit's %s", unit, text)
+        elif error.source is dm.ErrorSource.USER:
+            logger.info("The settings do not list the %s unit's %s as delayed", unit, text)
+            text = NOT_LISTED + text
+        else:
+            raise
         refused.setdefault(unit, []).append(text)
+
+
+def unopened_verdict(refused: list[str]) -> tuple[str, str]:
+    """Decide the result of a unit none of whose streams could open.
+
+    Massive's refusal comes first: listing a subscription in the settings would not open a
+    stream Massive refuses.
+
+    Args:
+        refused: The refusals of its streams (`split_failures`), at least one.
+
+    Returns:
+        `("refused", "refused: <error>")`, quoting Massive's first refusal when there is one;
+        otherwise `("skipped", "not listed as delayed: <error>")`, the first not listed.
+    """
+    massive = [r for r in refused if not r.startswith(NOT_LISTED)]
+    return ("refused", REFUSED + massive[0]) if massive else ("skipped", refused[0])
+
+
+def refusal_note(refused: list[str]) -> str:
+    """Describe a unit's first stream that could not open while others did.
+
+    Args:
+        refused: The refusals of its streams (`split_failures`), at least one.
+
+    Returns:
+        `"a stream refused: <error>"`, or `"a stream not listed as delayed: <error>"`.
+    """
+    first = refused[0]
+    return f"a stream {first if first.startswith(NOT_LISTED) else REFUSED + first}"
 
 
 _PERCENTILES: Final = (50, 90, 99)
@@ -834,7 +874,8 @@ def held_streams(
 
     Each stream's query is held as a `blink()` table with a listener (`_listen`), and a bars
     stream (`Stream.held`) also as an `append_only()` and a `last_by()` table. A stream Massive
-    refuses as it opens is recorded (`refusal_recorded`), and the others open. On the way out,
+    refuses as it opens, or the settings do not list as delayed, is recorded
+    (`refusal_recorded`), and the others open. On the way out,
     even after an error, the listeners stop, the tables are released, and the recorder writes
     what is queued and closes.
 
@@ -844,7 +885,7 @@ def held_streams(
         recorder: Their rows' recorder; closed on the way out.
 
     Yields:
-        The refusals of the streams Massive refused as they opened, by unit.
+        The refusals of the streams refused as they opened, by unit (`refusal_recorded`).
     """
     tables: list[Table] = []
     listeners: list[TableListenerHandle] = []
@@ -881,8 +922,8 @@ def _unit_verdict(
     """Decide one unit's result at the end of a stream day.
 
     Args:
-        refused: Massive's refusals of its streams, or of the chain its contracts come from
-            (`split_failures`).
+        refused: The refusals of its streams, or of the chain its contracts come from
+            (`split_failures`), Massive's and the settings' alike.
         broken: The errors of its streams that failed otherwise.
         streams: How many streams it opened or tried to open.
         contracts: Whether it had something to stream (an options unit needs contracts).
@@ -893,19 +934,16 @@ def _unit_verdict(
         delayed: Whether the owner's settings list its subscription as delayed.
 
     Returns:
-        `("passed", why)`, its reason the gaps and a refused stream, if any; `("refused",
-        "refused: <error>")` when Massive refused every one of its streams (or its chain) and
-        none recorded a row; `("skipped", why)` for a delayed unit without a row; or
+        `("passed", why)`, its reason the gaps and a refused stream, if any; when every one of
+        its streams (or its chain) was refused and none recorded a row, `unopened_verdict`'s
+        `"refused"`, or `"skipped"` as not listed when only the settings refused;
+        `("skipped", why)` for a delayed unit without a row; or
         `("failed", why)`, which a unit whose acknowledged streams recorded no row during its
         session's hours gets even when Massive refused its other streams.
     """
     minutes = round(gaps.total_seconds() / 60)
     if broken or (refused and len(refused) >= streams and not rows):
-        return (
-            ("failed", f"a stream failed: {broken[0]}")
-            if broken
-            else ("refused", REFUSED + refused[0])
-        )
+        return ("failed", f"a stream failed: {broken[0]}") if broken else unopened_verdict(refused)
     if not contracts:
         return "failed", "the SPY chain gave no contract to stream"
     if gaps > MAX_GAP:
@@ -916,7 +954,7 @@ def _unit_verdict(
         why = "no rows during its session's hours"
         return ("skipped", f"{why}, on the delayed feed") if delayed else ("failed", why)
     notes = [f"gaps {minutes}"] if minutes else []
-    notes += [f"a stream {REFUSED}{refused[0]}"] if refused else []
+    notes += [refusal_note(refused)] if refused else []
     return "passed", "; ".join(notes)
 
 
@@ -1078,9 +1116,9 @@ def run_throughput(
         if broken:
             report(unit, "failed", f"a stream failed: {broken[0]}")
         elif refused and len(refused) >= sum(s.unit == unit for s in streams):
-            report(unit, "refused", REFUSED + refused[0])
+            report(unit, *unopened_verdict(refused))
         elif summary["covered"]:
-            report(unit, "passed", f"a stream {REFUSED}{refused[0]}" if refused else "")
+            report(unit, "passed", refusal_note(refused) if refused else "")
         else:
             report(unit, "failed", "the measured hour was not sampled without a gap")
 

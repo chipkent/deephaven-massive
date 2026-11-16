@@ -28,10 +28,11 @@ again the same night appends to the same folder. At the night's end the last chi
 
 A unit fails when one of its streams failed, the night's gaps passed 30 minutes, the recorder
 could not write a batch, an hour its market was open went without a row (`quiet_hours`), or a
-row near a boundary carries the wrong `Date`. A unit whose streams Massive all refused is
-`refused`, quoting the refusal, and one the owner lists as delayed skips its quiet hours, since
-the delayed feed's lag is not known in advance. The next day `stream-night-reconcile` compares
-the night's minute bars with history (`reconcile.run_night_reconcile`).
+row near a boundary carries the wrong `Date`. A unit none of whose streams could open is
+`refused` or skipped as not listed (`stream_capture.unopened_verdict`), and one the owner lists
+as delayed skips its quiet hours, since the delayed feed's lag is not known in advance. The
+next day `stream-night-reconcile` compares the night's minute bars with history
+(`reconcile.run_night_reconcile`).
 
 Runs in a child process with an embedded Deephaven server and an open session, like the stream
 day; the functions here run on its main thread, apart from the recorder's.
@@ -62,14 +63,15 @@ from tests._live.live_run.stream_capture import (
     held_streams,
     index_futures,
     record_gap,
+    refusal_note,
     sample_until,
     split_failures,
     total_gaps,
+    unopened_verdict,
     wait_for_diagnostics,
     write_csv,
 )
 from tests._live.live_run.stream_units import NIGHT_UNITS
-from tests._live.summary import REFUSED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -489,7 +491,8 @@ def night_verdict(
     """Decide one unit's result at the end of a night.
 
     Args:
-        refused: Massive's refusals of its streams (`split_failures`).
+        refused: The refusals of its streams (`split_failures`), Massive's and the settings'
+            alike.
         broken: The errors of its streams that failed otherwise.
         streams: How many streams it opened or tried to open.
         delayed: Whether the owner's settings list its subscription as delayed.
@@ -500,16 +503,13 @@ def night_verdict(
 
     Returns:
         `("passed", why)`, its reason the gaps and a refused stream, if any; `("refused",
-        "refused: <error>")` when Massive refused every stream; `("skipped", why)` for quiet
+        "refused: <error>")`, or `("skipped", "not listed as delayed: <error>")`, when every
+        stream was refused (`unopened_verdict`); `("skipped", why)` for quiet
         hours of a delayed unit; or `("failed", why)`.
     """
     minutes = round(gaps.total_seconds() / 60)
     if broken or (refused and len(refused) >= streams):
-        return (
-            ("failed", f"a stream failed: {broken[0]}")
-            if broken
-            else ("refused", REFUSED + refused[0])
-        )
+        return ("failed", f"a stream failed: {broken[0]}") if broken else unopened_verdict(refused)
     if gaps > MAX_GAP:
         return "failed", f"gaps {minutes}"
     if errors:
@@ -528,5 +528,5 @@ def night_verdict(
             f"{w['dates']}, not {w['expected']}"
         )
     notes = [f"gaps {minutes}"] if minutes else []
-    notes += [f"a stream {REFUSED}{refused[0]}"] if refused else []
+    notes += [refusal_note(refused)] if refused else []
     return "passed", "; ".join(notes)
