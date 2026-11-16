@@ -1,4 +1,4 @@
-"""`StreamQuery` and `SymbolStreamQuery`: the queries of Massive's WebSocket streams.
+"""`StreamQuery` and `NoSymbolStreamQuery`: the queries of Massive's WebSocket streams.
 
 A stream dataset sends rows as they happen. Its query turns that one stream into the table
 shape the caller needs: `blink()` for the rows of the latest update cycle, `append_only()` for
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
 
-__all__ = ["MAX_RING_CAPACITY", "StreamQuery", "SymbolStreamQuery", "streaming_bars"]
+__all__ = ["MAX_RING_CAPACITY", "NoSymbolStreamQuery", "StreamQuery", "streaming_bars"]
 
 logger = logging.getLogger(__name__)
 
@@ -96,31 +96,13 @@ def _check_streams(spec: DatasetSpec, request: Request, *, call: str) -> None:
         )
 
 
-class StreamQuery(Query):
-    """A query of a live WebSocket stream: `blink()`, `append_only()`, and `ring()`.
+class _StreamShapes(Query):
+    """The three table shapes of a live WebSocket stream: `blink()`, `append_only()`, `ring()`.
 
-    Massive streams trades, quotes, bars, and other events over its WebSocket as they happen.
-    A stream's dataset method returns a `StreamQuery`, and each of its methods returns the
-    same stream as a different kind of live Deephaven table: `blink()` holds only the latest
-    update cycle's rows, `append_only()` keeps every row since the call, and `ring(capacity)`
-    keeps the latest `capacity` rows. When the stream's rows name their symbol, as almost all
-    do, the query is a `SymbolStreamQuery`, which adds `last_by()`.
-    `m.options.admin_messages()` names no symbol, so its query has only these three methods.
-
-    Identical queries share one stream, and each call returns its own table. The stream stays
-    subscribed while any of its tables, or a table made from one, is in use. A method returns
-    once its table exists, without waiting for Massive to confirm the subscription. A later
-    failure, such as a refused subscription or a rejected key, fails the table and shows in
-    `m.streams()`, and the next call on an identical query opens a new stream.
-
-    Import it as `from deephaven_massive.queries import StreamQuery` to annotate your own code.
-    You get one from a dataset method and never construct one.
-
-    Example:
-        ::
-
-            recent = m.stocks.imbalances(["AAPL", "MSFT"]).ring(1000)
-            notices = m.options.admin_messages().append_only()
+    Both public stream queries derive from it: `StreamQuery`, whose rows name their symbol and
+    which adds `last_by()`, and `NoSymbolStreamQuery`, whose rows don't. Its methods are public
+    members of both. The class itself stays private, since no dataset method returns it; code
+    that takes either query annotates `StreamQuery | NoSymbolStreamQuery`.
     """
 
     __slots__ = ()
@@ -340,13 +322,50 @@ class StreamQuery(Query):
         )
 
 
-class SymbolStreamQuery(StreamQuery):
-    """A query of a live stream whose rows name their symbol, which adds `last_by()`.
+class NoSymbolStreamQuery(_StreamShapes):
+    """A query of a live stream whose rows name no symbol: `blink()`, `append_only()`, `ring()`.
 
-    Most streams, such as `m.stocks.trades(...)` and `m.stocks.luld(...)`, carry a `Symbol`
-    column, so their query can also keep each symbol's latest row with `last_by()`: a live table
-    of the current state of every symbol you follow. It has the `StreamQuery` methods too, and
-    `help(StreamQuery)` covers what they share.
+    Massive sends a few streams per channel rather than per symbol, such as
+    `m.options.admin_messages()`, whose rows are notices from the options exchanges. Their rows
+    have no `Symbol` column, so their query has no `last_by()`. Each of its three methods returns
+    the stream as a different kind of live Deephaven table: `blink()` holds only the latest
+    update cycle's rows, `append_only()` keeps every row since the call, and `ring(capacity)`
+    keeps the latest `capacity` rows.
+
+    Identical queries share one stream, and each call returns its own table. The stream stays
+    subscribed while any of its tables, or a table made from one, is in use. A method returns
+    once its table exists, without waiting for Massive to confirm the subscription. A later
+    failure, such as a refused subscription or a rejected key, fails the table and shows in
+    `m.streams()`, and the next call on an identical query opens a new stream.
+
+    Import it as `from deephaven_massive.queries import NoSymbolStreamQuery` to annotate your own
+    code. You get one from a dataset method and never construct one.
+
+    Example:
+        ::
+
+            notices = m.options.admin_messages().append_only()
+    """
+
+    __slots__ = ()
+
+
+class StreamQuery(_StreamShapes):
+    """A query of a live WebSocket stream: `blink()`, `append_only()`, `ring()`, and `last_by()`.
+
+    Massive streams trades, quotes, bars, and other events over its WebSocket as they happen.
+    A stream's dataset method returns a `StreamQuery`, and each of its methods returns the
+    same stream as a different kind of live Deephaven table: `blink()` holds only the latest
+    update cycle's rows, `append_only()` keeps every row since the call, `ring(capacity)` keeps
+    the latest `capacity` rows, and `last_by()` keeps each symbol's latest row, a live table of
+    the current state of every symbol you follow. A stream whose rows name no symbol has no
+    `last_by()`, so its query is a `NoSymbolStreamQuery` instead.
+
+    Identical queries share one stream, and each call returns its own table. The stream stays
+    subscribed while any of its tables, or a table made from one, is in use. A method returns
+    once its table exists, without waiting for Massive to confirm the subscription. A later
+    failure, such as a refused subscription or a rejected key, fails the table and shows in
+    `m.streams()`, and the next call on an identical query opens a new stream.
 
     The symbols can be a list, a static table, which is read once at the call, or a live table,
     which works as a watchlist: the stream subscribes and unsubscribes as you add and delete
@@ -357,8 +376,8 @@ class SymbolStreamQuery(StreamQuery):
     table, raise `ValueError`; a watchlist's extra contracts wait for room, and `Deferred` in
     `m.streams()` counts them.
 
-    Import it as `from deephaven_massive.queries import SymbolStreamQuery` to annotate your own
-    code. You get one from a dataset method and never construct one.
+    Import it as `from deephaven_massive.queries import StreamQuery` to annotate your own code.
+    You get one from a dataset method and never construct one.
 
     Example:
         ::

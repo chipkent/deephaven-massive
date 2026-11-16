@@ -133,6 +133,36 @@ def _problems(
     return found
 
 
+_FUTURES_CONVERTERS: Final = {
+    "single": dm.canonical_symbol_future,
+    "combo": dm.canonical_symbol_future_spread,
+}
+"""The converter that takes the contracts of each `type` the futures contracts list is read by."""
+
+
+def _futures_type_problems(kind: str, rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return each futures contract of a type that the converter of that type refuses or changes.
+
+    A single contract the library reads as a combo, or a combo it reads as a single contract,
+    passes the class's grammar but fails its own converter, and the futures calendar would
+    look up the wrong tickers.
+
+    Args:
+        kind: The `type` the rows were read by: `single` or `combo`.
+        rows: Rows of the futures contracts list read by that type.
+
+    Returns:
+        One description per ticker whose converter does not give it back unchanged.
+    """
+    convert = _FUTURES_CONVERTERS[kind]
+    tickers = sorted({row["ticker"] for row in rows if isinstance(row.get("ticker"), str)})
+    return [
+        f"{ticker!r}: listed as a {kind}, which {convert.__name__} refuses"
+        for ticker in tickers
+        if convert(ticker, on_error=dm.OnError.IGNORE) != ticker
+    ]
+
+
 @pytest.mark.verifies("119")
 @pytest.mark.timeout(1800)
 @pytest.mark.parametrize(
@@ -203,7 +233,9 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     behind listed preferreds (`BAC`, `KIM`, `WFC`), and index options (`SPX`, `NDX`, `VIX`,
     `RUT`). For every ticker, asserts that the grammar accepts it as written, that
     `canonical_symbol` keeps it, that a flat-file filter holds a spelling that reads back as
-    it, and that its stream topic reads back as it. Records each list's size, the requests it
+    it, and that its stream topic reads back as it; and that each futures contract passes the
+    converter of its type unchanged (`canonical_symbol_future` for a single contract,
+    `canonical_symbol_future_spread` for a combo). Records each list's size, the requests it
     took, and the characters its tickers use, so a lower-case letter, a space, or a separator
     Massive writes shows up.
 
@@ -217,11 +249,14 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     grammar.
     """
     rows: list[dict[str, Any]] = []
+    by_type: list[str] = []
     requests = 0
     for query in queries:
         read, sent = _every_page(live_rest, path, query, bucket=bucket)
         rows.extend(read)
         requests += sent
+        if asset_class is AssetClass.FUTURES:
+            by_type.extend(_futures_type_problems(str(query["type"]), read))
     tickers = sorted({row["ticker"] for row in rows if isinstance(row.get("ticker"), str)})
     pairs = _crypto_pairs(rows) if asset_class is AssetClass.CRYPTO else {}
     evidence(f"{requests} requests, {len(rows)} rows, {len(tickers)} tickers")
@@ -229,7 +264,7 @@ def test_the_symbol_rule_accepts_every_ticker_massive_lists(
     evidence(f"characters used: {''.join(sorted(set(''.join(tickers))))!r}")
     if asset_class is AssetClass.CRYPTO:
         evidence(f"{len(tickers) - len(pairs)} tickers whose currencies do not join, not streamed")
-    found = _problems(asset_class, tickers, pairs)
+    found = [*_problems(asset_class, tickers, pairs), *by_type]
     for line in found[:_SHOWN]:
         evidence(line)
     assert tickers, f"Massive listed no {asset_class.value} ticker"

@@ -55,7 +55,7 @@ from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
 )
 from deephaven_massive.queries._query import Query, _read_symbol_table, _verb, _wait
-from deephaven_massive.queries._stream import SymbolStreamQuery
+from deephaven_massive.queries._stream import StreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -568,16 +568,15 @@ class HistoryQuery(Query):
             return dh_arrow.to_table(schema.arrow_schema().empty_table())
 
 
-class StreamHistoryQuery(SymbolStreamQuery, HistoryQuery):
+class StreamHistoryQuery(StreamQuery, HistoryQuery):
     """A query of a stream that also has history: the live feed and the past, with one schema.
 
     Massive both streams some datasets live and keeps them for the past, such as stock trades
     and quotes, index values, and aggregate bars. Their dataset methods return a
-    `StreamHistoryQuery`, which has every method of `SymbolStreamQuery` and of `HistoryQuery`:
+    `StreamHistoryQuery`, which has every method of `StreamQuery` and of `HistoryQuery`:
     `history(start, end)` reads a past range, and the stream methods follow the live feed, with
     the same columns, so code written against one works on the other. `help(StreamQuery)`
-    covers what the stream methods share, and `help(SymbolStreamQuery)` the symbols and
-    watchlists they take.
+    covers the stream methods and the symbols and watchlists they take.
 
     A `bars()` query streams only 1-second and 1-minute bars at `multiplier=1`, which Massive
     sends over its WebSocket; its stream methods refuse any other bars with `ValueError`, which

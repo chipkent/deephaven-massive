@@ -15,7 +15,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import StreamKind, StreamRow, StreamState
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries import StreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,10 +36,8 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(
-    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
-) -> SymbolStreamQuery:
-    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
+def stream_query(session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)) -> StreamQuery:
+    return build_query(session._core, SPEC, query_type=StreamQuery, symbols=symbols)
 
 
 def test_a_result_keeps_its_session_alive() -> None:

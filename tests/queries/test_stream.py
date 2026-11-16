@@ -23,7 +23,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive.queries import (
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 from deephaven_massive.queries._stream import _check_streams, streaming_bars
 from tests._fakes.queries import (
@@ -230,7 +230,7 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["C:EURUSD", "C:GBPUSD"])]))
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
-    assert isinstance(q, SymbolStreamQuery)
+    assert isinstance(q, StreamQuery)
     current = q.last_by()
     schema = massive_session._core.catalog.dataset_schema(FOREX_SPEC)
     # Received now: a row received before its symbol joined the watchlist is hidden.
@@ -251,7 +251,7 @@ def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_rais
     strict(massive_session, monkeypatch)
     watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
-    assert isinstance(q, SymbolStreamQuery)
+    assert isinstance(q, StreamQuery)
     for verb in (q.blink, q.append_only, q.last_by):
         with pytest.raises(
             ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"

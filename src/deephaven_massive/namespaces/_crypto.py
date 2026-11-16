@@ -41,7 +41,7 @@ from deephaven_massive.namespaces._query_building import (
 from deephaven_massive.queries import (
     FetchQuery,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 
 if TYPE_CHECKING:
@@ -333,7 +333,7 @@ class CryptoNamespace(Namespace):
         )
 
     @raises_through(build_query)
-    def quotes(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def quotes(self, symbols: SymbolsLike) -> StreamQuery:
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row holds one exchange's best bid and ask for one pair. Massive serves no crypto quote
@@ -358,7 +358,7 @@ class CryptoNamespace(Namespace):
 
                 book = m.crypto.quotes("X:BTCUSD").last_by(["Symbol", "Exchange"])
         """
-        return build_query(self._core, QUOTES, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, QUOTES, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query)
     def bars(
@@ -447,7 +447,7 @@ class CryptoNamespace(Namespace):
         )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> StreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
         Each row holds one update of Massive's own price estimate. Only Currencies Business includes
@@ -473,7 +473,7 @@ class CryptoNamespace(Namespace):
 
                 fair = m.crypto.fmv(["X:BTCUSD", "X:ETHUSD"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, FMV, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query)
     def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
