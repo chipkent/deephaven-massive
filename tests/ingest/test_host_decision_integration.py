@@ -18,7 +18,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._massive import Page, RestClient, Transport, source
 from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery
-from tests._live import recency
+from tests._live import recency, summary
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -281,6 +281,7 @@ settings list in `delayed_subscriptions`."""
 def test_a_delayed_subscription_is_refused_on_the_default_configuration(
     live_config: dm.MassiveConfig,
     *,
+    recency_label: RecencyLabel,
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
     stream_report: Report,
@@ -295,7 +296,9 @@ def test_a_delayed_subscription_is_refused_on_the_default_configuration(
     streams one symbol's minute bars (the Nasdaq-100's values for indices) or, for options,
     fetches the SPY chain. Passes when the library refused it with an `EntitlementError`, or
     the stream failed with a refusal, and the error says what to do; the evidence quotes it.
-    Skips when the settings list none of them.
+    Skips when the settings list none of them, and when Massive does not label that
+    subscription's data delayed (`recency_label`): a key Massive serves in real time streams
+    on the default configuration, which is no refusal to check.
     """
     held = [
         name
@@ -305,6 +308,11 @@ def test_a_delayed_subscription_is_refused_on_the_default_configuration(
     if not held:
         pytest.skip("no subscription is listed in delayed_subscriptions")
     name = held[0]
+    answer = recency_label(dm.Subscription(name))
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if not answer.delayed:
+        pytest.skip(f"Massive does not label the key's {name} data delayed ({answer.text()})")
     config = dm.MassiveConfig(api_key=live_config.api_key)
     session = dm.MassiveSession(config)
     errors: list[str] = []
