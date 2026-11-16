@@ -1296,8 +1296,8 @@ def test_contracts_lookup_cost_with_and_without_date(
     would still favor the later runs). Records each run as it completes: its rows, pages,
     and seconds per page; and a run that fails (`WireError`, after the client's retries), as
     evidence, without stopping the others. Then records each lookup's runs answered, seconds
-    per run, median, and slowest. A run cut at 5 pages (as 100 tickers without `date` is
-    likely to be) says its rows and seconds are lower bounds, of its first pages only.
+    per run, median, and slowest. A run cut at 5 pages (as 1 and 100 tickers without `date`
+    may be) says its rows and seconds are lower bounds, of its first pages only.
 
     A lookup with `date` that returns fewer rows than tickers asked found some tickers not
     listed that day. Seconds per page tell the causes apart: pages of like time mean the cost
@@ -1768,8 +1768,30 @@ def _record_trades_read(
     evidence(f"{label}: {len(trades)} trades, latest {latest}")
 
 
+def _spaced_and_plain_combos(client: RestClient, evidence: Evidence) -> tuple[_Combo, _Combo]:
+    """Pick the CL combos the path spelling check reads, from the snapshot from `CL` up to `CM`.
+
+    Returns:
+        The combo traded most recently within 7 days whose ticker holds `:` and a space, and
+        the one whose ticker holds neither, the control.
+    """
+    since = epoch_ns(datetime.now(UTC) - _RECENT_TRADE)
+    query = {"ticker.gte": "CL", "ticker.lt": "CM", "limit": _PRODUCTS_PAGE}
+    _, recent = _snapshot_combos(_page(client, _SNAPSHOT, query=query), since)
+    spaced = [combo for combo in recent if ":" in combo.ticker and " " in combo.ticker]
+    plain = [combo for combo in recent if ":" not in combo.ticker and " " not in combo.ticker]
+    assert spaced, "no CL combo whose ticker holds ':' and a space traded within 7 days"
+    assert plain, "no CL combo whose ticker holds neither ':' nor a space traded within 7 days"
+    combo, control = spaced[0], plain[0]
+    evidence(
+        f"combo {combo.ticker!r}, last snapshot trade {_chicago(combo.traded)}; control "
+        f"{control.ticker!r}, last snapshot trade {_chicago(control.traded)}"
+    )
+    return combo, control
+
+
 @pytest.mark.settles("136")
-@pytest.mark.requests(8)
+@pytest.mark.requests(9)
 @pytest.mark.timeout(300)
 def test_spaced_combo_trades_by_path_spelling(
     live_session: dm.MassiveSession,
@@ -1784,39 +1806,32 @@ def test_spaced_combo_trades_by_path_spelling(
     (`CL:BZ H7-M7`), though the snapshot showed each trading minutes before, while combos
     without them (`CLG7-BZG7`) read 200 each. The library sends such a ticker percent-encoded,
     `CL%3ABZ%20H7-M7`. Massive's docs say nothing of how a path ticker is encoded; a URL path
-    may hold `:` as it is and a space as `%20` (RFC 3986), and some servers read `+` as a
-    space. Reads the snapshot from `CL` up to `CM`, and takes the combo traded most recently
-    within 7 days whose ticker holds `:` or a space and, as the control, the one traded most
-    recently whose ticker holds neither. Reads up to 10 of the combo's trades, latest first,
-    from an hour before its last snapshot trade, its ticker spelled four ways: as the library
-    sends it, with `:` as it is (`CL:BZ%20H7-M7`), and with `+` for the space, `:` as it is
-    (`CL:BZ+H7-M7`) and encoded (`CL%3ABZ+H7-M7`). Reads the control's trades the same way,
-    from an hour before its own last trade, as the library sends it; then the combo's trades
-    in its hour as a user reads them, `m.futures.trades(combo).history(start, end)`. Records
-    each read's trades and latest trade in Chicago time, or Massive's refusal.
+    may hold `:` as it is and a space as `%20` (RFC 3986), and some servers read `+` as a space.
+    Reads the snapshot from `CL` up to `CM`, and takes the combo traded most recently within 7
+    days whose ticker holds `:` and a space (so that each spelling below differs) and, as the
+    control, the one traded most recently whose ticker holds neither. Reads up to 10 of the
+    combo's trades, latest first, from an hour before its last snapshot trade, its ticker
+    spelled four ways: as the library sends it, with `:` as it is (`CL:BZ%20H7-M7`), and with
+    `+` for the space, `:` as it is (`CL:BZ+H7-M7`) and encoded (`CL%3ABZ+H7-M7`). Reads the
+    control's trades the same way, from an hour before its own last trade, as the library sends
+    it and with its `-` escaped (`CLG7%2DBZG7`), which shows whether Massive decodes an escape
+    in the path at all; then the combo's trades in its hour as a user reads them,
+    `m.futures.trades(combo).history(start, end)`. Records each read's trades and latest trade
+    in Chicago time, or Massive's refusal.
 
-    When some spelling reads trades the library's does not, the library's encoding is the
-    cause, and that spelling is the one to send. When no spelling reads a trade and the control
-    does, Massive's trades path lacks such combos: a report for Massive, and `history()` of one
-    gives no rows. When the control reads none either, the run settles nothing. Passes when
-    every request is answered or refused; the counts are evidence. Sends at most 8 requests:
-    the snapshot, five trades reads, and up to 2 pages of `history()`.
+    When some spelling reads trades the library's does not, the library's encoding is the cause,
+    and that spelling is the one to send; so is it when the control reads trades as the library
+    sends it and none with its `-` escaped, since Massive then reads no escape. When no spelling
+    reads a trade and the control reads trades both ways, Massive's trades path lacks such
+    combos: a report for Massive, and `history()` of one gives no rows. When the control reads
+    none either, the run settles nothing. Passes when every request is answered or refused; the
+    counts are evidence. Sends at most 9 requests: the snapshot, six trades reads, and up to 2
+    pages of `history()`.
 
     Raises:
         WireError: When a trades read fails other than by a refusal.
     """
-    since = epoch_ns(datetime.now(UTC) - _RECENT_TRADE)
-    query = {"ticker.gte": "CL", "ticker.lt": "CM", "limit": _PRODUCTS_PAGE}
-    _, recent = _snapshot_combos(_page(live_rest, _SNAPSHOT, query=query), since)
-    spaced = [combo for combo in recent if ":" in combo.ticker or " " in combo.ticker]
-    plain = [combo for combo in recent if combo not in spaced]
-    assert spaced, "no CL combo whose ticker holds ':' or a space traded within 7 days"
-    assert plain, "no CL combo whose ticker holds neither ':' nor a space traded within 7 days"
-    combo, control = spaced[0], plain[0]
-    evidence(
-        f"combo {combo.ticker!r}, last snapshot trade {_chicago(combo.traded)}; control "
-        f"{control.ticker!r}, last snapshot trade {_chicago(control.traded)}"
-    )
+    combo, control = _spaced_and_plain_combos(live_rest, evidence)
     start = _instant(combo.traded) - _SPACED_WINDOW
     trades = {"timestamp.gte": start, "sort": "timestamp.desc", "limit": 10}
     since_control = _instant(control.traded) - _SPACED_WINDOW
@@ -1830,10 +1845,18 @@ def test_spaced_combo_trades_by_path_spelling(
         _record_trades_read(
             live_rest, rest_path.key, rest_path, path_params={}, query=trades, evidence=evidence
         )
-    for ticker, query in (
-        (combo.ticker, trades),
-        (control.ticker, {**trades, "timestamp.gte": since_control}),
-    ):
+    escaped = quote(control.ticker, safe="").replace("-", "%2D")
+    control_path = _spelled_path(_TRADES, escaped)
+    control_trades = {**trades, "timestamp.gte": since_control}
+    _record_trades_read(
+        live_rest,
+        f"control {control_path.key}",
+        control_path,
+        path_params={},
+        query=control_trades,
+        evidence=evidence,
+    )
+    for ticker, query in ((combo.ticker, trades), (control.ticker, control_trades)):
         _record_trades_read(
             live_rest,
             f"{ticker!r} as the library sends it ({quote(ticker, safe='')})",
