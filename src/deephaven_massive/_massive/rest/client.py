@@ -596,6 +596,8 @@ class RestClient:
                 self._governor.release(permit)
                 raise
             try:
+                # Sent from now: the minute Massive counts it in, after the wait for a slot.
+                self._governor.sending(permit)
                 return self._send(
                     job, request, permit, pool=pool, waited=self._clock.monotonic() - queued
                 )

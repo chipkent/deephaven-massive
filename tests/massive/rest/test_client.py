@@ -1008,6 +1008,28 @@ def test_a_refusal_naming_the_per_minute_maximum_pauses_a_window_and_tells_the_h
     rest.close()
 
 
+def test_the_client_tells_the_governor_when_each_attempt_is_sent(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    # The send, after the wait for a connection, is the minute Massive counts the attempt in.
+    sent: list[str] = []
+
+    class Recording(RequestGovernor):
+        __slots__ = ()
+
+        @override
+        def sending(self, permit: Permit) -> None:
+            sent.append(permit.bucket)
+            super().sending(permit)
+
+    governor = Recording(("stocks", "options"), clock=clock)
+    rest = RestClient(_KEY, base_url=fake_rest.url, max_concurrency=1, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", Reply({"message": "busy"}, status=429), _ok())
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert sent == ["stocks", "stocks"]  # the refused attempt and its retry
+    rest.close()
+
+
 def test_an_unknown_bucket_is_refused_before_anything_is_sent(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:

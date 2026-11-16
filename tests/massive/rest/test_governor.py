@@ -1756,8 +1756,9 @@ def test_an_abandoned_run_learns_nothing() -> None:
 def test_a_late_refusal_after_its_run_ended_teaches_nothing() -> None:
     clock = FakeClock()
     governor = _governor(clock)
-    stale = governor.admission("stocks", lane=object()).acquire(Cancel())
-    _requests(governor, "stocks", 5)
+    stale = governor.admission("stocks", lane=object()).acquire(Cancel())  # minute 0
+    clock.advance(60.0)
+    _requests(governor, "stocks", 5)  # minute 1
     _learn_run(governor, retry_after=70.0)
     assert _state(governor).learned == 5
     clock.advance(30.0)
@@ -1848,8 +1849,9 @@ def test_a_late_refusal_with_a_retry_after_after_its_run_teaches_nothing(
     # the answer that ends that pause must not learn from the old minute again.
     clock = FakeClock()
     governor = _governor(clock)
-    stale = governor.admission("stocks", lane=object()).acquire(Cancel())
-    _requests(governor, "stocks", 5)
+    stale = governor.admission("stocks", lane=object()).acquire(Cancel())  # minute 0
+    clock.advance(60.0)
+    _requests(governor, "stocks", 5)  # minute 1
     _learn_run(governor, retry_after=70.0)
     assert _state(governor).learned == 5
     clock.advance(120.0)
@@ -1857,3 +1859,50 @@ def test_a_late_refusal_with_a_retry_after_after_its_run_teaches_nothing(
         _refuse(governor, stale, retry_after=30.0, message=PER_MINUTE)
         _requests(governor, "stocks", 1)
     assert not [r for r in caplog.records if " sent in the clock minute" in r.getMessage()]
+
+
+def test_learning_waits_for_a_slow_answer_of_the_refused_minute(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Five sent; four answered; the sixth refused; the probe answered while the fifth is still
+    # downloading. The count waits for it, so a slow body never lowers the limit.
+    clock = FakeClock()
+    governor = _governor(clock)
+    sent = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(5)]
+    for permit in sent[:4]:
+        governor.done(permit, answered=True)
+    with caplog.at_level(logging.INFO, logger=_GOVERNOR_LOGGER):
+        _learn_run(governor, retry_after=70.0)
+        assert _state(governor).learned is None
+        assert not [r for r in caplog.records if " sent in the clock minute" in r.getMessage()]
+        governor.done(sent[4], answered=True)
+    assert _state(governor).learned == 5
+    assert _infos(caplog)[-1].startswith(
+        "stocks: Massive answered 5 stocks requests sent in the clock minute of its refusal"
+    )
+
+
+def test_a_failed_slow_request_of_the_refused_minute_releases_its_learning() -> None:
+    clock = FakeClock()
+    governor = _governor(clock)
+    sent = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(4)]
+    for permit in sent[:3]:
+        governor.done(permit, answered=True)
+    _learn_run(governor, retry_after=70.0)
+    governor.release(sent[3])  # never sent after all
+    assert _state(governor).learned == 3
+
+
+def test_a_request_counts_in_the_minute_it_is_sent_not_granted() -> None:
+    # Granted at :59, it waits for a connection and is sent at :01 of the next minute.
+    clock = FakeClock()
+    governor = _governor(clock)
+    clock.advance(59.0)
+    late = governor.admission("stocks", lane=object()).acquire(Cancel())
+    clock.advance(2.0)
+    governor.sending(late)
+    governor.done(late, answered=True)
+    governor.sending(late)  # already reported: nothing changes
+    _requests(governor, "stocks", 2)  # minute 1
+    _learn_run(governor, retry_after=70.0)
+    assert _state(governor).learned == 3

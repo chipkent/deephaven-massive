@@ -35,22 +35,24 @@ bucket is:
 
 **Learning.** A refusal whose message names the per-minute maximum (`is_rate_limit_refusal`)
 says the bucket has a limit, but not what it is. The limit is the number of the bucket's
-requests Massive answered (any status but 429; a wire failure is no answer) among those sent
-in the clock minute that held the send of the run's earliest such refusal: Massive counts a
-request when it arrives, nearest its send. When a refusal arrives, some of that
-minute's answers may still be in flight (with eight workers, the 429 can come back before the
-successes), so the bucket learns at the end of the run, when Massive answers a request sent
-after the latest pause; by then every answer of the burst is in. Counting by the clock minute,
-not by a window, keeps a burst that straddles two minutes from counting both. The bucket is
-then paced at that count. A later run re-learns only downward, when its minute holds fewer
-answers, so an over-count corrects itself and the pace never rises by itself. A run whose
-minute holds no answer (another client of the account spent it before this process sent
-anything) learns nothing, nor does a run that ends without an answer after its pause (abandoned,
-see below). Other clients of the account that share the minute make the count lower than the
-true limit, never higher: slower, never faster. Since a paced bucket never sends more than its
-limit in a minute, a learned limit never rises on its own, for the governor's life; the log
-line that learns it says so, and that declaring the limit raises it. A declared limit wins
-over a learned one: the user knows the limit.
+requests Massive answered (any status but 429; a wire failure is no answer) among those sent in
+the clock minute that held the send of the run's earliest such refusal: Massive counts a request
+when it arrives, nearest its send. A request's send is when the client sends it (`sending`),
+after any wait for a connection, not when its permit was granted. When a refusal arrives, some
+of that minute's answers may still be in flight (with eight workers, the 429 can come back
+before the successes), so the bucket learns once the run has ended, when Massive answers a
+request sent after the latest pause, and once no request sent in that minute is still in flight:
+a slow download of the minute counts when it is answered. Counting by the clock minute, not by a
+window, keeps a burst that straddles two minutes from counting both. The bucket is then paced at
+that count. A later run re-learns only downward, when its minute holds fewer answers, so an
+over-count corrects itself and the pace never rises by itself. A run whose minute holds no
+answer (another client of the account spent it before this process sent anything) learns
+nothing, nor does a run that ends without an answer after its pause (abandoned, see below).
+Other clients of the account that share the minute make the count lower than the true limit,
+never higher: slower, never faster. Since a paced bucket never sends more than its limit in a
+minute, a learned limit never rises on its own, for the governor's life; the log line that
+learns it says so, and that declaring the limit raises it. A declared limit wins over a learned
+one: the user knows the limit.
 
 **Lanes.** Each waiting request belongs to a *lane*: the requests of one read, one poller's
 cycle, or one host decision share a lane (the caller names it, usually by its cancellation
@@ -256,15 +258,12 @@ class Permit:
         bucket: The bucket the attempt is charged to.
         episode: The pause the attempt started after (a count of the bucket's pauses), which
             tells a response to the latest pause apart from one to an earlier burst.
-        sent: When the attempt was granted, in seconds since the Unix epoch on the governor's
-            clock: the clock minute a refusal of it counts in.
         probe: True for the first attempt to start after a pause, which goes alone while
             the bucket's other requests wait for its answer.
     """
 
     bucket: str
     episode: int
-    sent: float
     probe: bool = False
 
 
@@ -522,6 +521,7 @@ class _Bucket:
         "attempts",
         "declarable",
         "declared",
+        "due",
         "episode",
         "label",
         "lanes",
@@ -557,12 +557,17 @@ class _Bucket:
         # The clock minute that held the send of the current run's earliest refusal naming the
         # per-minute maximum, which the run's end learns from; None when there is none.
         self.refused_minute: int | None = None
+        # The refused minutes of runs that have ended, each learned from once no request sent
+        # in it is still in flight (`learn_ready`).
+        self.due: set[int] = set()
         # The waiting requests of each lane, first in first out, and the lanes' turns.
         self.lanes: dict[Hashable, deque[_Waiter]] = {}
         self.turns: deque[Hashable] = deque()
-        # The permits granted and not yet reported: the requests in flight. Adding one is the
-        # grant itself, a single step, so no interruption can leave a count out of step.
-        self.open: set[Permit] = set()
+        # The permits granted and not yet reported, the requests in flight, each with when it
+        # was sent (seconds since the Unix epoch): its grant until the client says it is sending
+        # (`RequestGovernor.sending`). Adding one is the grant itself, a single step, so no
+        # interruption can leave a count out of step.
+        self.open: dict[Permit, float] = {}
         # When each finished request's slot frees (monotonic seconds), oldest first.
         self.slots: deque[float] = deque()
         self.attempts = 0
@@ -581,47 +586,56 @@ class _Bucket:
         """The requests per minute the bucket is paced at: the declared limit, else the learned."""
         return self.learned if self.declared is None else self.declared
 
-    def count_answer(self, permit: Permit, wall: float) -> None:
+    def count_answer(self, sent: float, wall: float) -> None:
         """Count an answer of Massive in the clock minute of its send, and forget stale minutes.
 
         Massive counts a request when it arrives, nearest its send, and a refusal is placed by
         its send too, so an answer that comes back after the minute turned still counts in the
         minute it was sent. A minute is kept while learning may still read it: the run's
-        refused minute, the minute of any request still in flight (its 429 may yet come), and
-        the minute before this one.
+        refused minute, the minutes due to be learned, the minute of any request still in
+        flight (its 429 may yet come), and the minute before this one.
 
         Args:
-            permit: The answered attempt's permit, already finished.
+            sent: When the answered request was sent, in seconds since the Unix epoch.
             wall: The time now, in seconds since the Unix epoch.
         """
-        sent = int(permit.sent // _MINUTE)
-        self.answered[sent] = self.answered.get(sent, 0) + 1
-        kept = [int(wall // _MINUTE) - 1, *(int(other.sent // _MINUTE) for other in self.open)]
+        minute = int(sent // _MINUTE)
+        self.answered[minute] = self.answered.get(minute, 0) + 1
+        kept = [int(wall // _MINUTE) - 1, *self.due]
+        kept.extend(int(other // _MINUTE) for other in self.open.values())
         if self.refused_minute is not None:
             kept.append(self.refused_minute)
         oldest = min(kept)
         for old in [m for m in self.answered if m < oldest]:
             del self.answered[old]
 
-    def learn(self) -> tuple[int, int | None] | None:
-        """End the run's learning: count the answers of its refused minute and re-learn.
+    def end_learning(self) -> None:
+        """Mark the ended run's refused minute, if it has one, as due to be learned from.
 
         Called at the end of a run, when Massive answered a request sent after the pause.
+        """
+        if self.refused_minute is not None:
+            self.due.add(self.refused_minute)
+            self.refused_minute = None
+
+    def learn_ready(self) -> list[tuple[int, int | None]]:
+        """Learn from each due minute that no request still in flight was sent in.
 
         Returns:
-            None when the run had no refusal naming the per-minute maximum; otherwise the
-            minute's count and the learned limit before it. The bucket takes the count as its
-            learned limit when it had none or the count is lower; a count of zero learns
-            nothing.
+            For each minute learned from, oldest first, its count and the learned limit before
+            it. The bucket takes the count as its learned limit when it had none or the count
+            is lower; a count of zero learns nothing.
         """
-        minute, self.refused_minute = self.refused_minute, None
-        if minute is None:
-            return None
-        count = self.answered.get(minute, 0)
-        before = self.learned
-        if count > 0 and (before is None or count < before):
-            self.learned = count
-        return count, before
+        in_flight = {int(sent // _MINUTE) for sent in self.open.values()}
+        results = []
+        for minute in sorted(self.due - in_flight):
+            self.due.discard(minute)
+            count = self.answered.get(minute, 0)
+            before = self.learned
+            if count > 0 and (before is None or count < before):
+                self.learned = count
+            results.append((count, before))
+        return results
 
     @property
     def in_flight(self) -> int:
@@ -789,14 +803,14 @@ class _Bucket:
         Returns:
             The permit, in flight; the pause's probe when the bucket is probing.
         """
-        permit = admission.permit = Permit(name, self.episode, wall, probe=self.probing)
-        self.open.add(permit)  # the grant
+        permit = admission.permit = Permit(name, self.episode, probe=self.probing)
+        self.open[permit] = wall  # the grant
         self.attempts += 1
         if self.probing:
             self.probe = permit
         return permit
 
-    def finish(self, permit: Permit, now: float, *, hold: bool) -> bool:
+    def finish(self, permit: Permit, now: float, *, hold: bool) -> float | None:
         """End a request's flight, if it has not ended already.
 
         Args:
@@ -806,17 +820,18 @@ class _Bucket:
                 free it at once (it was never sent).
 
         Returns:
-            True for the permit's first report, False (and no change) for any later one.
+            When the request was sent, in seconds since the Unix epoch, for the permit's first
+            report; None (and no change) for any later one.
         """
-        if permit not in self.open:
-            return False
-        self.open.remove(permit)
+        sent = self.open.pop(permit, None)
+        if sent is None:
+            return None
         if permit is self.probe:  # the next request probes, unless its answer ended the run
             self.probe = None
         if hold:
             self.slots.append(now + RATE_WINDOW)
         self.wake_head()
-        return True
+        return sent
 
 
 class RequestGovernor:
@@ -1075,9 +1090,10 @@ class RequestGovernor:
         """Report an attempt that ended without a 429; its slot stays held for a window.
 
         Does nothing for a permit already reported. An answer that ends a pause's probing
-        (the bucket's requests resume) logs one DEBUG line, and ends the run's learning (see
-        the module): one line gives the count and the remedy, at the level `_learning_text`
-        chooses.
+        (the bucket's requests resume) logs one DEBUG line, and makes the run's refused minute
+        due to be learned from (see the module). Any report, this one, `refused`, or `release`,
+        learns from each due minute no request in flight was sent in, and logs one line for it
+        with the count and the remedy, at the level `_learning_text` chooses.
 
         Args:
             permit: The attempt's permit.
@@ -1088,32 +1104,60 @@ class RequestGovernor:
         """
         state = self._buckets[permit.bucket]
         resumed = False
-        learning: tuple[int, int | None] | None = None
         with self._lock:
-            if not state.finish(permit, self._clock.monotonic(), hold=True):
+            sent = state.finish(permit, self._clock.monotonic(), hold=True)
+            if sent is None:
                 return
             if answered:
-                state.count_answer(permit, self._clock.time())
+                state.count_answer(sent, self._clock.time())
             if answered and permit.episode == state.episode:
                 resumed = state.probing
                 state.run_refusals = 0  # the run is over
                 state.probing = False  # Massive answered after the pause: no more probe
                 if resumed:
-                    learning = state.learn()
-                    state.wake_head()  # the limit may have changed
-            declared, declarable = state.declared, state.declarable
+                    state.end_learning()
+            learned = state.learn_ready()
+            declared = state.declared
         if resumed:
             logger.debug(
                 "%s: Massive answered the first request after the pause; requests resume",
                 permit.bucket,
             )
-        if learning is not None:
-            count, before = learning
-            level, text = _learning_text(
-                state.label, count, before, declared=declared, declarable=declarable
-            )
-            logger.log(level, "%s: %s", permit.bucket, text)
+        self._log_learning(permit.bucket, learned, declared=declared)
         self._notify(permit.bucket)
+
+    def sending(self, permit: Permit) -> None:
+        """Record that an attempt is being sent now, which places it in Massive's minute.
+
+        A permit is granted before the client waits for a connection, so its grant can fall in
+        an earlier clock minute than its send; the client calls this just before it sends, and
+        learning counts the attempt in the minute of this call. Does nothing for a permit
+        already reported.
+
+        Args:
+            permit: The attempt's permit.
+        """
+        state = self._buckets[permit.bucket]
+        with self._lock:
+            if permit in state.open:
+                state.open[permit] = self._clock.time()
+
+    def _log_learning(
+        self, bucket: str, learned: list[tuple[int, int | None]], *, declared: int | None
+    ) -> None:
+        """Log each minute a bucket learned from, outside the lock, as `_learning_text` says.
+
+        Args:
+            bucket: The bucket.
+            learned: Each minute's count and the learned limit before it (`learn_ready`).
+            declared: The bucket's declared limit when it learned, or None.
+        """
+        state = self._buckets[bucket]
+        for count, before in learned:
+            level, text = _learning_text(
+                state.label, count, before, declared=declared, declarable=state.declarable
+            )
+            logger.log(level, "%s: %s", bucket, text)
 
     def release(self, permit: Permit) -> None:
         """Report an attempt that was never sent: its slot frees at once.
@@ -1125,8 +1169,11 @@ class RequestGovernor:
         """
         state = self._buckets[permit.bucket]
         with self._lock:
-            if not state.finish(permit, self._clock.monotonic(), hold=False):
+            if state.finish(permit, self._clock.monotonic(), hold=False) is None:
                 return
+            learned = state.learn_ready()
+            declared = state.declared
+        self._log_learning(permit.bucket, learned, declared=declared)
         self._notify(permit.bucket)
 
     def refused(
@@ -1177,7 +1224,8 @@ class RequestGovernor:
         with self._lock:
             now = self._clock.monotonic()
             state.settle(now)  # before `finish`, so a slow probe still holds its run open
-            if not state.finish(permit, now, hold=True):
+            sent = state.finish(permit, now, hold=True)
+            if sent is None:
                 return per_minute
             state.refusals += 1
             state.last_refusal = message
@@ -1197,11 +1245,14 @@ class RequestGovernor:
             # Learning reads the earliest refused minute of a run still going; a late refusal
             # after its run ended teaches nothing, even when its Retry-After pauses the bucket.
             if per_minute and state.run_refusals > 0:
-                minute = int(permit.sent // _MINUTE)
+                minute = int(sent // _MINUTE)
                 if state.refused_minute is None or minute < state.refused_minute:
                     state.refused_minute = minute
             # A request sent before a pause that has already ended leaves no pause.
             paused = max(0.0, state.pause_until - now)
+            learned = state.learn_ready()
+            declared = state.declared
+        self._log_learning(permit.bucket, learned, declared=declared)
         self._notify(permit.bucket)
         # One INFO line per refusal, with the pause it chose: a decision, not something to act
         # on. The paused-poll WARNING and the read's own error say when a pause matters.
