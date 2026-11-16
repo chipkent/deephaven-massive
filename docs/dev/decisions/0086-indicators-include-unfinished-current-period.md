@@ -2,7 +2,4 @@
 
 Date: 2026-11-02
 
-Status: accepted
-
-Indicators keep the current period's unfinished value; filter with `TimestampEnd <=
-TimestampInsert`.
+Status: moved to `src/deephaven_massive/namespaces/_indicators.py`, "still-changing value"

@@ -2,7 +2,4 @@
 
 Date: 2026-10-28
 
-Status: accepted
-
-One spelling for the transports in user-facing text: `REST`, `flat files`, and `WebSocket`, so a
-filter copied from a page works on `columns()`.
+Status: moved to `src/deephaven_massive/_datasets/column_descriptions.py`, "TRANSPORT_LABELS"

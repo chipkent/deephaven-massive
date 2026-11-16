@@ -2,6 +2,4 @@
 
 Date: 2026-10-30
 
-Status: superseded by [87](0087-limit-total-row-cap-per-request.md)
-
-*Superseded by 87.*
+Status: absorbed by [87](0087-limit-total-row-cap-per-request.md)

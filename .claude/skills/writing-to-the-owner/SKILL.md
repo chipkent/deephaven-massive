@@ -75,7 +75,10 @@ live tables), and what the result settles.
 (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read every one whose name touches the
 subject; then check `AGENTS.md`, the skills, the issue and its comments
 (`gh issue view <n> --comments`), and the owner's earlier answers. If an earlier answer settles the case, follow it and cite it; if it
-may cover the case but leaves a gap, quote it and ask only about the gap.
+may cover the case but leaves a gap, quote it and ask only about the gap. A ruling the owner
+gives becomes a record (`writing-a-record`) in the PR that acts on it: your message's question,
+options, and recommendation are its Question and Options, so write them once, and read the
+record's wording back to the owner before the file is written.
 
 **A question from the owner is a question, not an instruction.** Answer it; change nothing
 unless they say so. **If you can do a decided task yourself, do it** rather than handing it over.

@@ -2,6 +2,4 @@
 
 Date: 2026-10-23
 
-Status: accepted
-
-The context manager is kept, documented as for static results only.
+Status: moved to `src/deephaven_massive/_session.py`, "results are static"

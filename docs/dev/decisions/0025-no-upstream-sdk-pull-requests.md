@@ -2,6 +2,4 @@
 
 Date: 2026-10-26
 
-Status: accepted
-
-The library never depends on a fix in `massive-com/client-python`.
+Status: absorbed by [1](0001-no-sdk-own-rest-and-websocket-clients-not-massive-client-python.md)

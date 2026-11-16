@@ -2,6 +2,4 @@
 
 Date: 2026-10-23
 
-Status: accepted
-
-`uv.lock` is not committed, so every sync resolves afresh.
+Status: moved to `AGENTS.md`, "Agents never merge"; `AGENTS.md`, "`uv.lock` is not committed"

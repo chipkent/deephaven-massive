@@ -2,8 +2,4 @@
 
 Date: 2026-11-02
 
-Status: partly superseded: its per-symbol `limit` by [87](0087-limit-total-row-cap-per-request.md)
-
-An added symbol is read over the same fixed range and lands whole in one cycle; a removed one
-leaves. `reread=dm.Reread.ALWAYS` is the default; `m.symbol_reads()` shows each read. *Its
-per-symbol `limit` is superseded by 87.*
+Status: moved to `docs/dev/decisions/0082-every-api-accepts-live-symbol-table-watchlist.md`; `src/deephaven_massive/queries/_history.py`, "reread: Reread = Reread.ALWAYS"; `src/deephaven_massive/_tables/followed_read.py`, "so they land in one cycle"

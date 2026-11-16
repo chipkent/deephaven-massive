@@ -2,6 +2,4 @@
 
 Date: 2026-10-23
 
-Status: accepted
-
-A live Deephaven table of symbols drives subscriptions.
+Status: absorbed by [82](0082-every-api-accepts-live-symbol-table-watchlist.md)

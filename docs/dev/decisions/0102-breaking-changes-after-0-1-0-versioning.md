@@ -1,15 +1,35 @@
-# 102. From `0.1.0`, a breaking change needs the owner's permission and names the next version
+# 102. From 0.1.0, a breaking change needs the owner's permission and a new version
 
 Date: 2026-11-11
 
 Status: accepted
 
-The library had no users before its first release, so nothing was kept, aliased, or shimmed for
-compatibility and a rename was an ordinary edit. Once `0.1.0` is on PyPI, users' code and settings
-files depend on the documented contract. A change breaks when code written to the last release's
-documented contract stops working or gets a different documented result. From `0.1.0`, such a change
-needs the owner's permission; when the owner requests a public change, the agent says whether it
-breaks code and, if so, which version comes next, before making it. Versions follow
-`docs/dev/releasing.md`, "Which number to raise": pre-releases before `0.1.0` owe no compatibility;
-in `0.x` a break raises the minor and anything else the patch; from `1.0.0`, standard Semantic
-Versioning.
+## Question
+
+When does the library owe users compatibility, and what does a breaking change require?
+
+## Options
+
+None recorded: one path was proposed.
+
+## Ruling
+
+Before `0.1.0` nothing is kept or aliased. From `0.1.0`, when the owner asks for a public
+change, the agent says whether it breaks code written to the last release's documented behavior
+and which version number comes next, and asks before making a breaking one. In `0.x` a break
+raises the minor version. The owner ruled on 2026-11-11 that the API is not broken without their
+permission, and that they are told when a change breaks; recorded in PR #580.
+
+## Reason
+
+From the first release the library has users.
+
+## Consequences
+
+In `0.x` a break raises the minor version and anything else the patch; from `1.0.0`, standard
+Semantic Versioning.
+
+## Rule
+
+`AGENTS.md`, "Compatibility starts at `0.1.0`"; `docs/dev/releasing.md`, "Which number to
+raise".
