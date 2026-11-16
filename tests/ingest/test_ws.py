@@ -643,7 +643,7 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     # The row that is not canonical never became a topic.
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
     assert sent == {"T.AAPL"}
