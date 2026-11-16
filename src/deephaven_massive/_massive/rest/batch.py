@@ -396,8 +396,8 @@ def _array(field: Field, values: list[object]) -> pa.Array | None:
 
     Arrow checks the numbers in one native pass. When it refuses one (an integer out of the
     64-bit range, or one a double cannot hold exactly), the column is read again with every
-    number checked and converted in Python, which rounds such an integer in a `double` column as
-    the converter does.
+    number checked in Python, which refuses an integer a `double` column would round, so the
+    page is read row by row and that value marked.
 
     Returns:
         The array; or None when `spec.convert.column_converter` cannot vouch for a value, so the

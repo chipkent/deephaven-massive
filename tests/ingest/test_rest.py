@@ -4994,3 +4994,50 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
         assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
     assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
     assert sent_data(fake_rest) == []
+
+
+def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
+    *,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Under IGNORE a withheld row logs nothing above DEBUG, and its event still reaches the
+    # session; under RAISE the event reaches the session before the read fails.
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    page = Reply(envelope([odd, AAPL_DIVIDEND]))
+    fake_rest.reply(DIVIDENDS_PATH, page, page)
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    with dm.MassiveSession(config) as m:
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
+        quiet = dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)
+        with caplog.at_level(logging.DEBUG, LOGGER):
+            out = fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=quiet)
+        assert [r["Id"] for r in out] == ["E1"]
+        withheld = [r for r in caplog.records if "withheld 1 REST row" in r.getMessage()]
+        assert withheld == []
+        strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+        with pytest.raises(RowDataError, match=r"\(1 under unconvertible_values\)"):
+            fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)
+    ] * 2
+
+
+def test_a_row_whose_ticker_list_cannot_be_read_is_withheld_not_left_out(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its list may hold a named ticker, so it is no row outside the request: it is withheld and
+    # reported, beside the row that lists MSFT.
+    page = Reply(
+        envelope([{"benzinga_id": 1, "tickers": ["MSFT"]}, {"benzinga_id": 2, "tickers": "MSFT"}])
+    )
+    fake_rest.reply(LISTED_PATH, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "Tickers", 1)
+    ]

@@ -136,6 +136,7 @@ from deephaven_massive._tables.withheld import (
     Failure,
     Withheld,
     failure_of,
+    logs_withheld,
     mark_failures,
     setting_of,
     with_marks,
@@ -1602,7 +1603,8 @@ class Flusher:
             readers = self._withheld(plan, withheld, readers)
             if not readers:
                 return
-        drift = converted.drift.merge(withheld.drift)
+        logged = any(logs_withheld(withheld.counts(), r.policy) for r in readers)
+        drift = converted.drift.merge(withheld.drift) if logged else converted.drift
         if drift.fields_drifted or drift.dropped_rows:
             where = f"{self._thread.name} channel {plan.channel}"
             self._found(tuple(readers), drift, where=where)
@@ -1644,13 +1646,6 @@ class Flusher:
             if not counts:
                 kept.append(sink)
                 continue
-            failure = failure_of(
-                counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
-            )
-            if failure is not None:
-                self._fail_each([sink], MassiveError(failure, source=ErrorSource.LIBRARY))
-                continue
-            kept.append(sink)
             where = f"{self._thread.name} channel {plan.channel}"
             found = withheld.events(
                 dataset=plan.dataset,
@@ -1660,6 +1655,13 @@ class Flusher:
                 holds=holds,
             )
             self._events.append((sink, found))
+            failure = failure_of(
+                counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
+            )
+            if failure is not None:
+                self._fail_each([sink], MassiveError(failure, source=ErrorSource.LIBRARY))
+                continue
+            kept.append(sink)
         spellings = sorted(
             {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
         )
