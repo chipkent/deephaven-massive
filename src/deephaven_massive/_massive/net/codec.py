@@ -14,9 +14,10 @@ Deep nesting is bounded on both paths, so a hostile or broken body can never exh
 calling thread's C stack: orjson rejects depth beyond 1024 itself, and the standard-library
 path counts the depth before decoding and rejects anything deeper than `MAX_DEPTH` (512).
 
-orjson decodes an integer above the unsigned 64-bit range as a rounded `float`, which a `double`
-field would take as Massive's value, so a document holding a run of 20 digits or more is decoded
-by the standard library, which keeps the exact `int` for the decoder to judge. One other
+orjson decodes an integer above the unsigned, or below the signed, 64-bit range as a rounded
+`float`, which a `double` field would take as Massive's value, so a document holding a run of 20
+digits, or a minus and 19, is decoded by the standard library, which keeps the exact `int` for
+the decoder to judge. One other
 difference remains, not reachable from a well-formed Massive payload: a string escape naming a
 lone UTF-16 surrogate is rejected by orjson and decoded by the standard library.
 
@@ -135,9 +136,10 @@ def _too_deep(data: bytes | bytearray) -> bool:
     return max(accumulate(array("b", outside.translate(_STEPS))), default=0) > MAX_DEPTH
 
 
-_LONG_BYTES: Final = re.compile(rb"[0-9]{20}")
-"""Twenty digits in a row: an integer token past the unsigned 64-bit range starts this way."""
-_LONG_DIGITS: Final = re.compile(r"[0-9]{20}")
+_LONG_BYTES: Final = re.compile(rb"[0-9]{20}|-[0-9]{19}")
+"""Twenty digits in a row, or a minus and nineteen: how an integer token past the unsigned, or
+below the signed, 64-bit range starts."""
+_LONG_DIGITS: Final = re.compile(r"[0-9]{20}|-[0-9]{19}")
 """The same, in text."""
 
 
@@ -185,13 +187,14 @@ def loads(data: bytes | bytearray | str) -> object:
 
 
 def _has_long_integer(data: bytes | bytearray | str) -> bool:
-    """Tell whether a document holds a run of 20 digits, which orjson could round.
+    """Tell whether a document holds an integer token orjson could round.
 
     Args:
         data: The document.
 
     Returns:
-        True when some run of 20 digits or more is in it, a number's or a string's.
+        True when some run of 20 digits, or a minus and 19, is in it, a number's or a
+        string's.
     """
     found = _LONG_DIGITS.search(data) if isinstance(data, str) else _LONG_BYTES.search(data)
     return found is not None

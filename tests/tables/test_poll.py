@@ -3085,3 +3085,28 @@ def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
             publisher=_UnusedPublisher(),
             stop=Cancel(),
         )
+
+
+def test_a_poll_failed_by_a_withheld_row_still_shows_its_count(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Under RAISE the table fails on the withheld row, and its SchemaDrift still counts it.
+    rows = [
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 4, "cash_amount": 2.0},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+    q = build_query(
+        rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"], on_error=strict
+    )
+    table = q.poll(60)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(rest_session, dh_to_pylist)
+    assert "(1 under unconvertible_values)" in row["Error"]
+    assert "REST:1 row withheld" in row["SchemaDrift"]
+    rest_session.release(table)

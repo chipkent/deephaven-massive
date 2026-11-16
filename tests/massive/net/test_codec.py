@@ -239,3 +239,10 @@ def test_a_document_with_an_integer_orjson_would_round_is_decoded_exactly(
     assert calls == []
     assert codec.loads(b'{"p": 9007199254740993}') == {"p": 1.8446744073709552e19}
     assert calls == [b'{"p": 9007199254740993}']
+
+
+def test_a_document_with_an_integer_below_the_signed_range_is_decoded_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(codec, "_orjson", types.SimpleNamespace(loads=lambda _data: {"p": -1.0}))
+    assert codec.loads(b'{"p": -9223372036854775809}') == {"p": -9223372036854775809}
