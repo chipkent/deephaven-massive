@@ -546,7 +546,7 @@ def _check_snapshot(
     quoting Massive, or on delayed data the settings file does not list, quoting the library,
     and fails on any other failed read. Massive empties its snapshots
     from 03:30 to 04:00 New York time, and on the delayed feed refills them later by a lag the
-    tests do not know, so there an empty snapshot is recorded, not failed.
+    tests do not know, so there an empty snapshot of a finished read is recorded, not failed.
 
     Args:
         ran: Example 7's `m` and `snapshot`.
@@ -562,8 +562,13 @@ def _check_snapshot(
     def failed() -> list[str]:
         return [str(row["Error"]) for row in table_rows(reads) if row["State"] == "FAILED"]
 
-    _wait(lambda: bool(failed()) or bool(table_rows(snapshot)), _FILL_WAIT)
+    def done() -> bool:
+        states = [row["State"] for row in table_rows(reads)]
+        return bool(states) and all(state == "DONE" for state in states)
+
+    _wait(lambda: bool(failed()) or bool(table_rows(snapshot)) or done(), _FILL_WAIT)
     errors = failed()
+    finished = done()
     session.release(reads)
     skip_if_not_entitled(session)
     assert not errors, f"Example 7's snapshot read failed: {errors}"
@@ -574,6 +579,7 @@ def _check_snapshot(
         evidence("example 7's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
         return
     if delayed and not rows:
+        assert finished, f"example 7's snapshot read did not finish in {_FILL_WAIT:.0f} s"
         evidence("example 7's rows unchecked: the delayed feed's snapshot is empty")
         return
     assert _symbols(rows) == _STOCKS
