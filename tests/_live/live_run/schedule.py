@@ -10,8 +10,9 @@ from the state, the run's memory, and the time:
    than `MAX_STREAM_STARTS` times.
 3. Run the `--any-time` groups that still have due checks, at once, except on a stream day.
 4. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today
-   (or must run again: a refusal of one of its subscriptions cleared, `run_state.reruns`), and
-   whose latest start has not passed; sleep until its earliest start if it is not open yet.
+   (or must run again: a refusal of one of its subscriptions, or its skip for the delayed
+   listing, cleared, `run_state.reruns`), and whose latest start has not passed; sleep until
+   its earliest start if it is not open yet.
 5. Otherwise sleep until the next trading day's probe, or the planned night's start or latest
    restart if sooner.
 

@@ -381,6 +381,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
     """Whether Examples 7 to 12 fill with what the stock session of the moment sends.
@@ -408,7 +409,9 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
       the bars REST has of the day Example 11 read, or none on a day the market is closed.
 
     A run whose feed crosses from one session to another while it watches is skipped after
-    the checks that hold at any hour.
+    the checks that hold at any hour. When Massive refuses Example 7's snapshot or Example
+    12's streams, whose tables fail in the background, the test skips, quoting Massive,
+    before checking that example.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     delayed = dm.Subscription.STOCKS in live_config.delayed_subscriptions
@@ -422,8 +425,15 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
 
     try:
         with doc_examples.recorded_sessions():
-            snapshot = run.section("what-your-plan-allows", "snapshot")["snapshot"]
-            _check_snapshot(snapshot, delayed=delayed, table_rows=table_rows, evidence=evidence)
+            snapshot = run.section("what-your-plan-allows", "m", "snapshot")
+            _check_snapshot(
+                snapshot,
+                delayed=delayed,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
+            snapshot.clear()  # Example 8's `m` replaces Example 7's, as in a reader's console
             ran = {"stream-minute-bars": run.section("stream-minute-bars", "latest")}
             ran["change-since-close"] = run.section("change-since-close", "changes")
             ran["table-shapes"] = run.section("table-shapes", "since_start")
@@ -435,6 +445,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
             acked = wait_acked(board, len(_STOCKS), time.monotonic() + _ACK_WAIT)
             for line in stream_report(board):
                 evidence(line)
+            skip_if_not_entitled(board)
             assert acked >= len(_STOCKS), "Example 12's topics were not all acknowledged"
             seen = [
                 _watch_minute(
@@ -471,16 +482,39 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
 
 
 def _check_snapshot(
-    snapshot: Table, *, delayed: bool, table_rows: TableRows, evidence: Evidence
+    ran: Names,
+    *,
+    delayed: bool,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
 ) -> None:
     """Check Example 7: a snapshot of three stocks, with the columns its text names.
 
-    Massive empties its snapshots from 03:30 to 04:00 New York time, and on the delayed feed
-    refills them later by a lag the tests do not know, so there an empty snapshot is
-    recorded, not failed.
+    The snapshot reads in the background, so Massive's refusal fails its table instead of
+    raising: the check waits for rows or a failed read in `m.streams()`, and skips, quoting
+    Massive, on a refusal. Massive empties its snapshots from 03:30 to 04:00 New York time,
+    and on the delayed feed refills them later by a lag the tests do not know, so there an
+    empty snapshot is recorded, not failed.
+
+    Args:
+        ran: Example 7's `m` and `snapshot`.
+        delayed: Whether the settings file lists stocks as delayed.
+        table_rows: Snapshots a table into rows.
+        skip_if_not_entitled: Skips when Massive refused a read of the session.
+        evidence: Records what the snapshot held.
     """
+    session, snapshot = ran["m"], ran["snapshot"]
+    reads = session.streams()
+
+    def settled() -> bool:
+        failed = any(row["State"] == "FAILED" for row in table_rows(reads))
+        return failed or bool(table_rows(snapshot))
+
+    _wait(settled, _FILL_WAIT)
+    session.release(reads)
+    skip_if_not_entitled(session)
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
-    _wait(lambda: bool(table_rows(snapshot)), _FILL_WAIT)  # it reads in the background
     rows = table_rows(snapshot)
     evidence(f"example 7: {[(r['Symbol'], r['DayClose']) for r in rows]}")
     if doc_examples.snapshots_cleared(datetime.now(UTC), timedelta(0)):

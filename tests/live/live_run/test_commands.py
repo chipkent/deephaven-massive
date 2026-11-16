@@ -30,6 +30,7 @@ from tests._live.live_run.probe_result import ProbeResult
 from tests._live.live_run.secret_scrub import SecretFilter, fingerprints
 from tests._live.live_run.state import RunState, check_of, record
 from tests._live.live_run.stream_units import night_units, stream_units
+from tests._live.summary import NOT_LISTED
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -248,6 +249,31 @@ def test_units_massive_refused_plan_nothing_until_a_refusal_of_theirs_clears(
     check_of(state, "stream-night", "futures").rerun = True
     commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
     assert (state.stream_day, state.stream_night) == ("", "2026-11-05")
+
+
+def test_a_unit_the_settings_did_not_list_plans_a_stream_day_once_they_list_its_subscription(
+    harness: Harness,
+) -> None:
+    """Listing a subscription as delayed schedules its stream unit again, without `--redo`.
+
+    The other units passed, so only the unlisted one can ask for a stream day; it asks once a
+    check of its subscription that skipped for the same listing passes.
+    """
+    state = RunState(commit="c1")
+    for unit in stream_units():
+        check = check_of(state, "stream-day", unit)
+        if unit == "stocks":
+            record(state, check, status="skipped", reason=f"{NOT_LISTED}AM.*: x", day="2026-11-03")
+        else:
+            record(state, check, status="passed", reason="", day="2026-11-03")
+    listed = check_of(state, "evidence", "a.py::test_stocks_snapshot")
+    record(state, listed, status="skipped", reason=f"{NOT_LISTED}x", day="2026-11-03")
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
+    assert state.stream_day == ""
+    record(state, listed, status="passed", reason="", day="2026-11-04")
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
+    assert state.stream_day
+    assert any(f"stream day planned for {state.stream_day}" in line for line in harness.lines)
 
 
 def test_a_probe_that_fails_counts_a_retry(harness: Harness) -> None:

@@ -179,8 +179,8 @@ def _calls_for_streaming(check: run_state.Check, today: str) -> bool:
 
     A unit Massive refused, or that skipped for its delayed listing, still streams on the next
     planned day or night, but asks for one only once another check of its subscription stopped
-    being refused (`Check.rerun`): otherwise a key without a subscription would plan one every
-    day.
+    being refused or unlisted (`Check.rerun`): otherwise a key without a subscription would
+    plan one every day.
 
     Args:
         check: The unit's check.

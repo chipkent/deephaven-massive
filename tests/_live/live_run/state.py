@@ -9,13 +9,14 @@ after every change, so a crash or a Control-C never leaves it half written. It h
 - the planned stream night, the nights that ran, and the market closures Massive listed;
 - each attempt: one run of a group, in its own folder, with its child's pid and token;
 - each check: its status (`passed`, `failed`, `error`, `refused`, `skipped`, or `not run`), its
-  reason, how many times it failed, and, once Massive refused it, the subscription the refusal
-  names.
+  reason, how many times it failed, and, once Massive refused it or it skipped because the
+  owner's settings do not list its subscription as delayed, the subscription that names.
 
 The program never knows what the key holds: it learns it from Massive's answers. A check
-Massive refused runs again at its group's first attempt of each day, and when another check of
-the same subscription stops being refused (the key gained it), at once: its group may then run
-again the same evening (`reruns`). `is_due` decides whether a check runs again; `record` stores
+Massive refused, or skipped for its delayed listing, runs again at its group's first attempt of
+each day, and when another check of the same subscription stops being refused or unlisted (the
+key gained it, or the settings now list it), at once: its group may then run again the same
+evening (`reruns`). `is_due` decides whether a check runs again; `record` stores
 a result by the rules that keep a pass from being undone by a later skip. Everything here is
 pure but `load` and `save`.
 """
@@ -81,10 +82,10 @@ class Check:
         items: The open verification items it answers (`settles` and `verifies`).
         passed_rules: The `ROW_RULES` version in force at its last pass; 0 for a pass recorded
             before the version existed, or none.
-        subscription: The subscription its latest refusal names (`refused_subscription`), `""`
-            when it was never refused or the refusal names none.
-        rerun: Whether another check of its subscription stopped being refused since its last
-            run, which makes it due at once.
+        subscription: The subscription its latest refusal, or skip for its delayed listing,
+            names (`refused_subscription`); `""` when it had neither or the reason names none.
+        rerun: Whether another check of its subscription stopped being refused or unlisted
+            since its last run, which makes it due at once.
     """
 
     group: str
@@ -223,11 +224,12 @@ def save(folder: Path, state: RunState) -> None:
 
 
 def refused_subscription(name: str, reason: str) -> str:
-    """Name the subscription a refused check's refusal is about.
+    """Name the subscription a refused or unlisted check's reason is about.
 
     Args:
         name: The check's name: a node id, an example, or a streaming unit.
-        reason: The refusal, as Massive worded it (`refusals.refusal_line`).
+        reason: The refusal, as Massive worded it (`refusals.refusal_line`), or the skip for
+            the delayed listing (`summary.NOT_LISTED` and the library's message).
 
     Returns:
         The class of the refused request's path when the reason names one
@@ -284,7 +286,7 @@ def is_due(check: Check, today: str) -> bool:
 
     A check is due unless it passed; it failed `MAX_FAILURES` times; it was refused, or skipped
     for its delayed listing (`is_daily`), and already ran today, unless another check of its
-    subscription stopped being refused since (`Check.rerun`); or it was skipped for a
+    subscription stopped being refused or unlisted since (`Check.rerun`); or it was skipped for a
     condition `MAX_CONDITION_SKIPS` times. A check that needs rows (`needs_rows`) and passed
     under an older `ROW_RULES` proved nothing, so it is due until it passes again.
 
@@ -325,12 +327,14 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
 
     A skip never replaces a pass. The unfinished checks of a child stopped on purpose
     (Control-C, a hard stop) come as `interrupted` and are not stored, so they stay due
-    without counting as a failure. A refusal stores the subscription it names
-    (`refused_subscription`). When a refused check's new result is one Massive answered (a
-    pass, a failure, or a skip whose reason starts with `NOT_LISTED`), the key gained
-    something: every other refused check of the same subscription is marked to run again at
-    once (`Check.rerun`). A skip for any other reason, such as a closed market or a stream
-    that sent nothing, says nothing of the key and marks nothing.
+    without counting as a failure. A refusal, or a skip whose reason starts with `NOT_LISTED`,
+    stores the subscription it names (`refused_subscription`). When a refused check's new
+    result is one Massive answered (a pass, a failure, or a skip whose reason starts with
+    `NOT_LISTED`), the key gained something; when an unlisted check's is a pass or a failure,
+    the settings now list its subscription. Either way every other refused or unlisted check
+    of the same subscription (`is_daily`) is marked to run again at once (`Check.rerun`). A
+    skip for any other reason, such as a closed market or a stream that sent nothing, says
+    nothing of the key and marks nothing.
 
     Args:
         state: The run's state.
@@ -345,26 +349,25 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     check.last_run, check.rerun = day, False
     if status == "skipped" and check.status == "passed":
         return
-    answered = status in {"passed", "failed"} or (
-        status == "skipped" and reason.startswith(NOT_LISTED)
-    )
-    if check.status == "refused" and answered and check.subscription:
+    unlisted = status == "skipped" and reason.startswith(NOT_LISTED)
+    cleared = status in {"passed", "failed"} or (unlisted and check.status == "refused")
+    if is_daily(check) and cleared and check.subscription:
         for other in state.checks.values():
-            if other is not check and other.status == "refused":
+            if other is not check and is_daily(other):
                 other.rerun = other.rerun or other.subscription == check.subscription
     check.status, check.reason = status, reason
-    if status == "refused":
+    if status == "refused" or unlisted:
         check.subscription = refused_subscription(check.name, reason)
     elif status == "passed":
         check.passed_rules = ROW_RULES
     elif status in {"failed", "error"}:
         check.failures += 1
-    elif status == "skipped" and not reason.startswith(NOT_LISTED):
+    else:  # a skip for a condition of the moment
         check.condition_skips += 1
 
 
 def reruns(state: RunState, group: str) -> bool:
-    """Tell whether a group must run again today: a refusal of one of its subscriptions cleared.
+    """Tell whether a group must run again today: a refused or unlisted subscription cleared.
 
     Args:
         state: The run's state.

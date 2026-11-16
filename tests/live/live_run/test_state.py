@@ -148,6 +148,54 @@ def test_a_refusal_reruns_its_subscription_only_once_massive_answers_otherwise(
     assert second.rerun is reruns
 
 
+UNLISTED = "not listed as delayed: AM.*: list stocks in delayed_subscriptions"
+
+
+def test_a_check_of_a_listed_subscription_reruns_its_unlisted_and_refused_checks() -> None:
+    """When the settings start listing a subscription, its other daily checks run at once.
+
+    A check skipped because the settings do not list its subscription as delayed stores that
+    subscription; once another check of it passes, every refused or unlisted check of it is
+    due again the same day, and its group may run again (`reruns`).
+    """
+    state = _state()
+    unit = check_of(state, "stream-day", "stocks")
+    refused = check_of(state, "smoke", "b.py::u")
+    listed = check_of(state, "evidence", "a.py::test_stocks_snapshot")
+    record(state, unit, status="skipped", reason=UNLISTED, day=DAY)
+    record(state, refused, status="refused", reason=REFUSAL, day=DAY)
+    record(state, listed, status="skipped", reason=UNLISTED, day=DAY)
+    assert (unit.subscription, listed.subscription) == ("stocks", "stocks")
+    assert not run_state.reruns(state, "stream-day")
+    record(state, listed, status="passed", reason="", day=DAY)
+    assert (unit.rerun, refused.rerun, listed.rerun) == (True, True, False)
+    assert is_due(unit, DAY)
+    assert run_state.reruns(state, "stream-day")
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "reruns"),
+    [
+        ("passed", "", True),
+        ("failed", "call: KeyError", True),
+        ("skipped", UNLISTED, False),
+        ("refused", REFUSAL, False),
+        ("skipped", "the market was closed", False),
+    ],
+)
+def test_an_unlisted_check_reruns_its_subscription_only_once_the_settings_list_it(
+    status: str, reason: str, reruns: bool
+) -> None:
+    """Another skip for the listing, or Massive's refusal, says the settings gained nothing."""
+    state = _state()
+    first = check_of(state, "evidence", "a.py::test_stocks_t")
+    second = check_of(state, "stream-day", "stocks")
+    record(state, first, status="skipped", reason=UNLISTED, day=DAY)
+    record(state, second, status="skipped", reason=UNLISTED, day=DAY)
+    record(state, first, status=status, reason=reason, day=DAY)
+    assert second.rerun is reruns
+
+
 @pytest.mark.parametrize(
     ("name", "reason", "subscription"),
     [
