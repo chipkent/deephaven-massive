@@ -1138,22 +1138,11 @@ def serve_pairs(server: FakeRestServer) -> None:
     server.reply("/v3/reference/tickers", Reply({"status": "OK", "results": rows_}), empty)
 
 
-def test_a_pair_massive_does_not_list_is_taken_but_cannot_be_streamed(
+def test_any_crypto_pair_is_taken_with_no_lookup_at_the_call(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # Any X: ticker is Massive's; only a stream needs the pair split for its topic, and
-    # Massive's crypto ticker list does not hold this one, so the stream is refused.
-    empty = Reply({"status": "OK", "results": []})
-    fake_rest.reply("/v3/reference/tickers", empty, empty)
+    # Any X: ticker is Massive's; whether Massive has data for it is Massive's answer, which
+    # the read or the stream learns later (`test_ws.py`, `test_symbol_reads.py`).
     q = rest_session.crypto.trades("X:BTCXYZ")
     assert request_of(q).symbols == ("X:BTCXYZ",)
-    with pytest.raises(
-        dm.MassiveError,
-        match=r"^cannot stream 'X:BTCXYZ': 'X:BTCXYZ' cannot be split into its two currencies: "
-        r"Massive's reference data does not list it$",
-    ):
-        q.blink()
-    assert fake_rest.get_queries() == [
-        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["true"], "limit": ["1000"]}),
-        ("/v3/reference/tickers", {"market": ["crypto"], "active": ["false"], "limit": ["1000"]}),
-    ]
+    assert fake_rest.get_queries() == []

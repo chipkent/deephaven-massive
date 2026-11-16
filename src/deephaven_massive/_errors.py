@@ -95,7 +95,7 @@ __all__ = [
     "PermanentError",
     "RowDataError",
     "SessionClosedError",
-    "UnlistedPairError",
+    "UnavailableSymbolError",
     "copy_error",
     "every_symbol_failed",
     "failure_text",
@@ -386,20 +386,18 @@ class PermanentError(MassiveError):
     Internal: not exported from `dm`, and only its subclasses are raised. They are the ingest
     errors whose cause is settled for the session or the request: a row that breaks its
     dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
-    (`SymbolRowError`), a crypto pair missing from the session's ticker list
-    (`UnlistedPairError`), a symbol Massive has no data for under
-    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`, `_ingest/rest.py`), and, in
-    a read by symbol, a parameter a symbol's path does not take (`UnsupportedParameterError`,
+    (`SymbolRowError`), a symbol Massive has no data for under
+    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`), and, in a read by symbol, a
+    parameter a symbol's path does not take (`UnsupportedParameterError`,
     `_ingest/symbol_reads.py`).
 
     A `poll()` table fails with any of them except `UnsupportedParameterError` rather than
     retrying it every cycle. `UnsupportedParameterError` never reaches a `poll()` cycle: the
     read by symbol records it as that symbol's failure, so it fails only its own symbol and the
-    read goes on with the others. `RowDataError` and `UnlistedPairError` are defined here,
-    since the REST transport raises them and the tables layer names them; `SymbolRowError` is
-    the poll module's (`_tables/poll.py`). The fatal set of `poll()` names only this base, so a
-    subclass defined in a module the poll module cannot import (the ingest layer, such as
-    `UnavailableSymbolError`) still fails the table.
+    read goes on with the others. `RowDataError` and `UnavailableSymbolError` are defined here,
+    since both transports raise them; `SymbolRowError` is the poll module's
+    (`_tables/poll.py`). The fatal set of `poll()` names only this base, so every subclass
+    fails the table.
 
     Example:
         ::
@@ -728,7 +726,8 @@ class RowDataError(PermanentError):
 
     A REST page whose every row was dropped because a key could not be read (one odd row is
     dropped and counted, never raised), a symbol spelling the library cannot read under
-    `unreadable_symbols=RAISE`, a flat-file line that is not a readable row under
+    `unreadable_symbols=RAISE` (a listed crypto pair whose currencies do not join to it
+    included), a flat-file line that is not a readable row under
     `malformed_rows=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
     dataset's poll keys. A `fetch()` or `history()` table fails with it like any `MassiveError`,
     and a call with `wait=True` raises it; a `poll()` table fails with it, since the next cycle
@@ -739,18 +738,15 @@ class RowDataError(PermanentError):
     default_source = ErrorSource.LIBRARY
 
 
-class UnlistedPairError(PermanentError):
-    """A crypto ticker whose two currencies Massive's reference data does not give.
+class UnavailableSymbolError(PermanentError):
+    """A symbol Massive has no data for, under `MassiveConfig.unavailable_symbols=RAISE`.
 
-    A path that takes the pair as two currencies (`/v1/last/crypto/{from}/{to}`,
-    `/v1/open-close/crypto/{from}/{to}/{date}`) needs the split, which only Massive's reference
-    data gives; the session's crypto ticker list, read again on a miss at most once an hour,
-    does not list the ticker, or gives currencies that do not join to it
-    (`RestReader.crypto_pair` in `_ingest/rest.py`). A pair of a symbol table follows
-    `MassiveConfig.unlisted_symbols`: under `LOG` and `IGNORE`, `fetch()` and each `poll()`
-    cycle leave it out, and a followed read marks it `FAILED`; under `RAISE`, a `fetch()`,
-    `poll()`, or followed table fails with it, and `fetch(wait=True)` raises it. A pair passed in
-    code always raises it at the call.
+    Massive answered HTTP 404 for it, or its crypto ticker list gives no split for the pair
+    (`ErrorSource.MASSIVE`); or, in a `poll()` cycle, its path does not take a parameter the
+    poll sends (`ErrorSource.USER`, a bug). Under `LOG` and `IGNORE` the symbol gets no rows
+    instead. Under `RAISE` it fails whatever met it: a `fetch()` or `history()` table, which
+    `wait=True` raises; one symbol of a followed read, marked `FAILED`; a `poll()` table; or a
+    stream.
     """
 
 

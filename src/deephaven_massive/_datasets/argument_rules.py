@@ -42,8 +42,10 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, "
             "unless the dataset's page says it takes another source's tickers. In a table, that "
             "row is skipped and logged.\n"
-            "- To convert another source's tickers, such as Yahoo's `BRK-B`, use "
-            "`dm.canonical_symbol`."
+            "- To convert another source's tickers, use `dm.canonicalize_symbols` for a table "
+            "or `dm.canonical_symbol` for one value. A stock needs the source's convention: "
+            "`convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`. A row "
+            "that doesn't convert gets a null `Symbol`, which every dataset skips."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "

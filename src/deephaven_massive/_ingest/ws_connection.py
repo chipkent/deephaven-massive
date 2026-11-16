@@ -672,6 +672,32 @@ class Connection:
             return False
         return True
 
+    def post_later(self, delay: float, callback: Callable[..., None], *args: object) -> bool:
+        """Run `callback(*args)` on the loop thread after `delay` seconds. Any thread; never blocks.
+
+        The loop keeps the timer, so it ends with the connection: a callback still waiting then
+        never runs.
+
+        Args:
+            delay: Seconds to wait.
+            callback: A callable that never blocks and makes no Java call.
+            *args: Plain data.
+
+        Returns:
+            False when the loop has closed, so the callback never runs (`post`).
+        """
+        return self.post(self._start_timer, delay, callback, *args)
+
+    def _start_timer(self, delay: float, callback: Callable[..., None], *args: object) -> None:
+        """Start a timer of `post_later`; runs on the loop thread.
+
+        Args:
+            delay: Seconds to wait.
+            callback: What the timer runs.
+            *args: Its arguments.
+        """
+        self._client.loop.call_later(delay, callback, *args)
+
     # --- loop thread: streams ------------------------------------------------------------------
 
     def add_stream(self, stream: ConnectionStream) -> None:
@@ -738,7 +764,10 @@ class Connection:
     def change_symbols(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
     ) -> None:
-        """Apply a reactive symbol table's change to its stream's topics and its row.
+        """Apply a change of a stream's symbols to its topics and its row.
+
+        A reactive symbol table's changes come here, and so do a crypto stream's pairs once
+        they are split (`WsConnections._change_pairs`).
 
         Args:
             stream_id: The stream.
@@ -754,8 +783,9 @@ class Connection:
         with self._lock:
             pairs = dict(self._group.pairs)
         topics = stream_topics(self.asset_class, stream.channel, symbols, pairs=pairs)
-        self.subscriptions.add(topics - stream.topics)
-        self.subscriptions.remove(stream.topics - topics)
+        # Counted as the stream's other topics are, so its release removes what was added.
+        self.subscriptions.add(topics - stream.topics, static=stream.static)
+        self.subscriptions.remove(stream.topics - topics, static=stream.static)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "stream %d: its symbol table added %s and removed %s",

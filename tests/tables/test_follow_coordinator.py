@@ -37,7 +37,6 @@ from deephaven_massive._errors import (
     NEW_SESSION,
     BrokenGuaranteeError,
     MassiveError,
-    UnlistedPairError,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
@@ -1714,59 +1713,6 @@ def test_a_rest_read_takes_up_to_symbols_per_read_symbols(
     assert sorted(len(names) for names in script.calls) == [1, 2]
     assert sorted(name for names in script.calls for name in names) == ["AAPL", "MSFT", "NVDA"]
     massive_session.release(result)
-
-
-def unlisted() -> SymbolFailure:
-    error = UnlistedPairError(
-        "'X:DOTUSD' cannot be split: Massive's reference data does not list it"
-    )
-    return SymbolFailure(error)
-
-
-@pytest.mark.parametrize(("setting", "warns"), [(dm.OnError.LOG, True), (dm.OnError.IGNORE, False)])
-def test_an_unlisted_pair_fails_alone_and_warns_only_under_log(
-    *,
-    watchlist: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    setting: dm.OnError,
-    warns: bool,
-) -> None:
-    core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
-    script = Script(massive_session)
-    script.answers["DOT"] = [unlisted()]
-    with caplog.at_level(logging.DEBUG, logger=LOGGER):
-        result = follow(massive_session, watchlist("AAPL", "DOT"), script)
-        failed = wait_state(massive_session, "DOT", SymbolReadState.FAILED)
-        wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    assert "does not list it" in (failed.error or "")
-    assert not result.j_table.isFailed()
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert [("DOT failed" in m) for m in warnings] == ([True] if warns else [])
-    assert any("DOT failed" in r.getMessage() for r in caplog.records)  # DEBUG at least
-    massive_session.release(result)
-
-
-def test_an_unlisted_pair_fails_the_result_under_raise(
-    *,
-    watchlist: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    monkeypatch: pytest.MonkeyPatch,
-    drain: Callable[[], None],
-    dh_to_pylist: ToList,
-) -> None:
-    core = massive_session._core
-    config = dataclasses.replace(core.config, unlisted_symbols=dm.OnError.RAISE)
-    monkeypatch.setattr(core, "config", config)
-    script = Script(massive_session)
-    script.answers["DOT"] = [unlisted()]
-    result = follow(massive_session, watchlist("DOT"), script)
-    until(lambda: bool(result.j_table.isFailed()))
-    shown = stream(massive_session, drain, dh_to_pylist)
-    assert shown["State"] == "FAILED"
-    assert "does not list it" in shown["Error"]
 
 
 # --- The call-time symbols of a call that did not wait ----------------------------------------

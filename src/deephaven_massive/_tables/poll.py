@@ -50,8 +50,7 @@ the cycle (a `REPLACE` table drops their rows), and every good cycle lists them,
 reason, in the row's `Error` (`NotePart.LEFT_OUT`, `CycleRows.left_out`), clearing the list once
 none is left out, so the table never loses rows without saying why; the REST reader logs each
 one WARNING per session under `LOG`, and only DEBUG under `IGNORE`. Under `RAISE` the REST
-reader raises `_ingest/rest.py`'s `UnavailableSymbolError`, a `PermanentError`, which fails the
-table.
+reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the table.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
@@ -60,9 +59,8 @@ page whose every row was dropped because a key could not be read, or a row that,
 has a null poll key, which would merge unrelated rows; one odd row is dropped and counted, or
 its odd value read as null, and the table goes on), `SymbolRowError` (a symbol table's row
 that is not Massive's ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the
-row is skipped and the cycle's `Error` lists it), and `UnlistedPairError`
-(a crypto pair of a symbol table Massive's reference data does not split, under
-`unlisted_symbols=RAISE`; under `LOG` and `IGNORE` the cycle leaves it out). The failure is
+row is skipped and the cycle's `Error` lists it), and `UnavailableSymbolError` (a symbol
+Massive has no data for, under `unavailable_symbols=RAISE`). The failure is
 logged at the level its `is_bug` gives (`log_failure`): ERROR for a defect, naming whose it is,
 and WARNING otherwise.
 A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,
@@ -324,8 +322,8 @@ class CycleRows:
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
             `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted'])"` or
-            `"AAPL1 (HTTP 404: no data)"`, in the order found; empty for none. The row's
-            `Error` lists them (`NotePart.LEFT_OUT`).
+            `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
+            none. The row's `Error` lists them (`NotePart.LEFT_OUT`).
     """
 
     rows: pa.Table

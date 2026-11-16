@@ -18,11 +18,8 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import (
-    HistorySource,
-    OnError,
     PollMode,
 )
-from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
@@ -41,11 +38,9 @@ from tests._fakes.queries import (
     Recorder,
     feed,
     follows,
-    join_reads,
     last_trade,
     make,
     news,
-    released,
     symbol_reads,
     trades,
     until,
@@ -177,20 +172,6 @@ def test_a_one_row_fetch_passes_its_symbols(
     ]
 
 
-def test_only_symbols_in_code_have_their_crypto_pairs_split_at_the_call(
-    massive_session: dm.MassiveSession, rest: Recorder
-) -> None:
-    # A pair in code is code: one Massive does not list raises at the call. A table's pairs
-    # are data, which the read takes as MassiveConfig.unlisted_symbols says.
-    in_code = news(massive_session).fetch()
-    table = new_table([string_col("Symbol", ["AAPL"])])
-    from_table = trades(massive_session, table).history("2025-03-03", source=HistorySource.REST)
-    listed = trades(massive_session).history("2025-03-03", source=HistorySource.REST)
-    join_reads(massive_session)
-    assert rest.split_pairs == [True, False, True]
-    released(massive_session, in_code, from_table, listed)
-
-
 def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
     # A symbol's static rows, as a read returns them: `count` rows of nulls.
     schema = m._core.dataset_schema(spec)
@@ -198,16 +179,12 @@ def rows_of(m: dm.MassiveSession, spec: DatasetSpec, count: int) -> SymbolRows:
         return SymbolRows(dh_arrow.to_table(schema.to_arrow([{}] * count)))
 
 
-def test_a_static_fetch_is_unchanged_and_passes_the_unlisted_setting(
-    *, massive_session: dm.MassiveSession, rest: Recorder
-) -> None:
+def test_a_static_fetch_is_unchanged(*, massive_session: dm.MassiveSession, rest: Recorder) -> None:
     static = new_table([string_col("Symbol", ["AAPL"])])
     q = make(massive_session, LAST_TRADE_SPEC, symbols=static)
     assert isinstance(q, FetchQuery)
     assert not q.fetch(wait=True).is_refreshing
     assert not last_trade(massive_session).fetch(wait=True).is_refreshing
-    # A symbol table's crypto pairs follow the session's setting; symbols in code always raise.
-    assert rest.unlisted == [OnError.LOG, OnError.RAISE]
     assert rest.fetched == []
 
 
@@ -343,34 +320,6 @@ def test_a_followed_fetch_whose_every_symbol_failed_is_retryable_only_when_each_
     assert (mixed.value.status, mixed.value.is_retryable) == (503, False)
     assert mixed.value.__cause__ is busy
     rest.outcomes = {}  # the raised errors' tracebacks hold the session
-    follows(massive_session)
-
-
-@pytest.mark.parametrize("setting", [OnError.LOG, OnError.IGNORE, OnError.RAISE])
-def test_a_followed_fetch_s_unlisted_pair_follows_unlisted_symbols(
-    *,
-    live: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    rest: Recorder,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    setting: OnError,
-) -> None:
-    core = massive_session._core
-    monkeypatch.setattr(core, "config", dataclasses.replace(core.config, unlisted_symbols=setting))
-    error = UnlistedPairError("'DOT' cannot be split: Massive's reference data does not list it")
-    rest.outcomes = {"DOT": SymbolFailure(error)}
-    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "DOT"))
-    assert isinstance(q, FetchQuery)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
-        if setting is OnError.RAISE:
-            with pytest.raises(UnlistedPairError, match="does not list it"):
-                q.fetch(wait=True)
-            rest.outcomes = {}  # the raised error's traceback holds the session
-            return
-        result = q.fetch(wait=True)
-    assert len(caplog.messages) == (1 if setting is OnError.LOG else 0)
-    massive_session.release(result)
     follows(massive_session)
 
 
@@ -657,3 +606,66 @@ def test_poll_reads_a_table_of_values_at_its_call(
     assert verb == "poll"
     assert request.value_table is not None
     assert request.value_table.table is codes
+
+
+def test_a_followed_fetch_of_a_pair_massive_does_not_list_ends_done_with_no_rows(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Through the real REST transport: Massive's crypto ticker list holds only BTC-USD, so
+    # DOT-USD has no data, as a ticker Massive answers with nothing has: DONE, with no rows.
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    fake_rest.reply("/v3/reference/tickers", Reply(envelope([listed])), Reply(envelope([])))
+    last = {"status": "OK", "symbol": "BTC-USD", "last": {"price": 1.0, "timestamp": 1741000000000}}
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    result = rest_session.crypto.last_trade(live("X:BTCUSD", "X:DOTUSD")).fetch(wait=True)
+    assert [r["Symbol"] for r in dh_to_pylist(result)] == ["X:BTCUSD"]
+
+    def states() -> dict[str, tuple[str, int]]:
+        rows = dh_to_pylist(rest_session.symbol_reads())
+        return {r["Symbol"]: (r["State"], r["Rows"]) for r in rows}
+
+    until(lambda: states().get("X:DOTUSD") == ("DONE", 0))
+    rest_session.release(result)
+    follows(rest_session)
+
+
+def test_a_followed_fetch_names_a_listed_pair_whose_ticker_it_can_t_read_in_symbol_reads(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Massive's crypto ticker list gives X:DOTUSD the currencies DOT and USDT, which don't make
+    # up its ticker: no request is sent for it, and its m.symbol_reads() row says why, as a
+    # stream's and a poll's Error do. A pair the list reads is read with no Error.
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    unjoined = {"ticker": "X:DOTUSD", "base_currency_symbol": "DOT", "currency_symbol": "USDT"}
+    fake_rest.reply(
+        "/v3/reference/tickers", Reply(envelope([listed, unjoined])), Reply(envelope([]))
+    )
+    last = {"status": "OK", "symbol": "BTC-USD", "last": {"price": 1.0, "timestamp": 1741000000000}}
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    result = rest_session.crypto.last_trade(live("X:BTCUSD", "X:DOTUSD")).fetch(wait=True)
+    assert [r["Symbol"] for r in dh_to_pylist(result)] == ["X:BTCUSD"]
+
+    def reads() -> dict[str, tuple[str, int, str | None]]:
+        rows = dh_to_pylist(rest_session.symbol_reads())
+        return {r["Symbol"]: (r["State"], r["Rows"], r["Error"]) for r in rows}
+
+    until(lambda: reads().get("X:DOTUSD", ("", 0, None))[0] == "DONE")
+    state, rows, error = reads()["X:DOTUSD"]
+    assert (state, rows) == ("DONE", 0)
+    assert error is not None
+    assert error.startswith("skipped: ")
+    assert "the pair gets no rows" in error
+    assert reads()["X:BTCUSD"] == ("DONE", 1, None)
+    assert [p for p, _ in fake_rest.get_queries() if p != "/v3/reference/tickers"] == [
+        "/v1/last/crypto/BTC/USD"
+    ]
+    rest_session.release(result)
+    follows(rest_session)

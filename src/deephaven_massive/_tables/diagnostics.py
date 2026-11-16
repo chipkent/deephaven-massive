@@ -249,8 +249,8 @@ class NotePart(StrEnum):
     STALE_SYMBOLS = "stale_symbols"
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
     SKIPPED_PAIRS = "skipped_pairs"
-    """Crypto pairs a symbol table added that the stream skips: Massive's crypto ticker list
-    does not split them, or could not be read."""
+    """Crypto pairs, passed in code or added by a symbol table, that the stream skips:
+    Massive's crypto ticker list does not split them, or could not be read."""
     POLL_CYCLE = "poll_cycle"
     """A `poll()` cycle failed; the next one runs as scheduled."""
     LEFT_OUT = "left_out"

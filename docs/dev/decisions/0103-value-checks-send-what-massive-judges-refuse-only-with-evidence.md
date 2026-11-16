@@ -2,7 +2,7 @@
 
 Date: 2026-11-12
 
-Status: accepted
+Status: partly superseded: its application to a ticker's spelling by [104](0104-symbol-canonical-ticker-or-refused-no-data-gives-no-rows.md)
 
 The library refuses an argument value itself only when it is the wrong Python type, when no request
 can carry it, or when Massive, sent it, returns wrong or empty data with no error, and each such

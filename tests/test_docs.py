@@ -13,10 +13,10 @@ example, a block with the blocks that continue it, is a test case of its own, an
 examples' tables are checked where each example makes them. A block
 fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may be. The
 README's settings file is written by running its shell commands, with `HOME` in a temporary
-folder, and the settings page's example file loads as the page says. Five README sections also
-run alone against scripted replies, and the tests check that
-their tables hold what the README says they hold: the whole-market day, the watchlist that
-adds and removes stocks, the settings file, the change since yesterday's close, and the
+folder, and the settings page's example file loads as the page says. Six README sections also
+run alone against scripted replies, and the tests check that their tables hold what the README
+says they hold: the whole-market day, the watchlist that adds and removes stocks, the
+conversion of Yahoo tickers, the settings file, the change since yesterday's close, and the
 backfill of today's minutes. The helpers that read a page's blocks and run them are shared with
 the live run of the README's examples, `tests/live/test_doc_examples_integration.py`, from
 `tests/_live/doc_examples.py`.
@@ -623,6 +623,37 @@ def test_the_watchlist_example_adds_and_removes_stocks(
     assert symbols(rows) == after
     assert {r["Symbol"]: r["Close"] for r in rows}["NVDA"] == 104.0
     edited.clear()
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_yahoo_example_converts_each_ticker_and_nulls_the_one_it_cannot(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "BRK.B", "BACpL")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    [block] = section_blocks(README, "convert-symbols")
+    [names] = run_blocks([block], tmp_path, "yahoo", console_command=console_command)
+
+    # Every row stays, the original text beside Massive's ticker, and ^GSPC's Symbol is null.
+    rows = dh_to_pylist(names["stocks"])
+    assert [(r["Yahoo"], r["Symbol"]) for r in rows] == [
+        ("AAPL", "AAPL"),
+        ("BRK-B", "BRK.B"),
+        ("BAC-PL", "BACpL"),
+        ("^GSPC", None),
+    ]
+    assert [r["Yahoo"] for r in dh_to_pylist(names["stocks"].where("isNull(Symbol)"))] == ["^GSPC"]
+    # The closes hold a row for each converted ticker and none for the null row.
+    closes = _wait_for_rows(names["yahoo_closes"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in closes} == {"AAPL", "BRK.B", "BACpL"}
     names.clear()
 
 

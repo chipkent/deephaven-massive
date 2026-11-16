@@ -12,7 +12,10 @@ from deephaven import dtypes, new_table
 from deephaven.column import int_col, string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.symbols import strict_converter
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
+from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.symbols import _row_converter
 
@@ -198,26 +201,27 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         dm.canonicalize_symbols(sizes, AssetClass.FOREX)
 
 
-def test_the_row_converter_raises_or_nulls() -> None:
+def test_the_row_converter_raises_or_nulls(caplog: pytest.LogCaptureFixture) -> None:
     # Called from a Python thread: Deephaven runs a formula on its own threads, which line
     # coverage before 3.14 cannot see.
-    refused: list[tuple[str, str]] = []
-
-    def convert(text: str) -> str | None:
-        return dm.canonical_symbol(text, AssetClass.FOREX)
-
-    def refuse(value: str, reason: str) -> None:
-        refused.append((value, reason))
-
-    strict = _row_converter(convert, refuse, OnError.RAISE)
+    convert = strict_converter(AssetClass.FOREX, SymbolConvention.MASSIVE)
+    log = BoundedLog(logging.getLogger("deephaven_massive._tables.symbols"), limit=5, level=30)
+    strict = _row_converter(
+        convert, effect=effect_of(OnError.RAISE), log=log, consequence="its rows get a null S"
+    )
     assert strict(None) is None
     assert strict("EUR/USD") == "C:EURUSD"
     with pytest.raises(ValueError, match="cannot read 'no pe!'"):
         strict("no pe!")
-    lenient = _row_converter(convert, refuse, OnError.LOG)
-    assert lenient("no pe!") is None
-    assert lenient("GBP-USD") == "C:GBPUSD"
-    assert [value for value, _ in refused] == ["no pe!"]
+    lenient = _row_converter(
+        convert, effect=effect_of(OnError.LOG), log=log, consequence="its rows get a null S"
+    )
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
+        assert lenient("no pe!") is None
+        assert lenient("GBP-USD") == "C:GBPUSD"
+    assert [m.split(";")[0] for m in caplog.messages] == [
+        "canonicalize_symbols: cannot read 'no pe!' as a forex pair of two three-letter codes"
+    ]
 
 
 def _listeners(table: Table) -> int:

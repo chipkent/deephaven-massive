@@ -1,7 +1,9 @@
 """Tests for the canonical symbol grammar, its checks, and the converters."""
 
 import copy
+import functools
 import json
+import logging
 import re
 import typing
 from collections.abc import Callable, Sequence
@@ -14,6 +16,7 @@ from deephaven.dherror import DHError
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
     ALL,
     AllSymbols,
@@ -25,10 +28,13 @@ from deephaven_massive._datasets.symbols import (
     is_canonical,
     is_forex_currency,
     option_roots,
+    refusal,
+    strict_converter,
     symbol_class,
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
 
 STK, OPT, FUT, IDX, FX, CRY = (
@@ -510,6 +516,132 @@ def test_a_converter_refuses_with_a_reason(
         convert(text)
 
 
+@pytest.fixture
+def fresh_converter_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scalar converters' logs remember each value for the process: start with none seen.
+    for name, level in (("_logged_values", logging.WARNING), ("_ignored_values", logging.DEBUG)):
+        monkeypatch.setattr(symbols, name, BoundedLog(symbols.logger, limit=3, level=level))
+
+
+@pytest.mark.usefixtures("fresh_converter_logs")
+@pytest.mark.parametrize(
+    ("convert", "text", "caller"),
+    [
+        # The record names the function that judged the text: `canonical_symbol` for every
+        # class and convention function that converts through it, and each futures form's own.
+        (dm.canonical_symbol_stock, "BRK-B", "canonical_symbol"),
+        (dm.canonical_symbol_future, "esz5", "canonical_symbol_future"),
+        (dm.canonical_symbol_future_spread, "ESZ5", "canonical_symbol_future_spread"),
+        (dm.canonical_symbol_forex, "EURUSD=X", "canonical_symbol"),
+        (
+            functools.partial(dm.canonical_symbol, asset_class=AssetClass.CRYPTO),
+            "BTC",
+            "canonical_symbol",
+        ),
+    ],
+)
+def test_a_converter_raises_by_default_and_returns_none_under_log_and_ignore(
+    caplog: pytest.LogCaptureFixture, *, convert: Callable[..., str | None], text: str, caller: str
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(text)) as refused:
+        convert(text)
+    with pytest.raises(ValueError, match=re.escape(str(refused.value))):
+        convert(text, on_error=OnError.RAISE)
+    with caplog.at_level(logging.DEBUG, logger=symbols.logger.name):
+        assert convert(text, on_error=OnError.LOG) is None
+        assert convert(text, on_error=OnError.IGNORE) is None
+        assert convert(None, on_error=OnError.LOG) is None
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, f"{caller}: {refused.value}; it returns None"),
+        (logging.DEBUG, f"{caller}: {refused.value}; it returns None"),
+    ]
+
+
+@pytest.mark.usefixtures("fresh_converter_logs")
+def test_a_converter_logs_each_value_once_per_process_up_to_a_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=symbols.logger.name):
+        for text in ("b1", "b2", "b1", "b3", "b4"):
+            assert dm.canonical_symbol_forex(text, on_error=OnError.LOG) is None
+    assert [m[:30] for m in caplog.messages] == [
+        "canonical_symbol: cannot read ",  # b1
+        "canonical_symbol: cannot read ",  # b2
+        "canonical_symbol: cannot read ",  # b3
+        "3 values were reported; furthe",  # the limit: b4 is not logged
+    ]
+
+
+@pytest.mark.parametrize(
+    "convert",
+    [
+        functools.partial(dm.canonical_symbol, asset_class=AssetClass.STOCKS),
+        dm.canonical_symbol_crypto,
+        dm.canonical_symbol_forex,
+        dm.canonical_symbol_future,
+        dm.canonical_symbol_future_spread,
+        dm.canonical_symbol_index,
+        dm.canonical_symbol_option,
+        dm.canonical_symbol_stock,
+        dm.canonical_symbol_stock_cms,
+        dm.canonical_symbol_stock_nasdaq,
+        dm.canonical_symbol_stock_yahoo,
+    ],
+)
+def test_a_converter_refuses_an_on_error_that_is_no_member(convert: Callable[..., object]) -> None:
+    with pytest.raises(TypeError, match=r"^on_error must be dm\.OnError"):
+        convert("AAPL", on_error="log")
+
+
+@pytest.mark.parametrize("on_error", list(OnError))
+@pytest.mark.parametrize(("asset_class", "text"), NOT_CANONICAL)
+def test_a_scalar_and_a_table_cell_refuse_a_value_the_same_way(
+    dh_exec_ctx: object,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    asset_class: AssetClass,
+    text: str,
+    on_error: OnError,
+) -> None:
+    # The scalar converter and `canonicalize_symbols` share one verdict and one effect: for
+    # every text that is not canonical and every setting, the scalar's result or error and the
+    # cell's are the same, and so are the reason text and the log level.
+    monkeypatch.setattr(
+        symbols, "_logged_values", BoundedLog(symbols.logger, limit=50, level=logging.WARNING)
+    )
+    monkeypatch.setattr(
+        symbols, "_ignored_values", BoundedLog(symbols.logger, limit=50, level=logging.DEBUG)
+    )
+    table = new_table([string_col("Symbol", [text])])
+    reason = refusal(text, strict_converter(asset_class, SymbolConvention.MASSIVE))
+    table_logger = "deephaven_massive._tables.symbols"
+    if reason is None:  # not canonical, but a spelling the class converts: no record
+        converted = dm.canonical_symbol(text, asset_class, on_error=on_error)
+        cells = dm.canonicalize_symbols(table, asset_class, on_error=on_error)
+        assert [row[0] for row in cells.iter_tuple(cols="Symbol")] == [converted]
+        assert converted is not None
+        return
+    if on_error is OnError.RAISE:
+        with pytest.raises(ValueError, match=f"^{re.escape(reason)}$"):
+            dm.canonical_symbol(text, asset_class, on_error=on_error)
+        with pytest.raises(ValueError, match=re.escape(reason)):
+            dm.canonicalize_symbols(table, asset_class, on_error=on_error)
+        return
+    with (
+        caplog.at_level(logging.DEBUG, logger=symbols.logger.name),
+        caplog.at_level(logging.DEBUG, logger=table_logger),
+    ):
+        assert dm.canonical_symbol(text, asset_class, on_error=on_error) is None
+        cells = dm.canonicalize_symbols(table, asset_class, on_error=on_error)
+    assert [row[0] for row in cells.iter_tuple(cols="Symbol")] == [None]
+    level = logging.WARNING if on_error is OnError.LOG else logging.DEBUG
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (level, f"canonical_symbol: {reason}; it returns None"),
+        (level, f"canonicalize_symbols: {reason}; its rows get a null Symbol"),
+    ]
+
+
 def test_no_conversion_looks_a_name_up() -> None:
     # The index prefix comes from the class the caller or the endpoint names, never from the
     # ticker: a made-up name converts like a real one, and a bare name is a stock elsewhere.
@@ -692,6 +824,14 @@ def test_each_converter_runs_in_a_query_string(
     bad = new_table([string_col("P", ["X:BTC-USD" if "crypto" not in name else "C:EURUSD"])])
     with pytest.raises(DHError, match="ticker \\(prefix"):
         bad.update(["S = convert(P)"])
+    # A partial that binds on_error, in scope by a bare name, still makes a String column, and
+    # turns the bad row into a null instead of failing the formula.
+    lenient = functools.partial(convert, on_error=OnError.IGNORE)
+    assert lenient.keywords == {"on_error": OnError.IGNORE}  # the formula finds it as `lenient`
+    nulled = bad.update(["S = lenient(P)"])
+    (column,) = [c for c in nulled.columns if c.name == "S"]
+    assert column.data_type == dtypes.string
+    assert [row[0] for row in nulled.iter_tuple(cols="S")] == [None]
 
 
 def test_a_converter_called_through_the_module_needs_a_cast(dh_exec_ctx: object) -> None:

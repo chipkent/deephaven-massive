@@ -46,8 +46,7 @@ changes nothing.
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
 `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
-the coordinator records the failure and publishes it, never the listener. So does a crypto pair
-Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`. So does a call that
+the coordinator records the failure and publishes it, never the listener. So does a call that
 did not wait whose call-time symbols (the table's symbols when the watch started) all end
 `FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
 with the first symbol's error, in name order, retryable only when every symbol's error is, as
@@ -87,14 +86,12 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
-    UnlistedPairError,
     every_symbol_failed,
     failure_text,
     library_bug,
     required,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -1180,7 +1177,8 @@ class FollowCoordinator:
             symbol.kept = True
             symbol.rows = outcome.table.size
             symbol.read_at = began_at
-            symbol.error = symbol.cause = None
+            symbol.error = outcome.skipped  # why a read that succeeded gave it no rows, if so
+            symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
                 "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",
@@ -1198,10 +1196,6 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
-        A crypto pair Massive's crypto ticker list does not hold (`UnlistedPairError`) follows
-        `MassiveConfig.unlisted_symbols`: `FAILED` with a WARNING under `LOG`, with only a
-        DEBUG line under `IGNORE`, and under `RAISE` it fails the whole result.
-
         Args:
             result: The result's state.
             name: The symbol.
@@ -1209,20 +1203,6 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
-        unlisted = (
-            result.read.core.config.unlisted_symbols
-            if isinstance(error, UnlistedPairError)
-            else None
-        )
-        if unlisted is not None and effect_of(unlisted).fails:
-            logger.debug(
-                "call %d follow %s: fails the result, under unlisted_symbols=RAISE: %s",
-                result.read.call,
-                name,
-                error,
-            )
-            self._fail(result, error)
-            return
         symbol.error = failure_text(error)
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
@@ -1250,9 +1230,7 @@ class FollowCoordinator:
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
         level = logging.WARNING if first else logging.DEBUG
-        if unlisted is not None:
-            level = effect_of(unlisted, first=first).level
-        elif error.is_bug and first:
+        if error.is_bug and first:
             level = logging.ERROR
         logger.log(
             level,

@@ -76,10 +76,6 @@ class FakeStreamTransport:
         with self._lock:
             self.published_held.append(stream_id)
 
-    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
-        # Every pair is listed here; `tests/ingest/test_ws.py` tests the real lookups.
-        return symbols
-
     def open_stream(
         self, spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
     ) -> StreamHandle:

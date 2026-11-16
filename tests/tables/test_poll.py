@@ -2000,7 +2000,7 @@ def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == (
         "RUNNING",
-        "no rows this cycle for 1 symbol: MSFT (HTTP 404: no data)",
+        f"no rows this cycle for 1 symbol: MSFT (HTTP 404 from {SMA_STOCK})",
     )
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "MSFT"])
@@ -2062,11 +2062,11 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     (row,) = streams_of(ignoring_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == (
         "RUNNING",
-        f"no rows this cycle for 2 symbols: {CRYPTO_REFUSED}; MSFT (HTTP 404: no data)",
+        f"no rows this cycle for 2 symbols: {CRYPTO_REFUSED}; MSFT (HTTP 404 from {SMA_STOCK})",
     )
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
-    assert any("no data for 1 [MSFT]" in r.getMessage() for r in caplog.records)
+    assert any("no data for 1 [MSFT (" in r.getMessage() for r in caplog.records)
     # A fetch() of the same session follows the same setting: the symbol is left out quietly.
     caplog.clear()
     fetched = build_query(ignoring_session._core, SMA, query_type=FetchQuery, symbols=["MSFT"])
@@ -2111,9 +2111,9 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
-        "indicators.sma poll(): MSFT cannot be polled: HTTP 404 from "
-        "/v1/indicators/sma/{stockTicker}: no data. Remove the symbol, or set MassiveConfig("
-        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+        f"indicators.sma: Massive has no data for 1 [MSFT (HTTP 404 from {SMA_STOCK})]. "
+        "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
+        "it out and read the others"
     )
 
 
@@ -2125,7 +2125,9 @@ def test_a_long_list_of_left_out_symbols_is_counted(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
-    script.left_out = tuple(f"S{n} (HTTP 404: no data)" for n in range(poll.LEFT_OUT_SHOWN + 2))
+    script.left_out = tuple(
+        f"S{n} (HTTP 404 from {SMA_STOCK})" for n in range(poll.LEFT_OUT_SHOWN + 2)
+    )
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     clock.wait_for_sleepers(1)

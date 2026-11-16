@@ -20,7 +20,6 @@ from deephaven_massive._datasets.symbols import SymbolsLike
 from deephaven_massive._enums import (
     AssetClass,
     NotBars,
-    OnError,
     PollMode,
     Timespan,
 )
@@ -129,7 +128,6 @@ class Recorder:
         self.call_ids: list[int] = []
         # The request checks a background read made on the calling thread.
         self.checks: list[tuple[str, DatasetSpec, Request]] = []
-        self.split_pairs: list[bool] = []
         # Each read by symbol (a followed history()): its symbols, window, and thread.
         self.by_symbol: list[tuple[tuple[str, ...], HistoryWindow, str]] = []
         # The outcome of a symbol's read by symbol, by symbol; rows of none otherwise.
@@ -140,8 +138,6 @@ class Recorder:
         self.gates: dict[str, list[threading.Event]] = {}
         # A followed fetch() read's outcome of a symbol, one per read, in turn; then `outcomes`.
         self.turns: dict[str, list[SymbolOutcome]] = {}
-        # The unlisted_symbols setting each static fetch() passed.
-        self.unlisted: list[OnError] = []
         # Each read of a value table's values: the values, the request, and the thread.
         self.valued: list[tuple[tuple[str, ...], Request, str]] = []
         # Raised by every read by symbol, when set: a failure of every symbol alike.
@@ -159,10 +155,8 @@ class Recorder:
         *,
         call: int,
         stop: threading.Event | None = None,
-        unlisted: OnError,
     ) -> Table:
         self.call_ids.append(call)
-        self.unlisted.append(unlisted)
         return self._record("fetch", spec, request, **({} if stop is None else {"stop": stop}))
 
     def fetch_by_symbol(
@@ -205,15 +199,11 @@ class Recorder:
         empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
         return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
 
-    def check_fetch(self, spec: DatasetSpec, request: Request, *, split_pairs: bool) -> None:
+    def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         self.checks.append(("fetch", spec, request))
-        self.split_pairs.append(split_pairs)
 
-    def check_history(
-        self, spec: DatasetSpec, request: Request, window: HistoryWindow, *, split_pairs: bool
-    ) -> None:
+    def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
         self.checks.append(("history", spec, request))
-        self.split_pairs.append(split_pairs)
 
     def poll(
         self,

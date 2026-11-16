@@ -33,7 +33,7 @@ from deephaven_massive._errors import (
     ErrorSource,
     MassiveError,
     RowDataError,
-    UnlistedPairError,
+    UnavailableSymbolError,
 )
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.symbol_reads import (
@@ -200,7 +200,7 @@ def _monday() -> HistoryWindow:
         (EntitlementError("not in the plan", status=403), False),
         (RowDataError("every row was dropped"), False),
         (UnsupportedParameterError("does not take ['adjusted']"), False),
-        (UnlistedPairError("X:NOPEUSD is not listed"), False),
+        (UnavailableSymbolError("Massive has no data for X:NOPEUSD"), False),
         (MassiveError("unreadable", source=ErrorSource.LIBRARY), False),
         (MassiveError("HTTP 400", status=400), False),
     ],
@@ -336,9 +336,20 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     assert "returned from /v2/reference/news for no symbol name none" in caplog.text
 
 
-def test_a_crypto_pair_massive_does_not_list_fails_alone(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_raise(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # A pair Massive has no data for, as a 404 is: no rows under LOG and IGNORE, logged once at
+    # WARNING or DEBUG; its own failure under RAISE.
+    core = session._core
+    replaced = dataclasses.replace(core.config, unavailable_symbols=setting)
+    monkeypatch.setattr(core, "config", replaced)
     listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
     fake_rest.reply(TICKERS_PATH, Reply(envelope([listed])), Reply(envelope([])))
     last = {
@@ -347,11 +358,31 @@ def test_a_crypto_pair_massive_does_not_list_fails_alone(
         "last": {"price": 90000.5, "timestamp": 1741000000000},
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
-    out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
-    nope = _failure(out["X:NOPEUSD"])
-    assert isinstance(nope.error, UnlistedPairError)
-    assert not nope.error.is_retryable
+    skipped = [
+        (r.levelno, r.getMessage()) for r in caplog.records if "are left out" in r.getMessage()
+    ]
+    if setting is dm.OnError.RAISE:
+        assert skipped == []
+    else:
+        assert _rows(out["X:NOPEUSD"]) == []
+        level = logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG
+        assert skipped == [
+            (
+                level,
+                (
+                    "crypto.last: Massive has no data for 1 [X:NOPEUSD (Massive's crypto "
+                    "ticker list does not hold it)], so they are left out"
+                ),
+            )
+        ]
+    if setting is dm.OnError.RAISE:
+        nope = _failure(out["X:NOPEUSD"])
+        assert isinstance(nope.error, UnavailableSymbolError)
+        assert "Massive's crypto ticker list does not hold it" in str(nope.error)
+        assert not nope.error.is_retryable
     # No request was made for the pair the list does not hold.
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
         "/v1/last/crypto/BTC/USD"
@@ -446,8 +477,8 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
     assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == [
         (
-            "stocks.trades: no data for 1 [MSFT]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
+            "stocks.trades: Massive has no data for 1 [MSFT (HTTP 404 from "
+            "/v3/trades/{stockTicker})], so they are left out"
         )
     ]
 

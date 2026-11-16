@@ -8,8 +8,11 @@ which reads rows and adds a formula column, so it lives here, on the Deephaven s
 Under `OnError.LOG`, the default, or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows
 it cannot convert instead of failing, so one bad row never fails the table; `OnError.RAISE`
 fails instead. It takes its own `on_error` argument rather than a session's
-`MassiveConfig.noncanonical_symbols`, since it needs no session. The tables it returns are what
-the symbol-table check in `_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
+`MassiveConfig.noncanonical_symbols`, since it needs no session. Each row's verdict and the
+effect of `on_error` on it are the scalar converters' own (`strict_converter`, `refusal`,
+`convert_under`), so a value converts, or is refused with one reason, the same way in a cell
+and in `canonical_symbol`. The tables it returns are what the symbol-table check in
+`_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
 
 Every function here runs on the caller's thread, inside a Deephaven execution context, and the
 formula it installs is pure, so Deephaven may run it on several threads at once.
@@ -23,7 +26,13 @@ from typing import TYPE_CHECKING, Final
 from deephaven import dtypes
 from deephaven.table import Table
 
-from deephaven_massive._datasets.symbols import canonical_symbol
+from deephaven_massive._datasets.symbols import (
+    LOGGED_VALUES,
+    check_convention,
+    convert_under,
+    refusal,
+    strict_converter,
+)
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
@@ -31,32 +40,31 @@ from deephaven_massive._on_error import effect_of
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from deephaven_massive._on_error import OnErrorEffect
+
 __all__ = ["canonicalize_symbols"]
 
 logger = logging.getLogger(__name__)
 
 _SHOWN: Final = 5
 """The most bad values one message lists."""
-_LOGGED_VALUES: Final = 20
-"""The most bad values one `canonicalize_symbols` table logs under `OnError.LOG`."""
 
 
-def _refused(values: Iterable[str], convert: Callable[[str], str | None]) -> dict[str, str]:
+def _refused(values: Iterable[str], convert: Callable[[str], str]) -> dict[str, str]:
     """Return the distinct values that do not convert, with their reasons.
 
     Args:
         values: The distinct non-null values.
-        convert: The class's converter.
+        convert: The class's strict verdict (`strict_converter`).
 
     Returns:
-        Each value that raised, mapped to its `ValueError` message.
+        Each value that does not convert, mapped to its reason (`refusal`).
     """
     refused: dict[str, str] = {}
     for value in values:
-        try:
-            convert(value)
-        except ValueError as error:
-            refused[value] = str(error)
+        reason = refusal(value, convert)
+        if reason is not None:
+            refused[value] = reason
     return refused
 
 
@@ -129,14 +137,8 @@ def canonicalize_symbols(
     )
     effect = effect_of(mode)
     # Under RAISE nothing logs to `bad`: a bad value raises below or fails the formula.
-    bad = BoundedLog(logger, limit=_LOGGED_VALUES, level=effect.level)
-
-    def convert(text: str) -> str | None:
-        return canonical_symbol(text, resolved, convention=chosen)
-
-    def refuse(value: str, reason: str) -> None:
-        bad.log(value, "canonicalize_symbols: %s; its rows get a null %s", reason, column)
-
+    bad = BoundedLog(logger, limit=LOGGED_VALUES, level=effect.level)
+    convert = strict_converter(resolved, chosen)
     # The current rows are converted in Python first, over one consistent snapshot of their
     # values (iter_tuple holds the shared lock), so a bad one raises a clean ValueError here,
     # static table or refreshing. They are de-duplicated here, not by a select_distinct, which
@@ -150,8 +152,10 @@ def canonicalize_symbols(
             f"{shown}. Pass on_error=dm.OnError.LOG to null them instead"
         )
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none
-        refuse(value, refused[value])
-    massive_canonical_symbol = _row_converter(convert, refuse, mode)
+        bad.log(value, "canonicalize_symbols: %s; its rows get a null %s", refused[value], column)
+    massive_canonical_symbol = _row_converter(
+        convert, effect=effect, log=bad, consequence=f"its rows get a null {column}"
+    )
     # Deephaven resolves the formula's function from this call's local variables, by the name
     # the helper gives it.
     return table.update([f"{column} = {massive_canonical_symbol.__name__}({column})"])
@@ -175,19 +179,14 @@ def _arguments(
     Raises:
         TypeError: If `table` is not a Deephaven `Table` or `column` is not a `str`.
         ValueError: If the table has no `column` (the message lists its columns and names a
-            `String` one to pass), `column` is not a `String` column, or `convention` is a
-            stock convention and the class is not stocks.
+            `String` one to pass), or `column` is not a `String` column.
 
-    An enum argument of the wrong type raises the `TypeError` of `_require_enum`.
+    An enum argument of the wrong type raises the `TypeError` of `_require_enum`, and a stock
+    convention for a class other than stocks the `ValueError` of `check_convention`.
     """
     if not isinstance(table, Table):
         raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
-    resolved = _require_enum(asset_class, AssetClass, "asset_class")
-    chosen = _require_enum(convention, SymbolConvention, "convention")
-    if chosen is not SymbolConvention.MASSIVE and resolved is not AssetClass.STOCKS:
-        raise ValueError(
-            f"the {chosen.name} convention applies to stocks only, not {resolved.value}"
-        )
+    resolved, chosen = check_convention(asset_class, convention)
     mode = _require_enum(on_error, OnError, "on_error")
     if not isinstance(column, str):
         raise TypeError(f"column must be a str, not {type(column).__name__}")
@@ -208,30 +207,32 @@ def _arguments(
 
 
 def _row_converter(
-    convert: Callable[[str], str | None], refuse: Callable[[str, str], None], mode: OnError
+    convert: Callable[[str], str], *, effect: OnErrorEffect, log: BoundedLog, consequence: str
 ) -> Callable[[str | None], str | None]:
     """Return the formula function of `canonicalize_symbols`: one conversion per row.
 
     Args:
-        convert: The class's converter.
-        refuse: Logs a value that does not convert (bounded).
-        mode: `RAISE` lets the converter's `ValueError` fail the table; `LOG` and `IGNORE`
-            pass the value to `refuse` and return None.
+        convert: The class's strict verdict.
+        effect: What `on_error` does with a value that does not convert: `RAISE` lets the
+            verdict's `ValueError` fail the table; `LOG` and `IGNORE` log the value and give
+            the row None (`convert_under`).
+        log: The table's bounded log of such values.
+        consequence: What the row gets, for the log record.
 
     Returns:
         A function from a row's text (or None) to its canonical symbol (or None).
     """
-    fails = effect_of(mode).fails
 
     def massive_canonical_symbol(text: str | None) -> str | None:
         if text is None:
             return None
-        if fails:
-            return convert(text)
-        try:
-            return convert(text)
-        except ValueError as error:
-            refuse(text, str(error))
-            return None
+        return convert_under(
+            text,
+            convert,
+            effect=effect,
+            log=log,
+            caller="canonicalize_symbols",
+            consequence=consequence,
+        )
 
     return massive_canonical_symbol

@@ -608,6 +608,7 @@ try:
     dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS)
 except ValueError as error:
     print(f"ValueError: {error}")
+print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, on_error=dm.OnError.LOG))
 
 yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(
@@ -617,8 +618,10 @@ converted = dm.canonicalize_symbols(
 
 You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line, then a line
 that starts `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another convention's
-separators`. `converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no
-convention could convert. The debug log records a `WARNING` for it.
+separators`, then `None`: with `on_error=dm.OnError.LOG` the converter returns `None` for a
+value it cannot convert and logs it once, as `dm.canonicalize_symbols` does by default.
+`converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no convention could
+convert. The debug log records a `WARNING` for each.
 
 #### 12. Check the debug log for your key
 

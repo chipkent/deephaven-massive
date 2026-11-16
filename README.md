@@ -319,6 +319,33 @@ At the next poll, Nvidia's row arrives and Microsoft's leaves, and the table kee
 Wherever a dataset takes symbols, it also takes a table with a `Symbol` column, and it follows a
 live one as it changes.
 
+<a id="convert-symbols"></a>
+
+To read a list from Yahoo Finance, convert it first. Yahoo spells some tickers differently:
+Yahoo's `BRK-B` is Massive's `BRK.B`, and Yahoo's `BAC-PL` is Massive's `BACpL`. Tell the
+converter whose tickers they are with `convention=`. This reads the previous closes of a table
+of Yahoo tickers, with Stocks Basic:
+
+```python
+import deephaven_massive as dm
+from deephaven import new_table
+
+m = dm.MassiveSession()
+yahoo = new_table({"Symbol": ["AAPL", "BRK-B", "BAC-PL", "^GSPC"]})
+stocks = dm.canonicalize_symbols(
+    yahoo.update("Yahoo = Symbol"), dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+)
+yahoo_closes = m.stocks.previous_day_bar(stocks).fetch()
+```
+
+`yahoo_closes` has one row each for `AAPL`, `BRK.B`, and `BACpL`, with the previous trading
+day's bar. `stocks` keeps all four rows. `Symbol` holds Massive's ticker, and `Yahoo` holds
+the text you started with.
+
+`^GSPC` isn't a stock ticker, so its `Symbol` is null and every dataset skips the row.
+`stocks.where("isNull(Symbol)")` lists such rows. To fail instead of nulling a row, pass
+`on_error=dm.OnError.RAISE`.
+
 Next, settings for the paid plans.
 
 <a id="what-your-plan-allows"></a>

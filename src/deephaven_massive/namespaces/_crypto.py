@@ -272,8 +272,7 @@ class CryptoNamespace(Namespace):
         """Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 
         Each row holds one trade on one exchange. `Timestamp` is the exchange's own time, and `Date`
-        is its UTC date. The call refuses a pair that isn't on Massive's crypto ticker list. For
-        each pair's latest trade alone, use `last_trade()`.
+        is its UTC date. For each pair's latest trade alone, use `last_trade()`.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` reads
@@ -303,8 +302,7 @@ class CryptoNamespace(Namespace):
 
         Each row holds one pair's latest trade. A pair with no trade gets no row, and the library
         logs a WARNING. Each poll sees only the trade that is latest at that moment; `trades()`
-        streams every trade. Currencies Basic doesn't include this dataset. The call refuses a pair
-        that isn't on Massive's crypto ticker list.
+        streams every trade. Currencies Basic doesn't include this dataset.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair, use
@@ -339,8 +337,7 @@ class CryptoNamespace(Namespace):
         """Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 
         Each row holds one exchange's best bid and ask for one pair. Massive serves no crypto quote
-        history and no last quote. For each pair's current state, poll `snapshots()`. The call
-        refuses a pair that isn't on Massive's crypto ticker list.
+        history and no last quote. For each pair's current state, poll `snapshots()`.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
@@ -374,8 +371,7 @@ class CryptoNamespace(Namespace):
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, and weeks run
-        Sunday to Saturday. Crypto has no splits, so there's no `adjusted`. The call refuses a pair
-        that isn't on Massive's crypto ticker list.
+        Sunday to Saturday. Crypto has no splits, so there's no `adjusted`.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` takes
@@ -456,7 +452,7 @@ class CryptoNamespace(Namespace):
 
         Each row holds one update of Massive's own price estimate. Only Currencies Business includes
         it; on another plan, the table fails with `EntitlementError`. It streams only, with no
-        history. The call refuses a pair that isn't on Massive's crypto ticker list.
+        history.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
@@ -542,8 +538,7 @@ class CryptoNamespace(Namespace):
         """The open and close prices of crypto pairs on one UTC day, with the trades behind them.
 
         Each row holds one pair's open and close for the UTC day. `OpenTrades` and `ClosingTrades`
-        hold its first and last trades as JSON text. The call refuses a pair that isn't on Massive's
-        crypto ticker list. Delisted pairs are on the list, so past dates work for them.
+        hold its first and last trades as JSON text. Past dates work for delisted pairs too.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair's bar of

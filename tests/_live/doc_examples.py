@@ -62,8 +62,10 @@ FREE_SECTIONS: Final = (
     "follow-the-news",
     "stop-live-tables",
     "drive-with-a-watchlist",
+    "convert-symbols",
 )
-"""The README's Stocks Basic examples, 1 to 7, which follow its hook, in the README's order."""
+"""The README's Stocks Basic examples, which follow its hook: Examples 1 to 6, the conversion of
+Yahoo tickers that ends Example 6, and Example 13."""
 
 PAID_SECTIONS: Final = (
     "what-your-plan-allows",

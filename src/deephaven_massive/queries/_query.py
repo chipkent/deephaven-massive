@@ -29,12 +29,10 @@ from typing_extensions import override
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._errors import (
     MassiveError,
-    UnlistedPairError,
     every_symbol_failed,
     failure_text,
     raises_through,
 )
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -354,15 +352,6 @@ class Query:
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
 
-    @property
-    def _in_code(self) -> bool:
-        """True when the query's symbols were passed in code, not as a table.
-
-        A crypto pair passed in code that Massive does not list raises at the call; a table's
-        follows `MassiveConfig.unlisted_symbols`.
-        """
-        return not isinstance(self._request.symbols, SymbolTable)
-
     def _static_request(self) -> Request:
         """Return the request with a symbol table read once, for a static verb.
 
@@ -416,9 +405,7 @@ class Query:
     def _first_read(self, plan: FollowPlan, call_time: tuple[str, ...], *, verb: str) -> FirstRead:
         """Read the call-time symbols of a followed `history()` or `fetch()` now, as one read.
 
-        The read of `wait=True`, on the caller thread. A crypto pair Massive's crypto ticker
-        list does not hold follows `MassiveConfig.unlisted_symbols`: under `RAISE` the call
-        raises its error, and under `IGNORE` the WARNING leaves it out.
+        The read of `wait=True`, on the caller thread.
 
         Args:
             plan: How the symbols are read.
@@ -430,9 +417,8 @@ class Query:
 
         Raises:
             MassiveError: The first symbol's error, retryable only when every symbol's is,
-                when every symbol failed; or, under `unlisted_symbols=RAISE`, the first
-                unlisted pair's. A failure of every symbol alike (a rejected key, a closed
-                session) propagates from the read.
+                when every symbol failed. A failure of every symbol alike (a rejected key, a
+                closed session) propagates from the read.
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
@@ -442,31 +428,20 @@ class Query:
             for name, outcome in outcomes.items()
             if isinstance(outcome, SymbolFailure)
         }
-        unlisted = effect_of(self._core.config.unlisted_symbols)
-        pairs = [
-            name for name, outcome in failed.items() if isinstance(outcome.error, UnlistedPairError)
-        ]
-        if pairs and unlisted.fails:
-            raise failed[pairs[0]].error
         if len(failed) == len(call_time):
             first = every_symbol_failed([failed[name].error for name in call_time])
             raise first from failed[call_time[0]].error
-        warned = {
-            name: outcome
-            for name, outcome in failed.items()
-            if not (name in pairs and unlisted.level <= logging.DEBUG)
-        }
-        if warned:
+        if failed:
             logger.warning(
                 "%s %s: %d of the %d symbols of the call failed and are left out of the "
                 "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
                 self._spec.name,
                 verb,
-                len(warned),
+                len(failed),
                 len(call_time),
                 "; ".join(
                     f"{name}: {failure_text(outcome.error)}"
-                    for name, outcome in list(warned.items())[:_FAILED_SHOWN]
+                    for name, outcome in list(failed.items())[:_FAILED_SHOWN]
                 ),
             )
         return FirstRead(outcomes, began_at, time.monotonic() - started)

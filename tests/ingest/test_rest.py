@@ -53,7 +53,7 @@ from deephaven_massive._errors import (
     READ_STOPPED,
     CutShortError,
     RowDataError,
-    UnlistedPairError,
+    UnavailableSymbolError,
 )
 from deephaven_massive._ingest import (
     crypto_tickers,
@@ -63,7 +63,8 @@ from deephaven_massive._ingest import (
     rest_requests,
     shared_lookup,
 )
-from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 from deephaven_massive._massive import Cancel, RestPath, Transport
@@ -1243,7 +1244,7 @@ def test_a_stopped_fetch_reads_no_crypto_ticker_list(
     stop = Cancel()
     stop.set()
     with pytest.raises(dm.MassiveError, match="cancelled"):
-        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
+        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop)
     assert fake_rest.requests == []
 
 
@@ -1496,48 +1497,40 @@ def _failed_soon(table: Table) -> bool:
     return False
 
 
-def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # A pair passed in code is planned at the call and raises. A symbol table's pairs are
-    # planned each cycle: under LOG the unlisted one is left out with one WARNING, and under
-    # RAISE the table fails at its first cycle.
+    # A pair Massive's list does not hold has no data, as a 404 has: the cycle plans it as a
+    # call it never sends, whether the pair came in code or in a table. Under RAISE such a
+    # pair fails the table at its first cycle, in code or in a table, never at the call.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
-    assert isinstance(static, FetchQuery)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
-        static.poll(60)
     reader = _endpoints(session)._reader("poll")
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        for _ in range(2):
-            planned, left_out = reader._plan_cycle(
-                CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
-            )
-            assert [call.symbol for _, calls in planned for call in calls] == ["X:BTCUSD"]
-            assert left_out == ["X:DOTUSD (not in Massive's crypto ticker list)"]
-    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert [r.getMessage() for r in warned] == [
-        (
-            "crypto.daily_open_close poll(): 'X:DOTUSD' cannot be split into its two "
-            "currencies: Massive's reference data does not list it; it is left out and the "
-            "table's other symbols are read. Delete its row, or set "
-            "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
-        )
-    ]  # once a session: the second cycle logs at DEBUG
+    planned, left_out = reader._plan_cycle(
+        CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
+    )
+    calls = [call for _, calls in planned for call in calls]
+    assert [(call.symbol, call.unsplit) for call in calls] == [
+        ("X:BTCUSD", None),
+        ("X:DOTUSD", NOT_LISTED),
+    ]
+    assert left_out == []
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
+        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
     )
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
+        in_code = query(strict, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(in_code, FetchQuery)
+        assert _failed_soon(in_code.poll(60))
         table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
         assert isinstance(table, FetchQuery)
         assert _failed_soon(table.poll(60))
 
 
-def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
+def test_a_fetch_reports_a_pair_massive_does_not_list_as_a_symbol_with_no_data(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     last = {
@@ -1555,23 +1548,26 @@ def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
         out = fetch(session, CRYPTO_LAST, symbols=table)  # LOG, the default
     assert [r["Symbol"] for r in out] == ["X:BTCUSD"]
     assert [path for path, _ in sent_data(fake_rest)] == ["/v1/last/crypto/BTC/USD"]
-    assert len(caplog.records) == 1
-    assert caplog.messages[0].startswith("crypto.last fetch(): 'X:DOTUSD' cannot be split")
-    # A pair in code always raises; a table whose every pair is unlisted would read nothing.
-    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
-        fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"])
-    with pytest.raises(dm.MassiveError, match=r"no symbol of the symbol table is a crypto pair"):
-        fetch(session, CRYPTO_LAST, symbols=new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    assert caplog.messages == [
+        (
+            "crypto.last: Massive has no data for 1 [X:DOTUSD (Massive's crypto ticker list "
+            "does not hold it)], so they are left out"
+        )
+    ]
+    # A pair Massive has no data for gives no rows, passed in code or in a table, alone too.
+    assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    unlisted = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    assert fetch(session, CRYPTO_LAST, symbols=unlisted) == []
     for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
         config = dm.MassiveConfig(
-            api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=setting
+            api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
         )
         with dm.MassiveSession(config) as other:
             serve_pairs(fake_rest)
             caplog.clear()
             with caplog.at_level(logging.WARNING, LOGGER):
                 if setting is dm.OnError.RAISE:
-                    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
+                    with pytest.raises(UnavailableSymbolError, match="X:DOTUSD"):
                         fetch(other, CRYPTO_LAST, symbols=table)
                 else:
                     assert len(fetch(other, CRYPTO_LAST, symbols=table)) == 1
@@ -1713,8 +1709,8 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
     ]
     assert caplog.messages == [
         (
-            "crypto.last: no data for 1 [X:ETHUSD]: Massive answered HTTP 404 from "
-            "/v1/last/crypto/{from}/{to}, so they are left out"
+            "crypto.last: Massive has no data for 1 [X:ETHUSD (HTTP 404 from "
+            "/v1/last/crypto/{from}/{to})], so they are left out"
         )
     ]
 
@@ -2178,7 +2174,7 @@ def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     with pytest.raises(
         dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
     ):
-        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1, unlisted=dm.OnError.RAISE)
+        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
 
 
 # --- History -----------------------------------------------------------------------------------
@@ -2379,9 +2375,9 @@ def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
     # One WARNING for the read, naming each session.
     assert caplog.messages == [
         (
-            "futures.trades: no data for 2 [ESH5 for the session 2025-01-22, ESH5 for the session "
-            "2025-01-23]: Massive answered HTTP 404 from /futures/v1/trades/{ticker}, so they are "
-            "left out"
+            "futures.trades: Massive has no data for 2 [ESH5 for the session 2025-01-22 (HTTP 404 "
+            "from /futures/v1/trades/{ticker}), ESH5 for the session 2025-01-23 (HTTP 404 from "
+            "/futures/v1/trades/{ticker})], so they are left out"
         )
     ]
 
@@ -2680,7 +2676,7 @@ def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
             assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
-    assert caplog.text.count("no data for 1 [X:ETHUSD]") == 1
+    assert caplog.text.count("no data for 1 [X:ETHUSD (") == 1
     assert caplog.text.count("for 1 [I:VIX (NOT_ENTITLED: Not entitled)]") == 1
 
 
@@ -2830,9 +2826,7 @@ def test_an_error_row_needs_only_its_symbol(
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     reader = _endpoints(session)._reader("call-1")
-    table, _ = reader.read_fetch(
-        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), unlisted=dm.OnError.RAISE
-    )
+    table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
 
@@ -2922,7 +2916,7 @@ def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> N
     reader = _endpoints(session)._reader("call-1")
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
-    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), unlisted=dm.OnError.RAISE)
+    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
     assert (table.num_rows, requests) == (0, 0)
     assert table.schema.names[0] == "Symbol"
 
@@ -3709,8 +3703,8 @@ def test_a_symbol_with_no_data_returns_no_rows(
     assert out == []
     assert caplog.messages == [
         (
-            "stocks.trades: no data for 1 [ZZZZ]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
+            "stocks.trades: Massive has no data for 1 [ZZZZ (HTTP 404 from "
+            "/v3/trades/{stockTicker})], so they are left out"
         )
     ]
 
@@ -3939,33 +3933,45 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
         q.fetch(wait=False)
-    # Without split_pairs, the check splits no crypto pair, which would read Massive's list.
+    # The check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
-    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request, split_pairs=False)
+    rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
     assert fake_rest.requests == []
     assert session._core.workers._workers == {}
 
 
-def test_a_background_fetch_of_an_unlisted_pair_in_code_raises_at_the_call(
+def test_a_pair_massive_does_not_list_fails_a_fetch_under_raise_never_at_the_call(
+    *, fake_rest: FakeRestServer
+) -> None:
+    # As a 404 under RAISE does: the read fails, and a call that waits raises; nothing is
+    # decided at the call, and only the crypto ticker list is read.
+    serve_pairs(fake_rest)
+    params = {"date": "2025-03-03"}
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+    )
+    with dm.MassiveSession(config) as session:
+        pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(pair, FetchQuery)
+        background = pair.fetch()
+        assert background.is_refreshing
+        session.release(background)
+        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[X:DOTUSD \(Massive"):
+            pair.fetch(wait=True)
+        assert sent_data(fake_rest) == []
+
+
+def test_a_fetch_of_a_pair_massive_does_not_list_gives_no_rows(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # As poll() does: a pair passed in code is code, so one Massive does not list raises
-    # before any table exists, whatever wait is. Only the crypto ticker list is read.
+    # Massive has no data for a pair its crypto ticker list does not hold: under the default
+    # LOG it gives no rows, and only the crypto ticker list is read.
     serve_pairs(fake_rest)
     params = {"date": "2025-03-03"}
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
     assert isinstance(pair, FetchQuery)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
-        pair.fetch()
+    assert pair.fetch(wait=True).size == 0
     assert sent_data(fake_rest) == []
-    assert session._core.workers._workers == {}
-    # A table's pair is data: the call returns, and the read follows unlisted_symbols.
-    table = new_table([string_col("Symbol", ["X:DOTUSD"])])
-    from_table = query(session, CRYPTO_OPEN_CLOSE, symbols=table, params=params)
-    assert isinstance(from_table, FetchQuery)
-    result = from_table.fetch()
-    assert result.is_refreshing
-    session.release(result)
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(
@@ -3995,7 +4001,7 @@ def test_a_background_history_checks_its_plan_with_no_request(
         q = query(session, spec, symbols=tickers, timespan=Timespan.DAY)
         request = dataclasses.replace(q._request, start=first, end=last)
         window = history_window(spec, request, start=first, end=last, classes=())
-        rest.check_history(spec, request, window, split_pairs=False)
+        rest.check_history(spec, request, window)
     assert fake_rest.requests == []
 
 
@@ -4007,7 +4013,7 @@ def test_a_set_stop_token_ends_a_read_before_its_first_request(
     stop.set()
     q = query(session, DIVIDENDS, symbols=["AAPL"])
     with pytest.raises(dm.MassiveError):
-        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
     assert fake_rest.requests == []
 
 
@@ -4405,11 +4411,12 @@ def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == [
         (
-            "stocks.trades: no data for 2 [YYYY, ZZZZ]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
+            "stocks.trades: Massive has no data for 2 [YYYY (HTTP 404 from "
+            "/v3/trades/{stockTicker}), ZZZZ (HTTP 404 from /v3/trades/{stockTicker})], so they "
+            "are left out"
         )
     ]
-    debug = [r.getMessage() for r in caplog.records if "has no data" in r.getMessage()]
+    debug = [r.getMessage() for r in caplog.records if " has no data (" in r.getMessage()]
     assert len(debug) == 4  # each symbol of each read
     assert all(r.startswith("stocks.trades: ") and "HTTP 404 from" in r for r in debug)
     assert any("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker}" in r for r in debug)
@@ -4422,8 +4429,8 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
     day = date(2025, 3, 3)
     no_data = (
-        r"^stocks\.trades: no data for 1 \[ZZZZ\]: Massive answered HTTP 404 from "
-        r"/v3/trades/\{stockTicker\}\. Remove the symbol, or set "
+        r"^stocks\.trades: Massive has no data for 1 \[ZZZZ \(HTTP 404 from "
+        r"/v3/trades/\{stockTicker\}\)\]\. Remove the symbol, or set "
         r"MassiveConfig\(unavailable_symbols=dm\.OnError\.LOG\)"
     )
 
@@ -4438,10 +4445,10 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     with session_with(dm.OnError.IGNORE) as m, caplog.at_level(logging.DEBUG, LOGGER):
         history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("no data for 1 [ZZZZ]" in r.getMessage() for r in caplog.records)
+    assert any("no data for 1 [ZZZZ (" in r.getMessage() for r in caplog.records)
     with session_with(dm.OnError.RAISE) as m:
         # A static read fails, naming the symbol and the setting that would leave it out.
-        with pytest.raises(rest.UnavailableSymbolError, match=no_data):
+        with pytest.raises(UnavailableSymbolError, match=no_data):
             history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
         # A read by symbol fails that symbol alone; the others keep their rows.
         asked = Request(start=day, end=day)
@@ -4451,7 +4458,7 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     assert isinstance(out["MSFT"], SymbolRows)
     failed = out["ZZZZ"]
     assert isinstance(failed, SymbolFailure)
-    assert isinstance(failed.error, rest.UnavailableSymbolError)
+    assert isinstance(failed.error, UnavailableSymbolError)
     assert re.match(no_data, str(failed.error))
 
 
@@ -4650,7 +4657,7 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
         read = _value_cycle(rest_session, ("ES", "NQ"))
     assert read.rows.column("ProductCode").to_pylist() == ["ES"]
     assert read.requests == 1
-    assert read.left_out == ("NQ (HTTP 404: no data)",)
+    assert read.left_out == ("NQ (HTTP 404 from /futures/v1/products)",)
     assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["ES"], ["NQ"]]
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
 
@@ -4694,7 +4701,7 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
         "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
     )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
-    assert outcome == rest._Outcome((), 1, missing="ZZZZ")
+    assert outcome == rest._Outcome((), 1, missing="ZZZZ (HTTP 404 from /v3/trades/{stockTicker})")
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
@@ -4760,3 +4767,44 @@ def test_page_recency_passes_a_listed_subscription_and_collects_unknown_labels()
 def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
     found = _recency([{"timeframe": "DELAYED"}, {"ticker": "AAPL"}])
     assert found == rest._PageRecency(delayed=False, real_time=False, refused={}, unknown=())
+
+
+def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSession) -> None:
+    # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
+    path = _endpoints(session)._reader("call-1").rest_path(CRYPTO_LAST_PATH)
+    sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
+    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
+    assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
+
+
+def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The WebSocket transport's lookup reaches the session's one crypto ticker list.
+    serve_pairs(fake_rest)
+    ports = session._core._ports
+    assert isinstance(ports, SessionClients)
+    assert ports._crypto_pair("X:BTCUSD") == ("BTC", "USD")
+    assert ports._crypto_pair("X:NOPEUSD") == NOT_LISTED
+
+
+def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The lookup reported it under unreadable_symbols: a poll names it in the cycle's Error,
+    # and no read reports it again as a symbol with no data.
+    unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
+    fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
+    reader = _endpoints(session)._reader("poll")
+    request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
+    _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
+    assert left_out == [
+        (
+            "X:DOTUSD (Massive's reference data gives the currencies 'DOT' and 'USDT', which do "
+            "not join to it)"
+        )
+    ]
+    with caplog.at_level(logging.WARNING, LOGGER):
+        assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
+    assert sent_data(fake_rest) == []

@@ -21,7 +21,7 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
-from deephaven_massive._enums import AssetClass, Timespan
+from deephaven_massive._enums import Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._tables.columns import (
     describe,
@@ -146,9 +146,7 @@ class StreamQuery(Query):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair of
-        the table that Massive's crypto ticker list does not hold follows
-        `unlisted_symbols` (`StreamTransport.tradable_pairs`).
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
 
         Args:
             verb: The stream method called, such as `"blink"`, which a refusal names.
@@ -166,8 +164,6 @@ class StreamQuery(Query):
             return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
             read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
-            if self._spec.asset_class is AssetClass.CRYPTO:
-                read = self._core.stream_transport().tradable_pairs(self._spec, read)
             return replace(request, symbols=read)
         return request
 
@@ -179,11 +175,8 @@ class StreamQuery(Query):
         is read before the stream is acquired, so the result is built under no library lock.
         A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
-        crypto ticker list when the stream starts (read once per session); a failed read, or a
-        pair the list does not hold, raises `MassiveError` before any topic is subscribed. A pair
-        of a symbol table, at the call or added later, follows `MassiveConfig.unlisted_symbols`
-        instead: skipped (and, for a reactive table, listed in `m.streams()`) under `LOG` and
-        `IGNORE`.
+        crypto ticker list, read once per session, after the stream opens, wherever the pair
+        came from (`StreamTransport.open_stream`).
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -225,7 +218,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
     )
     def blink(self) -> Table:
         """Return the stream as a blink table, which holds only the latest update cycle's rows.
@@ -254,13 +246,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
 
@@ -273,7 +259,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
     )
     def append_only(self) -> Table:
         """Return every row the stream sends after the call, oldest first.
@@ -301,13 +286,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(
             blink_to_append_only, self._stream_request("append_only"), verb="append_only"
@@ -322,7 +301,6 @@ class StreamQuery(Query):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
         require_positive_int,
     )
     def ring(self, capacity: int) -> Table:
@@ -354,13 +332,7 @@ class StreamQuery(Query):
                 label means your plan lacks the dataset, and the message links the page that
                 lists the plans that include it.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -441,7 +413,6 @@ class SymbolStreamQuery(StreamQuery):
         _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
-        StreamTransport.tradable_pairs,
         _last_by_keys,
     )
     def last_by(self, by: str | Sequence[str] = "Symbol") -> Table:
@@ -478,13 +449,7 @@ class SymbolStreamQuery(StreamQuery):
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
                 change.
             SessionClosedError: If the session is closed.
-            MassiveError: If:
-                - the stream fails while it opens;
-                - Massive's list of crypto tickers can't be read, or lacks a crypto pair passed as a
-                  `str` or list;
-                - that list lacks every pair of a table of crypto pairs;
-                - that list lacks any pair of such a table, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            MassiveError: If the stream fails while it opens.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request("last_by")

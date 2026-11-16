@@ -24,10 +24,10 @@ from typing_extensions import override
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
-from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive._ingest.crypto_tickers import NOT_LISTED
+from deephaven_massive._tables.transports import HostDecision, Unsplit
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import SymbolStreamQuery
 
@@ -127,9 +127,9 @@ class WsSession:
             order; appended under `cond`, so read it under `cond` (in a `wait` predicate) or
             once the calendar is idle.
         pair_answers: What Massive's crypto ticker list says of each crypto ticker, as the
-            REST transport's `crypto_pair` would read it: its `(base, quote)`, or an exception
-            to raise. A ticker missing from it is refused as unlisted. Change it under `cond`,
-            or before the stream that looks the ticker up.
+            REST transport's `crypto_pair` would read it: its `(base, quote)`, why it has no
+            split, or an exception to raise. A ticker missing from it is not listed. Change it
+            under `cond`, or before the stream that looks the ticker up.
     """
 
     def __init__(
@@ -144,7 +144,7 @@ class WsSession:
         connection_taken: dm.ConnectionTaken = _DEFAULTS.connection_taken,
         max_outage: float = _DEFAULTS.max_outage,
         noncanonical_symbols: dm.OnError = _DEFAULTS.noncanonical_symbols,
-        unlisted_symbols: dm.OnError = _DEFAULTS.unlisted_symbols,
+        unavailable_symbols: dm.OnError = _DEFAULTS.unavailable_symbols,
         unreadable_symbols: dm.OnError = _DEFAULTS.unreadable_symbols,
         delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
     ) -> None:
@@ -161,7 +161,7 @@ class WsSession:
             connection_taken: As `MassiveConfig` takes it.
             max_outage: As `MassiveConfig` takes it.
             noncanonical_symbols: As `MassiveConfig` takes it.
-            unlisted_symbols: As `MassiveConfig` takes it.
+            unavailable_symbols: As `MassiveConfig` takes it.
             unreadable_symbols: As `MassiveConfig` takes it.
             delayed_subscriptions: As `MassiveConfig` takes it.
         """
@@ -178,7 +178,7 @@ class WsSession:
         self._opens = 0
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
-        self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
+        self.pair_answers: dict[str, tuple[str, str] | Unsplit | Exception] = dict(PAIRS)
         self.config = dataclasses.replace(
             _DEFAULTS,
             flush_interval=flush_interval,
@@ -187,7 +187,7 @@ class WsSession:
             connection_taken=connection_taken,
             max_outage=max_outage,
             noncanonical_symbols=noncanonical_symbols,
-            unlisted_symbols=unlisted_symbols,
+            unavailable_symbols=unavailable_symbols,
             unreadable_symbols=unreadable_symbols,
             delayed_subscriptions=delayed_subscriptions,
         )
@@ -264,23 +264,18 @@ class WsSession:
             self.cond.notify_all()
             return list(self.rows.get(template, []))
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.
 
         Returns:
-            The ticker's `(base, quote)` from `pair_answers`.
+            The ticker's answer in `pair_answers`, or `NOT_LISTED` when it has none.
 
         Raises:
-            UnlistedPairError: If `pair_answers` does not hold the ticker.
+            Exception: The answer, when it is one.
         """
         with self.cond:
             self._journal.append(("crypto_pair", symbol, threading.current_thread().name))
-            answer = self.pair_answers.get(symbol)
-        if answer is None:
-            raise UnlistedPairError(
-                f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
-                "does not list it"
-            )
+            answer = self.pair_answers.get(symbol, NOT_LISTED)
         if isinstance(answer, Exception):
             raise answer
         return answer
