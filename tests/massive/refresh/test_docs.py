@@ -199,8 +199,9 @@ def test_a_page_without_a_connection_table_has_no_connections() -> None:
             "unreadable Connection row",
         ),
         ("## Connection\n\n| Feed | URL |\n| Real-Time | y |\n", "unreadable Connection header"),
+        (_FEED + "  | Night | `wss://night.massive.com/stocks` |\n", "an indented Connection row"),
     ],
-    ids=["two tables", "a row without a URL", "no separator"],
+    ids=["two tables", "a row without a URL", "no separator", "an indented row"],
 )
 def test_an_unreadable_connection_table_is_rejected(page: str, message: str) -> None:
     with pytest.raises(docs.DocsError, match=message):

@@ -38,6 +38,7 @@ This module imports only the standard library.
 
 from __future__ import annotations
 
+import itertools
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -326,13 +327,22 @@ def connections(page: str) -> list[DocConnection]:
         overview or the quickstart).
 
     Raises:
-        DocsError: If the page has more than one "Connection" heading, the table's second line
-            is not a header separator, or a row is not a feed and its URL
+        DocsError: If the page has more than one "Connection" heading, a row of its table is
+            indented (which the table reader would skip), the table's second line is not a
+            header separator, or a row is not a feed and its URL
             (`` | Real-Time | `wss://socket.massive.com/stocks` | ``).
     """
-    headings = page.splitlines().count("## Connection")
+    lines = page.splitlines()
+    headings = lines.count("## Connection")
     if headings > 1:
         raise DocsError(f"a page has {headings} Connection tables")
+    if headings:
+        section = itertools.takewhile(
+            lambda line: not _HEADING.match(line), lines[lines.index("## Connection") + 1 :]
+        )
+        indented = [line for line in section if line[:1].isspace() and line.lstrip()[:1] == "|"]
+        if indented:
+            raise DocsError(f"an indented Connection row: {indented[0][:120]!r}")
     table = _table(page, "Connection")
     found: list[DocConnection] = []
     for line in _rows(table, "Connection") if table else []:
