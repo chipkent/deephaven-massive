@@ -173,7 +173,8 @@ def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
         symbols=None,
         time_header="sip_timestamp",
         window_ns=None,
-        to_ns=lambda values: (values, ""),
+        to_ns=lambda values: values,
+        unplaced=str,
         block_size=block_size,
         chunk_size=16 * block_size,
         parse_threads=3,
@@ -1052,7 +1053,7 @@ def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
     seen: list[int] = []
 
     def read(file: FlatFile) -> None:
-        for batch, _ in file.batches(stocks_plan(block_size=16 << 10)):
+        for batch, _, _ in file.batches(stocks_plan(block_size=16 << 10)):
             seen.extend(batch["SequenceNumber"].to_pylist())
 
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
@@ -1292,7 +1293,9 @@ def test_a_404_page_that_is_not_s3s_is_a_wire_error_over_the_network(
 def _symbols(file: FlatFile | None) -> list[str]:
     assert file is not None
     with file:
-        return [s for batch, _ in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()]
+        return [
+            s for batch, _, _ in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()
+        ]
 
 
 def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(

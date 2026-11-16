@@ -527,7 +527,7 @@ def test_the_vendor_samples_decode(
     rest_path = CATALOG.rest_path(spec.fetch_path)
     rows = _rows(json.loads(load_fixture(OWNER, f"{sample.fixture}.json")), rest_path.result_key)
     required = [f.column for f in required_fields(spec, rest_path)]
-    batch, report = to_batch(rows, rest_path, required=required)
+    batch, report, _ = to_batch(rows, rest_path, required=required)
     assert tuple(sorted(report.extra)) == sample.extra
     assert tuple(sorted(report.missing)) == sample.missing
     first = batch.to_pylist()[0]

@@ -22,7 +22,7 @@ from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.flatfiles import reader
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.spec.types import DriftReport, DriftSample
+from deephaven_massive._massive.spec.types import DriftReport, DriftSample, RowFault, RowMark
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
@@ -49,8 +49,12 @@ FUTURES_COLUMNS = (
 )
 
 
-def identity(values: pa.Array) -> tuple[pa.Array, str]:
-    return values, ""
+def identity(values: pa.Array) -> pa.Array:
+    return values
+
+
+def unplaced(value: int) -> str:
+    return f"{value} is no time"
 
 
 def plan(
@@ -59,7 +63,7 @@ def plan(
     symbols: pa.Array | None = None,
     time_header: str = "sip_timestamp",
     window_ns: tuple[int, int] | None = None,
-    to_ns: Callable[[pa.Array], tuple[pa.Array, str]] = identity,
+    to_ns: Callable[[pa.Array], pa.Array] = identity,
     block_size: int = 1 << 20,
     chunk_blocks: int = 16,
     parse_threads: int = 3,
@@ -72,6 +76,7 @@ def plan(
         time_header=time_header,
         window_ns=window_ns,
         to_ns=to_ns,
+        unplaced=unplaced,
         block_size=block_size,
         chunk_size=chunk_blocks * block_size,
         parse_threads=parse_threads,
@@ -104,13 +109,13 @@ def trades(
 
 def table(file: FlatFile, read: ReadPlan) -> pa.Table:
     with file:
-        return pa.Table.from_batches([batch for batch, _ in file.batches(read)])
+        return pa.Table.from_batches([batch for batch, _, _ in file.batches(read)])
 
 
 def drift(file: FlatFile, read: ReadPlan) -> DriftReport:
     # The drift of every block of a file is the same report.
     with file:
-        reports = {report for _, report in file.batches(read)}
+        reports = {report for _, report, _ in file.batches(read)}
     (report,) = reports
     return report
 
@@ -160,9 +165,9 @@ def test_the_symbol_filter_keeps_only_the_requested_symbols(trades: FlatFile) ->
 def test_the_window_is_half_open_on_the_converted_time(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+    def to_ns(values: pa.Array) -> pa.Array:
         converted.append(len(values))
-        return pc.multiply(values, 1), ""
+        return pc.multiply(values, 1)
 
     window = (1741012200000002000, 1741035600000000000)
     result = table(trades, plan(window_ns=window, to_ns=to_ns))
@@ -184,9 +189,9 @@ def test_the_file_counts_its_rows_after_each_filter(trades: FlatFile) -> None:
 def test_the_window_follows_the_symbol_filter(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+    def to_ns(values: pa.Array) -> pa.Array:
         converted.append(len(values))
-        return values, ""
+        return values
 
     symbols = pa.array(["SPY"], pa.string())
     result = table(trades, plan(symbols=symbols, window_ns=(0, 2**62), to_ns=to_ns))
@@ -200,31 +205,45 @@ def test_the_window_converts_the_time_of_a_plan_whose_time_is_no_key(trades: Fla
     assert result["Id"].to_pylist() == ["2", "3"]
 
 
-def test_a_row_whose_time_cannot_be_placed_is_dropped_and_counted(trades: FlatFile) -> None:
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
-        # The converter places every time but the second row's.
-        placed = pc.if_else(pc.equal(values, 1741012200000002000), None, values)
-        return placed, "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
+def test_a_row_whose_time_cannot_be_placed_is_kept_and_marked(
+    *, opened: Callable[[str, str | bytes], FlatFile], load_fixture: Callable[[str, str], bytes]
+) -> None:
+    text = load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode()
 
-    with trades:
-        [(batch, report)] = list(trades.batches(plan(to_ns=to_ns)))
-    assert batch["Id"].to_pylist() == ["1", "3", "4"]
-    assert report.dropped_rows == 1
-    assert report.dropped_reason == (
-        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
-    )
+    def to_ns(values: pa.Array) -> pa.Array:
+        # The converter places every time but the second row's.
+        return pc.if_else(pc.equal(values, 1741012200000002000), None, values)
+
+    def ids(window: tuple[int, int] | None) -> list[str]:
+        with opened(KEY, text) as file:
+            [(batch, report, marks)] = list(file.batches(plan(to_ns=to_ns, window_ns=window)))
+        found: list[str] = batch["Id"].to_pylist()
+        assert marks == {
+            RowFault.UNREADABLE_KEYS: RowMark(
+                rows=(found.index("2"),),
+                fields=("Timestamp",),
+                reasons=("1741012200000002000 is no time",),
+                symbols=("MSFT",),
+            )
+        }
+        assert report.dropped_rows == 0
+        return found
+
+    assert ids(None) == ["1", "2", "3", "4"]
+    # A window holds the row too, since its time cannot be placed in or out of any window.
+    assert ids((1741012200000000123, 1741012200000000124)) == ["1", "2"]
 
 
 def test_a_file_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
-        return pa.nulls(len(values), pa.int64()), "timestamp unit mismatch for x: 5 ns"
+    def to_ns(values: pa.Array) -> pa.Array:
+        return pa.nulls(len(values), pa.int64())
 
     with pytest.raises(WireError) as info:
         table(trades, plan(to_ns=to_ns))
     assert info.value.message == (
         f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of the 4 rows "
         "of the requested symbols was dropped, so the file's format may have changed; the "
-        "first: timestamp unit mismatch for x: 5 ns"
+        "first: 1741012200000000123 is no time"
     )
     assert info.value.kind is WireFailure.UNREADABLE
 
@@ -241,9 +260,10 @@ def test_one_odd_row_alone_in_its_block_never_fails_the_file(
         read = plan(symbols=pa.array(["ILLQ", "AAPL"], pa.string()), block_size=1024)
         found = list(file.batches(read))
     assert len(found) > 2
-    first, report = found[0]
-    assert (first.num_rows, report.dropped_rows) == (0, 1)  # the block's only requested row
-    assert sum(batch.num_rows for batch, _ in found) == 3
+    first, _, marks = found[0]
+    assert first.num_rows == 1  # the block's only requested row, kept for its mark
+    assert marks[RowFault.UNREADABLE_KEYS].rows == (0,)
+    assert sum(batch.num_rows for batch, _, _ in found) == 4
 
 
 def test_typed_values_with_surrounding_spaces_are_read(
@@ -252,7 +272,7 @@ def test_typed_values_with_surrounding_spaces_are_read(
     # Arrow's typed parsing trimmed spaces around numbers; reading as text keeps that.
     row = '"12,37",  1 ,4,1,1, 227.48 ,100, 1741012200000000123 ,100,3,AAPL,, 0\n'
     with opened(KEY, TRADE_HEADER + row) as file:
-        [(batch, report)] = list(file.batches(plan()))
+        [(batch, report, _)] = list(file.batches(plan()))
     assert batch.to_pylist()[0] | {"Conditions": None} == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
@@ -344,14 +364,19 @@ def test_odd_values_are_null_and_found_without_python_per_value(
         (",,4,1,1,1.5,1,1741012200000000000,10,1,,,\n", "a row has no ticker"),
     ],
 )
-def test_a_row_whose_key_cannot_be_read_is_dropped(
+def test_a_row_whose_key_cannot_be_read_is_kept_and_marked(
     row: str, reason: str, opened: Callable[[str, str | bytes], FlatFile]
 ) -> None:
+    # The row's price does not parse either, but its key is its fault, and adds no drift.
     good = ",,4,2,1,1.5,1,1741012200000000000,10,1,MSFT,,\n"
-    with opened(KEY, TRADE_HEADER + row + good) as file:
-        [(batch, report)] = list(file.batches(plan()))
-    assert batch["Id"].to_pylist() == ["2"]
-    assert (report.dropped_rows, report.dropped_reason) == (1, reason)
+    with opened(KEY, TRADE_HEADER + row.replace(",1.5,", ",x,") + good) as file:
+        [(batch, report, marks)] = list(file.batches(plan()))
+    assert batch["Id"].to_pylist() == ["1", "2"]
+    [(fault, mark)] = marks.items()
+    assert fault is RowFault.UNREADABLE_KEYS
+    assert (mark.rows, mark.reasons) == ((0,), (reason,))
+    assert mark.symbols == ((None,) if "ticker" in reason else ("AAPL",))
+    assert (report.dropped_rows, report.unconvertible) == (0, frozenset())
 
 
 def test_rows_the_symbol_filter_removes_never_fail_a_block(
@@ -360,7 +385,7 @@ def test_rows_the_symbol_filter_removes_never_fail_a_block(
     odd = ",,4,1,1,1.5,1,4.0,10,1,AAPL,,\n"
     with opened(KEY, TRADE_HEADER + odd) as file:
         read = plan(symbols=pa.array(["MSFT"], pa.string()))
-        [(batch, report)] = list(file.batches(read))
+        [(batch, report, _)] = list(file.batches(read))
     assert (batch.num_rows, report.dropped_rows) == (0, 0)
 
 
@@ -371,7 +396,7 @@ def test_every_block_yields_a_batch_even_when_empty(
     file = opened(KEY, TRADE_HEADER + rows)
     with file:
         read = plan(symbols=pa.array(["ZZZZ"]), block_size=1024)
-        batches = [batch for batch, _ in file.batches(read)]
+        batches = [batch for batch, _, _ in file.batches(read)]
     assert len(batches) > 10
     assert all(batch.num_rows == 0 for batch in batches)
     assert batches[0].schema.names == [column.column for column in TRADE_COLUMNS]
@@ -388,7 +413,7 @@ def test_a_futures_file_keeps_each_rows_own_session(
     assert set(result["SessionEndDate"].to_pylist()) == {date(2025, 3, 4)}
 
 
-def test_a_futures_row_without_a_session_is_dropped(
+def test_a_futures_row_without_a_session_is_marked(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
     text = (
@@ -398,12 +423,15 @@ def test_a_futures_row_without_a_session_is_dropped(
     required = frozenset({"ticker", "timestamp", "session_end_date"})
     futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp", required=required)
     with opened(FUTURES_KEY, text) as file:
-        [(batch, report)] = list(file.batches(futures))
-    assert batch["ReportSequence"].to_pylist() == [2]
-    assert (report.dropped_rows, report.dropped_reason) == (
-        2,
+        [(batch, report, marks)] = list(file.batches(futures))
+    assert batch["ReportSequence"].to_pylist() == [1, 2, 3]
+    mark = marks[RowFault.UNREADABLE_KEYS]
+    assert (mark.rows, mark.fields) == ((0, 2), ("SessionEndDate", "SessionEndDate"))
+    assert mark.reasons == (
         "a row has no session_end_date",
+        "session_end_date holds '2025-13-45', which is not date32[day]",
     )
+    assert report.dropped_rows == 0
 
 
 @pytest.mark.parametrize(
@@ -515,13 +543,14 @@ def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str
             strings_can_be_null=True,
         ),
     )
-    batches, drift, held = [], headers, 0
+    batches, drift, held, unread = [], headers, 0, 0
     for block in blocks:
-        rows, found, considered = file._apply(block, read)
-        batches.append(rows)
-        drift = drift.merge(found)
-        held += considered
-    if held and drift.dropped_rows == held:
+        applied = file._apply(block, read)
+        batches.append(applied.rows)
+        drift = drift.merge(applied.drift)
+        held += applied.considered
+        unread += applied.unread
+    if held and unread == held:
         return f"every one of the {held} rows of the requested symbols was dropped"
     return pa.Table.from_batches(batches, schema=batches[0].schema), drift
 
@@ -531,7 +560,7 @@ def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
     batches, drift = [], DriftReport()
     try:
         with file:
-            for rows, found in file.batches(read):
+            for rows, found, _ in file.batches(read):
                 batches.append(rows)
                 drift = drift.merge(found)
     except WireError as error:
@@ -615,7 +644,7 @@ def test_a_read_ended_early_drops_the_chunks_not_yet_parsed(
     file, _ = flat_file(KEY, data)
     with file:
         blocks = file.batches(plan(block_size=4096, chunk_blocks=1, parse_threads=2))
-        first, _ = next(blocks)
+        first, _, _ = next(blocks)
         blocks.close()
     assert first.num_rows > 0
     assert not [t for t in threading.enumerate() if t.name.endswith(" parse_0")]
@@ -726,7 +755,7 @@ def test_a_header_without_rows_yields_one_empty_batch_with_its_drift(
     for text in (TRADE_HEADER, TRADE_HEADER.rstrip("\n"), "ticker,sip_timestamp,halted\n"):
         file = opened(KEY, text)
         with file:
-            ((batch, _),) = list(file.batches(plan()))
+            ((batch, _, _),) = list(file.batches(plan()))
         assert batch.num_rows == 0
         assert batch.schema == table(opened(KEY, TRADE_HEADER + TRADE_ROWS), plan()).schema
     # The drift of a file without rows still reaches the caller.
@@ -773,7 +802,7 @@ def test_a_list_that_does_not_convert_is_null_and_reported(
         good = '"12,37",,4,2,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         row = f'"{conditions}",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         with opened(KEY, TRADE_HEADER + good + row) as file:
-            [(batch, report)] = list(file.batches(plan()))
+            [(batch, report, _)] = list(file.batches(plan()))
         assert batch["Conditions"].to_pylist() == [[12, 37], None]
         assert report.unconvertible == {"conditions"}
         assert report.samples["conditions"] == DriftSample(None, conditions)
@@ -807,12 +836,24 @@ def test_a_value_that_does_not_convert_is_null_and_reported_by_its_header(
     rows = "12,,4,1,1,1.5,1,1,10,1,AAPL,,x\n12,,4,2,1,x" + "y" * 300 + ",1,1,10,1,AAPL,,5\n"
     text = reorder(TRADE_HEADER + rows, list(reversed(TRADE_NAMES)))
     with opened(KEY, text) as file:
-        [(batch, report)] = list(file.batches(plan()))
+        [(batch, report, marks)] = list(file.batches(plan()))
     assert batch["TrfTimestamp"].to_pylist() == [None, 5]
     assert batch["Price"].to_pylist() == [1.5, None]
     assert report.unconvertible == {"trf_timestamp", "price"}
     assert report.samples["trf_timestamp"] == DriftSample(None, "x")
     assert report.samples["price"] == DriftSample(None, "x" + "y" * 199)  # cut to 200
+    # Each row is marked once, for its first header that does not parse, in the plan's order.
+    assert marks == {
+        RowFault.UNCONVERTIBLE_VALUES: RowMark(
+            rows=(0, 1),
+            fields=("TrfTimestamp", "Price"),
+            reasons=(
+                "trf_timestamp holds 'x', which is not int64",
+                f"price holds {'x' + 'y' * 199!r}, which is not double",
+            ),
+            symbols=("AAPL", "AAPL"),
+        )
+    }
 
 
 def test_a_malformed_line_is_skipped_and_counted(
@@ -874,7 +915,7 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
             read = plan(block_size=4096, chunk_blocks=chunk_blocks, parse_threads=threads)
             file, _ = flat_file(KEY, data)
             with file:
-                rows = [batch for batch, _ in file.batches(read)]
+                rows = [batch for batch, _, _ in file.batches(read)]
             assert pa.Table.from_batches(rows).equals(expected[0]), (chunk_blocks, threads)
             assert file.malformed_lines == 6
             assert file.malformed_reason == (
@@ -955,7 +996,7 @@ def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(bad: Callable[[int]
 
     def consume() -> None:
         with file:
-            for batch, _ in file.batches(read):
+            for batch, _, _ in file.batches(read):
                 seen.append((batch.num_rows, file.malformed_lines))
 
     with pytest.raises(WireError, match="every one of its 40 lines is malformed"):
@@ -1007,7 +1048,7 @@ def test_benchmark_one_large_file(
         file, _ = flat_file(KEY, data)
         started = time.perf_counter()
         with file:
-            kept = sum(batch.num_rows for batch, _ in file.batches(read))
+            kept = sum(batch.num_rows for batch, _, _ in file.batches(read))
         times.append(time.perf_counter() - started)
     seconds = statistics.median(times)
     with capsys.disabled():
@@ -1090,3 +1131,20 @@ def test_a_watched_body_refuses_to_seek() -> None:
     watched = reader._Watched(io.BytesIO(b"body"), threading.Event())
     with pytest.raises(io.UnsupportedOperation, match=r"a response body cannot seek \(to 0\)"):
         watched.seek(0)
+
+
+def test_a_row_with_two_unreadable_keys_is_marked_once_for_the_first_header(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    good = ",,4,2,1,1.5,1,1741012200000000000,10,1,MSFT,,\n"
+    with opened(KEY, TRADE_HEADER + ",,4,1,1,1.5,1,,10,1,,,\n" + good) as file:
+        [(batch, _, marks)] = list(file.batches(plan()))
+    assert batch["Id"].to_pylist() == ["1", "2"]
+    assert marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,),
+            fields=("Timestamp",),
+            reasons=("a row has no sip_timestamp",),
+            symbols=(None,),
+        )
+    }

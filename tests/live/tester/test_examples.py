@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from deephaven_massive._massive import DriftReport, RowMarks, Source, Status, WireError, WsState
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
@@ -197,7 +197,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _massive.WsClient:

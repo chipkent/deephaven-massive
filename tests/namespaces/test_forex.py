@@ -482,7 +482,7 @@ def test_each_fixture_has_the_generated_shape(
         rows = found if isinstance(found, list) else [found]
     declared = spec.keys_for(R, path).declared()
     required = {key.column for _, key in declared if not key.from_request}
-    batch, drift = to_batch(rows, rest_path, required=required)
+    batch, drift, _ = to_batch(rows, rest_path, required=required)
     assert batch.num_rows == len(rows) > 0
     assert (drift.extra, drift.missing) == (frozenset(), frozenset())
 

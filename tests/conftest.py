@@ -2874,7 +2874,8 @@ def _raw_plan(prefix: str, tickers: list[str] | None) -> ReadPlan:
         symbols=None if tickers is None else pa.array(tickers, pa.string()),
         time_header=headers[0],
         window_ns=None,
-        to_ns=lambda values: (values, ""),
+        to_ns=lambda values: values,
+        unplaced=str,
         block_size=_FLAT_FILE_BLOCK,
         chunk_size=16 * _FLAT_FILE_BLOCK,
         parse_threads=3,
@@ -2910,7 +2911,7 @@ def _read_flat_file(
     rows: list[dict[str, str | None]] = []
     extra: frozenset[str] = frozenset()
     with file, contextlib.closing(file.batches(_raw_plan(prefix, tickers))) as batches:
-        for batch, drift in batches:
+        for batch, drift, _ in batches:
             extra = drift.extra
             rows.extend(batch.to_pylist())
             if max_rows is not None and len(rows) >= max_rows:
@@ -3048,7 +3049,7 @@ def flat_file_sessions(
             return None
         counts: Counter[str | None] = Counter()
         with file, contextlib.closing(file.batches(_raw_plan(prefix, None))) as batches:
-            for batch, _drift in batches:
+            for batch, _drift, _ in batches:
                 counts.update(batch.column("session_end_date").to_pylist())
         return counts
 

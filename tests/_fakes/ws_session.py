@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import AssetClass, ChannelFamily
     from deephaven_massive._error_policy import ResolvedPolicy
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from deephaven_massive._massive import DriftReport, RowMarks, Source, Status, WireError, WsState
     from tests._fakes.ws import FakeMassiveServer
 
 TIMEOUT = 15.0
@@ -225,7 +225,7 @@ class WsSession:
 
     @property
     def items(self) -> int:
-        """How many data items the clients have delivered, rows and rejects alike."""
+        """How many data items the clients have delivered: every object is a row."""
         with self.cond:
             return self._items
 
@@ -298,7 +298,7 @@ class WsSession:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> SpyClient:
@@ -344,10 +344,9 @@ class WsSession:
             if what == "opens":
                 self._opens += 1
             elif what == "items":
-                rows, rejects = event[2:4]
+                rows = event[2]
                 assert isinstance(rows, list)
-                assert isinstance(rejects, list)
-                self._items += len(rows) + len(rejects)
+                self._items += len(rows)
             elif what == "statuses":
                 status = event[1]
                 assert isinstance(status, _massive.Status)
@@ -407,8 +406,8 @@ class WsSession:
     def send(self, *items: dict[str, object]) -> None:
         """Send one frame of `items` and wait until the clients have delivered every data item.
 
-        A client delivers a frame one channel at a time, so the wait counts items, rows and
-        rejects alike, not deliveries: it returns only once every channel of the frame has
+        A client delivers a frame one channel at a time, so the wait counts items, every object
+        a row, not deliveries: it returns only once every channel of the frame has
         reached the transport. A status object (`"ev": "status"`) is not a data item and is not
         waited for, and every other item must belong to a channel the connection has a source
         for, since the client drops any other.
