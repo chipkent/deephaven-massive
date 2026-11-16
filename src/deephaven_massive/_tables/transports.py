@@ -161,10 +161,14 @@ class SymbolRows:
         source: Where the rows came from, as users read it: `"REST"`, `"flat files"`, or
             `"flat files and REST"` when REST served the days the files lack; None when the
             maker did not say.
+        skipped: Why the read sent no request for the symbol and gave it no rows: a crypto
+            pair whose currencies, as Massive's crypto ticker list gives them, don't make up its
+            ticker. `m.symbol_reads()` shows it in `Error`. None when the symbol was read.
     """
 
     table: Table
     source: str | None = None
+    skipped: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

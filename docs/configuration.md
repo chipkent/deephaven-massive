@@ -300,7 +300,8 @@ column. Such a symbol is a library bug. To report it, see
 Under `raise` the table has no `RawSymbol` column.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
-written together. Under `log` or `ignore` it gets no rows.
+written together. Under `log` or `ignore` it gets no rows. A
+watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
 
 #### unavailable_symbols
 

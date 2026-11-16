@@ -612,8 +612,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Rows`: its rows in the result.
             - `Attempts`: reads started since it was last added.
             - `NextAttemptAt`: the next try, while it's `RETRYING`.
-            - `Error`: its latest failure, with the HTTP status, path, and `request_id`. It's null
-              once a read succeeds.
+            - `Error`: its latest failure, with the HTTP status, path, and `request_id`. Once a
+              read succeeds, it's null, unless the library skipped the symbol: a crypto pair
+              whose ticker it can't read from Massive's crypto ticker list is `DONE` with no
+              rows, and `Error` says why.
             - `UpdatedAt`: when the row last changed.
 
         Raises:

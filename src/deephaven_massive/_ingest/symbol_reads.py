@@ -10,9 +10,11 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   for the symbols, each with its path. A dataset whose rows carry no `Symbol` column reads
   each symbol in a request of its own, so every row belongs to the one request that returned
   it; a dataset whose rows list their tickers gets its `Symbol` from them, so its requests are
-  grouped as `fetch()` groups them. A
-  crypto pair Massive's ticker list does not hold, and a parameter a path does not take, fail
-  their own symbols here, before any request.
+  grouped as `fetch()` groups them. A parameter a path does not take, and a crypto ticker list
+  that can't be read, fail their own symbols here, before any request. A crypto pair the list
+  gives no split for is planned as a call never sent. A pair the list doesn't hold has no
+  data, as an HTTP 404 means. A pair whose currencies can't make up its ticker is skipped, and
+  its `m.symbol_reads()` row says why (`_with_skipped`).
 - **Attribution** (`read_rest_by_symbol`): a request of one symbol gives all its rows to that
   symbol; a request of several (`ticker.any_of`) gives each its rows by their `Symbol`, and its
   failure is the failure of each of them. A row of such a request with a null `Symbol` (a row
@@ -60,6 +62,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._errors import (
+    LIBRARY_BUG,
     NEW_SESSION,
     AuthenticationError,
     ErrorSource,
@@ -382,7 +385,7 @@ def read_rest_by_symbol(
         for symbol, rows in pieces.items()
         if symbol not in failures
     }
-    return symbol_outcomes(
+    outcomes = symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -391,6 +394,37 @@ def read_rest_by_symbol(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
+    return _with_skipped(outcomes, units)
+
+
+def _with_skipped(
+    outcomes: dict[str, SymbolOutcome], units: Sequence[RestUnit]
+) -> dict[str, SymbolOutcome]:
+    """Name, in each outcome it applies to, why a call left its crypto pair unread.
+
+    A pair whose currencies Massive's crypto ticker list gives but can't be read as its ticker
+    is planned as a call the reader never sends (`Call.unsplit`), so its read ends with no
+    rows; `unreadable_symbols` already logged it. A stream and a `poll()` name such a pair in
+    their `Error`, so a read by symbol names it in its `m.symbol_reads()` row. A pair Massive
+    has no data for is not named: it is reported as HTTP 404 is.
+
+    Args:
+        outcomes: Each symbol's outcome (`symbol_outcomes`).
+        units: The planned requests.
+
+    Returns:
+        The outcomes, each skipped pair's rows carrying why (`SymbolRows.skipped`).
+    """
+    for _, planned in units:
+        unsplit, symbol = planned.unsplit, planned.symbol
+        if unsplit is None or unsplit.no_data:
+            continue
+        assert symbol is not None  # a split is planned only for a call of one pair
+        outcome = outcomes[symbol]
+        assert isinstance(outcome, SymbolRows)  # an unsent call fails no symbol
+        why = f"skipped: {unsplit.why}; the pair gets no rows. {LIBRARY_BUG}"
+        outcomes[symbol] = replace(outcome, skipped=why)
+    return outcomes
 
 
 def read_rest_by_value(

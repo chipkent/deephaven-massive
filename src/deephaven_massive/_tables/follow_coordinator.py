@@ -1177,7 +1177,8 @@ class FollowCoordinator:
             symbol.kept = True
             symbol.rows = outcome.table.size
             symbol.read_at = began_at
-            symbol.error = symbol.cause = None
+            symbol.error = outcome.skipped  # why a read that succeeded gave it no rows, if so
+            symbol.cause = None
             symbol.due = symbol.next_attempt_at = None
             logger.debug(
                 "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",

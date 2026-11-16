@@ -631,3 +631,41 @@ def test_a_followed_fetch_of_a_pair_massive_does_not_list_ends_done_with_no_rows
     until(lambda: states().get("X:DOTUSD") == ("DONE", 0))
     rest_session.release(result)
     follows(rest_session)
+
+
+def test_a_followed_fetch_names_a_listed_pair_whose_ticker_it_can_t_read_in_symbol_reads(
+    *,
+    live: Callable[..., Table],
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[Any]],
+) -> None:
+    # Massive's crypto ticker list gives X:DOTUSD the currencies DOT and USDT, which don't make
+    # up its ticker: no request is sent for it, and its m.symbol_reads() row says why, as a
+    # stream's and a poll's Error do. A pair the list reads is read with no Error.
+    listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
+    unjoined = {"ticker": "X:DOTUSD", "base_currency_symbol": "DOT", "currency_symbol": "USDT"}
+    fake_rest.reply(
+        "/v3/reference/tickers", Reply(envelope([listed, unjoined])), Reply(envelope([]))
+    )
+    last = {"status": "OK", "symbol": "BTC-USD", "last": {"price": 1.0, "timestamp": 1741000000000}}
+    fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
+    result = rest_session.crypto.last_trade(live("X:BTCUSD", "X:DOTUSD")).fetch(wait=True)
+    assert [r["Symbol"] for r in dh_to_pylist(result)] == ["X:BTCUSD"]
+
+    def reads() -> dict[str, tuple[str, int, str | None]]:
+        rows = dh_to_pylist(rest_session.symbol_reads())
+        return {r["Symbol"]: (r["State"], r["Rows"], r["Error"]) for r in rows}
+
+    until(lambda: reads().get("X:DOTUSD", ("", 0, None))[0] == "DONE")
+    state, rows, error = reads()["X:DOTUSD"]
+    assert (state, rows) == ("DONE", 0)
+    assert error is not None
+    assert error.startswith("skipped: ")
+    assert "the pair gets no rows" in error
+    assert reads()["X:BTCUSD"] == ("DONE", 1, None)
+    assert [p for p, _ in fake_rest.get_queries() if p != "/v3/reference/tickers"] == [
+        "/v1/last/crypto/BTC/USD"
+    ]
+    rest_session.release(result)
+    follows(rest_session)
