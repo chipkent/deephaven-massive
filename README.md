@@ -629,7 +629,7 @@ each on its own plan. Two settings match a session to your plans:
 | Setting | Set it when | What changes |
 |---|---|---|
 | `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
-| `rest_requests_per_minute` | Massive limits a subscription's REST requests per minute | Its requests keep to your limit from the first one, so Massive doesn't refuse them. |
+| `rest_requests_per_minute` | Massive limits a subscription's REST requests per minute | Its requests keep to your limit from the first one, with no pause to learn it. |
 
 This session's stocks plan streams delayed data, and Massive limits each of its other
 subscriptions to five requests a minute:
@@ -650,7 +650,7 @@ m = dm.MassiveSession(config)
 ```
 
 Leave a limited subscription out, and the session learns its limit from Massive's first
-refusal, after a pause. `m.rate_limits()` then shows the learned limit in `RequestsPerMinute`.
+rate-limit error, after a pause. `m.rate_limits()` then shows the learned limit in `RequestsPerMinute`.
 Copy that number into the setting to skip the pause next time.
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as

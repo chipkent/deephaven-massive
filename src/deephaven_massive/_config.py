@@ -235,8 +235,9 @@ class MassiveConfig:
             5 for `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
 
             Leave a limited subscription out, and the session learns its limit from Massive's
-            first refusal, after a pause. `m.rate_limits()` shows the limit a session learned:
-            copy it here to skip the pause next time. A limit you list wins over a learned one.
+            first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session
+            learned. Copy it here to skip the pause next time. A limit you list wins over a
+            learned one.
 
             Every session in this server that uses your key shares one limit per subscription.
             When sessions list different limits, the lowest applies.

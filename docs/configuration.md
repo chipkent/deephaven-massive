@@ -18,9 +18,10 @@ of three forms:
   [Values and defaults](#settings-table) shows it.
 - A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` is the
   only list.
-- A mapping, one `key: value` line per entry, indented under the setting's name, or in
-  braces on one line: `{stocks: 5}`, or `{}` for none. `websocket_hosts` maps asset classes to
-  hostnames, and `rest_requests_per_minute` maps subscriptions to whole numbers.
+- A mapping, one `key: value` line per entry, indented under the setting's name. A short
+  mapping also fits in braces on one line, such as `{stocks: 5}`; `{}` is an empty one.
+  `websocket_hosts` maps asset classes to hostnames, and `rest_requests_per_minute` maps
+  subscriptions to whole numbers.
 
 This file uses all three forms:
 
@@ -241,8 +242,9 @@ List each subscription Massive limits, with its limit in requests a minute, such
 5 for `stocks`. Leave out a subscription Massive doesn't limit.
 
 Leave a limited subscription out, and the session learns its limit from Massive's
-first refusal, after a pause. `m.rate_limits()` shows the limit a session learned:
-copy it here to skip the pause next time. A limit you list wins over a learned one.
+first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session
+learned. Copy it here to skip the pause next time. A limit you list wins over a
+learned one.
 
 Every session in this server that uses your key shares one limit per subscription.
 When sessions list different limits, the lowest applies.

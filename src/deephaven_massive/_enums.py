@@ -551,14 +551,14 @@ class Subscription(StrEnum):
     """One of Massive's five subscriptions, each with its own plan and REST request limit.
 
     Massive sells its data as five subscriptions, one per asset class, with forex and crypto sharing
-    `CURRENCIES`. Each has its own plan, and the plan sets how many REST requests a minute it
-    allows, if it limits them. All the API keys of your account share the limits.
+    `CURRENCIES`. Each has its own plan. A plan may limit how many REST requests a minute the
+    subscription makes. All the API keys of your account share the limits.
 
     Give each limited subscription's limit in `MassiveConfig.rest_requests_per_minute`, so its
-    requests keep to it from the first one; otherwise the library slows down after Massive's
-    first refusal. `m.rate_limits()` shows each subscription's state. Datasets Massive assigns to
-    no subscription, such as reference, economy, and partner data, share a limit of their own,
-    `other`, which the library learns from Massive's refusals.
+    requests keep to it from the first one. Without it, the library slows down after Massive's
+    first rate-limit error. `m.rate_limits()` shows each subscription's state. Datasets Massive
+    assigns to no subscription share a limit of their own, `other`. Reference, economy, and
+    partner data are among them. The library learns that limit from Massive's rate-limit errors.
 
     Example:
         ::
