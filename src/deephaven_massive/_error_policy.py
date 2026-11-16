@@ -82,12 +82,12 @@ class ErrorPolicy:
             This setting covers only tables. A symbol you pass in code must be Massive's exact
             ticker, or the call raises `ValueError`. A table whose every row is bad raises
             `ValueError` too, whatever this setting says.
-        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the
-            library can't read as Massive's ticker. Defaults to `LOG`.
+        unreadable_symbols: Decides whether a row of Massive's data whose symbol the library
+            can't read as Massive's ticker fails the table; the row is left out either way.
+            Defaults to `LOG`.
 
-            The row is never published. Set `dm.OnError.RAISE` when a table must fail on such
-            a row rather than go on without it. Such a symbol is a library bug. To report it,
-            see
+            Set `dm.OnError.RAISE` to fail the table at the first such row. Such a symbol is a
+            library bug. To report it, see
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
 
             A listed crypto pair is unreadable too when its ticker isn't its two currencies
@@ -105,23 +105,34 @@ class ErrorPolicy:
             This setting also covers a watchlist symbol a `poll()` can't request with your
             arguments. For example, an indicator poll with `adjusted=False` can't request a
             crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
-        unreadable_keys: Decides what happens to a row of Massive's data that the library
-            can't place: its symbol, its time, or another key its dataset needs is missing,
-            null, or not of its type. A time of 0 counts, and so does one outside 1990 to 2100.
-            Defaults to `LOG`.
+        unreadable_keys: Decides whether a row of Massive's data whose key the library can't
+            read fails the table; the row is left out either way. Defaults to `LOG`.
 
-            The row is never published. Set `dm.OnError.RAISE` when a table must fail on such
-            a row rather than go on without it.
-        unconvertible_values: Decides what happens to a row of Massive's data holding a value
-            the library can't read as its column's type. A whole number that a `double` column
-            would round counts, and so does a time outside 1990 to 2100 in any column but the
-            row's own time; a time of 0 there is null, as Massive means it. So does a bar of a
-            day or longer stamped at a time Massive isn't known to use, whose day the library
-            can't tell. Defaults to `LOG`.
+            A key can't be read when it is one of these:
 
-            The row is never published, so a table never holds a value the library made up.
-            Set `dm.OnError.RAISE` when a table must fail on such a row rather than go on
-            without it.
+            - the row's symbol, its time, or another column its dataset needs, missing or of
+              the wrong type;
+            - a time of 0, or one outside 1990 to 2100.
+
+            A symbol that is present but isn't Massive's ticker is `unreadable_symbols`. Set
+            `dm.OnError.RAISE` to fail the table at the first such row. Such a row is a sign
+            that Massive's format changed.
+        unconvertible_values: Decides whether a row of Massive's data holding a value the
+            library can't read as its column's type fails the table; the row is left out
+            either way. Defaults to `LOG`.
+
+            A value the library can't read is one of these:
+
+            - a value of another type, or a whole number that a `double` column would round;
+            - a time outside 1990 to 2100 in any column but the row's own time;
+            - the start of a bar of a day or longer stamped at a time Massive isn't known to
+              use.
+
+            In those other columns a time of 0 is a null, as Massive means it, and the row is
+            kept.
+
+            Set `dm.OnError.RAISE` when a table must fail rather than leave out a row with a
+            value it can't read.
         malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
             readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
             Defaults to `LOG`.
