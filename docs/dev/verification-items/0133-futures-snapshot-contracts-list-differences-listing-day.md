@@ -11,5 +11,7 @@ lists thousands of new contracts (2026-11-02 listed 3,035 combos and 1,631 singl
 Meanwhile the calendar finds a ticker's product only in the contracts list.
 
 Settled by `tests/ingest/test_futures_calendar_integration.py::test_snapshot_and_contracts_list_differences_on_a_listing_day`, which reads
-both lists, asks each for the other's tickers it lacked, and records the new listings of its
-day, so the evidence says whether it ran on such a day.
+both lists and asks each for the other's tickers it lacked, up to a cap (beyond it, a share
+spread evenly and said to be a lower bound). It also counts the contracts active that day that
+were first traded on it, so the evidence says whether it ran on such a day (a lower bound when
+the contracts read stop at their page cap).

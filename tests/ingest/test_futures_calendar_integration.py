@@ -932,15 +932,21 @@ def _with_fields(path: str) -> RestPath:
     return replace(rest_path, params=(*rest_path.params, replace(template, name="fields")))
 
 
+_PROXY_AUTH = 407
+"""The HTTP status of a proxy refusing its credentials: the network's answer, not Massive's."""
+
+
 def _refused(error: WireError) -> bool:
     """Tell whether a wire error is Massive refusing a request, other than for the key.
 
     Returns:
         True for an HTTP 4xx answer that is neither an authentication nor an entitlement
-        refusal: one these tests record as evidence instead of failing.
+        refusal, nor a proxy's refusal of its credentials (407): one these tests record as
+        evidence instead of failing.
     """
     keyed = isinstance(error, (WireAuthError, WireEntitlementError))
-    return not keyed and error.status is not None and 400 <= error.status < 500
+    status = error.status
+    return not keyed and status is not None and 400 <= status < 500 and status != _PROXY_AUTH
 
 
 def _spread(items: Sequence[str], count: int) -> list[str]:
@@ -1000,7 +1006,7 @@ def _read_snapshot(client: RestClient, evidence: Evidence) -> dict[str, _Listed]
     """Read the whole futures snapshot, up to `_SNAPSHOT_PAGES` pages, with few fields.
 
     Asks for `_SNAPSHOT_FIELDS` only; when Massive refuses `fields`, reads whole rows instead,
-    and says so.
+    and says so. Sends at most 6 requests: up to 3 pages, then up to 3 again after a refusal.
 
     Returns:
         Each ticker's product code and last trade.
@@ -1201,7 +1207,7 @@ def _cost_sample(client: RestClient, evidence: Evidence) -> list[str]:
 
 
 @pytest.mark.settles("130")
-@pytest.mark.requests(117)
+@pytest.mark.requests(120)
 @pytest.mark.timeout(1200)
 def test_contracts_lookup_cost_with_and_without_date(
     live_rest: RestClient, *, evidence: Evidence
@@ -1224,8 +1230,8 @@ def test_contracts_lookup_cost_with_and_without_date(
     listed that day. Seconds per page tell the causes apart: pages of like time mean the cost
     is the rows `date` leaves out; one slow page among fast ones means Massive's variance.
     Times include any wait for the key's rate limit. Passes when every request is answered;
-    the times are evidence. Sends at most 117 requests: up to 3 snapshot pages, up to 4 days
-    asked, then 5 runs of up to 22 pages.
+    the times are evidence. Sends at most 120 requests: up to 6 for the snapshot (`_read_snapshot`),
+    up to 4 days asked, then 5 runs of up to 22 pages.
     """
     sample = _cost_sample(live_rest, evidence)
     day = _listed_day(live_rest, evidence)
@@ -1260,7 +1266,7 @@ _PRODUCT_FIELDS = ["details.ticker", "details.product_code"]
 
 
 @pytest.mark.settles("131")
-@pytest.mark.requests(33)
+@pytest.mark.requests(36)
 @pytest.mark.timeout(600)
 def test_snapshot_lookup_by_ticker_list(live_rest: RestClient, *, evidence: Evidence) -> None:
     """What a snapshot lookup by `ticker.any_of` costs, and whether nested `fields` works.
@@ -1278,8 +1284,8 @@ def test_snapshot_lookup_by_ticker_list(live_rest: RestClient, *, evidence: Evid
     Massive's answer and not sent again.
 
     Times include any wait for the key's rate limit. Passes when every request is answered
-    or refused as above; the times are evidence. Sends at most 33 requests: up to 3 snapshot
-    pages, then 30.
+    or refused as above; the times are evidence. Sends at most 36 requests: up to 6 for the
+    snapshot (`_read_snapshot`), then 30.
 
     Raises:
         WireError: When a lookup fails other than by such a refusal.
@@ -1484,8 +1490,9 @@ def _candidate_sessions(
 
 
 _PLACED_APART = "placed apart"
-"""The tally of the trades a combo's candidates place in different sessions: the only trades
-that tell the snapshot's product from the others."""
+"""The tally of the trades two of a combo's candidates place in different sessions: the only
+trades that tell the snapshot's product from the others. A trade one candidate places and
+another places in no session is tallied apart, since a schedule read short can leave it out."""
 
 
 @dataclass(frozen=True)
@@ -1514,7 +1521,8 @@ def _place_combo_trades(
     Returns:
         The trades by candidate (`product` for the snapshot's, `other`) and verdict (`agree`
         with the trade's `session_end_date`, `disagree`, or `none` when no session holds it),
-        and under `_PLACED_APART` the trades the candidates place in different sessions.
+        under `_PLACED_APART` the trades two candidates place in different sessions, and the
+        trades some candidates place and others place in none.
 
     Raises:
         WireError: When the read fails other than by such a refusal.
@@ -1545,9 +1553,11 @@ def _place_combo_trades(
         placements = {
             code: _session_holding(spans.get(code, {}), stamp) for code in candidates.codes
         }
-        held = {"none" if placed.startswith("none") else placed for placed in placements.values()}
-        if len(held) > 1:  # every "none of [...]" is one answer: no session holds the trade
+        dated = {placed for placed in placements.values() if not placed.startswith("none")}
+        if len(dated) > 1:
             tally[_PLACED_APART] += 1
+        elif dated and len(dated) < len(placements):  # a schedule read short may leave a gap
+            tally["placed by some candidates only"] += 1
         for code, placed in placements.items():
             verdict = (
                 "agree" if placed == day else "none" if placed.startswith("none") else ("disagree")
@@ -1565,7 +1575,7 @@ def _place_combo_trades(
 
 
 @pytest.mark.settles("132")
-@pytest.mark.requests(48)
+@pytest.mark.requests(51)
 @pytest.mark.timeout(600)
 def test_combo_trade_sessions_by_snapshot_product(
     live_rest: RestClient, *, evidence: Evidence
@@ -1598,7 +1608,7 @@ def test_combo_trade_sessions_by_snapshot_product(
     other candidates only by the trades they place apart, so with none the evidence says the
     question stays open. Run on a weekday, so trades from both parts of a session are read.
     Passes when every request is answered or refused as above and a combo's trade is read;
-    the counts are evidence. Sends at most 48 requests.
+    the counts are evidence. Sends at most 51 requests.
 
     Raises:
         WireError: When a trades read fails other than by a refusal.
@@ -1714,7 +1724,7 @@ def _record_traded_but_unlisted(
 
 
 @pytest.mark.settles("133")
-@pytest.mark.requests(82)
+@pytest.mark.requests(85)
 @pytest.mark.timeout(900)
 def test_snapshot_and_contracts_list_differences_on_a_listing_day(
     live_rest: RestClient, *, evidence: Evidence
@@ -1737,7 +1747,7 @@ def test_snapshot_and_contracts_list_differences_on_a_listing_day(
     lacks.
 
     Passes when every request is answered and both lists hold a ticker; the counts are
-    evidence. Sends at most 82 requests.
+    evidence. Sends at most 85 requests.
     """
     day = _listed_day(live_rest, evidence)
     listed = _read_snapshot(live_rest, evidence)
@@ -1782,7 +1792,7 @@ def _days_range(days: int | None) -> str:
 
 
 @pytest.mark.settles("135")
-@pytest.mark.requests(253)
+@pytest.mark.requests(256)
 @pytest.mark.timeout(1200)
 def test_schedule_horizon_per_traded_product(live_rest: RestClient, *, evidence: Evidence) -> None:
     """How many days ahead each traded futures product's schedule reaches.
@@ -1801,7 +1811,7 @@ def test_schedule_horizon_per_traded_product(live_rest: RestClient, *, evidence:
     refusal fails the test with Massive's answer.
 
     Passes when every request is answered and a product was asked about; the days are
-    evidence. Sends at most 253 requests.
+    evidence. Sends at most 256 requests.
     """
     listed = _read_snapshot(live_rest, evidence)
     since = epoch_ns(datetime.now(UTC) - _HORIZON_TRADED)
