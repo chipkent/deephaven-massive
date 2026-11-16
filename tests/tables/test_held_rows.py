@@ -571,3 +571,11 @@ def test_merged_rows_keep_the_time_each_was_held(
     settled = settle(held, None)
     assert settled.discarded[Readiness.UNSCHEDULED]["ESZ6"][0] == 1  # the first row only
     assert held.rows_of("trades") == held_rows.MERGE_AT
+
+
+def test_the_held_bytes_count_each_rows_held_time(held: HeldRows[str]) -> None:
+    settle(held, batch(("ESZ6", None, 1.0)))
+    [part] = held._held["trades"]["ESZ6"].parts
+    assert held.total_bytes == (
+        part.rows.get_total_buffer_size() + part.held_at.get_total_buffer_size()
+    )

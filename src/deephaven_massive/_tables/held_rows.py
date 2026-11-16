@@ -100,7 +100,7 @@ class _Part:
         generation: The newest socket generation of the rows.
         held_at: When each of them was held, seconds since the epoch, one per row: merging
             parts keeps each row's own.
-        nbytes: The size of the rows' buffers.
+        nbytes: The size of the rows' buffers and of their held times.
     """
 
     rows: pa.Table
@@ -466,7 +466,7 @@ class HeldRows(Generic[_K]):
                     _part(
                         tail.take(pa.array(range(tail.num_rows))),
                         part.generation,
-                        held_at=part.held_at.slice(first),
+                        held_at=part.held_at.slice(first).take(pa.array(range(tail.num_rows))),
                     )
                 )
         if lost:
@@ -767,7 +767,8 @@ def _part(rows: pa.Table, generation: int, *, held_at: pa.Array) -> _Part:
     Returns:
         The part.
     """
-    return _Part(rows, generation, held_at, rows.get_total_buffer_size())
+    size = rows.get_total_buffer_size() + held_at.get_total_buffer_size()
+    return _Part(rows, generation, held_at, size)
 
 
 def _first(flags: pa.Array) -> int | None:
