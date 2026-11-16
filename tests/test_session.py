@@ -52,7 +52,7 @@ from deephaven_massive.namespaces._partners import (
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.namespaces._reference import ReferenceNamespace
 from deephaven_massive.namespaces._stocks import StocksNamespace
-from deephaven_massive.queries import FetchQuery, SymbolStreamQuery
+from deephaven_massive.queries import FetchQuery, StreamQuery
 from tests._fakes.rest import Reply
 from tests._fakes.stream import transport_of
 
@@ -84,8 +84,8 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(session: dm.MassiveSession, symbols: SymbolsLike = ("AAPL",)) -> SymbolStreamQuery:
-    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
+def stream_query(session: dm.MassiveSession, symbols: SymbolsLike = ("AAPL",)) -> StreamQuery:
+    return build_query(session._core, SPEC, query_type=StreamQuery, symbols=symbols)
 
 
 def one_row(session: dm.MassiveSession) -> Table:
@@ -651,7 +651,7 @@ def test_after_close(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(dm.MassiveError, match=message):
         q.append_only()
     # Building queries and reaching namespaces never fail.
-    assert isinstance(stream_query(massive_session), SymbolStreamQuery)
+    assert isinstance(stream_query(massive_session), StreamQuery)
     assert isinstance(massive_session.stocks, StocksNamespace)
 
 

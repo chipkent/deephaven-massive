@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.queries import SymbolStreamQuery
+    from deephaven_massive.queries import StreamQuery
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 
@@ -2918,14 +2918,14 @@ def symbol_watchlist(dh_input_table: Callable[..., InputTable]) -> InputTable:
     return watchlist
 
 
-def static_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
+def static_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
     def open_result(ws_session: WsSession, upstream: list[Table], _: InputTable | None) -> Live:
         return Live(verb(ws_session.query(TRADES, [WATCHED])), upstream)
 
     return open_result
 
 
-def watchlist_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
+def watchlist_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
     def open_result(
         ws_session: WsSession, upstream: list[Table], watchlist: InputTable | None
     ) -> Live:

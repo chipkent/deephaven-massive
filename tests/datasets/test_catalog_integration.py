@@ -53,7 +53,7 @@ import deephaven_massive as dm
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
-from deephaven_massive.queries import FetchQuery, HistoryQuery, StreamQuery
+from deephaven_massive.queries import FetchQuery, HistoryQuery, NoSymbolStreamQuery, StreamQuery
 from tests._live import streams
 
 if TYPE_CHECKING:
@@ -712,7 +712,7 @@ def _stream_case(
     Returns:
         The table's columns and what the case saw drift.
     """
-    assert isinstance(query, StreamQuery)
+    assert isinstance(query, (StreamQuery, NoSymbolStreamQuery))
     table = query.append_only()
     before = _reconnects(_socket_rows(case))
     acked = wait_acked(case.session, 1, time.monotonic() + _STREAM_WAIT)
