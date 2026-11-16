@@ -19,13 +19,15 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   size (`DatasetSpec.page_size`, else the path's documented maximum `limit`, or `Request.limit`
   when that is smaller, so a small cap fetches no more than it keeps), and for `history()` the
   ascending direction (`_ascending`).
-  `Request.limit` caps the total rows, and the client stops paging there; on a dataset that
-  sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or an
-  indicator, or the news of one ticker) it caps each symbol's rows instead.
+  `Request.limit` caps the call's total rows: its requests go one at a time, each capped at the
+  rows still wanted, and none is sent once the cap is reached (`_read_capped`). On a dataset
+  that sends one symbol per request (a per-symbol path such as Benzinga's consensus ratings, or
+  an indicator, or the news of one ticker) it caps each symbol's rows instead.
 - **Listed tickers.** A dataset whose rows list their tickers (`DatasetSpec.ticker_list`: news,
   financial statements, insider and 8-K filings) gets its `Symbol` from the request: each
   ticker the request named that a row lists, the row repeated once per such ticker
-  (`_listed_rows`), so the split comes after `limit`, which caps what Massive returns.
+  (`_listed_rows`). The split comes after Massive's cap on a request's rows, so the read then
+  cuts the split rows to `limit`, and a row listed under several tickers may keep only some.
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -121,7 +123,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -138,6 +140,7 @@ from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     NEW_SESSION,
     AuthenticationError,
+    BrokenGuaranteeError,
     CutShortError,
     EntitlementError,
     ErrorSource,
@@ -168,6 +171,7 @@ from deephaven_massive._ingest.rest_requests import (
     Call,
     CryptoSplit,
     axis_query,
+    capped_call,
     fetch_paths,
     history_calls,
     own_symbols,
@@ -337,6 +341,82 @@ def _listed_rows(
     return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unmatched
 
 
+def _per_symbol(name: str, planned: Sequence[tuple[RestPath, list[Call]]]) -> bool:
+    """Return whether every planned call names one symbol, so `limit` caps each symbol.
+
+    Args:
+        name: The dataset's name, for the error.
+        planned: Each path with its calls.
+
+    Returns:
+        True when every call names one symbol (`Call.symbol`); False when none does, or there
+        are no calls.
+
+    Raises:
+        BrokenGuaranteeError: If some calls name one symbol and others do not: no dataset plans
+            such a read, and neither cap would be right for it.
+    """
+    kinds = {call.symbol is not None for _, calls in planned for call in calls}
+    if len(kinds) > 1:
+        raise BrokenGuaranteeError(
+            f"{name}: a read mixes per-symbol requests with requests of several symbols, so "
+            "`limit` can cap neither each symbol nor the whole call"
+        )
+    return True in kinds
+
+
+def _read_capped(
+    spec: DatasetSpec,
+    planned: Sequence[tuple[RestPath, list[Call]]],
+    read: functools.partial[_PathRows],
+    *,
+    limit: int,
+) -> tuple[list[pa.Table], int]:
+    """Make planned calls one at a time until `limit` rows have arrived: a capped read.
+
+    `limit` caps a call's total rows, and Massive stops sending them only per request, so a
+    read of several requests (a list of symbols split into batches) asks each only for the
+    rows still wanted (`capped_call`) and sends none once Massive has sent `limit` rows,
+    rather than sending them together. The count is of the rows Massive sent, before any was
+    withheld or listed under its tickers, as the client counts them when it stops paging. One
+    DEBUG line names the requests left unsent; the rate announcement and a `poll()` table's
+    pace check counted every planned request, so they may overstate a capped read.
+
+    Args:
+        spec: The dataset.
+        planned: Each path with its calls, in result order; no call names one symbol.
+        read: Reads one path's calls (`RestReader.read` bound to the read's arguments), given
+            the path, its calls, and the cap on their rows as `limit`.
+        limit: The cap on the read's rows.
+
+    Returns:
+        The rows of each call made, in call order, and the request count. Their rows may
+        exceed `limit` when rows are listed under several named tickers (`_listed_rows`).
+    """
+    tables: list[pa.Table] = []
+    requests = 0
+    remaining = limit
+    units = [(rest_path, call) for rest_path, calls in planned for call in calls]
+    for index, (rest_path, call) in enumerate(units):
+        if remaining <= 0:
+            logger.debug(
+                "%s: limit=%d rows arrived after %d of %d planned requests; the other %d are "
+                "not sent",
+                spec.name,
+                limit,
+                index,
+                len(units),
+                len(units) - index,
+            )
+            break
+        capped = capped_call(spec, rest_path, call, cap=remaining)
+        path_rows = read(rest_path, [capped], limit=remaining)
+        tables.append(path_rows.table)
+        requests += path_rows.requests
+        remaining -= path_rows.received
+    return tables, requests
+
+
 def _cut(text: str) -> str:
     """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
 
@@ -393,11 +473,28 @@ class _Outcome:
             was asked for and why, such as `"ESZ6 for the session 2026-10-30 (HTTP 404 from
             /futures/vX/trades/{ticker})"` or `"X:FOOUSD (Massive's crypto ticker list does not
             hold it)"`; None when the call was answered.
+        received: How many rows Massive sent, before any was withheld, listed under its
+            tickers, or left out of a window: what `limit` counts.
     """
 
     batches: tuple[pa.RecordBatch, ...]
     requests: int
     missing: str | None = None
+    received: int = 0
+
+
+class _PathRows(NamedTuple):
+    """What `RestReader.read` returned for one path's calls.
+
+    Attributes:
+        table: The rows, in call order and then page order.
+        requests: How many requests the calls made.
+        received: How many rows Massive sent (`_Outcome.received`).
+    """
+
+    table: pa.Table
+    requests: int
+    received: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -667,7 +764,7 @@ class RestReader:
         patience: Patience,
         tally: ReadTally,
         on_missing: Callable[[Sequence[str]], None] | None = None,
-    ) -> tuple[pa.Table, int]:
+    ) -> _PathRows:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
         One call runs on this thread; several run on `executor`, or on a pool of
@@ -686,7 +783,7 @@ class RestReader:
             calls: The planned calls, in result order.
             request: The normalized arguments: the timespan and multiplier of bars, and the
                 `adjusted` basis every page must echo.
-            limit: The cap on each call's rows, or None; `read_fetch` caps the total.
+            limit: The cap on each call's rows, or None; `_read_planned` caps the total.
             window: The `history()` window whose rows to keep, or None. Bars of a day or longer
                 move to 00:00 of their day in the class day zone, and a stamp Massive is not
                 known to use is kept as sent and logs one WARNING per form of stamp per session
@@ -712,7 +809,8 @@ class RestReader:
                 that setting here (`_report_missing`).
 
         Returns:
-            The rows, in call order and then page order, and the number of requests made.
+            The rows, in call order and then page order, the number of requests made, and how
+            many rows Massive sent.
 
         Errors: the public error of each `WireError` (`public_error`), the `RowDataError` of a
         withheld row's `RAISE` cause (`_page_rows`), and the `MassiveError` of `_call` for a
@@ -747,8 +845,11 @@ class RestReader:
         elif missing:
             self._report_missing(spec, missing)
         batches = [batch for outcome in outcomes for batch in outcome.batches]
-        table = pa.Table.from_batches(batches, schema=converter.arrow_schema)
-        return table, sum(outcome.requests for outcome in outcomes)
+        return _PathRows(
+            pa.Table.from_batches(batches, schema=converter.arrow_schema),
+            sum(outcome.requests for outcome in outcomes),
+            sum(outcome.received for outcome in outcomes),
+        )
 
     def read_each(
         self,
@@ -1070,11 +1171,11 @@ class RestReader:
             return _Outcome((), 0, missing=missing)
         kept: list[pa.RecordBatch] = []
         requests = 0
+        received_rows = 0
         template = converter.rest_path.template
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
-        stamps = times.stamps
         bucket = _request_bucket(spec, template, call)
         bare_index = _bare_index(request, call)
         try:
@@ -1089,6 +1190,7 @@ class RestReader:
             ):
                 received = time.time_ns()
                 requests += 1
+                received_rows += len(page.rows)
                 self.drift.report_statuses(template, page.drift.statuses)
                 if current:
                     self._check_recency(
@@ -1115,9 +1217,9 @@ class RestReader:
                     self._check_index_rows(spec, batches, bare_index, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
-                if stamps is not None:
+                if times.stamps is not None:
                     batches = [
-                        _stamped(stamps, spec.name, b, source=template, policy=self.policy)
+                        _stamped(times.stamps, spec.name, b, source=template, policy=self.policy)
                         for b in batches
                     ]
                 kept.extend(
@@ -1146,7 +1248,7 @@ class RestReader:
                 kept=kept,
                 requests=requests,
             )
-        return _Outcome(tuple(kept), requests)
+        return _Outcome(tuple(kept), requests, received=received_rows)
 
     def _not_found(
         self,
@@ -2156,8 +2258,7 @@ class RestReader:
 
         Returns:
             The rows of every path, in path order, capped at `Request.limit` (each symbol's
-            rows where a request names one symbol, each request's rows for a dataset whose
-            symbols overlap; `_read_planned`), and the request count.
+            rows where a request names one symbol; `_read_planned`), and the request count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
@@ -2204,11 +2305,11 @@ class RestReader:
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
-        The cap is on the total rows, except where each request names one symbol
-        (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few symbols
-        with many rows never crowd out the rest. A dataset whose rows list their tickers may
-        hold more rows than the cap: each row is repeated once per named ticker it lists
-        (`_listed_rows`) after Massive capped it.
+        The cap is on the total rows (`_read_capped`), except where each request names one
+        symbol (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few
+        symbols with many rows never crowd out the rest, and the calls of a path run together.
+        On a dataset whose rows list their tickers, each row is repeated once per named ticker
+        it lists (`_listed_rows`), and the cap counts the repeated rows.
 
         Args:
             spec: The dataset.
@@ -2232,36 +2333,37 @@ class RestReader:
         Raises:
             RowDataError: If the library could read none of the rows of the read's symbols
                 whole, across all its paths and pages (`ReadTally.check`), whatever its policy.
+            BrokenGuaranteeError: If a capped plan mixes per-symbol calls with calls of several
+                symbols (`_per_symbol`).
 
         Errors are otherwise those of `read`.
         """
-        tables = []
-        requests = 0
         tally = ReadTally()
-        for rest_path, calls in planned:
-            table, made = self.read(
-                spec,
-                rest_path,
-                calls,
-                request=request,
-                limit=request.limit,
-                current=current,
-                on_recency=on_recency,
-                record=record,
-                executor=executor,
-                cancel=cancel,
-                patience=patience,
-                tally=tally,
-                on_missing=on_missing,
-            )
-            tables.append(table)
-            requests += made
+        read = functools.partial(
+            self.read,
+            spec,
+            request=request,
+            current=current,
+            on_recency=on_recency,
+            record=record,
+            executor=executor,
+            cancel=cancel,
+            patience=patience,
+            tally=tally,
+            on_missing=on_missing,
+        )
+        per_symbol = request.limit is not None and _per_symbol(spec.name, planned)
+        if request.limit is None or per_symbol:
+            done = [read(rest_path, calls, limit=request.limit) for rest_path, calls in planned]
+            tables = [path_rows.table for path_rows in done]
+            requests = sum(path_rows.requests for path_rows in done)
+        else:
+            tables, requests = _read_capped(spec, planned, read, limit=request.limit)
         tally.check(spec.name, source=", ".join(f"GET {path.template}" for path, _ in planned))
         if not tables:
             schema = self.catalog.dataset_schema(spec)
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
-        per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
         if request.limit is not None and per_symbol:
             # Each request named one symbol and was capped on its own.
             logger.debug(
@@ -2271,17 +2373,8 @@ class RestReader:
                 requests,
                 request.limit,
             )
-        elif request.limit is not None and spec.ticker_list is not None:
-            # Massive capped the rows; listing each under every named ticker it lists can
-            # give more, all of which are kept.
-            logger.debug(
-                "%s: kept %d rows, each listed under its named tickers, from rows Massive "
-                "capped at limit=%d",
-                spec.name,
-                rows.num_rows,
-                request.limit,
-            )
         elif request.limit is not None:
+            # Rows listed under several named tickers can outnumber the rows Massive capped.
             rows = rows.slice(0, request.limit)
         return rows, requests
 
@@ -2717,7 +2810,7 @@ class RestEndpoints:
         )
         patience = reader.patience()
         tally = ReadTally()
-        table, requests = reader.read(
+        read = reader.read(
             spec,
             rest_path,
             calls,
@@ -2732,10 +2825,10 @@ class RestEndpoints:
         logger.info(
             "%s history: source=REST requests=%d, waiting out at most %.0f s of pauses",
             spec.name,
-            requests,
+            read.requests,
             patience.seconds,
         )
-        return self._static(spec, table)
+        return self._static(spec, read.table)
 
     def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
         """Plan `history`'s REST requests with no data request, so a parameter error raises now.

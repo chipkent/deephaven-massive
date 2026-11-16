@@ -51,6 +51,7 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
     READ_STOPPED,
+    BrokenGuaranteeError,
     CutShortError,
     RowDataError,
     UnavailableSymbolError,
@@ -1625,7 +1626,23 @@ def test_limit_caps_rows_across_requests(
     out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
     assert len(out) == 3
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
-    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["3"]]
+    # The second request asks only for the row still wanted.
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["1"]]
+
+
+def test_limit_sends_no_request_once_its_rows_have_arrived(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The symbols take two requests, but the first answers every row the call asked for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert len(out) == 2
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+    assert (
+        "stocks.dividends: limit=2 rows arrived after 1 of 2 planned requests; the other 1 are "
+        "not sent"
+    ) in caplog.messages
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -2885,7 +2902,7 @@ def test_a_read_fans_out_on_the_callers_pool(
         CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
-        table, requests = reader.read(
+        table, requests, _ = reader.read(
             CRYPTO_LAST,
             path,
             calls,
@@ -4926,13 +4943,36 @@ def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
     assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
 
 
-def test_listing_a_row_under_each_ticker_can_pass_the_limit(
+def test_limit_counts_the_rows_massive_sent_not_those_kept(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # `limit` caps the rows Massive returns; each is then listed under its named tickers.
+    # The first request's two rows reach the cap though one is withheld, as the client stops
+    # paging at the rows that arrived: the second request is not sent.
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([odd, AAPL_DIVIDEND])))
+    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert [r["Id"] for r in out] == ["E1"]
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+
+
+def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> None:
+    # Neither cap fits such a plan, and no dataset makes one.
+    path = RestPath(key="/x", fields=(), params=())
+    planned = [(path, [rest_requests.Call({}, {}, "AAPL"), rest_requests.Call({}, {})])]
+    with pytest.raises(BrokenGuaranteeError, match="mixes per-symbol requests"):
+        rest._per_symbol("stocks.dividends", planned)
+    assert rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {})])]) is False
+    assert rest._per_symbol("stocks.dividends", []) is False
+
+
+def test_limit_caps_the_rows_listed_under_each_ticker(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive caps its rows at the limit; listing a row under each named ticker it lists can
+    # give more, and the cap is on the call's rows, so the copy past it is cut.
     fake_rest.reply(LISTED_PATH, _listed((1, ["AAPL", "MSFT"])))
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"], limit=1)
-    assert [r["Symbol"] for r in out] == ["AAPL", "MSFT"]
+    assert [r["Symbol"] for r in out] == ["AAPL"]
     assert fake_rest.get_queries()[0][1]["limit"] == ["1"]
 
 
