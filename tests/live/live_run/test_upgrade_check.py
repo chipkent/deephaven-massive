@@ -1,8 +1,8 @@
 """Tests of the live run's attended upgrade check (`tests/_live/live_run/upgrade_check.py`).
 
-Sessions reach the fake REST server, which answers the free plan's 429 until the scripted
-upgrade; the test's governors wait on a fake clock (`rest_clock`), so no pause sleeps. The
-check's own clock, sleeps, and Enter are stand-ins, and `tier_of` plays the probe.
+Sessions reach the fake REST server, which answers a limited subscription's 429 until the
+scripted upgrade; the test's governors wait on a fake clock (`rest_clock`), so no pause sleeps.
+The check's own clock, sleeps, and Enter are stand-ins.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import pytest
 import deephaven_massive as dm
 from tests._fakes.rest import Reply, envelope
 from tests._live.live_run import upgrade_check
+from tests._live.live_run.stream_units import SUBSCRIPTIONS
 from tests._live.live_run.upgrade_check import Waits
 
 if TYPE_CHECKING:
@@ -102,21 +103,20 @@ def test_an_upgrade_that_lifts_the_limit_passes(
     capsys: pytest.CaptureFixture[str],
     rest_clock: FakeClock,
 ) -> None:
-    fake_rest.reply(PREV, LIMITED, BAR)
-    tiers = ["basic", None, "starter"]
+    # Session A learns the limit; the first minute's six calls draw a 429; the next minute's
+    # are all answered, so the upgrade took effect.
+    fake_rest.reply(PREV, LIMITED, BAR, LIMITED, BAR)
     clock = _Time(rest_clock)
     record = upgrade_check.run_upgrade_check(
-        "stocks",
-        open_session=open_session,
-        tier_of=lambda: tiers.pop(0) if len(tiers) > 1 else tiers[0],
-        folder=tmp_path,
-        waits=clock.waits(),
+        "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
     )
     assert record.verdict == "passed"
     assert record.learned_calls == 1
     assert record.row_before["LimitSource"] == "LEARNED"
     assert clock.entered == 1
-    assert clock.sleeps == [60.0, 60.0, upgrade_check.FRESH_MINUTE]
+    assert clock.sleeps == [60.0, upgrade_check.FRESH_MINUTE]
+    assert [a["refused"] for a in record.answered] == [True, False]
+    assert len(record.answered[1]["calls"]) == upgrade_check.ANSWERED_CALLS
     [round_] = record.rounds
     assert len(round_["calls"]) == upgrade_check.ROUND_CALLS
     assert not round_["refused"]
@@ -135,11 +135,7 @@ def test_a_slow_round_without_refusals_blames_the_library(
     fake_rest.reply(PREV, LIMITED, BAR)
     clock = _Time(rest_clock, call_seconds=31.0)
     record = upgrade_check.run_upgrade_check(
-        "stocks",
-        open_session=open_session,
-        tier_of=lambda: "starter",
-        folder=tmp_path,
-        waits=clock.waits(),
+        "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
     )
     assert record.verdict == "failed: library paced"
 
@@ -151,17 +147,14 @@ def test_refusals_until_the_wait_ends_blame_massive(
     tmp_path: Path,
     rest_clock: FakeClock,
 ) -> None:
-    fake_rest.reply(PREV, *[LIMITED, BAR] * 100)  # every session B is refused again
+    # Six calls answered, then every session B is refused again.
+    fake_rest.reply(PREV, LIMITED, *[BAR] * 7, *[LIMITED, BAR] * 400)
     record = upgrade_check.run_upgrade_check(
-        "stocks",
-        open_session=open_session,
-        tier_of=lambda: "starter",
-        folder=tmp_path,
-        waits=_Time(rest_clock).waits(),
+        "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )
-    assert record.verdict == "failed: Massive kept the free limit"
+    assert record.verdict == "failed: Massive refused a round of ten"
     assert all(r["refused"] for r in record.rounds)
-    assert len(record.rounds) == 8  # every 125 s (65 s, a round, 60 s) within 15 minutes
+    assert len(record.rounds) == 14  # from 65 s, then every 60 s, within 15 minutes
 
 
 def test_no_upgrade_is_a_rehearsal(
@@ -171,16 +164,14 @@ def test_no_upgrade_is_a_rehearsal(
     tmp_path: Path,
     rest_clock: FakeClock,
 ) -> None:
-    fake_rest.reply(PREV, LIMITED, BAR)
+    fake_rest.reply(PREV, *[LIMITED, BAR] * 200)  # every minute's six calls draw a 429
     record = upgrade_check.run_upgrade_check(
-        "stocks",
-        open_session=open_session,
-        tier_of=lambda: "basic",
-        folder=tmp_path,
-        waits=_Time(rest_clock).waits(),
+        "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )
-    assert record.verdict == "failed: tier stayed Basic"
+    assert record.verdict == "failed: Massive kept limiting for 15 minutes"
     assert record.rounds == []
+    assert record.answered
+    assert all(a["refused"] for a in record.answered)
 
 
 def test_a_limit_never_learned_stops_the_check(
@@ -202,7 +193,7 @@ def test_a_failed_call_is_recorded_with_its_error(
 
 
 def test_each_subscription_has_a_one_request_call() -> None:
-    assert set(upgrade_check.CALLS) == set(upgrade_check.SUBSCRIPTIONS)
+    assert set(upgrade_check.CALLS) == set(SUBSCRIPTIONS)
 
 
 @pytest.mark.parametrize("subscription", ["options", "indices", "currencies", "futures"])
@@ -221,10 +212,9 @@ def test_the_default_waits_are_real() -> None:
     assert before <= waits.now()
 
 
-def test_the_options_call_reads_an_endpoint_basic_includes(
+def test_the_options_call_reads_a_contract_bar_not_the_chain(
     fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession]
 ) -> None:
-    # A contract's previous-day bar: Options Basic has aggregates, but not the chain snapshot.
     with open_session() as m:
         upgrade_check.CALLS["options"](m)
     [request] = fake_rest.requests

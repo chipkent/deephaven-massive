@@ -1,7 +1,7 @@
 """Tests of the live run's state and its due rules (`tests/_live/live_run/state.py`).
 
-The state round-trips through `state.json`; the entitlement ids, the rise of a tier, and the
-rules that decide whether a check runs again are checked case by case.
+The state round-trips through `state.json`; the subscription a refusal names, and the rules
+that decide whether a check runs again, are checked case by case.
 """
 
 from __future__ import annotations
@@ -12,22 +12,21 @@ import pytest
 
 from tests._live.live_run import state as run_state
 from tests._live.live_run.state import Attempt, RunState, check_of, is_due, record
-from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 DAY = "2026-11-03"
+NEXT_DAY = "2026-11-04"
 
-
-def _tiers(**tiers: str) -> dict[str, str]:
-    return {name: tiers.get(name, "basic") for name in TIERS}
+REFUSAL = (
+    "refused: HTTP 403 from GET /v3/quotes/AAPL on api.massive.com (request_id 1): "
+    "You are not entitled to this data"
+)
 
 
 def _state() -> RunState:
-    state = RunState(commit="abc")
-    state.current = run_state.entitlement_id(state, _tiers(), [])
-    return state
+    return RunState(commit="abc")
 
 
 def test_the_state_round_trips_and_a_missing_one_is_none(tmp_path: Path) -> None:
@@ -42,41 +41,20 @@ def test_the_state_round_trips_and_a_missing_one_is_none(tmp_path: Path) -> None
 
 
 def test_a_state_of_another_version_is_refused(tmp_path: Path) -> None:
-    (tmp_path / "state.json").write_text('{"version": 99}')
-    with pytest.raises(ValueError, match="layout version 99"):
+    (tmp_path / "state.json").write_text('{"version": 1}')
+    with pytest.raises(ValueError, match="layout version 1"):
         run_state.load(tmp_path)
 
 
-def test_entitlement_ids_name_each_combination_once() -> None:
-    state = _state()
-    assert run_state.entitlement_id(state, _tiers(), []) == "e1"
-    assert run_state.entitlement_id(state, _tiers(stocks="starter"), ["b", "a"]) == "e2"
-    assert run_state.entitlement_id(state, _tiers(stocks="starter"), ["a", "b"]) == "e2"
-    assert run_state.tiers_text(state, "e2").endswith("futures=basic; flat files: a, b")
-    assert run_state.tiers_text(state, "e1").endswith("flat files: none")
-    assert run_state.tiers_text(state, "") == ""
-
-
-def test_a_tier_rises_only_upward_between_known_entitlements() -> None:
-    state = _state()
-    high = run_state.entitlement_id(state, _tiers(options="starter"), [])
-    assert run_state.tier_rose(state, "e1", high)
-    assert not run_state.tier_rose(state, high, "e1")
-    assert not run_state.tier_rose(state, "", high)
-    assert not run_state.tier_rose(state, high, high)
-
-
-def test_a_new_check_is_due_and_a_pass_is_not_until_a_tier_rises() -> None:
+def test_a_new_check_is_due_and_a_pass_is_final() -> None:
     state = _state()
     check = check_of(state, "evidence", "t")
-    assert is_due(state, check)
+    assert is_due(check, DAY)
     record(state, check, status="passed", reason="", day=DAY)
-    assert not is_due(state, check)
-    state.current = run_state.entitlement_id(state, _tiers(stocks="starter"), [])
-    assert is_due(state, check)
-    record(state, check, status="skipped", reason="no frame arrived", day=DAY)
-    assert (check.status, check.passed_under) == ("passed", state.current)
-    assert not is_due(state, check)
+    assert not is_due(check, NEXT_DAY)
+    record(state, check, status="skipped", reason="no frame arrived", day=NEXT_DAY)
+    assert (check.status, check.last_run) == ("passed", NEXT_DAY)
+    assert not is_due(check, NEXT_DAY)
 
 
 def test_two_failures_are_final_and_an_interruption_counts_nothing() -> None:
@@ -84,32 +62,92 @@ def test_two_failures_are_final_and_an_interruption_counts_nothing() -> None:
     check = check_of(state, "smoke", "t")
     record(state, check, status="failed", reason="call: KeyError", day=DAY)
     record(state, check, status="interrupted", reason="", day="later")
-    assert (is_due(state, check), check.last_run) == (True, DAY)
+    assert (is_due(check, DAY), check.last_run) == (True, DAY)
     record(state, check, status="error", reason="the child ended first", day=DAY)
     assert check.failures == 2
-    assert not is_due(state, check)
+    assert not is_due(check, NEXT_DAY)
     check_of(state, "other", "u")
     run_state.redo(state, "smoke")
-    assert (check.status, check.failures, is_due(state, check)) == ("not run", 0, True)
+    assert (check.status, check.failures, is_due(check, DAY)) == ("not run", 0, True)
 
 
-@pytest.mark.parametrize("status", ["refused", "skipped"])
-def test_a_need_or_refusal_waits_for_another_entitlement(status: str) -> None:
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [("refused", REFUSAL), ("skipped", "not listed as delayed: list stocks in ...")],
+)
+def test_a_refusal_or_an_unlisted_delay_runs_again_at_the_first_attempt_of_each_day(
+    status: str, reason: str
+) -> None:
+    """Massive's refusal, or the owner's settings, change only with the key or the file.
+
+    Such a check runs once a day, at its group's first attempt, and never counts as a
+    condition skip, so it never runs out of attempts.
+    """
     state = _state()
     check = check_of(state, "evidence", "t")
-    record(state, check, status=status, reason="needs Stocks Starter ($29/month)", day=DAY)
-    assert not is_due(state, check)
-    state.current = run_state.entitlement_id(state, _tiers(indices="starter"), [])
-    assert is_due(state, check)
+    record(state, check, status=status, reason=reason, day=DAY)
+    assert run_state.is_daily(check)
+    assert not is_due(check, DAY)
+    assert is_due(check, NEXT_DAY)
+    assert check.condition_skips == 0
+
+
+def test_a_cleared_refusal_reruns_the_other_refused_checks_of_its_subscription_at_once() -> None:
+    """When one of a subscription's checks stops being refused, the key gained something.
+
+    Every other check of that subscription that Massive refused is due again the same day,
+    and its group may run again (`reruns`); a refusal of another subscription waits for the
+    next day.
+    """
+    state = _state()
+    first = check_of(state, "evidence", "a.py::t")
+    second = check_of(state, "smoke", "b.py::u")
+    other = check_of(state, "smoke", "c.py::v")
+    record(state, first, status="refused", reason=REFUSAL, day=DAY)
+    record(state, second, status="refused", reason=REFUSAL, day=DAY)
+    record(
+        state,
+        other,
+        status="refused",
+        reason="refused: HTTP 403 from GET /v3/snapshot/indices on h: no",
+        day=DAY,
+    )
+    assert (first.subscription, other.subscription) == ("stocks", "indices")
+    assert not run_state.reruns(state, "smoke")
+    record(state, first, status="passed", reason="", day=DAY)
+    assert (second.rerun, other.rerun, first.rerun) == (True, False, False)
+    assert is_due(second, DAY)
+    assert not is_due(other, DAY)
+    assert run_state.reruns(state, "smoke")
+    record(state, second, status="refused", reason=REFUSAL, day=DAY)
+    assert not run_state.reruns(state, "smoke")
+    assert not is_due(second, DAY)
+
+
+@pytest.mark.parametrize(
+    ("name", "reason", "subscription"),
+    [
+        ("t", REFUSAL, "stocks"),
+        ("t", "refused: HTTP 403 from GET /v2/aggs/ticker/O%3ASPY/range on h: no", "options"),
+        ("crypto", "refused: HTTP 403: not entitled", "currencies"),
+        ("futures", "refused: NOT_AUTHORIZED", "futures"),
+        ("a.py::test_forex_quotes", "refused: HTTP 403: not entitled", "currencies"),
+        ("a.py::test_x", "refused: the indices stream: not entitled", "indices"),
+        ("a.py::test_x", "refused: HTTP 403 from GET /v1/marketstatus/now on h: no", ""),
+    ],
+)
+def test_the_subscription_a_refusal_names(name: str, reason: str, subscription: str) -> None:
+    assert run_state.refused_subscription(name, reason) == subscription
 
 
 def test_a_condition_skip_is_retried_three_times() -> None:
     state = _state()
     check = check_of(state, "luld", "t")
     for _ in range(3):
-        assert is_due(state, check)
+        assert is_due(check, DAY)
         record(state, check, status="skipped", reason="no LULD frame arrived", day=DAY)
-    assert (check.condition_skips, is_due(state, check)) == (3, False)
+    assert (check.condition_skips, is_due(check, DAY)) == (3, False)
+    assert not run_state.is_daily(check)
 
 
 def test_a_stream_check_skipped_while_the_market_was_closed_is_due_on_a_trading_day() -> None:
@@ -129,10 +167,10 @@ def test_a_stream_check_skipped_while_the_market_was_closed_is_due_on_a_trading_
         reason="not exercised: market closed (acknowledged)",
         day=saturday,
     )
-    assert (check.status, check.passed_under, check.condition_skips) == ("skipped", "", 1)
-    assert is_due(state, check)
+    assert (check.status, check.condition_skips) == ("skipped", 1)
+    assert is_due(check, monday)
     record(state, check, status="passed", reason="", day=monday)
-    assert not is_due(state, check)
+    assert not is_due(check, monday)
 
 
 @pytest.mark.parametrize(
@@ -140,7 +178,7 @@ def test_a_stream_check_skipped_while_the_market_was_closed_is_due_on_a_trading_
     [
         ("smoke", "t.py::test_every[stocks.trades-stream]"),
         ("evidence", "t.py::test_whether_massive_serves_a_real_time_key_on_the_delayed_feed"),
-        ("stream-day", "stocks delayed"),
+        ("stream-day", "stocks"),
     ],
 )
 def test_a_stream_pass_from_before_rows_were_required_runs_again(group: str, name: str) -> None:
@@ -151,19 +189,13 @@ def test_a_stream_pass_from_before_rows_were_required_runs_again(group: str, nam
     """
     state = _state()
     check = check_of(state, group, name)
-    check.status, check.passed_under = "passed", state.current  # as an older state stored it
-    assert is_due(state, check)
+    check.status = "passed"  # as an older state stored it
+    assert is_due(check, DAY)
     record(state, check, status="skipped", reason="not exercised: market closed", day=DAY)
-    assert is_due(state, check)
+    assert is_due(check, DAY)
     record(state, check, status="passed", reason="", day=DAY)
-    assert (check.passed_rules, is_due(state, check)) == (run_state.ROW_RULES, False)
+    assert (check.passed_rules, is_due(check, DAY)) == (run_state.ROW_RULES, False)
     other = check_of(state, "smoke", "t.py::test_every[stocks.trades-fetch]")
-    other.status, other.passed_under = "passed", state.current
-    assert not is_due(state, other)
-
-
-def test_need_reasons_are_told_from_conditions() -> None:
-    assert run_state.is_need("not entitled: needs a Stocks plan")
-    assert run_state.is_need("outside the plan's history: ...")
-    assert not run_state.is_need("is the market closed?")
+    other.status = "passed"
+    assert not is_due(other, DAY)
     assert run_state.key("g", "n") == "g n"

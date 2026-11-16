@@ -10,9 +10,10 @@ the JSON of the `FAKE_LIVE_CHILD` environment variable, in this order:
 - `print`: lines to print (a test plants secrets in them to see the program clean its logs);
 - `evidence`: text appended to `live-evidence-20261104T163000Z.log` in the working directory,
   as the live tests' evidence recorder writes its run's own file (never while collecting);
-- `collection`: with `--collect-only`, the object written to `MASSIVE_LIVE_COLLECTION`;
-- `outcomes`: for each node id on the command line, its phase records, appended to
-  `MASSIVE_LIVE_OUTCOMES` as the outcomes plugin would;
+- `collection`: with `--collect-only`, the object written to the file `--live-collection`
+  names;
+- `outcomes`: for each node id on the command line, its phase records, appended to the file
+  `--live-outcomes` names, as the outcomes plugin would;
 - `results`: for `_group`, the lines appended to the attempt's `results.jsonl`;
 - `prompt`: for `_group`, a line printed before the results, after which the child reads one
   line from its standard input (the upgrade check's Enter);
@@ -55,8 +56,8 @@ def main() -> int:
     if "evidence" in script and "--collect-only" not in argv:
         with Path("live-evidence-20261104T163000Z.log").open("a", encoding="utf-8") as file:
             file.write(script["evidence"])
-    collection = os.environ.get("MASSIVE_LIVE_COLLECTION", "")
-    outcomes = os.environ.get("MASSIVE_LIVE_OUTCOMES", "")
+    collection = _option(argv, "--live-collection")
+    outcomes = _option(argv, "--live-outcomes")
     if "--collect-only" in argv and collection and "collection" in script:
         Path(collection).write_text(json.dumps(script["collection"]), encoding="utf-8")
     elif outcomes:

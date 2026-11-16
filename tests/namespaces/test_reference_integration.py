@@ -24,7 +24,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import bad_values
+from tests._live import bad_values, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -47,8 +47,6 @@ _TYPES = ("WARRANT", "UNIT", "RIGHT", "PFD")
 _LIMIT = 10_000
 """The most rows read of a listing; a result of exactly this many is cut short."""
 
-_BASIC_LIMIT = 5_000
-"""The most rows read of a listing with Stocks on Basic: five pages of 1,000, five requests."""
 _PARTNER_PAGES = ("/benzinga/v1/ratings", "/etf-global/v1/constituents", "/tmx/v1/corporate-events")
 
 
@@ -61,7 +59,6 @@ def _repeated(keys: Iterable[tuple[object, ...]]) -> list[tuple[tuple[object, ..
     return [(key, count) for key, count in Counter(keys).most_common() if count > 1]
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("24")
 @pytest.mark.requests(2)
 def test_key_of_the_ticker_event_type(
@@ -89,32 +86,29 @@ def test_key_of_the_ticker_event_type(
     assert all(r["Type"] is not None for r in library), f"a null Type: {library}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("30")
-@pytest.mark.requests(5)
+@pytest.mark.requests(10)
 @pytest.mark.timeout(110)
 def test_inactive_tickers_on_several_rows(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether a delisted ticker can appear on several rows of the inactive tickers listing.
 
-    `reference.tickers` polls keyed by `Symbol`. Records inactive tickers from `A` to `AC`
-    (up to 10,000 rows, or 5,000 with Stocks on Basic, five requests) that occur on more than
-    one row. Passes when no ticker is on several rows, so the key holds; a repeated ticker
-    means a polled table keeps one of its rows, and the key needs another column.
+    `reference.tickers` polls keyed by `Symbol`. Records inactive tickers from `A` to `AC` (up to
+    10,000 rows, ten requests of 1,000) that occur on more than one row. Passes when no ticker is on
+    several rows, so the key holds; a repeated ticker means a polled table keeps one of its rows,
+    and the key needs another column.
     """
-    limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
     rows = table_rows(
         live_session.reference.tickers(
-            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=limit
+            active=False, filters={"ticker_gte": "A", "ticker_lt": "AC"}, limit=_LIMIT
         ).fetch(wait=True)
     )
     repeated = _repeated((row["Symbol"],) for row in rows)
-    cut = " (cut short at the limit)" if len(rows) == limit else ""
+    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
     evidence(
         f"tickers(active=False) A..AC: {len(rows)} rows{cut}, {len(repeated)} repeated tickers"
     )
@@ -124,7 +118,6 @@ def test_inactive_tickers_on_several_rows(
     assert not repeated, f"inactive tickers on several rows: {repeated[:20]}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("31")
 @pytest.mark.requests(1)
 def test_exchanges_are_keyed_by_asset_class_and_id(
@@ -142,27 +135,24 @@ def test_exchanges_are_keyed_by_asset_class_and_id(
     assert not repeated, f"exchanges sharing (AssetClass, Id): {repeated}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("32")
-@pytest.mark.requests(5)
+@pytest.mark.requests(10)
 def test_conditions_are_keyed_by_every_column(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """Whether every condition differs from the others in some column, the key it polls by.
 
-    Reads up to 10,000 conditions, or 5,000 with Stocks on Basic (five requests at most). For
+    Reads up to 10,000 conditions (ten requests of 1,000 at most). For
     each `(AssetClass, Type, Id)` Massive lists more than once, records the columns whose
     values differ between its rows. Passes when no two rows are equal in every column but
     `TimestampInsert`, so a `poll()` table, keyed by all of them, keeps every condition; a
     failure names the repeated rows.
     """
-    limit = _BASIC_LIMIT if "stocks" in classes_on_basic else _LIMIT
-    rows = table_rows(live_session.reference.conditions(limit=limit).fetch(wait=True))
-    cut = " (cut short at the limit)" if len(rows) == limit else ""
+    rows = table_rows(live_session.reference.conditions(limit=_LIMIT).fetch(wait=True))
+    cut = " (cut short at the limit)" if len(rows) == _LIMIT else ""
     triples = _repeated((row["AssetClass"], row["Type"], row["Id"]) for row in rows)
     evidence(f"conditions: {len(rows)} rows{cut}; repeated (AssetClass, Type, Id): {triples}")
     for triple, _count in triples:
@@ -195,12 +185,11 @@ def _hashable(value: object) -> object:
     return tuple(value) if isinstance(value, list) else value
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("43")
-@pytest.mark.requests(4)
+@pytest.mark.requests(7)
 @pytest.mark.timeout(110)
 def test_stock_ticker_spellings_the_library_cannot_read(
-    live_rest: RestClient, *, classes_on_basic: frozenset[str], evidence: Evidence
+    live_rest: RestClient, *, evidence: Evidence
 ) -> None:
     """Which stock ticker spellings fall outside the library's canonical stock grammar.
 
@@ -210,9 +199,8 @@ def test_stock_ticker_spellings_the_library_cannot_read(
     Passes when the grammar reads every ticker of the four types; another spelling must join
     the grammar or be left to the handling of unknown symbols. The partner pages are evidence
     only, since they also hold tickers of other markets (ETF Global's currency instruments,
-    TMX's Canadian listings). A refused partner page (no entitlement) is recorded and skipped.
-    With Stocks on Basic, which allows 5 requests a minute, the partner pages are left out, so
-    the test sends 4 requests.
+    TMX's Canadian listings). A partner page Massive refuses is recorded with Massive's
+    refusal and passed over. The test sends 7 requests.
     """
     seen = 0
     unread: dict[str, list[str]] = {}
@@ -230,15 +218,13 @@ def test_stock_ticker_spellings_the_library_cannot_read(
         evidence(f"    outside the stock grammar: {odd}")
         if odd:
             unread[ticker_type] = odd
-    if "stocks" in classes_on_basic:
-        evidence("Stocks on Basic: the partner pages are not read")
-    for path in () if "stocks" in classes_on_basic else _PARTNER_PAGES:
+    for path in _PARTNER_PAGES:
         try:
             rows = live_rest.get(
                 source(Transport.REST, path), {}, {"limit": 100}, bucket="other"
             ).rows
         except WireEntitlementError as error:
-            evidence(f"{path}: not entitled: needs the partner's $99/month add-on ({error})")
+            evidence(f"{path}: refused: {refusals.refusal_line(error)}")
             continue
         except WireError as error:
             evidence(f"{path}: {type(error).__name__}: {error}")
@@ -265,7 +251,6 @@ def _unreadable(ticker: str) -> bool:
     return False
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("92")
 @pytest.mark.requests(3)
 def test_massive_answers_an_asset_class_its_endpoint_does_not_list(

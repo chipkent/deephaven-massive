@@ -154,7 +154,6 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
     assert not problems, f"REST rows the library cannot read back: {problems}"
 
 
-@pytest.mark.needs("s3")
 @pytest.mark.verifies("121")
 @pytest.mark.timeout(600)
 def test_flat_file_rows_spell_share_classes_and_preferreds_canonically(

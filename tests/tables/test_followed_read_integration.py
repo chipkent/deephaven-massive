@@ -6,7 +6,7 @@ fixed range, drops each one removed, and on a re-add either reuses the earlier d
 each symbol's read. The test follows a watchlist of daily bars from REST over a past week,
 adds Apple and a ticker with no data, removes and re-adds Apple under each member, and
 records what `m.symbol_reads()` shows at each step. Unadjusted bars keep it independent of
-splits. It sends about four requests, so it fits the Basic limit. How to run these tests is in
+splits. It sends about four requests. How to run these tests is in
 `docs/live-tests.md`.
 """
 
@@ -45,7 +45,8 @@ _NO_DATA = "ZZZZQ"
 """A stock ticker in Massive's grammar that names no listed stock, so it has no bars."""
 
 _WAIT = 90.0
-"""Seconds a step may take: a request may wait for the Basic plan's per-minute slot."""
+"""Seconds a step may take: a request of a subscription Massive limits may wait for a later
+minute."""
 
 
 def _wait_for(read: Callable[[], Reads], done: Callable[[Reads], bool]) -> Reads:
@@ -128,7 +129,6 @@ def _aapl_rows(table_rows: TableRows, result: Table) -> int:
     return sum(1 for row in table_rows(result) if row["Symbol"] == "AAPL")
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(400)
 def test_a_followed_history_reads_reuses_and_rereads_a_symbol(

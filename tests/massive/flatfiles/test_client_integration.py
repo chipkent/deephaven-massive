@@ -72,13 +72,12 @@ def _raw_client(client: FlatFileClient, key: str) -> Iterator[S3Client]:
         client._give_back(s3)
 
 
-@pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.settles("14")
 def test_when_each_days_file_was_published(
     live_flat_files: FlatFileClient,
     *,
+    recent_monday: date,
     live_s3_config: MassiveConfig,
-    flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
     """When Massive publishes each day's stock file, against the documented ~11:00 New York.
@@ -87,11 +86,14 @@ def test_when_each_days_file_was_published(
     for one not out yet, and read from REST under `AUTO`. Records the `LastModified` of
     `us_stocks_sip/day_aggs_v1` for each of the last ten weekdays, in New York time, or why it
     has none (a holiday has no file). Reading it: the spread of times, Fridays' included, is
-    what the error message's "about 11:00 ET, but the time varies" describes. Skips when the
-    S3 credentials do not reach the stock day files.
+    what the error message's "about 11:00 ET, but the time varies" describes. First opens the
+    stock file of the most recent published Monday through the client, so a refusal of the
+    stock day files skips the test, quoting Massive.
     """
-    if not flat_files_reached(_DAY_FILE):
-        pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")
+    control = live_flat_files.open(object_key(_DAY_FILE, recent_monday))
+    evidence(f"control {recent_monday}: {'exists' if control is not None else 'missing'}")
+    if control is not None:
+        control.close()
     today = datetime.now(_NEW_YORK).date()
     seen = 0
     with _raw_client(live_flat_files, _DAY_FILE) as s3:
@@ -108,14 +110,12 @@ def test_when_each_days_file_was_published(
     assert seen
 
 
-@pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.verifies("16")
 def test_a_weekend_key_is_missing_not_refused(
     live_flat_files: FlatFileClient,
     *,
     recent_monday: date,
     live_s3_config: MassiveConfig,
-    flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
     """Whether a key with no file answers 404 `NoSuchKey` (missing), not 403 or another 404.
@@ -125,7 +125,8 @@ def test_a_weekend_key_is_missing_not_refused(
     serves an HTML "404 Not Found" page for a path it does not route) would hide S3's
     `NoSuchKey`, which the client requires before it calls a key missing, so every range that
     holds a weekend would raise. First opens the existing stock file of the most recent published
-    Monday, so the credentials are known to reach the dataset. Then requests the Sunday before
+    Monday, so the credentials are known to reach the dataset (Massive's refusal of it skips
+    the test, quoting Massive). Then requests the Sunday before
     directly, to record the status, S3's error code, and the content type, and opens it through the
     client. Passes when the Sunday's key is missing.
 
@@ -134,8 +135,6 @@ def test_a_weekend_key_is_missing_not_refused(
             answers a 404 that is not `NoSuchKey`; the answer is recorded first, and fails
             the test.
     """
-    if not flat_files_reached(_DAY_FILE):
-        pytest.skip(f"needs the {_DAY_FILE} flat files: the S3 credentials do not reach them")
     control = live_flat_files.open(object_key(_DAY_FILE, recent_monday))
     evidence(f"control {recent_monday}: {'exists' if control is not None else 'missing'}")
     assert control is not None, (

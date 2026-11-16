@@ -33,8 +33,9 @@ outlives the run.
 
 Most examples open their session with `dm.MassiveSession()`, as the README's do. The paid
 Stocks examples load the settings file the README's settings example saves, `SETTINGS_PATH`;
-`run_examples` writes a settings file for the key's plans (`settings_text`) and runs a copy of
-each such example that reads it instead (`fitted`), so the run needs no file of the tester's.
+`run_examples` writes a settings file listing the subscriptions the tester's own settings list
+as delayed (`listed_delayed`, `settings_text`) and runs a copy of each such example that reads
+it instead (`fitted`), so the run writes nothing into the tester's own file.
 
 This module imports Deephaven, so it is imported only once a Deephaven server runs.
 """
@@ -48,7 +49,7 @@ import runpy
 import time
 import traceback
 from dataclasses import dataclass
-from types import MappingProxyType
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from deephaven.execution_context import get_exec_ctx
@@ -56,12 +57,12 @@ from deephaven.pandas import to_pandas
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive._config import CONFIG_FILE_VARIABLE
 from deephaven_massive._tables.liveness import new_scope, release_scope
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping
     from contextlib import AbstractContextManager
-    from pathlib import Path
 
     from tests._live.live_run.secret_scrub import SecretFilter
 
@@ -110,28 +111,41 @@ SETTINGS_PATH: Final = "~/massive/settings.yaml"
 TEST_FOLDER: Final = "~/massive-test"
 """The tester's folder, where the examples write their debug log and the diagnostics."""
 
-DELAYED_TIERS: Final = ("starter", "developer")
-"""The plans that stream delayed data, except for currencies, which are real-time on every
-plan."""
 
+def listed_delayed(environ: Mapping[str, str]) -> tuple[str, ...] | None:
+    """Read the subscriptions the tester's own settings file lists as delayed.
 
-def settings_text(tiers: Mapping[str, str]) -> str:
-    """Write the settings file the paid examples read, for the key's plans.
-
-    A Starter or Developer subscription other than currencies goes in
-    `delayed_subscriptions`, so its live examples read the delayed feed its plan streams.
+    The file is the one `DEEPHAVEN_MASSIVE_CONFIG_FILE` names, else `SETTINGS_PATH`, where
+    the README's settings example saves it. Which subscriptions Massive serves delayed is the
+    tester's to say, as their dashboard shows it; nothing asks Massive.
 
     Args:
-        tiers: Each subscription's plan, as the probe names them (`"stocks": "starter"`);
-            empty when the plans are unknown, which writes the free plan's file.
+        environ: The environment.
+
+    Returns:
+        The subscriptions, sorted; None when there is no such file.
+
+    Raises:
+        ValueError: When the library refuses the file.
+    """
+    path = Path(environ.get(CONFIG_FILE_VARIABLE, "").strip() or SETTINGS_PATH).expanduser()
+    if not path.exists():
+        return None
+    config = dm.MassiveConfig.from_file(path)
+    return tuple(sorted(s.value for s in config.delayed_subscriptions))
+
+
+def settings_text(delayed: Collection[str]) -> str:
+    """Write the settings file the paid examples read.
+
+    Args:
+        delayed: The subscriptions to list in `delayed_subscriptions`, so their live examples
+            read the delayed feed (`listed_delayed`); empty lists none.
 
     Returns:
         The file's YAML, such as `delayed_subscriptions: [futures, stocks]` and a newline.
     """
-    delayed = sorted(
-        name for name, tier in tiers.items() if tier in DELAYED_TIERS and name != "currencies"
-    )
-    return f"delayed_subscriptions: [{', '.join(delayed)}]\n"
+    return f"delayed_subscriptions: [{', '.join(sorted(delayed))}]\n"
 
 
 def fitted(path: Path, *, settings: Path, test_folder: Path, folder: Path) -> Path:
@@ -440,7 +454,7 @@ def run_examples(
     echo: Callable[[str], None],
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
-    tiers: Mapping[str, str] = MappingProxyType({}),
+    delayed: Collection[str] = (),
     settle: Callable[[list[dm.MassiveSession]], None] = lambda _sessions: time.sleep(REFUSAL_WAIT),
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
@@ -455,8 +469,8 @@ def run_examples(
         lock: Makes the lock every console command holds.
         wait: Waits for the background downloads before each example; returns False when it
             gave up.
-        tiers: Each subscription's plan, for the settings file `out/settings.yaml`
-            (`settings_text`); empty, the default, writes the free plan's file. An example
+        delayed: The subscriptions the settings file `out/settings.yaml` lists as delayed
+            (`settings_text`); the default lists none. An example
             that names `SETTINGS_PATH` or `TEST_FOLDER` runs from a copy under `out/fitted/`
             (`fitted`).
         settle: Waits, after the last example, for Massive's answers to the streams of the
@@ -469,7 +483,7 @@ def run_examples(
     """
     out.mkdir(parents=True, exist_ok=True)
     settings = out / "settings.yaml"
-    settings.write_text(settings_text(tiers), encoding="utf-8")
+    settings.write_text(settings_text(delayed), encoding="utf-8")
     namespace: dict[str, Any] = {}
     outcomes: list[Outcome] = []
     opened: dict[int, tuple[dm.MassiveSession, str]] = {}

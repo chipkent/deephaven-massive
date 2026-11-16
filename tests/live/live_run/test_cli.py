@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def _probe() -> ProbeResult:
-    return ProbeResult(when="2026-11-04T17:00:00Z", tiers=None, error="not used")
+    return ProbeResult(when="2026-11-04T17:00:00Z", error="not used")
 
 
 def _machine(_folder: Path, _offset: float | None) -> tuple[list[Item], dict[str, object]]:
@@ -270,9 +270,7 @@ def test_a_run_imports_no_deephaven_while_it_probes_and_runs_groups(tmp_path: Pa
     child = ROOT / "tests" / "_fakes" / "live_child.py"
     wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{child}" "$@"\n')
     wrapper.chmod(0o755)
-    # No subscription on Basic, so no pause after the probe holds the first group back.
-    tiers = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "starter")
-    probe = ProbeResult(when="2026-11-04T17:00:00Z", tiers=tiers, clock_offset=0.5)
+    probe = ProbeResult(when="2026-11-04T17:00:00Z", clock_offset=0.5)
     script = {
         "probe": dataclasses.asdict(probe),
         "results": [{"name": "market-status", "status": "passed", "reason": ""}],
@@ -297,7 +295,7 @@ def test_a_run_imports_no_deephaven_while_it_probes_and_runs_groups(tmp_path: Pa
     assert report == {"status": commands.INTERRUPTED, "imported": []}
     # The run probed through its child and ran groups in theirs, so the check means something.
     [probed] = (out / "probes").glob("2026*.json")
-    assert json.loads(probed.read_text())["tiers"] == tiers
+    assert json.loads(probed.read_text())["clock_offset"] == 0.5
     state = run_state.load(out)
     assert state is not None
     assert state.attempts

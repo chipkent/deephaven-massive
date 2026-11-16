@@ -53,9 +53,7 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
-SpreadReads: TypeAlias = (
-    "Callable[[Sequence[Mapping[str, Any]]], tuple[list[SpreadRead], list[str]]]"
-)
+SpreadReads: TypeAlias = "Callable[[Sequence[Mapping[str, Any]]], list[SpreadRead]]"
 RestRows: TypeAlias = (
     "Callable[[str, Mapping[str, object], Mapping[str, object]], list[dict[str, Any]]]"
 )
@@ -109,7 +107,7 @@ def _aggregates(
         resolution), which is recorded as evidence.
 
     Raises:
-        WireEntitlementError: When the request is refused for want of a plan.
+        WireEntitlementError: When Massive refuses the key the request.
     """
     query = {
         "ticker": contract,
@@ -128,7 +126,6 @@ def _aggregates(
         return []
 
 
-@pytest.mark.needs("futures:starter")
 @pytest.mark.verifies("23")
 def test_where_the_futures_snapshot_carries_the_ticker(
     live_session: dm.MassiveSession,
@@ -179,15 +176,13 @@ def test_where_the_futures_snapshot_carries_the_ticker(
     assert all(r["Symbol"] == ticker for r in library), f"library rows {library}"
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("29")
-@pytest.mark.requests(4)
+@pytest.mark.requests(6)
 @pytest.mark.timeout(100)
 def test_the_session_after_a_holiday_and_year_candles(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    classes_on_basic: frozenset[str],
     recent_holiday: Callable[[str], date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -200,10 +195,9 @@ def test_the_session_after_a_holiday_and_year_candles(
     Records the ES schedule around the holiday, the last minute bar before the session after
     it and that session's first minute bars (read raw, from the Friday before), the library's
     minute bars of that session, and the contract's 1-year candles from January 1 and from
-    mid-June of the year before. With Futures on Basic, which allows 5 requests a minute, it
-    leaves out the library's minute bars and sends 4 raw requests. Passes when the session
-    after the holiday has minute bars and, off Basic, the library keeps them: the 4-day margin
-    covers it. A candle of the year before returned for the mid-year filter means
+    mid-June of the year before: 4 raw requests, and the library's read of about 2. Passes
+    when the session after the holiday has minute bars and the library keeps them: the 4-day
+    margin covers it. A candle of the year before returned for the mid-year filter means
     `window_start` filters match the candle's start (snap), its absence that they do not.
     """
     holiday = recent_holiday("martin luther king day")
@@ -240,19 +234,16 @@ def test_the_session_after_a_holiday_and_year_candles(
         )
     for bar in session[:3]:
         evidence(f"first minute bars of {session_day}: {instant_text(int(bar['window_start']))}")
-    if "futures" in classes_on_basic:
-        evidence(f"Futures on Basic: the library's minute bars of {session_day} are not read")
-    else:
-        minutes = table_rows(
-            live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
-                session_day, session_day, wait=True
-            )
+    minutes = table_rows(
+        live_session.futures.bars(contract, dm.Timespan.MINUTE).history(
+            session_day, session_day, wait=True
         )
-        evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
-        if minutes:
-            evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
-            evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
-        assert minutes, f"the library kept no minute bar of the {session_day} session"
+    )
+    evidence(f"library minute bars of {session_day}: {len(minutes)} rows")
+    if minutes:
+        evidence(f"    first {instant_text(minutes[0]['TimestampStart'])} {minutes[0]}")
+        evidence(f"    last {instant_text(minutes[-1]['TimestampStart'])}")
+    assert minutes, f"the library kept no minute bar of the {session_day} session"
     year = holiday.year - 1
     for start in (date(year, 1, 1), date(year, 6, 15)):
         candles = _aggregates(
@@ -271,7 +262,6 @@ def test_the_session_after_a_holiday_and_year_candles(
     assert session, f"no minute bar of the {session_day} session among {len(raw)} read"
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("36")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -310,15 +300,13 @@ def test_futures_sessions_end_only_on_weekdays(
     assert not weekend, f"sessions ending on a Saturday or Sunday: {weekend[:50]}"
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.settles("40")
-@pytest.mark.requests(5)
+@pytest.mark.requests(8)
 @pytest.mark.timeout(100)
 def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    classes_on_basic: frozenset[str],
     recent_month: tuple[date, date],
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
@@ -336,8 +324,8 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     with the 1-session list: its first or its last session is the label. Pairs that stay the
     same for both starts align to a calendar; pairs that shift with the start align to
     `{from}`, and dates cannot select them. A refused resolution is recorded and the rest still
-    run. With Futures on Basic, which allows 5 requests a minute, it leaves out the 1-month bars
-    and the library's 2-session bars and sends the other 5 requests.
+    run. Then records the library's 2-session bars of the same months: 6 raw requests, and
+    the library's read of about 2.
     """
     contract = front_contract("ES", recent_month[1])
     first = recent_month[0].replace(day=1)
@@ -346,12 +334,11 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     start = _midnight(first)
     end = _midnight(recent_month[1] + timedelta(days=1))
     later_month = _midnight((first + timedelta(days=32)).replace(day=1))
-    basic = "futures" in classes_on_basic
     requests = (
         ("1session", start),
         ("2session", start),
         ("2session", start + timedelta(days=1)),
-        *(() if basic else (("1month", start),)),
+        ("1month", start),
         ("2month", start),
         ("2month", later_month),
     )
@@ -366,10 +353,6 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
             f"{contract} {resolution} from {since:%Y-%m-%d}: {len(bars)} bars; "
             f"(window_start, session_end_date) {labels}"
         )
-    if basic:
-        evidence("Futures on Basic: the 1-month bars and the library's 2-session bars are not read")
-        assert shown
-        return
     library = table_rows(
         live_session.futures.bars(contract, dm.Timespan.SESSION, multiplier=2).history(
             start, end, wait=True
@@ -383,7 +366,6 @@ def test_labels_and_alignment_of_futures_bars_of_several_sessions(
     assert shown
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.settles("107")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(100)
@@ -443,7 +425,6 @@ def test_futures_day_bars_against_session_bars(
     assert library
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("47")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -490,7 +471,6 @@ _ES_SINGLE = re.compile(r"ES(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,2})")
 """An ES single contract: the product code, a month letter, and a one- or two-digit year."""
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("72")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
@@ -541,9 +521,8 @@ def test_how_massive_writes_a_contracts_year(
     assert not any(answered.values()), f"Massive answered another spelling: {answered}"
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.verifies("48")
-@pytest.mark.requests(5)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_forms_of_futures_spread_tickers_on_every_venue(
     live_rest: RestClient,
@@ -561,10 +540,8 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
     one page of up to 50,000), then, for each of the four exchanges (CME, CBOT, NYMEX,
     COMEX), one page of up to 1,000 combo contracts (`/futures/v1/contracts?type=combo`) of
     two of its single products (whose calendar spreads may carry their legs' product code)
-    and up to 20 of its combo products, taken in turn from each strategy type. On a paid
-    plan it also reads the combo contracts of any other venue the products name; with
-    Futures on Basic, which allows 5 requests a minute, those are left out and named, so
-    the test sends 5 requests.
+    and up to 20 of its combo products, taken in turn from each strategy type, and the same
+    of any other venue the products name: one request for the products and one per venue.
 
     Records each venue's combo products by strategy type, and, per venue read, every ticker
     form (each run of letters written `A`, each run of digits `9`) with its count, how many
@@ -575,7 +552,7 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
     a builder from legs could produce each form.
     """
     products = _page(live_rest, _PRODUCTS_PATH, query={"type": "combo", "limit": 50_000})
-    reads, left_out = futures_spread_reads(products)
+    reads = futures_spread_reads(products)
     contracts = {
         read.venue: _page(
             live_rest,
@@ -586,8 +563,6 @@ def test_forms_of_futures_spread_tickers_on_every_venue(
     }
     for read in reads:
         evidence(f"{read.venue} combo contracts read for products {list(read.product_codes)}")
-    if left_out:
-        evidence(f"Futures on Basic: the combo contracts of {left_out} are not read")
     for line in futures_spread_report(products, contracts):
         evidence(line)
     assert products, "Massive listed no combo product"
@@ -637,7 +612,6 @@ def _label_changes(rows: list[dict[str, Any]], time_column: str) -> list[str]:
     return changes
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.settles("58")
 @pytest.mark.requests(5)
 @pytest.mark.timeout(100)
@@ -702,8 +676,7 @@ def _record_corn_labels(
 
     CBOT grains trade from 19:00, so only quotes fall in the 16:45 pre-open; their labels from
     16:45 to 19:00 are recorded on a line of their own, and the trades are the control from the
-    open. Each read refused for the plan (trades and quotes need Futures Developer) is
-    recorded, not raised.
+    open. Each read Massive refuses is recorded with Massive's refusal, not raised.
 
     Args:
         live_session: The session that reads.
@@ -730,7 +703,6 @@ def _record_corn_labels(
             evidence(f"{corn} quotes 16:45 to 19:00 Chicago: labels {labels}")
 
 
-@pytest.mark.needs("futures:starter")
 @pytest.mark.settles("58")
 @pytest.mark.verifies("59")
 @pytest.mark.timeout(160)
@@ -738,28 +710,28 @@ def test_streamed_futures_dates_and_one_second_ends(
     live_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     *,
+    live_config: dm.MassiveConfig,
     front_contract: Callable[[str, date], str],
     wait_rows: WaitRows,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     rows_due: Callable[[str], tuple[str, bool]],
-    skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
     """Which session the library gives streamed futures bars, and how long a one-second bar is.
 
-    Streams the front ES contract's minute and one-second bars, the streams every Futures plan from
-    Starter includes (trades and quotes need Developer), and asserts that Massive acknowledged both
-    topics, whatever the hour. Rows are required only once ES has been `open`, by
-    `/futures/v1/market-status` and its `timestamp`, longer than the plan's feed delay (10 minutes
-    on Futures Starter and Developer, none on real-time plans); before that the test skips after the
-    acknowledgement. Records each row's `Date`, the `m.streams()` errors (a schedule miss shows
-    there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the
-    library logs when Massive's `e` is not the start plus one second. Passes when every
-    one-second bar spans one second: `TimestampEnd` is the later of the start plus one second
-    and Massive's `e`, so a longer span means Massive's bars span more, as its documented sample
-    (60 seconds) suggests. Reading the rest: no miss confirms the calendar. A refused stream
-    skips, naming the plan.
+    Streams the front ES contract's minute and one-second bars, and asserts that Massive
+    acknowledged both topics, whatever the hour. Rows are required only while ES is `open`, by
+    `/futures/v1/market-status`; otherwise the test skips after the acknowledgement. The delayed
+    feed lags by an amount the tests do not know, so when the owner's settings list futures as
+    delayed, no bar skips instead of failing. Records each row's `Date`, the `m.streams()` errors (a
+    schedule miss shows there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with
+    the WARNING the library logs when Massive's `e` is not the start plus one second. Passes when
+    every one-second bar spans one second: `TimestampEnd` is the later of the start plus one second
+    and Massive's `e`, so a longer span means Massive's bars span more, as its documented sample (60
+    seconds) suggests. Reading the rest: no miss confirms the calendar. A refused stream skips,
+    quoting Massive.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
@@ -780,10 +752,12 @@ def test_streamed_futures_dates_and_one_second_ends(
     evidence(
         f"end warnings: {[r.getMessage() for r in caplog.records if 'one-second' in r.message]}"
     )
-    skip_if_not_entitled(live_session, "Futures Starter")
+    skip_if_not_entitled(live_session)
     assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
     if not due:
-        pytest.skip(f"no ES bar is due yet: ES is {status}, or still within the feed delay")
+        pytest.skip(f"no ES bar is due: ES is {status}")
+    if not (rows or bars) and dm.Subscription.FUTURES in live_config.delayed_subscriptions:
+        pytest.skip(f"no bar on the delayed feed in {_STREAM_WAIT:.0f} s, though ES is {status}")
     assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
     assert bars, f"no one-second bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
     longer = [span for span in spans if span[1] != 1.0]
@@ -990,8 +964,8 @@ def _ns_text(bar: Bar) -> str:
     return futures_bar_buckets.stamp_text(bar.start_ns)
 
 
-@pytest.mark.needs("futures:starter")
 @pytest.mark.settles("40", "81")
+@pytest.mark.requests(40)
 @pytest.mark.timeout(900)
 def test_futures_bar_buckets_against_the_bars_inside_them(
     *,
@@ -1022,8 +996,7 @@ def test_futures_bar_buckets_against_the_bars_inside_them(
     reads confirm the model; anything else says where it breaks.
 
     It asserts only that each contract has 1-session and minute bars. Cost: about 10 REST
-    requests per contract (the minute bars take two or three pages), some 40 in all, so it
-    needs Futures Starter, which has no request limit.
+    requests per contract (the minute bars take two or three pages), some 40 in all.
     """
     found = {}
     for product in _BUCKET_PRODUCTS:
@@ -1037,7 +1010,8 @@ def test_futures_bar_buckets_against_the_bars_inside_them(
 
 
 _FOLLOW_WAIT = 90.0
-"""Seconds a followed read's step may take: a request may wait for the Basic plan's slot."""
+"""Seconds a followed read's step may take: a request of a subscription Massive limits may
+wait for a later minute."""
 
 
 def _codes_until(
@@ -1058,7 +1032,6 @@ def _codes_until(
         pause.wait(0.25)
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(300)
 def test_contracts_follow_a_live_table_of_product_codes(

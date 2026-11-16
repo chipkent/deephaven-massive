@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("93")
 @pytest.mark.requests(1)
 def test_massive_answers_a_sort_value_its_path_does_not_list(
@@ -43,7 +42,6 @@ def test_massive_answers_a_sort_value_its_path_does_not_list(
     assert bad_values.ask_all(live_rest, bad_values.ENUM_SORT, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("94")
 @pytest.mark.requests(1)
 def test_massive_answers_a_sort_field_its_rows_do_not_have(
@@ -57,7 +55,6 @@ def test_massive_answers_a_sort_field_its_rows_do_not_have(
     assert bad_values.ask_all(live_rest, bad_values.SORT_FIELD, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("95")
 @pytest.mark.requests(1)
 def test_massive_answers_a_sort_part_with_a_space(
@@ -71,7 +68,6 @@ def test_massive_answers_a_sort_part_with_a_space(
     assert bad_values.ask_all(live_rest, bad_values.SORT_WHITESPACE, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("96")
 @pytest.mark.requests(1)
 def test_massive_answers_a_limit_of_0(live_rest: RestClient, *, evidence: Evidence) -> None:

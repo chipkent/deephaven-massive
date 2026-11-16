@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("105")
 @pytest.mark.requests(2)
 def test_massive_answers_a_start_after_the_end(
@@ -44,7 +43,6 @@ def test_massive_answers_a_start_after_the_end(
     assert bad_values.ask_all(live_rest, bad_values.START_AFTER_END, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("106")
 @pytest.mark.requests(1)
 def test_massive_answers_a_start_after_now(live_rest: RestClient, *, evidence: Evidence) -> None:

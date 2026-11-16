@@ -25,7 +25,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import index_day_sources
+from tests._live import index_day_sources, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -63,8 +63,8 @@ LargestError: TypeAlias = (
 )
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
-_SNAPSHOTS_PLAN = "Indices Starter ($49/month)"
-"""The plan of the indices snapshot and the unified snapshot of an index."""
+_INDEX = "I:NDX"
+"""The index the spelling checks read: any index serves, so the Nasdaq-100."""
 
 
 def _raw_requests(
@@ -95,12 +95,6 @@ def _raw_requests(
     )
 
 
-_SNAPSHOT_PATHS = frozenset({"/v3/snapshot/indices", "/v3/snapshot"})
-"""The raw requests that need Indices Starter, left out with Indices on Basic."""
-
-_BASIC_LIBRARY_CALL = "indices.daily_open_close fetch()"
-"""The one library call made with Indices on Basic."""
-
 _TICKER_KEYS = ("T", "ticker", "symbol", "underlying")
 
 
@@ -115,37 +109,32 @@ def _spellings(value: object) -> dict[str, object]:
     return {key: value[key] for key in _TICKER_KEYS if key in value}
 
 
-@pytest.mark.needs("indices:basic")
 @pytest.mark.verifies("26")
 @pytest.mark.requests(2)
 def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     live_session: dm.MassiveSession,
     *,
-    index_symbol: str,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Massive reads a percent-encoded colon in a path (`I%3ASPX`) as `I:SPX`.
+    """Whether Massive reads a percent-encoded colon in a path (`I%3ANDX`) as `I:NDX`.
 
     The library percent-encodes every path value whole, so `/prev` of an index is requested
-    as `/v2/aggs/ticker/I%3A<index>/prev`. Uses `I:SPX`, or `I:NDX` when Indices is on Basic,
-    which excludes SPX. Passes when the library's `fetch()` returns one row for the index. A
-    failure (no row, or a 404) means a colon must be sent unencoded.
+    as `/v2/aggs/ticker/I%3A<index>/prev`. Any index serves the question, so it reads the
+    Nasdaq-100. Passes when the library's `fetch()` returns one row for the index. A failure
+    (no row, or a 404) means a colon must be sent unencoded.
     """
-    rows = table_rows(live_session.indices.previous_day_bar(index_symbol).fetch(wait=True))
-    evidence(f"library fetch() of /prev for {index_symbol} (sent encoded): {rows}")
-    assert [row["Symbol"] for row in rows] == [index_symbol]
+    rows = table_rows(live_session.indices.previous_day_bar(_INDEX).fetch(wait=True))
+    evidence(f"library fetch() of /prev for {_INDEX} (sent encoded): {rows}")
+    assert [row["Symbol"] for row in rows] == [_INDEX]
 
 
-@pytest.mark.needs("indices:basic")
 @pytest.mark.verifies("44")
-@pytest.mark.requests(5)
+@pytest.mark.requests(11)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
-    index_symbol: str,
     recent_monday: date,
     live_rest: RestClient,
     table_rows: TableRows,
@@ -153,28 +142,24 @@ def test_index_ticker_spelling_on_every_index_endpoint(
 ) -> None:
     """Which index endpoints spell an index with its `I:` prefix and which without.
 
-    Sends one raw request of each REST endpoint that serves the index (`I:SPX`, or `I:NDX` on
-    Indices Basic), the dated ones for the most recent published Monday: `/prev`, the range,
-    open-close, the indices snapshot, the unified
-    snapshot, and an indicator. Records the ticker keys of the body and of the first row,
-    then the library's `Symbol` for the same datasets. The two snapshots need Indices
-    Starter. With Indices on Basic, which allows 5 requests a minute, it leaves them out and
-    reads the library's `daily_open_close` only, 5 requests in all: the library's `/prev` is
-    checked by the encoded-path test, and its indicator line is left out. Passes when every
-    row the library returns carries the index with its `I:` prefix in `Symbol`, whichever
-    spelling the endpoint sent; the raw lines show which endpoints drop the prefix.
+    Sends one raw request of each REST endpoint that serves the index (`I:NDX`, since any
+    index serves), the dated ones for the most recent published Monday: `/prev`, the range,
+    open-close, the indices snapshot, the unified snapshot, and an indicator, 6 requests.
+    Records the ticker keys of the body and of the first row, then the library's `Symbol` for
+    the same datasets, 5 more. Each request or call Massive refuses is recorded with Massive's
+    refusal and the rest still run; the test skips, quoting the first refusal, when Massive
+    answered no raw request. Passes when every row the library returns carries the index with
+    its `I:` prefix in `Symbol`, whichever spelling the endpoint sent; the raw lines show
+    which endpoints drop the prefix.
     """
     answered = 0
-    basic = "indices" in classes_on_basic
-    if basic:
-        evidence("Indices on Basic: the snapshots and the library's other lines are not read")
-    for path, path_params, query in _raw_requests(index_symbol, recent_monday):
-        if basic and path in _SNAPSHOT_PATHS:
-            continue
+    refused: list[str] = []
+    for path, path_params, query in _raw_requests(_INDEX, recent_monday):
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
         except WireEntitlementError as error:
-            evidence(f"{path}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
+            refused.append(refusals.refusal_line(error))
+            evidence(f"{path}: not entitled: {refused[-1]}")
             continue
         except WireError as error:
             evidence(f"{path}: {type(error).__name__}: {error}")
@@ -191,36 +176,34 @@ def test_index_ticker_spelling_on_every_index_endpoint(
             evidence(f"    first row keys and values: {page.rows[0]}")
     queries = {
         "indices.previous_day_bar fetch()": partial(
-            live_session.indices.previous_day_bar(index_symbol).fetch, wait=True
+            live_session.indices.previous_day_bar(_INDEX).fetch, wait=True
         ),
         "indices.snapshots fetch()": partial(
-            live_session.indices.snapshots(index_symbol).fetch, wait=True
+            live_session.indices.snapshots(_INDEX).fetch, wait=True
         ),
         "indices.daily_open_close fetch()": partial(
-            live_session.indices.daily_open_close(index_symbol, recent_monday).fetch, wait=True
+            live_session.indices.daily_open_close(_INDEX, recent_monday).fetch, wait=True
         ),
-        "snapshots (unified) fetch()": partial(
-            live_session.snapshots(index_symbol).fetch, wait=True
-        ),
+        "snapshots (unified) fetch()": partial(live_session.snapshots(_INDEX).fetch, wait=True),
         "indicators.sma fetch()": partial(
-            live_session.indicators.sma(index_symbol, 10, limit=2).fetch, wait=True
+            live_session.indicators.sma(_INDEX, 10, limit=2).fetch, wait=True
         ),
     }
     misspelled: dict[str, list[object]] = {}
     for name, call in queries.items():
-        if basic and name != _BASIC_LIBRARY_CALL:
-            continue
         try:
             symbols = [r["Symbol"] for r in table_rows(call())]
             evidence(f"library {name}: Symbol {symbols}")
-            if any(symbol != index_symbol for symbol in symbols):
+            if any(symbol != _INDEX for symbol in symbols):
                 misspelled[name] = symbols
         except dm.EntitlementError as error:
-            evidence(f"library {name}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
+            evidence(f"library {name}: not entitled: {refusals.refusal_line(error)}")
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
+    if not answered and refused:
+        pytest.skip(f"refused: every raw request; the first: {refused[0]}")
     assert answered
-    assert not misspelled, f"library rows without {index_symbol} in Symbol: {misspelled}"
+    assert not misspelled, f"library rows without {_INDEX} in Symbol: {misspelled}"
 
 
 _STAMP_INDICES = ("I:SPX", "I:AAVE100")
@@ -434,7 +417,6 @@ def _record_library_index_stamps(
         raise refused[0]
 
 
-@pytest.mark.needs("indices:starter")
 @pytest.mark.settles("52", "60")
 @pytest.mark.timeout(100)
 def test_index_day_and_longer_bar_stamps_from_rest(
@@ -506,7 +488,6 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     assert not any(gaps.values()), f"missing evidence, by index: {gaps}"
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.settles("52", "60")
 @pytest.mark.timeout(100)
 def test_index_day_bar_stamps_of_the_day_file(
@@ -551,7 +532,6 @@ _ROUND_THE_CLOCK = "I:AAVE100"
 """An index that updates around the clock, so its minute file has rows near every midnight."""
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.timeout(160)
 def test_an_index_minute_file_holds_its_own_new_york_day(
     *,
@@ -855,8 +835,8 @@ def _read_index(
     return tally, bool(ranged and minutes)
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.settles("60", "80")
+@pytest.mark.requests(110)
 @pytest.mark.timeout(900)
 def test_index_day_windows_and_files_across_many_indices(
     *,
@@ -890,8 +870,8 @@ def test_index_day_windows_and_files_across_many_indices(
     It asserts only that each index has REST day and minute bars and that at least one day file and
     one minute file were read; everything else is evidence. Cost: 3 ticker-list searches, then per
     index one 1-day range, one `/prev`, one open-close per day, and one minute range per run of
-    adjacent days (two or three for the usual days): at most about 110 REST requests, on Indices
-    Starter, which has no request limit, and 2 flat files per day.
+    adjacent days (two or three for the usual days): at most about 110 REST requests, and 2
+    flat files per day.
     """
     days = index_check_days
     found = {

@@ -16,7 +16,6 @@ import pytest
 import deephaven_massive as dm
 from tests._fakes.rest import Reply, envelope
 from tests._live.live_run import replies, reply_examples
-from tests._live.plans import TIERS, LivePlans
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,10 +31,6 @@ if TYPE_CHECKING:
 TODAY = date(2026, 11, 4)
 
 PLANTED_KEY = "PLANTED-replies-key-77c1"
-
-
-def _plans(**tiers: str) -> LivePlans:
-    return LivePlans({n: tiers.get(n, "basic") for n in TIERS}, s3=False, flat_files=(), source="t")
 
 
 def _example(name: str) -> reply_examples.Example:
@@ -71,11 +66,9 @@ def test_an_example_records_every_reply_cleaned_and_passes_with_data(
     seen, report = _report()
     replies.run_responses(
         [_example("market-status")],
-        plans=_plans(),
         open_session=open_session,
         folder=tmp_path,
         today=TODAY,
-        entitlement="e1",
         report=report,
     )
     assert seen == [("market-status", "passed", "")]
@@ -87,46 +80,43 @@ def test_an_example_records_every_reply_cleaned_and_passes_with_data(
     )
     assert PLANTED_KEY not in (tmp_path / "market-status.jsonl").read_text()
     index = json.loads((tmp_path / "index.json").read_text())
-    assert index == [
-        {"name": "market-status", "status": "passed", "reason": "", "entitlement": "e1"}
-    ]
+    assert index == [{"name": "market-status", "status": "passed", "reason": ""}]
 
 
-def test_a_refusal_example_passes_when_massive_refuses(
+def test_an_example_massive_refuses_is_refused_quoting_massive_with_its_reply_kept(
     fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession], tmp_path: Path
 ) -> None:
     refusal = envelope(status="NOT_AUTHORIZED", message="You are not entitled to this data.")
     fake_rest.reply("/v2/last/trade/AAPL", Reply(refusal, status=403))
     seen, report = _report()
     replies.run_responses(
-        [_example("refusal-stocks-developer")],
-        plans=_plans(stocks="starter"),
+        [_example("stocks-last-trade")],
         open_session=open_session,
         folder=tmp_path,
         today=TODAY,
-        entitlement="e1",
         report=report,
     )
-    assert seen == [("refusal-stocks-developer", "passed", "")]
-    [reply] = _lines(tmp_path / "refusal-stocks-developer.jsonl")
+    [(name, status, reason)] = seen
+    assert (name, status) == ("stocks-last-trade", "refused")
+    assert reason.startswith("refused: ")
+    assert "not entitled" in reason
+    [reply] = _lines(tmp_path / "stocks-last-trade.jsonl")
     assert reply["status"] == 403
 
 
-def test_a_refusal_example_fails_when_massive_answers(
+def test_an_example_massive_answers_passes(
     fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession], tmp_path: Path
 ) -> None:
     fake_rest.reply("/v3/snapshot/indices", Reply(envelope([{"ticker": "I:SPX", "value": 1.0}])))
     seen, report = _report()
     replies.run_responses(
-        [_example("refusal-indices-starter")],
-        plans=_plans(),
+        [_example("indices-snapshot")],
         open_session=open_session,
         folder=tmp_path,
         today=TODAY,
-        entitlement="e1",
         report=report,
     )
-    assert seen == [("refusal-indices-starter", "failed", "expected a refusal")]
+    assert seen == [("indices-snapshot", "passed", "")]
 
 
 def test_an_example_without_a_reply_fails_naming_what_it_raised(
@@ -207,33 +197,19 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
         fake_ws_server.wait_for(lambda _: failed())
 
     status, reason = replies.run_example(
-        reply_examples.Example("refused-bars", expects=reply_examples.REFUSAL, stream=True),
+        reply_examples.Example("refused-bars", stream=True),
         lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
         open_session=open_ws,
         folder=tmp_path,
         today=TODAY,
         hold=wait_failed,
     )
-    assert (status, reason) == ("passed", "")
+    assert status == "refused"
+    assert reason.startswith("refused: ")
     lines = _lines(tmp_path / "refused-bars.jsonl")
     assert lines
     assert all(line["transport"] == "ws" for line in lines)
     assert any("not authorized" in str(line["text"]) for line in lines)
-
-
-def test_a_skipped_example_is_reported_and_indexed(tmp_path: Path) -> None:
-    seen, report = _report()
-    replies.run_responses(
-        [_example("stream-forex-quotes")],
-        plans=_plans(),
-        open_session=lambda: pytest.fail("no session for a skipped example"),
-        folder=tmp_path,
-        today=TODAY,
-        entitlement="e3",
-        report=report,
-    )
-    assert seen == [("stream-forex-quotes", "skipped", "needs Currencies Starter ($49/month)")]
-    assert json.loads((tmp_path / "index.json").read_text())[0]["entitlement"] == "e3"
 
 
 class _Recorder:

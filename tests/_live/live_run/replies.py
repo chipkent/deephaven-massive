@@ -11,12 +11,13 @@ reply of one example lands in another's file, and every `history()` reads REST
 (`source=dm.HistorySource.REST`): the group's child runs without the S3 pair, since the hook
 does not see flat files.
 
-An example the key's subscriptions lack is skipped (`reply_examples.skip_reason`). `index.json`
-lists every example with its outcome, its exception if any, and the entitlement it ran under;
-each result also goes to the attempt's results file, which the program reads (`live_run`).
+Every example runs whatever the key holds. `index.json` lists every example with its outcome
+and its reason; each result also goes to the attempt's results file, which the program reads
+(`live_run`).
 
-An example passes when its expected replies were captured: data (no error, and at least one
-reply), a refusal (Massive refused it, which the example exists to record), or any reply.
+An example Massive refused is recorded `refused`, quoting the refusal: its replies hold
+Massive's answer. Otherwise it passes when its expected replies were captured: data (no error,
+and at least one reply), or any reply.
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ from typing import TYPE_CHECKING, Final
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
 from tests._live.calendar import trading_day_before
-from tests._live.live_run.reply_examples import DATA, REFUSAL, Example, skip_reason
-from tests._live.live_run.stream_capture import diagnostics_rows
+from tests._live.live_run.reply_examples import DATA, Example
+from tests._live.live_run.stream_capture import diagnostics_rows, is_refusal
+from tests._live.summary import REFUSED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,7 +45,6 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
     from deephaven_massive._massive import CapturedReply
-    from tests._live.plans import LivePlans
 
 logger = logging.getLogger(__name__)
 
@@ -65,18 +66,6 @@ def hold_for(seconds: float) -> Callable[[MassiveSession], None]:
         threading.Event().wait(seconds)
 
     return hold
-
-
-_REFUSAL_MARKS: Final = (
-    "HTTP 403",
-    "NOT_AUTHORIZED",
-    "not entitled",
-    "may not include this data",
-    "needs a Business plan",
-)
-"""Text that marks a failed stream's error as a refusal by Massive: an HTTP 403, a
-`NOT_AUTHORIZED` envelope, and the library's wording of a refused topic, including a
-fair-market-value (FMV) topic, which only a Business plan serves."""
 
 
 _COMPANIES: Final = ["AAPL", "MSFT", "NVDA", "JPM", "XOM"]
@@ -115,18 +104,16 @@ CALLS: Final[dict[str, Callable[[MassiveSession, date], Table | None]]] = {
         start=today - timedelta(days=31)
     ).fetch(wait=True),
     "unknown-ticker-details": lambda m, _: m.reference.ticker_details("ZZZZZQ").fetch(wait=True),
-    "refusal-stocks-starter": lambda m, _: m.stocks.snapshots("AAPL").fetch(wait=True),
-    "refusal-stocks-developer": lambda m, _: m.stocks.last_trade("AAPL").fetch(wait=True),
-    "refusal-stocks-advanced": lambda m, _: m.stocks.last_quote("AAPL").fetch(wait=True),
-    "refusal-options-starter": lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(
+    "stocks-snapshot": lambda m, _: m.stocks.snapshots("AAPL").fetch(wait=True),
+    "stocks-last-trade": lambda m, _: m.stocks.last_trade("AAPL").fetch(wait=True),
+    "stocks-last-quote": lambda m, _: m.stocks.last_quote("AAPL").fetch(wait=True),
+    "options-snapshot": lambda m, _: m.options.snapshots("O:SPY261218C00600000").fetch(wait=True),
+    "indices-snapshot": lambda m, _: m.indices.snapshots("I:SPX").fetch(wait=True),
+    "forex-last-quote": lambda m, _: m.forex.last_quote("C:EURUSD").fetch(wait=True),
+    "crypto-fmv-stream": lambda m, _: m.crypto.fmv("X:BTCUSD").append_only(),
+    "futures-snapshot": lambda m, _: m.futures.snapshots(dm.ALL, product_code="ES", limit=1).fetch(
         wait=True
     ),
-    "refusal-indices-starter": lambda m, _: m.indices.snapshots("I:SPX").fetch(wait=True),
-    "refusal-currencies-starter": lambda m, _: m.forex.last_quote("C:EURUSD").fetch(wait=True),
-    "refusal-currencies-business": lambda m, _: m.crypto.fmv("X:BTCUSD").append_only(),
-    "refusal-futures-starter": lambda m, _: m.futures.snapshots(
-        dm.ALL, product_code="ES", limit=1
-    ).fetch(wait=True),
     "stream-stock-minute-bars": lambda m, _: m.stocks.bars(
         ["AAPL", "NVDA"], dm.Timespan.MINUTE
     ).append_only(),
@@ -205,7 +192,8 @@ def run_example(
         hold: Keeps a stream example open, given its session (`hold_for`).
 
     Returns:
-        `(status, reason)`: `passed`, or `failed` with what was missing or what was raised.
+        `(status, reason)`: `passed`; `refused` with Massive's refusal; or `failed` with what
+        was missing or what was raised.
     """
     writer = _Writer(folder / f"{example.name}.jsonl")
     set_reply_capture(writer.put)
@@ -242,16 +230,16 @@ def _verdict(
         count: How many replies were captured.
 
     Returns:
-        `(status, reason)`.
+        `(status, reason)`: an example Massive refused is `refused`, its reason starting
+        `summary.REFUSED` and quoting the refusal.
     """
     if count == 0:
         raised = f": {type(error).__name__}: {error}" if error is not None else ""
         return "failed", f"no reply was captured{raised}"
-    refused = isinstance(error, dm.EntitlementError) or any(
-        mark in stream_error for mark in _REFUSAL_MARKS
-    )
-    if example.expects == REFUSAL:
-        return ("passed", "") if refused else ("failed", "expected a refusal")
+    if isinstance(error, dm.EntitlementError):
+        return "refused", REFUSED + " ".join(str(error).split())
+    if is_refusal(stream_error):
+        return "refused", REFUSED + " ".join(stream_error.split())
     if example.expects == DATA and (error is not None or stream_error):
         shown = f"{type(error).__name__}: {error}" if error is not None else stream_error
         return "failed", shown
@@ -261,11 +249,9 @@ def _verdict(
 def run_responses(
     examples: list[Example],
     *,
-    plans: LivePlans,
     open_session: Callable[[], MassiveSession],
     folder: Path,
     today: date,
-    entitlement: str,
     report: Callable[[str, str, str], None],
     hold: Callable[[MassiveSession], None] | None = None,
 ) -> None:
@@ -273,31 +259,23 @@ def run_responses(
 
     Args:
         examples: The due examples, in order.
-        plans: The key's tiers.
         open_session: Opens a fresh session on the key.
         folder: The attempt's folder.
         today: The run's New York date.
-        entitlement: The entitlement id, recorded in the index.
         report: Receives each example's name, status, and reason as it finishes.
         hold: Keeps each stream example open; `hold_for(STREAM_SECONDS)` by default.
     """
     hold = hold or hold_for(STREAM_SECONDS)
     index = []
     for example in examples:
-        reason = skip_reason(example, plans, today)
-        if reason is None:
-            status, reason = run_example(
-                example,
-                CALLS[example.name],
-                open_session=open_session,
-                folder=folder,
-                today=today,
-                hold=hold,
-            )
-        else:
-            status = "skipped"
-        report(example.name, status, reason)
-        index.append(
-            {"name": example.name, "status": status, "reason": reason, "entitlement": entitlement}
+        status, reason = run_example(
+            example,
+            CALLS[example.name],
+            open_session=open_session,
+            folder=folder,
+            today=today,
+            hold=hold,
         )
+        report(example.name, status, reason)
+        index.append({"name": example.name, "status": status, "reason": reason})
         (folder / "index.json").write_text(json.dumps(index, indent=1) + "\n", encoding="utf-8")

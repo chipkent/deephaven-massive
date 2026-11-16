@@ -25,9 +25,18 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass
+class _Config:
+    options: dict[str, str] = field(default_factory=dict)
+
+    def getoption(self, name: str) -> str:
+        return self.options.get(name, "")
+
+
+@dataclass
 class _Item:
     nodeid: str
     marks: list[pytest.Mark] = field(default_factory=list)
+    config: _Config = field(default_factory=_Config)
 
     def iter_markers(self, name: str) -> list[pytest.Mark]:
         return [m for m in self.marks if m.name == name]
@@ -71,58 +80,44 @@ def _report_through_hook(item: _Item, report: _Report, call: _Call) -> object:
     return stopped.value.value
 
 
-def test_collection_writes_items_and_requests(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_collection_writes_items(tmp_path: Path) -> None:
     target = tmp_path / "collection.json"
-    monkeypatch.setenv(outcomes.COLLECTION_VARIABLE, str(target))
+    config = _Config({outcomes.COLLECTION_OPTION: str(target)})
     items = [
-        _Item(
-            "a.py::marked",
-            [
-                pytest.mark.settles("21").mark,
-                pytest.mark.verifies("x").mark,
-                pytest.mark.requests(3).mark,
-            ],
-        ),
+        _Item("a.py::marked", [pytest.mark.settles("21").mark, pytest.mark.verifies("x").mark]),
         _Item("a.py::plain"),
     ]
     hook: Any = outcomes.pytest_collection_modifyitems
-    hook(items)
+    hook(config, items)
     assert json.loads(target.read_text()) == {
-        "a.py::marked": {"items": ["21", "x"], "requests": 3},
-        "a.py::plain": {"items": [], "requests": outcomes.DEFAULT_REQUESTS},
+        "a.py::marked": {"items": ["21", "x"]},
+        "a.py::plain": {"items": []},
     }
 
 
-def test_collection_writes_nothing_without_the_variable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv(outcomes.COLLECTION_VARIABLE, raising=False)
+def test_collection_writes_nothing_without_the_option(tmp_path: Path) -> None:
     hook: Any = outcomes.pytest_collection_modifyitems
-    hook([_Item("b.py::t")])
+    hook(_Config(), [_Item("b.py::t")])
     assert list(tmp_path.iterdir()) == []
 
 
-def test_each_phase_appends_a_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_phase_appends_a_line(tmp_path: Path) -> None:
     target = tmp_path / "outcomes.jsonl"
-    monkeypatch.setenv(outcomes.OUTCOMES_VARIABLE, str(target))
-    item = _Item("c.py::t")
+    item = _Item("c.py::t", config=_Config({outcomes.OUTCOMES_OPTION: str(target)}))
     failed = _Report("call", "failed")
-    assert _report_through_hook(item, failed, _Call(_ExcInfo("EntitlementError"))) is failed
-    skipped = _Report("setup", "skipped", ("f.py", 1, "Skipped: needs Stocks Starter"))
+    assert _report_through_hook(item, failed, _Call(_ExcInfo("AssertionError"))) is failed
+    skipped = _Report("setup", "skipped", ("f.py", 1, "Skipped: refused: HTTP 403: no"))
     _report_through_hook(item, skipped, _Call(None))
     _report_through_hook(item, _Report("teardown", "failed"), _Call(None))
     lines = outcomes.read_outcomes(target)
     assert [(r["phase"], r["outcome"], r["error_type"], r["reason"]) for r in lines] == [
-        ("call", "failed", "EntitlementError", ""),
-        ("setup", "skipped", "", "needs Stocks Starter"),
+        ("call", "failed", "AssertionError", ""),
+        ("setup", "skipped", "", "refused: HTTP 403: no"),
         ("teardown", "failed", "", ""),
     ]
 
 
-def test_a_phase_writes_nothing_without_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(outcomes.OUTCOMES_VARIABLE, raising=False)
+def test_a_phase_writes_nothing_without_the_option() -> None:
     report = _Report("call", "passed")
     assert _report_through_hook(_Item("d.py::t"), report, _Call(None)) is report
 
@@ -148,8 +143,12 @@ def _phase(phase: str, outcome: str, *, error_type: str = "", reason: str = "") 
         ([_phase("setup", "passed"), _phase("call", "passed")], ("passed", "")),
         ([_phase("setup", "skipped", reason="needs S3")], ("skipped", "needs S3")),
         (
+            [_phase("call", "skipped", reason="refused: HTTP 403: not entitled")],
+            ("refused", "refused: HTTP 403: not entitled"),
+        ),
+        (
             [_phase("call", "failed", error_type="EntitlementError")],
-            ("refused", "call: EntitlementError"),
+            ("failed", "call: EntitlementError"),
         ),
         (
             [_phase("call", "failed", error_type="AssertionError"), _phase("teardown", "failed")],
@@ -171,12 +170,11 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
             import pytest
 
             @pytest.mark.settles("7")
-            @pytest.mark.requests(2)
             def test_passes():
                 pass
 
             def test_skips():
-                pytest.skip("needs Options Starter ($29/month)")
+                pytest.skip("refused: HTTP 403: not entitled")
 
             def test_fails():
                 raise KeyError("x")
@@ -186,11 +184,7 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
     collection = tmp_path / "collection.json"
     lines = tmp_path / "outcomes.jsonl"
     env = {k: v for k, v in os.environ.items() if not k.startswith("MASSIVE_")}
-    env |= {
-        "PYTHONPATH": str(ROOT),
-        outcomes.COLLECTION_VARIABLE: str(collection),
-        outcomes.OUTCOMES_VARIABLE: str(lines),
-    }
+    env |= {"PYTHONPATH": str(ROOT)}
     done = subprocess.run(
         [
             sys.executable,
@@ -202,6 +196,10 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
             "no:cacheprovider",
             "--live-run-token",
             "abc",
+            "--live-collection",
+            "collection.json",
+            "--live-outcomes",
+            "outcomes.jsonl",
             "-q",
             "test_tiny.py",
         ],
@@ -212,22 +210,19 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
         check=False,
     )
     assert done.returncode == 1, done.stdout + done.stderr
-    assert json.loads(collection.read_text())["test_tiny.py::test_passes"] == {
-        "items": ["7"],
-        "requests": 2,
-    }
+    assert json.loads(collection.read_text())["test_tiny.py::test_passes"] == {"items": ["7"]}
     by_test: dict[str, list[dict[str, Any]]] = {}
     for line in outcomes.read_outcomes(lines):
         by_test.setdefault(line["nodeid"], []).append(line)
     assert {n: outcomes.check_outcome(p) for n, p in by_test.items()} == {
         "test_tiny.py::test_passes": ("passed", ""),
-        "test_tiny.py::test_skips": ("skipped", "needs Options Starter ($29/month)"),
+        "test_tiny.py::test_skips": ("refused", "refused: HTTP 403: not entitled"),
         "test_tiny.py::test_fails": ("failed", "call: KeyError"),
     }
     assert by_test["test_tiny.py::test_passes"][0]["items"] == ["7"]
 
 
-def test_the_plugin_adds_the_token_option() -> None:
+def test_the_plugin_adds_the_token_and_file_options() -> None:
     added: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     class _Parser:
@@ -236,6 +231,9 @@ def test_the_plugin_adds_the_token_option() -> None:
 
     hook: Any = outcomes.pytest_addoption
     hook(_Parser())
-    [(names, options)] = added
-    assert names == ("--live-run-token",)
-    assert options["default"] == ""
+    assert [names for names, _ in added] == [
+        ("--live-run-token",),
+        (outcomes.OUTCOMES_OPTION,),
+        (outcomes.COLLECTION_OPTION,),
+    ]
+    assert all(options["default"] == "" for _, options in added)

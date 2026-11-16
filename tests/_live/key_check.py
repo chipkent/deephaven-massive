@@ -1,37 +1,19 @@
-"""The key a live test may use, and the run's plans, learned only once that key may be used.
+"""The key a live test may use: never under CI, and only when one is set.
 
 Every live test reaches Massive with the key in `MASSIVE_API_KEY`, and never under CI (`CI` set
 to anything but blank): a key added to CI's secrets later still never reaches Massive from CI.
-`live_key` makes that check, skipping the test, and every fixture that sets up a live test calls
-it before anything reaches Massive.
+`live_key` makes that check, skipping the test, and the autouse key check of
+`tests/conftest.py` calls it first, before any fixture of a live test reaches Massive: every
+live fixture is function-scoped, so none is set up before that check.
 
-The run's plans are the session fixture `live_plans`, which the first live test that needs them
-sets up before any of its function-scoped fixtures, the autouse key check of `tests/conftest.py`
-included. So the fixture makes the same check first itself, and only then asks the run's source
-of plans (`PLANS_SOURCE`), which `tests/conftest.py` sets: the declared plans, the cached ones,
-or a probe of Massive.
-
-The module is also the pytest plugin that holds the fixture: `tests/conftest.py` registers it.
-It imports neither the library nor Deephaven, so a pytest run can load it with `-p` and no JVM.
+It imports neither the library nor Deephaven, so a pytest run can load it with no JVM.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
-from typing import Final
 
 import pytest
-
-from tests._live.plans import LivePlans
-
-PLUGIN_NAME: Final = "live-key-check"
-"""The name `tests/conftest.py` registers this module under as a pytest plugin."""
-
-PLANS_SOURCE: Final = pytest.StashKey[Callable[[pytest.Config, str], LivePlans]]()
-"""The config stash key of the function that learns the run's plans for a key, given the pytest
-configuration and the key. `tests/conftest.py` sets it; `run_plans` calls it only past the key
-check."""
 
 
 def live_key() -> str:
@@ -61,26 +43,3 @@ def required_env(name: str) -> str:
     if not value:
         pytest.skip(f"{name} is not set")
     return value
-
-
-def run_plans(pytestconfig: pytest.Config) -> LivePlans:
-    """Return the plans of the run's key, after the check that the key may be used.
-
-    This is the session fixture `live_plans`. Only the live tests request it, so a unit run
-    never learns the plans. Being session-scoped, it is set up before any function-scoped
-    fixture of the first live test that needs it, the autouse key check included, so it makes
-    the same check (`live_key`) first itself: under CI, or without `MASSIVE_API_KEY`, the test
-    skips before the run's source of plans (`PLANS_SOURCE`) is asked, and so before anything
-    reaches Massive.
-
-    Args:
-        pytestconfig: The pytest configuration, whose stash holds the source of plans.
-
-    Returns:
-        The plans the source gives for the key.
-    """
-    return pytestconfig.stash[PLANS_SOURCE](pytestconfig, live_key())
-
-
-live_plans = pytest.fixture(scope="session", name="live_plans")(run_plans)
-"""The run's plans, as a session fixture (`run_plans`)."""

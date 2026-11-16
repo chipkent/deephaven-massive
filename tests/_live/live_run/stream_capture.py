@@ -1,11 +1,12 @@
 """The live run's streaming groups: a full trading day of live streams, and their throughput.
 
 `stream-day` streams, for one trading day from 03:45 to 20:30 New York time, a watchlist of
-every unit the key can stream (`stream_units`), through the library's public verbs, so it
-measures the library as users run it:
+every subscription's unit (`stream_units`), through the library's public verbs, so it
+measures the library as users run it. The session uses the owner's settings, so a subscription
+they list in `delayed_subscriptions` streams from the delayed feed.
 
 - **Watchlists.** Stocks: minute and second bars of 20 stocks (with `KIMpL`, a preferred share,
-  to check its spelling live), and their trades from Developer up. Options: minute bars of the
+  to check its spelling live), and their trades. Options: minute bars of the
   10 SPY contracts nearest the money at the nearest expiry, chosen from the chain at the start.
   Currencies: minute bars of two forex pairs and two crypto pairs, and the forex pairs' quotes.
   Indices: minute bars of `I:SPX` and `I:NDX`. Futures: minute bars of the front ES and NQ
@@ -17,22 +18,25 @@ measures the library as users run it:
 - **Rows.** The writer appends each row to `rows/<stream>-<hour>.parquet` by the hour (UTC) of
   its `TimestampInsert`, counts rows per stream and minute into `minutes.csv`, and measures each
   row's arrival delay: `TimestampInsert` minus the event's own time (`Timestamp` for ticks,
-  `TimestampEnd` for bars), less the documented delay of a delayed unit. Each hour's 50th, 90th,
-  and 99th percentiles and maximum go to `latency.csv`.
+  `TimestampEnd` for bars), a delayed feed's lag included, as Massive delivered it. Each hour's
+  50th, 90th, and 99th percentiles and maximum go to `latency.csv`.
 - **Samples.** Every 10 seconds the sampler appends one row per stream and per connection, from
   snapshots of `m.streams()` and `m.connections()`, to `samples-streams.csv` and
   `samples-connections.csv`, and one row of CPU seconds and JVM heap to `samples-process.csv`.
 - **Gaps.** A child that starts again on the same day appends to the same files and records
   the time since the last sample in `gaps.csv`; more than 30 minutes of gaps fails the day.
-- **Rows.** A unit whose streams recorded no row all day fails, once its class's session has
-  been open longer than the unit's delay (`SESSION_OPENS`): an acknowledged subscription that
-  never delivers is a failure, not a quiet pass.
+- **Verdicts.** A unit whose streams Massive all refused is `refused`, quoting the refusal; one
+  of whose streams Massive refused while others delivered passes, and its reason quotes the
+  refusal. A unit whose streams recorded no row all day fails, once its class's session has
+  opened (`SESSION_OPENS`): an acknowledged subscription that never delivers is a failure, not
+  a quiet pass. A unit the owner lists as delayed skips instead, since the delayed feed's lag
+  is not known in advance.
 
 `throughput` holds, from 09:15, the busiest streams of every symbol (`dm.ALL`) as `last_by()`
 tables: second bars of every stock, every crypto trade, and every forex quote. Its samples give
-the rows a second of each stream over the measured hour (09:45 to 10:45 for delayed stocks,
-09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects, and any
-`SchemaDrift`, in `summary.json`; it passes when it sampled the whole hour without a gap.
+the rows a second of each stream over the measured hour (09:45 to 10:45 when the owner lists
+stocks as delayed, 09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects,
+and any `SchemaDrift`, in `summary.json`; it passes when it sampled the whole hour without a gap.
 
 The overnight group (`stream_night`) reuses the recorder, the sampler, the gap records, and
 the stream holding (`held_streams`) of the stream day.
@@ -62,8 +66,7 @@ import numpy as np
 import deephaven_massive as dm
 from tests._live.calendar import NEW_YORK
 from tests._live.contracts import front_contract
-from tests._live.live_run import stream_units
-from tests._live.live_run.stream_units import delay_of
+from tests._live.summary import REFUSED
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +111,31 @@ currencies and futures, trades through the night, so its session counts as open 
 stream day's start (`DAY_START`)."""
 
 SESSION_GRACE: Final = timedelta(minutes=5)
-"""How long past its session's open, and its unit's delay, a unit may go without a row."""
+"""How long past its session's open a unit may go without a row."""
+
+REFUSAL_MARKS: Final = (
+    "HTTP 403",
+    "NOT_AUTHORIZED",
+    "not entitled",
+    "may not include this data",
+    "(FMV) data needs",
+)
+"""Text that marks a failed stream's error as a refusal by Massive: an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and the library's wording of a refused topic, including a
+fair-market-value (FMV) topic."""
+
+
+def is_refusal(error: str) -> bool:
+    """Tell whether a failed stream's error is Massive's refusal.
+
+    Args:
+        error: The stream's `Error`.
+
+    Returns:
+        True when it holds one of `REFUSAL_MARKS`.
+    """
+    return any(mark in error for mark in REFUSAL_MARKS)
+
 
 _PERCENTILES: Final = (50, 90, 99)
 
@@ -119,7 +146,7 @@ class Stream:
 
     Attributes:
         name: Its file name, such as `"stocks-minute-bars"`.
-        unit: The streaming unit it belongs to, such as `"stocks delayed"`.
+        unit: The streaming unit it belongs to, such as `"stocks"`.
         query: Builds its query on the session.
         event_column: The column of the event's own time: `Timestamp` or `TimestampEnd`.
         held: Whether its `append_only()` and `last_by()` tables are held too (bars).
@@ -174,14 +201,11 @@ def option_contracts(rows: list[dict[str, Any]], today: date) -> list[str]:
     return [r["Symbol"] for r in chosen[:OPTION_CONTRACTS]]
 
 
-def stream_day_streams(
-    units: Iterable[str], *, tiers: dict[str, str], today: date, options: list[str]
-) -> list[Stream]:
+def stream_day_streams(units: Iterable[str], *, today: date, options: list[str]) -> list[Stream]:
     """Return the stream day's streams for its due units.
 
     Args:
-        units: The due units, such as `["stocks delayed", "currencies real-time"]`.
-        tiers: Each class's tier, which decides whether stock trades are streamed.
+        units: The due units, such as `["stocks", "currencies"]`.
         today: The New York date, which picks the front futures contracts.
         options: The option contracts to stream (`option_contracts`).
 
@@ -190,31 +214,23 @@ def stream_day_streams(
     """
     streams: list[Stream] = []
     for unit in units:
-        name = unit.split()[0]
+        name = unit
         if name == "stocks":
-            streams.append(
+            streams += [
                 Stream(
                     "stocks-minute-bars", unit, lambda m: m.stocks.bars(STOCKS, dm.Timespan.MINUTE)
-                )
-            )
-            if tiers["stocks"] != "business":  # the base Business plan has no per-second bars
-                streams.append(
-                    Stream(
-                        "stocks-second-bars",
-                        unit,
-                        lambda m: m.stocks.bars(STOCKS, dm.Timespan.SECOND),
-                    )
-                )
-            if tiers["stocks"] not in {"basic", "starter", "business"}:
-                streams.append(
-                    Stream(
-                        "stocks-trades",
-                        unit,
-                        lambda m: m.stocks.trades(STOCKS),
-                        event_column="Timestamp",
-                        held=False,
-                    )
-                )
+                ),
+                Stream(
+                    "stocks-second-bars", unit, lambda m: m.stocks.bars(STOCKS, dm.Timespan.SECOND)
+                ),
+                Stream(
+                    "stocks-trades",
+                    unit,
+                    lambda m: m.stocks.trades(STOCKS),
+                    event_column="Timestamp",
+                    held=False,
+                ),
+            ]
         elif name == "options" and options:
             streams.append(
                 Stream(
@@ -254,29 +270,18 @@ def stream_day_streams(
     return streams
 
 
-def throughput_streams(units: Iterable[str], *, tiers: dict[str, str]) -> list[Stream]:
+def throughput_streams(units: Iterable[str]) -> list[Stream]:
     """Return the throughput group's streams of every symbol, for its due units.
 
     Args:
-        units: The due units of the stocks and currencies classes.
-        tiers: Each class's tier: the base Stocks Business plan has no per-second bars, so it
-            streams every stock's minute bars instead.
+        units: The due units: `stocks` and `currencies`.
 
     Returns:
-        The streams: every stock's second (or minute) bars, every crypto trade, every forex
-        quote.
+        The streams: every stock's second bars, every crypto trade, every forex quote.
     """
     streams: list[Stream] = []
     for unit in units:
-        if unit.startswith("stocks") and tiers.get("stocks") == "business":
-            streams.append(
-                Stream(
-                    "stocks-all-minute-bars",
-                    unit,
-                    lambda m: m.stocks.bars(dm.ALL, dm.Timespan.MINUTE),
-                )
-            )
-        elif unit.startswith("stocks"):
+        if unit == "stocks":
             streams.append(
                 Stream(
                     "stocks-all-second-bars",
@@ -456,8 +461,7 @@ class Recorder:
                 key = (batch.stream.name, str(minute))
                 self._minutes[key] = self._minutes.get(key, 0) + int(count)
         event = batch.columns[batch.stream.event_column].astype("datetime64[ns]")
-        delay = delay_of(batch.stream.unit)
-        delays = (inserted - event).astype("int64") / 1e6 - delay.total_seconds() * 1000
+        delays = (inserted - event).astype("int64") / 1e6
         for hour in np.unique(hours):
             mask = hours == hour
             files = self._files.setdefault(batch.stream.name, _StreamFiles())
@@ -712,7 +716,7 @@ def run_stream_day(
     m: MassiveSession,
     *,
     units: list[str],
-    tiers: dict[str, str],
+    delayed: frozenset[str],
     folder: Path,
     until: datetime,
     report: Callable[[str, str, str], None],
@@ -724,7 +728,7 @@ def run_stream_day(
     Args:
         m: The session.
         units: The due units.
-        tiers: Each class's tier.
+        delayed: The subscriptions the owner's settings list as delayed.
         folder: The attempt's folder, shared by every child of the same day.
         until: When the day ends (20:30 New York time).
         report: Receives each unit's name, status, and reason at the end.
@@ -737,10 +741,10 @@ def run_stream_day(
     day_start = day_start or datetime.combine(today, DAY_START, NEW_YORK)
     record_gap(folder, clock.now(), day_start=day_start)
     options: list[str] = []
-    if any(u.startswith("options") for u in units):
+    if "options" in units:
         chain = m.options.chain("SPY").fetch(wait=True)
         options = option_contracts(rows_of(chain), today)
-    streams = stream_day_streams(units, tiers=tiers, today=today, options=options)
+    streams = stream_day_streams(units, today=today, options=options)
     recorder = Recorder(folder)
     with held_streams(m, streams, recorder):
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
@@ -749,13 +753,13 @@ def run_stream_day(
     rows = unit_rows(folder, streams)
     for unit in units:
         status, reason = _unit_verdict(
-            unit,
-            failure=failures.get(unit.split()[0], ""),
-            contracts=bool(options) or not unit.startswith("options"),
+            failures=failures.get(unit, []),
+            contracts=bool(options) or unit != "options",
             gaps=total_gaps(folder),
             errors=recorder.errors,
             rows=rows.get(unit, 0),
             late=clock.now() >= rows_due_from(unit, today),
+            delayed=unit in delayed,
         )
         report(unit, status, reason)
 
@@ -796,41 +800,52 @@ def held_streams(m: MassiveSession, streams: list[Stream], recorder: Recorder) -
 
 
 def _unit_verdict(
-    unit: str,
     *,
-    failure: str,
+    failures: list[str],
     contracts: bool,
     gaps: timedelta,
     errors: list[str],
     rows: int,
     late: bool,
+    delayed: bool,
 ) -> tuple[str, str]:
     """Decide one unit's result at the end of a stream day.
 
     Args:
-        unit: The unit.
-        failure: The error of its class's first failed stream, `""` for none.
+        failures: The errors of its class's failed streams, in order.
         contracts: Whether it had something to stream (an options unit needs contracts).
         gaps: The day's gaps.
         errors: The recorder's errors.
         rows: The rows its streams recorded all day.
-        late: Whether its session had been open past its delay when the day ended.
+        late: Whether its session had opened when the day ended.
+        delayed: Whether the owner's settings list its subscription as delayed.
 
     Returns:
-        `("passed", "")` or `("passed", "gaps N")`, or `("failed", why)`.
+        `("passed", why)`, its reason the gaps and a refused stream, if any; `("refused",
+        "refused: <error>")` when Massive refused its streams and none recorded a row;
+        `("skipped", why)` for a delayed unit without a row; or `("failed", why)`.
     """
     minutes = round(gaps.total_seconds() / 60)
+    refused = [f for f in failures if is_refusal(f)]
+    broken = [f for f in failures if not is_refusal(f)]
     if not contracts:
         return "failed", "the SPY chain gave no contract to stream"
-    if failure:
-        return "failed", f"a stream failed: {failure}"
+    if broken or (refused and not rows):
+        return (
+            ("failed", f"a stream failed: {broken[0]}")
+            if broken
+            else ("refused", REFUSED + refused[0])
+        )
     if gaps > MAX_GAP:
         return "failed", f"gaps {minutes}"
     if errors:
         return "failed", errors[0]
     if not rows and late:
-        return "failed", "no rows during its session's hours"
-    return "passed", f"gaps {minutes}" if minutes else ""
+        why = "no rows during its session's hours"
+        return ("skipped", f"{why}, on the delayed feed") if delayed else ("failed", why)
+    notes = [f"gaps {minutes}"] if minutes else []
+    notes += [f"a stream {REFUSED}{refused[0]}"] if refused else []
+    return "passed", "; ".join(notes)
 
 
 def unit_rows(folder: Path, streams: list[Stream]) -> dict[str, int]:
@@ -861,16 +876,15 @@ def rows_due_from(unit: str, day: date) -> datetime:
     """Return when a unit must have recorded a row on a stream day.
 
     Args:
-        unit: The unit, such as `"stocks delayed"`.
+        unit: The unit, such as `"stocks"`.
         day: The New York date of the stream day.
 
     Returns:
-        Its class's session open that day (`SESSION_OPENS`), plus the unit's delay and
-        `SESSION_GRACE`, as an aware instant.
+        Its class's session open that day (`SESSION_OPENS`), plus `SESSION_GRACE`, as an
+        aware instant.
     """
-    opens = SESSION_OPENS.get(unit.split(maxsplit=1)[0], DAY_START)
-    delay = stream_units.delay_of(unit)
-    return datetime.combine(day, opens, NEW_YORK) + delay + SESSION_GRACE
+    opens = SESSION_OPENS.get(unit, DAY_START)
+    return datetime.combine(day, opens, NEW_YORK) + SESSION_GRACE
 
 
 DATASET_CLASSES: Final = {"forex": "currencies", "crypto": "currencies"}
@@ -878,8 +892,8 @@ DATASET_CLASSES: Final = {"forex": "currencies", "crypto": "currencies"}
 the currencies unit's."""
 
 
-def failed_streams(rows: list[dict[str, Any]]) -> dict[str, str]:
-    """Return each class whose streams ended the day failed, with the first failure's error.
+def failed_streams(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Return each class whose streams ended the day failed, with each failure's error.
 
     A stream Massive refuses, or that fails on its own, fails asynchronously: its table stops
     growing while the sampler goes on, so the day's verdict must read the streams' states.
@@ -888,13 +902,14 @@ def failed_streams(rows: list[dict[str, Any]]) -> dict[str, str]:
         rows: The rows of `m.streams()` at the day's end.
 
     Returns:
-        The error of the first `FAILED` stream of each class, by class.
+        The errors of the `FAILED` streams of each class, in order, by class.
     """
-    found: dict[str, str] = {}
+    found: dict[str, list[str]] = {}
     for row in rows:
         if row["State"] == "FAILED":
             namespace = str(row["Dataset"]).split(".")[0]
-            found.setdefault(DATASET_CLASSES.get(namespace, namespace), str(row["Error"]))
+            name = DATASET_CLASSES.get(namespace, namespace)
+            found.setdefault(name, []).append(str(row["Error"]))
     return found
 
 
@@ -928,17 +943,18 @@ def sample_until(
             break
 
 
-def throughput_window(units: list[str], day: date) -> tuple[datetime, datetime]:
+def throughput_window(delayed: frozenset[str], day: date) -> tuple[datetime, datetime]:
     """Return the hour the throughput is measured over.
 
     Args:
-        units: The due units.
+        delayed: The subscriptions the owner's settings list as delayed.
         day: The New York date.
 
     Returns:
-        09:45 to 10:45 New York time when stock data is delayed, else 09:30 to 10:30.
+        09:45 to 10:45 New York time when stocks are listed as delayed, so the hour holds
+        regular-session rows, else 09:30 to 10:30.
     """
-    start = time(9, 45) if "stocks delayed" in units else time(9, 30)
+    start = time(9, 45) if "stocks" in delayed else time(9, 30)
     first = datetime.combine(day, start, NEW_YORK)
     return first, first + timedelta(hours=1)
 
@@ -947,7 +963,7 @@ def run_throughput(
     m: MassiveSession,
     *,
     units: list[str],
-    tiers: dict[str, str],
+    delayed: frozenset[str],
     folder: Path,
     until: datetime,
     report: Callable[[str, str, str], None],
@@ -959,7 +975,8 @@ def run_throughput(
     Args:
         m: The session.
         units: The due units (stocks and currencies).
-        tiers: Each class's tier (`throughput_streams`).
+        delayed: The subscriptions the owner's settings list as delayed
+            (`throughput_window`).
         folder: The attempt's folder.
         until: When to stop (11:00 New York time).
         report: Receives each unit's name, status, and reason at the end.
@@ -967,8 +984,8 @@ def run_throughput(
         window: The measured hour; `throughput_window` by default.
     """
     clock = clock or Clock()
-    window = window or throughput_window(units, clock.now().astimezone(NEW_YORK).date())
-    streams = throughput_streams(units, tiers=tiers)
+    window = window or throughput_window(delayed, clock.now().astimezone(NEW_YORK).date())
+    streams = throughput_streams(units)
     tables = [stream.query(m).last_by() for stream in streams]
     recorder = Recorder(folder)
     try:
@@ -981,8 +998,10 @@ def run_throughput(
     summary = summarize_throughput(folder, window)
     (folder / "summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
     for unit in units:
-        failure = failures.get(unit.split()[0], "")
-        if failure:
+        failure = next(iter(failures.get(unit, [])), "")
+        if failure and is_refusal(failure):
+            report(unit, "refused", REFUSED + failure)
+        elif failure:
             report(unit, "failed", f"a stream failed: {failure}")
         elif summary["covered"]:
             report(unit, "passed", "")

@@ -5,4 +5,4 @@ Date: 2026-11-12
 Status: open
 
 Sent as written; if Massive reads the empty item as no filter, the library should refuse it. Settled
-by `tests/datasets/test_filters_integration.py` (Stocks Basic).
+by `tests/datasets/test_filters_integration.py`, which reads stock dividends.

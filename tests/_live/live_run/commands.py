@@ -13,9 +13,9 @@ the real machine, and calls one of these:
 - `status`: the latest probe, every check, and a summary per group. Reads only.
 - `pack`: `checks.csv`, `REPORT.md`, the secret scan, and the zip; refused while a run holds
   the lock or without `MASSIVE_API_KEY`, since the scan would then prove nothing.
-- `upgrade-check SUBSCRIPTION`: the attended upgrade check, holding the lock; refused unless
-  the probe shows the subscription on Basic. A run that ends `tier stayed Basic` was a
-  rehearsal and is recorded as one, not as the check's result.
+- `upgrade-check SUBSCRIPTION`: the attended upgrade check, holding the lock. A run that ends
+  `Massive kept limiting for 15 minutes` (no upgrade took effect) was a rehearsal and is
+  recorded as one, not as the check's result.
 
 Every printed line also goes to `run.log`, cleaned of the secrets. Times are New York time.
 """
@@ -51,7 +51,6 @@ from tests._live.live_run.schedule import (
 from tests._live.live_run.secret_scrub import fingerprints
 from tests._live.live_run.state import RunState, check_of, is_due, record
 from tests._live.live_run.stream_units import night_units, stream_units
-from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -61,18 +60,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BASIC_PAUSE: Final = timedelta(seconds=65)
-"""The pause after a probe before any group starts, while some subscription is on Basic: the
-next group then starts on an unspent minute."""
-
 ERROR_BACKOFF: Final = timedelta(minutes=5)
 """How long the run waits after a step that raised before it tries the next step."""
 
 INTERRUPTED: Final = 130
 """The exit status after Control-C."""
 
-REHEARSAL: Final = "tier stayed Basic"
-"""The upgrade check's verdict when no upgrade happened: a rehearsal."""
+REHEARSAL: Final = "Massive kept limiting for 15 minutes"
+"""The upgrade check's verdict when no upgrade took effect: a rehearsal."""
 
 
 @contextlib.contextmanager
@@ -124,11 +119,10 @@ def is_locked(out: Path) -> bool:
 def apply_probe(
     ctx: RunContext, state: RunState, memory: RunMemory, *, result: ProbeResult
 ) -> None:
-    """Record a probe, adopt its tiers, and plan a stream day and a stream night when due.
+    """Record a probe, adopt its closures, and plan a stream day and a stream night when due.
 
-    Writes `probes/<UTC time>.json` and a line of `probes/entitlements.csv`. A probe that could
-    not tell the tiers keeps the previous ones, Basic everywhere before the first, and is tried
-    again later (`run_schedule`).
+    Writes `probes/<UTC time>.json` and a line of `probes/probes.csv`. A probe that could not
+    read Massive's market status is tried again later (`run_schedule`).
 
     Args:
         ctx: The command's context.
@@ -149,66 +143,76 @@ def apply_probe(
     if result.key_rejected:
         msg = "the API key was rejected: copy it again from Massive's dashboard"
         raise RunRefusedError(msg)
-    if result.tiers is None:
+    if result.error:
         memory.retries += 1
-        ctx.say(f"the probe could not tell the subscriptions ({result.error}); keeping the last")
-        if not state.current:
-            basic = dict.fromkeys(TIERS, "basic")
-            state.current = run_state.entitlement_id(state, basic, [])
+        ctx.say(f"the probe could not read Massive's market status ({result.error})")
     else:
         memory.retries = 0
         memory.latest_probe = dataclasses.asdict(result)
         if result.closures is not None:
             state.closures = result.closures
-        state.current = run_state.entitlement_id(state, result.tiers, result.flat_files)
-        _append_probe_line(folder, state, result)
-        ctx.say(f"subscriptions: {run_state.tiers_text(state, state.current)}")
-    tiers = state.entitlements[state.current]["tiers"]
-    if "basic" in tiers.values():
-        memory.not_before = now + BASIC_PAUSE
-    _plan_stream_day(ctx, state, tiers)
-    _plan_stream_night(ctx, state, tiers)
-    _remind_flat_files(ctx, memory, result)
+        _append_probe_line(folder, result)
+    _plan_stream_day(ctx, state)
+    _plan_stream_night(ctx, state)
     run_state.save(ctx.out, state)
 
 
-def _append_probe_line(folder: Path, state: RunState, result: ProbeResult) -> None:
-    """Append one probe's line to `probes/entitlements.csv`.
+def _append_probe_line(folder: Path, result: ProbeResult) -> None:
+    """Append one probe's line to `probes/probes.csv`.
 
     Args:
         folder: The `probes` folder.
-        state: The run's state, for the entitlement's text.
         result: The probe.
     """
-    path = folder / "entitlements.csv"
+    path = folder / "probes.csv"
     new = not path.exists()
     with path.open("a", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
         if new:
-            writer.writerow(["when", "entitlement", "subscriptions", "history", "clock_offset_s"])
-        history = " ".join(f"{k}={v}" for k, v in result.history_start.items())
-        subscriptions = run_state.tiers_text(state, state.current)
-        writer.writerow([result.when, state.current, subscriptions, history, result.clock_offset])
+            writer.writerow(["when", "clock_offset_s", "closures"])
+        closures = " ".join(f"{k}={v}" for k, v in sorted((result.closures or {}).items()))
+        writer.writerow([result.when, result.clock_offset, closures])
 
 
-def _plan_stream_day(ctx: RunContext, state: RunState, tiers: dict[str, str]) -> None:
-    """Plan a stream day when a streaming unit is due and none is planned ahead.
+def _calls_for_streaming(check: run_state.Check, today: str) -> bool:
+    """Tell whether a streaming unit asks for a stream day or night to be planned.
+
+    A unit Massive refused, or that skipped for its delayed listing, still streams on the next
+    planned day or night, but asks for one only once another check of its subscription stopped
+    being refused (`Check.rerun`): otherwise a key without a subscription would plan one every
+    day.
+
+    Args:
+        check: The unit's check.
+        today: The New York date, ISO.
+
+    Returns:
+        True when it is due and not waiting on Massive.
+    """
+    return is_due(check, today) and (not run_state.is_daily(check) or check.rerun)
+
+
+def _plan_stream_day(ctx: RunContext, state: RunState) -> None:
+    """Plan a stream day when a streaming unit asks for one and none is planned ahead.
 
     Args:
         ctx: The command's context.
         state: The run's state.
-        tiers: The current tiers.
     """
     today = ctx.now().astimezone(NEW_YORK).date()
-    due = [u for u in stream_units(tiers) if is_due(state, check_of(state, "stream-day", u))]
+    due = [
+        u
+        for u in stream_units()
+        if _calls_for_streaming(check_of(state, "stream-day", u), today.isoformat())
+    ]
     if due and (not state.stream_day or state.stream_day < today.isoformat()):
         planned = timetable.next_stream_day(today, state.stream_days, night=state.stream_night)
         state.stream_day = planned.isoformat()
         ctx.say(f"stream day planned for {state.stream_day}: keep the machine on and awake")
 
 
-def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) -> None:
-    """Plan a stream night when a night unit is due and the planned one may start no more.
+def _plan_stream_night(ctx: RunContext, state: RunState) -> None:
+    """Plan a stream night when a night unit asks for one and the planned one may start no more.
 
     A night whose child may still start is never moved: a probe between two of its children's
     starts finds its units still due. One whose child started too often, or whose latest
@@ -218,10 +222,12 @@ def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) 
     Args:
         ctx: The command's context.
         state: The run's state.
-        tiers: The current tiers.
     """
     now = ctx.now()
-    units = [u for u in night_units(tiers) if is_due(state, check_of(state, "stream-night", u))]
+    today = now.astimezone(NEW_YORK).date().isoformat()
+    units = [
+        u for u in night_units() if _calls_for_streaming(check_of(state, "stream-night", u), today)
+    ]
     if not units or night_may_start(state, now):
         return
     evening = timetable.next_stream_night(
@@ -233,26 +239,6 @@ def _plan_stream_night(ctx: RunContext, state: RunState, tiers: dict[str, str]) 
         f"{timetable.night_end(evening):%H:%M} the next morning: "
         "keep the machine on and awake overnight"
     )
-
-
-def _remind_flat_files(ctx: RunContext, memory: RunMemory, result: ProbeResult) -> None:
-    """Print, once a day, that a paid tier includes flat files while the S3 pair is not set.
-
-    Args:
-        ctx: The command's context.
-        memory: The run's memory, which notes the day of the reminder.
-        result: The probe.
-    """
-    if result.tiers is None or any(ctx.environ.get(v, "").strip() for v in children.S3_VARIABLES):
-        return
-    today = ctx.now().astimezone(NEW_YORK).date().isoformat()
-    paid = [f"{name.capitalize()} {tier}" for name, tier in result.tiers.items() if tier != "basic"]
-    if paid and memory.reminded != today:
-        memory.reminded = today
-        ctx.say(
-            f"{paid[0]} includes flat files, but the S3 pair is not set: "
-            "set MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY, then restart"
-        )
 
 
 # --- commands ---------------------------------------------------------------------------------
@@ -274,13 +260,11 @@ def command_check(ctx: RunContext) -> int:
         ctx.echo(f"{item.verdict:4} {item.name}: {item.detail}")
     if result.key_rejected:
         ctx.echo("FAIL key: the API key was rejected: copy it again from Massive's dashboard")
-    elif result.tiers is None:
-        ctx.echo(f"WARN probe: could not tell the subscriptions ({result.error})")
+    elif result.error:
+        ctx.echo(f"WARN probe: could not read Massive's market status ({result.error})")
     else:
-        for name, tier in result.tiers.items():
-            history = result.history_start.get(name, "")
-            ctx.echo(f"     {name}: {tier}, history from {history}")
-        ctx.echo(f"     flat files: {', '.join(result.flat_files) or 'none'}")
+        closures = ", ".join(f"{k} {v}" for k, v in sorted((result.closures or {}).items()))
+        ctx.echo(f"     market closures Massive lists: {closures or 'none'}")
     ok = ready(items) and not result.key_rejected
     ctx.echo(f"ready: {'yes' if ok else 'no'}")
     return 0 if ok else 1
@@ -344,8 +328,8 @@ def safe_probe(ctx: RunContext) -> ProbeResult:
         ctx: The command's context.
 
     Returns:
-        The probe's result; on an exception, a result with no tiers and the exception as its
-        error, which keeps the previous tiers (`apply_probe`).
+        The probe's result; on an exception, a result with the exception as its error, which
+        is tried again later (`apply_probe`).
     """
     try:
         return ctx.probe()
@@ -483,21 +467,15 @@ def _step(ctx: RunContext, state: RunState, memory: RunMemory) -> None:
         state: The run's state.
         memory: The run's memory.
     """
-
-    def reprobe() -> None:
-        apply_probe(ctx, state, memory, result=safe_probe(ctx))
-
     step = next_step(state, memory, ctx.now())
     if step.action == "probe":
-        reprobe()
+        apply_probe(ctx, state, memory, result=safe_probe(ctx))
         return
     assert step.until is not None  # a run has a stop and a sleep an end
     if step.action == "run":
         ctx.say(f"start {step.group}")
         if step.group in PYTEST_GROUPS:
-            attempts.run_pytest_group(
-                ctx, state, memory, group=step.group, until=step.until, reprobe=reprobe
-            )
+            attempts.run_pytest_group(ctx, state, memory, group=step.group, until=step.until)
         else:
             attempts.run_built_in_group(ctx, state, memory, group=step.group, until=step.until)
         if step.group in state.any_time:
@@ -573,7 +551,7 @@ def command_status(ctx: RunContext) -> int:
     latest = None
     for path in reversed(probes):
         stored = json.loads(path.read_text(encoding="utf-8"))
-        if stored.get("tiers") is not None:
+        if not stored.get("error"):
             latest = stored
             break
     now = ctx.now()
@@ -661,32 +639,26 @@ def command_upgrade_check(ctx: RunContext, subscription: str) -> int:
 
     Args:
         ctx: The command's context.
-        subscription: One of the subscriptions (`plans.TIERS`).
+        subscription: One of the subscriptions (`stream_units.SUBSCRIPTIONS`).
 
     Returns:
         0 when it passed or was a rehearsal, 1 when it failed, `INTERRUPTED` after Control-C
         (nothing is recorded then).
 
     Raises:
-        RunRefusedError: When the folder is in use, the commit differs, the key was rejected,
-            or the subscription is not on Basic.
+        RunRefusedError: When the folder is in use, the commit differs, or the key was
+            rejected.
     """
     require_key(ctx)
     with held_lock(ctx.out), hang_ups_interrupt():
         state = _open_state(ctx)
         memory = RunMemory()
         apply_probe(ctx, state, memory, result=safe_probe(ctx))
-        tier = state.entitlements[state.current]["tiers"][subscription]
-        if tier != "basic":
-            msg = f"{subscription} is on {tier}, not Basic: the upgrade check starts from Basic"
-            raise RunRefusedError(msg)
         attempt = attempts.new_attempt(ctx, state, "upgrade-check")
         folder = ctx.out / attempt.folder
         request = {
             "group": "upgrade-check",
             "due": [subscription],
-            "tiers": {},
-            "entitlement": state.current,
             "until": ctx.now().isoformat(),
         }
         (folder / "request.json").write_text(json.dumps(request) + "\n", encoding="utf-8")
@@ -737,7 +709,7 @@ def _attended_child(
         if line.endswith(children.ENTER_PROMPT):
             prompted.set()
 
-    env = attempts.environment(ctx, state, folder=folder, extra={})
+    env = attempts.environment(ctx, folder=folder)
     argv = [
         ctx.python,
         str(ctx.script),

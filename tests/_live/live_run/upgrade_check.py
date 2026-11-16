@@ -1,7 +1,7 @@
 """The live run's attended upgrade check: does pacing end once a subscription is upgraded?
 
-When a free subscription's 5 requests a minute run out, the library learns that the
-subscription is on Basic and paces it. This check, run by hand at the moment of an upgrade
+When Massive refuses a subscription's requests past its limit a minute, the library learns
+the limit and paces the subscription. This check, run by hand at the moment of an upgrade
 (`live_run.py upgrade-check SUBSCRIPTION`), tests that a new session after the upgrade is no
 longer limited:
 
@@ -9,18 +9,20 @@ longer limited:
    `m.rate_limits()` shows its limit `LEARNED`.
 2. The child prints `Now upgrade <subscription> on the dashboard, then press Enter` and reads a
    line from its standard input, which the parent writes when the person presses Enter.
-3. A's row is recorded and A is closed. The subscription is probed once a minute until its tier
-   is above Basic; then, 65 seconds later, session B, which declares nothing, sends ten
-   one-request calls, recording each one's send and answer times and B's rows.
+3. A's row is recorded and A is closed. Once a minute, a fresh session that declares nothing
+   sends six one-request calls (`ANSWERED_CALLS`), until Massive answers all six without an
+   HTTP 429; then, 65 seconds later, session B, which declares nothing, sends ten one-request
+   calls, recording each one's send and answer times and B's rows.
 4. One round whose ten calls are all answered within 30 seconds with no refusal passes. A
-   refusal (Massive still limits) closes B and repeats step 3 a minute later; the whole wait
-   after Enter is limited to 15 minutes.
+   refusal (Massive still limits) closes B and repeats the round a minute later; the whole
+   wait after Enter is limited to 15 minutes.
 
 The verdicts: `passed`; `failed: library paced` (no refusal, but a call waited more than 30 s);
-`failed: Massive kept the free limit` (the 15 minutes ended on refusals); and `failed: tier
-stayed Basic` (no probe saw the upgrade), which records a rehearsal, not the check's result.
-Everything goes to `upgrade-check.json` in the attempt's folder. It judges by timings, never by
-states seen in a refreshing table.
+`failed: Massive refused a round of ten` (the 15 minutes ended on refused rounds); and
+`failed: Massive kept limiting for 15 minutes` (Massive never answered six calls in a minute),
+which records a rehearsal, not the check's result. Everything goes to `upgrade-check.json` in
+the attempt's folder. It judges by timings and Massive's answers, never by states seen in a
+refreshing table.
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
 from tests._live.live_run.children import ENTER_PROMPT
 from tests._live.live_run.stream_capture import diagnostics_rows, wait_for_diagnostics
-from tests._live.plans import TIERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,18 +46,20 @@ if TYPE_CHECKING:
 
     from deephaven_massive import MassiveSession
 
-SUBSCRIPTIONS: Final = tuple(TIERS)
-
 CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
     "stocks": lambda m: m.stocks.previous_day_bar("AAPL").fetch(wait=True),
-    # Options Basic includes a contract's bars, not the chain; an expired contract answers 404,
-    # which counts against the minute the same.
+    # A contract's bars, not the chain, which more keys are refused; an expired contract
+    # answers 404, which counts against the minute the same.
     "options": lambda m: m.options.previous_day_bar("O:SPY261218C00600000").fetch(wait=True),
     "indices": lambda m: m.indices.previous_day_bar("I:NDX").fetch(wait=True),
     "currencies": lambda m: m.forex.previous_day_bar("C:EURUSD").fetch(wait=True),
     "futures": lambda m: m.futures.market_status(product_code="ES", limit=1).fetch(wait=True),
 }
 """One call of each subscription that sends exactly one request."""
+
+ANSWERED_CALLS: Final = 6
+"""The calls Massive must answer in a minute, none refused with an HTTP 429, before the upgrade
+counts as taken; session A's learned limit (`Record.row_before`) shows how many it allowed."""
 
 ROUND_CALLS: Final = 10
 ANSWER_LIMIT: Final = 30.0
@@ -100,6 +103,7 @@ class Record:
         subscription: The subscription upgraded.
         learned_calls: How many calls session A made before its limit read `LEARNED`.
         row_before: A's rate-limit row after Enter.
+        answered: Each minute's `ANSWERED_CALLS` calls, until Massive answered them all.
         rounds: Each round of session B: its calls (send time, seconds, error) and its row.
         verdict: `passed`, or the failure.
     """
@@ -107,6 +111,7 @@ class Record:
     subscription: str
     learned_calls: int = 0
     row_before: dict[str, Any] = field(default_factory=dict)
+    answered: list[dict[str, Any]] = field(default_factory=list)
     rounds: list[dict[str, Any]] = field(default_factory=list)
     verdict: str = ""
 
@@ -129,7 +134,7 @@ def _row(m: MassiveSession, subscription: str) -> dict[str, Any]:
 
 
 def learn_limit(m: MassiveSession, subscription: str, *, limit: int = 30) -> int:
-    """Make one-request calls until the session has learned the subscription is on Basic.
+    """Make one-request calls until the session has learned the subscription's limit.
 
     After each call it waits until the call's effect shows in `m.rate_limits()`, which takes
     an update cycle after the call (`wait_for_diagnostics`), then reads the subscription's
@@ -144,22 +149,29 @@ def learn_limit(m: MassiveSession, subscription: str, *, limit: int = 30) -> int
         How many calls it took.
 
     Raises:
-        RuntimeError: When the limit was not learned within `limit` calls: the subscription is
-            not on Basic.
+        RuntimeError: When the limit was not learned within `limit` calls: Massive did not
+            limit the subscription.
     """
     for count in range(1, limit + 1):
         CALLS[subscription](m)
         wait_for_diagnostics(m)
         if _row(m, subscription).get("LimitSource") == "LEARNED":
             return count
-    msg = f"{subscription}: no limit was learned after {limit} calls; is it on Basic?"
+    msg = (
+        f"{subscription}: no limit was learned after {limit} calls: Massive answered them all, "
+        "so it does not limit this subscription"
+    )
     raise RuntimeError(msg)
 
 
 def round_of_calls(
-    open_session: Callable[[], MassiveSession], subscription: str, waits: Waits
+    open_session: Callable[[], MassiveSession],
+    subscription: str,
+    waits: Waits,
+    *,
+    count: int = ROUND_CALLS,
 ) -> dict[str, Any]:
-    """Open session B, send ten one-request calls, and record each call and B's row.
+    """Open a session, send one-request calls, and record each call and the session's row.
 
     Massive's refusals are counted from the replies themselves, through the wire package's
     reply-capture hook, so the verdict never depends on when the diagnostics table catches up.
@@ -168,6 +180,8 @@ def round_of_calls(
         open_session: Opens a session that declares nothing.
         subscription: The subscription.
         waits: The time source.
+        count: How many calls: ten for session B's round, `ANSWERED_CALLS` to see whether
+            Massive still limits the subscription.
 
     Returns:
         The round: its calls (`sent`, `seconds`, `error`), B's row, the HTTP 429 replies
@@ -179,7 +193,7 @@ def round_of_calls(
     set_reply_capture(lambda reply: statuses.append(reply.status))
     try:
         with open_session() as m:
-            for _ in range(ROUND_CALLS):
+            for _ in range(count):
                 sent, started = waits.now().isoformat(), waits.monotonic()
                 error = ""
                 try:
@@ -200,16 +214,14 @@ def run_upgrade_check(
     subscription: str,
     *,
     open_session: Callable[[], MassiveSession],
-    tier_of: Callable[[], str | None],
     folder: Path,
     waits: Waits | None = None,
 ) -> Record:
     """Run the attended upgrade check, and write `upgrade-check.json`.
 
     Args:
-        subscription: One of `SUBSCRIPTIONS`.
+        subscription: A subscription, a key of `CALLS`.
         open_session: Opens a session that declares nothing.
-        tier_of: Probes the subscription's tier now; None when the probe cannot tell.
         folder: The attempt's folder.
         waits: The time source and waits; real ones by default.
 
@@ -227,12 +239,14 @@ def run_upgrade_check(
     deadline = waits.now() + WAIT_LIMIT
     upgraded = False
     while waits.now() < deadline:
-        tier = tier_of()
-        if tier is None or tier == "basic":
-            waits.sleep(60.0)
-            continue
-        upgraded = True
-        waits.sleep(FRESH_MINUTE)
+        if not upgraded:
+            seen = round_of_calls(open_session, subscription, waits, count=ANSWERED_CALLS)
+            record.answered.append(seen)
+            if seen["refused"]:
+                waits.sleep(60.0)
+                continue
+            upgraded = True
+            waits.sleep(FRESH_MINUTE)
         result = round_of_calls(open_session, subscription, waits)
         record.rounds.append(result)
         if not result["refused"]:
@@ -241,7 +255,9 @@ def run_upgrade_check(
         waits.sleep(60.0)
     if not record.verdict:
         record.verdict = (
-            "failed: Massive kept the free limit" if upgraded else "failed: tier stayed Basic"
+            "failed: Massive refused a round of ten"
+            if upgraded
+            else "failed: Massive kept limiting for 15 minutes"
         )
     text = json.dumps(dataclasses.asdict(record), indent=1, default=str)
     (folder / "upgrade-check.json").write_text(text + "\n", encoding="utf-8")

@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._live import bad_values
+from deephaven_massive._massive import WireEntitlementError
+from tests._live import bad_values, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,7 +30,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:advanced")
 @pytest.mark.settles("99")
 @pytest.mark.requests(1)
 def test_massive_answers_trailing_twelve_month_balance_sheets(
@@ -38,6 +38,11 @@ def test_massive_answers_trailing_twelve_month_balance_sheets(
     """What the balance sheets answer to `timeframe=trailing_twelve_months` for AAPL.
 
     `m.stocks.financials.balance_sheets` refuses that timeframe, which the other statements
-    take. DATA counts the rows of that timeframe.
+    take. DATA counts the rows of that timeframe. Massive's refusal of the request answers the
+    question too: the test records it as the verdict and passes, so the item is read with the
+    evidence instead of skipped.
     """
-    assert bad_values.ask_all(live_rest, bad_values.TRAILING_BALANCE_SHEET, evidence)
+    try:
+        assert bad_values.ask_all(live_rest, bad_values.TRAILING_BALANCE_SHEET, evidence)
+    except WireEntitlementError as error:
+        evidence(f"verdict: Massive refused the request: {refusals.refusal_line(error)}")

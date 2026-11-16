@@ -435,17 +435,25 @@ def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
     assert "m = dm.MassiveSession()\n" in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
-def test_settings_text_fits_the_keys_plans() -> None:
-    # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
-    paid = {
-        "stocks": "developer",
-        "options": "advanced",
-        "indices": "basic",
-        "currencies": "starter",
-        "futures": "starter",
-    }
-    assert examples.settings_text(paid) == "delayed_subscriptions: [futures, stocks]\n"
-    assert examples.settings_text({}) == "delayed_subscriptions: []\n"
+def test_settings_text_lists_the_delayed_subscriptions_sorted() -> None:
+    assert examples.settings_text(("stocks", "futures")) == (
+        "delayed_subscriptions: [futures, stocks]\n"
+    )
+    assert examples.settings_text(()) == "delayed_subscriptions: []\n"
+
+
+def test_the_testers_own_settings_file_names_the_delayed_subscriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which subscriptions Massive serves delayed is the tester's to say, in their own file."""
+    monkeypatch.setenv("MASSIVE_API_KEY", "PLANTED-examples-key")
+    settings = tmp_path / "settings.yaml"
+    variable = {"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
+    assert examples.listed_delayed(variable) is None
+    settings.write_text("delayed_subscriptions: [stocks, futures]\n", encoding="utf-8")
+    assert examples.listed_delayed(variable) == ("futures", "stocks")
+    monkeypatch.setenv("HOME", str(tmp_path))  # SETTINGS_PATH is under the home folder
+    assert examples.listed_delayed({}) is None
 
 
 def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:

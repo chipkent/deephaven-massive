@@ -32,7 +32,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import bad_values, calendar, greeks
+from tests._live import bad_values, calendar, greeks, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from deephaven.table_factory import InputTable
 
     from deephaven_massive.queries import FetchQuery
-    from tests._live.plans import LivePlans
 
 pytestmark = pytest.mark.integration
 
@@ -72,6 +71,7 @@ PeriodBarReport: TypeAlias = (
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -80,13 +80,6 @@ _SNAPSHOT = "/v3/snapshot"
 
 _UNDERLYINGS = ("SPX", "I:SPX", "SPXW", "NDX", "NDXP", "VIX", "VIXW", "BRK.B", "BRKB")
 """Underlyings whose spelling the options endpoints may not agree on."""
-
-_BASIC_UNDERLYINGS = ("SPX", "I:SPX", "BRK.B", "BRKB")
-"""The underlyings read with Options on Basic, one contracts request each: an index with and
-without its prefix, and `BRK.B` with and without its dot."""
-
-_SNAPSHOT_PLAN = "Options Starter ($29/month)"
-"""The plan of the chain and unified snapshots of options."""
 
 _CONTRACT_PAGE = 1000
 _CHAIN_PAGE = 250
@@ -106,7 +99,8 @@ _ADJUSTED: tuple[tuple[str, str, date], ...] = (
 )
 """(contract root, underlying, a day the contracts were listed): three adjusted roots, after a
 spin-off, a special dividend, and a split. Adjusted roots are rare and named by hand, so the
-older ones lie beyond a short history; the test reads only those the plan keeps."""
+older ones lie beyond a short history; a root whose day Massive refuses the key is recorded with
+Massive's refusal and passed over."""
 
 
 _OCC_TAIL = 15
@@ -128,7 +122,7 @@ def _raw(
     """Read the raw rows of a request's first page; record a refusal as evidence.
 
     A rejection (an unknown underlying) is itself evidence, so it is recorded and the check
-    goes on; so is a snapshot refused for want of Options Starter, labelled "not entitled".
+    goes on; so is a snapshot Massive refuses, labelled "not entitled" with Massive's refusal.
 
     Returns:
         The rows; empty after a rejection or a refused snapshot.
@@ -143,7 +137,7 @@ def _raw(
     except WireEntitlementError as error:
         if path == _CONTRACTS:
             raise
-        evidence(f"{path} {dict(params)}: not entitled: needs {_SNAPSHOT_PLAN} ({error})")
+        evidence(f"{path} {dict(params)}: not entitled: {refusals.refusal_line(error)}")
         return []
     except WireError as error:
         evidence(f"{path} {dict(params)}: {type(error).__name__}: {error}")
@@ -159,7 +153,7 @@ def _library(build: Callable[[], FetchQuery], table_rows: TableRows) -> list[dic
     try:
         return table_rows(build().fetch(wait=True))
     except dm.EntitlementError as error:
-        return f"not entitled: needs {_SNAPSHOT_PLAN} ({error})"
+        return f"not entitled: {refusals.refusal_line(error)}"
     except (dm.MassiveError, ValueError) as error:
         return f"{type(error).__name__}: {error}"
 
@@ -178,7 +172,7 @@ def _root_contracts(
         The root's contracts; empty after a rejection, which is recorded.
 
     Raises:
-        WireEntitlementError: When the listing is refused for want of a plan.
+        WireEntitlementError: When Massive refuses the key the listing.
     """
     prefix = f"O:{root}"
     found: list[dict[str, Any]] = []
@@ -205,15 +199,13 @@ def _root_contracts(
     return found
 
 
-@pytest.mark.needs("options:basic")
 @pytest.mark.settles("45")
-@pytest.mark.requests(4)
+@pytest.mark.requests(45)
 @pytest.mark.timeout(100)
 def test_underlying_spelling_on_the_options_endpoints(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -222,10 +214,9 @@ def test_underlying_spelling_on_the_options_endpoints(
     For `SPX`, `I:SPX`, `SPXW`, `NDX`, `NDXP`, `VIX`, `VIXW`, `BRK.B`, and `BRKB`, records one
     full page of the contracts reference (the roots it lists and the `underlying_ticker` values),
     one page of the chain snapshot (`underlying_asset.ticker`), the unified snapshot's
-    `underlying_asset.ticker` of one contract, and the library's `chain()` and `contracts()`.
-    With Options on Basic, which has no snapshots and allows 5 requests a minute, it records
-    only the contracts page of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`, which still shows which
-    spelling of an index and of `BRK.B` the reference answers. Reading it: the spelling that
+    `underlying_asset.ticker` of one contract, and the library's `chain()` and `contracts()`:
+    up to 45 requests. A snapshot Massive refuses is recorded with Massive's refusal and the
+    rest still run. Reading it: the spelling that
     answers is the one the library must send for `underlying=`; a root such as `SPXW` listed
     under `SPX` means roots and underlyings differ. The chain path sends `I:SPX`
     percent-encoded, so an `I:SPX` chain result counts only if the encoded-colon check of the
@@ -233,13 +224,7 @@ def test_underlying_spelling_on_the_options_endpoints(
     """
     answered = 0
     options = live_session.options
-    basic = "options" in classes_on_basic
-    if basic:
-        evidence(
-            "Options on Basic: the contracts reference of "
-            f"{', '.join(_BASIC_UNDERLYINGS)} only; the snapshots need {_SNAPSHOT_PLAN}"
-        )
-    for underlying in _BASIC_UNDERLYINGS if basic else _UNDERLYINGS:
+    for underlying in _UNDERLYINGS:
         contracts = _raw(
             live_rest,
             _CONTRACTS,
@@ -252,9 +237,6 @@ def test_underlying_spelling_on_the_options_endpoints(
             f"{underlying}: contracts {len(contracts)} rows; roots {roots}; "
             f"underlying_ticker {spelled}"
         )
-        if basic:
-            answered += bool(contracts)
-            continue
         chain = _raw(
             live_rest,
             _CHAIN,
@@ -292,56 +274,60 @@ def test_underlying_spelling_on_the_options_endpoints(
     assert answered
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.verifies("46")
+@pytest.mark.requests(13)
 @pytest.mark.timeout(400)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    plan_history_start: Callable[[str], date | None],
     recent_monday: date,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """How the contracts reference describes adjusted and standard deliverables.
 
-    Lists the contracts of the adjusted roots `DELL1` (as of 2021-11-15, after a spin-off),
-    `FF1` (2024-04-15, a special dividend), and `AAPL7` (2014-06-10, the 7:1 split), and of
-    standard `AAPL` and `SPX` contracts (the most recent published Monday), looked up by
-    underlying (following pages until the root is passed) and by root, and records
-    `additional_underlyings` (or `<missing>`), `cfi`, `correction`, and `shares_per_contract`
-    of up to three of each, and the library's columns for the first. A root listed before the
-    first day the key's Options plan keeps, by the documented history windows, is not read; its
-    line says "outside the plan's history". Passes when some root was read and no standard
-    contract carries a non-empty `additional_underlyings`, so null and `[]` both mark a standard
-    deliverable, as the chain's documented recipe assumes. Reading the rest: an adjusted
-    contract with no list (a split's, which changes only the share count) means only `Cfi` or
-    the root's trailing digit can tell it from a standard one. A root found by neither lookup,
-    with the page counts showing the listing was read past it, is not kept by Massive for that
-    day.
+    Lists the contracts of the adjusted roots `DELL1` (as of 2021-11-15, after a spin-off), `FF1`
+    (2024-04-15, a special dividend), and `AAPL7` (2014-06-10, the 7:1 split), and of standard
+    `AAPL` and `SPX` contracts (the most recent published Monday), looked up by underlying
+    (following pages until the root is passed) and by root, and records `additional_underlyings` (or
+    `<missing>`), `cfi`, `correction`, and `shares_per_contract` of up to three of each, and the
+    library's columns for the first. Every root is asked for; a root whose day Massive refuses the
+    key (its refusal of the data timeframe) is recorded, "outside the plan's history" with Massive's
+    refusal, and the rest still run. Passes when some root was read and no standard contract carries
+    a non-empty `additional_underlyings`, so null and `[]` both mark a standard deliverable, as the
+    chain's documented recipe assumes. Reading the rest: an adjusted contract with no list (a
+    split's, which changes only the share count) means only `Cfi` or the root's trailing digit can
+    tell it from a standard one. A root found by neither lookup, with the page counts showing the
+    listing was read past it, is not kept by Massive for that day.
+
+    Raises:
+        WireEntitlementError: When Massive refuses a listing for another reason than its day;
+            the live tests' hook skips the test, quoting Massive.
     """
-    first = plan_history_start("options")
     found = 0
     standard = (("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
     roots = (*_ADJUSTED, *standard)
     listed_extra: list[str] = []
     for root, underlying, listed in roots:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
-        if first is not None and listed < first:
-            evidence(f"    outside the plan's history: {listed} is before {first}")
+        try:
+            matching = [
+                row
+                for expired in (False, True)
+                for lookup in dict.fromkeys((underlying, root))
+                for row in _root_contracts(
+                    live_rest,
+                    root,
+                    query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
+                    evidence=evidence,
+                )
+            ]
+        except WireEntitlementError as error:
+            if not refusals.is_timeframe_refusal(error):
+                raise
+            evidence(f"    outside the plan's history (Massive: {refusals.refusal_line(error)})")
             continue
-        matching = [
-            row
-            for expired in (False, True)
-            for lookup in dict.fromkeys((underlying, root))
-            for row in _root_contracts(
-                live_rest,
-                root,
-                query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
-                evidence=evidence,
-            )
-        ]
         rows = list({str(row["ticker"]): row for row in matching}.values())
         found += bool(rows)
         evidence(f"    {len(rows)} contracts of root {root}")
@@ -562,7 +548,6 @@ def _prev_bars(
     return found
 
 
-@pytest.mark.needs("options:starter", "stocks:basic")
 @pytest.mark.verifies("51")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(130)
@@ -662,7 +647,6 @@ def test_option_day_and_week_bar_stamps_from_rest(
     assert not odd, f"(source, ticker, day, stamp ms) the library does not expect: {odd}"
 
 
-@pytest.mark.needs("options:starter", "s3", "stocks:basic")
 @pytest.mark.verifies("51")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(100)
@@ -730,7 +714,6 @@ listed options, and the lowest-strike call a contracts listing returns first may
 all."""
 
 
-@pytest.mark.needs("options:developer")
 @pytest.mark.settles("57")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -745,8 +728,9 @@ def test_option_bars_across_the_underlyings_split(
     Reads the day bars of one expired NVDA call across NVDA's 10-for-1 split of 2024-06-10,
     under its ticker before the split, `O:NVDA240621C01200000`, and after it,
     `O:NVDA240621C00120000`, from three days before the split to two days after, with
-    `adjusted=true` and `adjusted=false`. It needs Options Developer: Basic and Starter keep two
-    years of history, and the split is older. Fails unless the `adjusted=true` reads of the two
+    `adjusted=true` and `adjusted=false`. The split is more than two years old, so Massive may
+    refuse a key its days; the test then skips, quoting Massive and the earliest day asked.
+    Fails unless the `adjusted=true` reads of the two
     tickers together have bars on both sides of the split, without which nothing can be read from
     them. Reading it: prices before the split that differ by its ratio between the two reads mean
     options are adjusted in full like stocks; equal prices mean the contract's history is kept as
@@ -797,7 +781,6 @@ def _underlyings_until(
         pause.wait(0.25)
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.timeout(300)
 def test_the_chain_follows_a_live_table_of_underlyings(
     live_session: dm.MassiveSession,
@@ -836,42 +819,50 @@ _ADMIN_WAIT = 60.0
 """Seconds the admin messages test waits for Massive's acknowledgement, and then for a row."""
 
 
-@pytest.mark.needs("options:advanced")
 @pytest.mark.verifies("82")
 @pytest.mark.timeout(150)
 def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
-    live_session: dm.MassiveSession,
+    live_config: dm.MassiveConfig,
     *,
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
     """Whether Massive acknowledges `AD.*` on the real-time options feed, and what rows carry.
 
-    With Options Advanced held, streams `m.options.admin_messages()`, which subscribes every
-    exchange (`AD.*`) on `socket.massive.com`, and records the connection, the stream, and up
-    to five rows: each one's exchange, sequence number, SIP timestamp, and text as OPRA sent it.
-    Passes when Massive acknowledged the topic, which it does whether or not the market is open,
-    the stream still runs, and every row that arrived has its `Timestamp` and `Message`.
-    Messages come only with FLEX activity or an exchange's notice, so no row is required; a
-    refusal fails the test, since Options Advanced includes the channel.
+    Streams `m.options.admin_messages()`, which subscribes every exchange (`AD.*`) on
+    `socket.massive.com`, and records the connection, the stream, and up to five rows: each
+    one's exchange, sequence number, SIP timestamp, and text as OPRA sent it. Massive serves
+    the admin messages only in real time, so the session leaves options out of
+    `delayed_subscriptions`, as a user streaming them would. Passes when Massive acknowledged
+    the topic, which it does whether or not the market is open, the stream still runs, and
+    every row that arrived has its `Timestamp` and `Message`. Messages come only with FLEX
+    activity or an exchange's notice, so no row is required. Massive's refusal skips the test,
+    quoting Massive; the refusal test checks what the refusal says.
     """
-    table = live_session.options.admin_messages().append_only()
-    acked = wait_acked(live_session, 1, time.monotonic() + _ADMIN_WAIT)
-    deadline = time.monotonic() + _ADMIN_WAIT
-    pause = threading.Event()  # never set; only paces the wait for a row
-    while acked and not table_rows(table) and time.monotonic() < deadline:
-        pause.wait(1.0)
-    rows = table_rows(table)
-    for line in stream_report(live_session):
-        evidence(line)
-    states = [
-        r["State"]
-        for r in table_rows(live_session.streams())
-        if r["Dataset"] == "options.admin_messages"
-    ]
-    live_session.release(table)
+    listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
+    session = dm.MassiveSession(dataclasses.replace(live_config, delayed_subscriptions=listed))
+    try:
+        table = session.options.admin_messages().append_only()
+        acked = wait_acked(session, 1, time.monotonic() + _ADMIN_WAIT)
+        deadline = time.monotonic() + _ADMIN_WAIT
+        pause = threading.Event()  # never set; only paces the wait for a row
+        while acked and not table_rows(table) and time.monotonic() < deadline:
+            pause.wait(1.0)
+        rows = table_rows(table)
+        for line in stream_report(session):
+            evidence(line)
+        states = [
+            r["State"]
+            for r in table_rows(session.streams())
+            if r["Dataset"] == "options.admin_messages"
+        ]
+        skip_if_not_entitled(session)
+        session.release(table)
+    finally:
+        session.close()
     evidence(f"AD.* acknowledged topics {acked}; stream {states}; rows received: {len(rows)}")
     for row in rows[:5]:
         evidence(
@@ -884,35 +875,28 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
 
 
 _ADMIN_PAGE = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"
-"""The dataset page of the admin messages, whose plan table every refusal of them links."""
-
-_ADMIN_PLANS = frozenset({"advanced", "business_expansion"})
-"""The Options plans that include the admin messages: Advanced, and Business with the expansion,
-which covers it."""
+"""The dataset page of the admin messages, whose table of the plans that include them every
+refusal of them links."""
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.verifies("82")
 @pytest.mark.timeout(150)
-def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
+def test_a_refusal_of_the_admin_messages_links_the_datasets_plans(
     live_config: dm.MassiveConfig,
-    live_plans: LivePlans,
     *,
     table_rows: TableRows,
     stream_report: StreamReport,
     evidence: Evidence,
 ) -> None:
-    """What an Options plan without the admin messages answers, and whether it links their plans.
+    """What a refusal of the admin messages says, and whether it links the dataset's page.
 
-    On Options Starter, Developer, or Business, streams `m.options.admin_messages()` from a
-    session whose `delayed_subscriptions` leaves options out, as the dataset requires. On a
-    plan Massive labels delayed the call raises `dm.EntitlementError`; on base Business the
-    stream's row turns `FAILED` with Massive's refusal of `AD.*`. Passes when one of the two
-    happens and its message ends with the link to the dataset's page of plans. Skips on a plan
-    that includes the channel, which the real-time test checks.
+    Streams `m.options.admin_messages()` from a session whose `delayed_subscriptions` leaves
+    options out, as the dataset requires. When Massive labels the key's options data delayed,
+    the call raises `dm.EntitlementError`; when Massive refuses `AD.*`, the stream's row
+    turns `FAILED` with Massive's refusal. Passes when one of the two happens and its message
+    ends with the link to the dataset's page. Skips when Massive serves the admin messages,
+    which the real-time test checks.
     """
-    if live_plans.tiers["options"] in _ADMIN_PLANS:
-        pytest.skip("the key's Options plan includes the admin messages; the real-time test runs")
     config = dataclasses.replace(
         live_config,
         delayed_subscriptions=live_config.delayed_subscriptions - {dm.Subscription.OPTIONS},
@@ -943,7 +927,9 @@ def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
             session.release(table)
     finally:
         session.close()
-    evidence(f"options {live_plans.tiers['options']}: {outcome}: {message}")
+    evidence(f"options admin messages: {outcome}: {message}")
+    if outcome == "RUNNING":
+        pytest.skip("Massive served the admin messages; the real-time test covers them")
     assert outcome in {"refused at the call", "FAILED"}, f"the admin messages stream is {outcome}"
     assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
 
@@ -955,7 +941,6 @@ _GAMMA_DAYS = (20, 50)
 """The days to expiry of the calls the gamma check reads: far enough that gamma is smooth."""
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.settles("83")
 @pytest.mark.timeout(120)
 def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
@@ -1044,7 +1029,6 @@ def _calls_near_the_money(
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.settles("103")
 @pytest.mark.requests(2)
 def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
@@ -1058,7 +1042,6 @@ def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.settles("108")
 @pytest.mark.requests(1)
 def test_massive_answers_a_chain_of_an_option_contract(
@@ -1073,7 +1056,6 @@ def test_massive_answers_a_chain_of_an_option_contract(
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN_CONTRACT, evidence)
 
 
-@pytest.mark.needs("options:basic")
 @pytest.mark.settles("103")
 @pytest.mark.requests(2)
 def test_massive_answers_contracts_of_a_currency_or_crypto_pair(
@@ -1087,7 +1069,6 @@ def test_massive_answers_contracts_of_a_currency_or_crypto_pair(
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS, evidence)
 
 
-@pytest.mark.needs("options:basic")
 @pytest.mark.settles("109")
 @pytest.mark.requests(1)
 def test_massive_answers_contracts_of_an_option_contract(
@@ -1102,7 +1083,6 @@ def test_massive_answers_contracts_of_an_option_contract(
     assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS_CONTRACT, evidence)
 
 
-@pytest.mark.needs("options:basic")
 @pytest.mark.settles("104")
 @pytest.mark.requests(1)
 def test_massive_answers_contract_details_of_a_stock_ticker(

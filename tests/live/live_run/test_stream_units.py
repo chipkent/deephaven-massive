@@ -2,39 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from tests._live.live_run import stream_units
 
 
-def test_units_follow_each_tier_recency() -> None:
-    tiers = {
-        "stocks": "starter",
-        "options": "basic",
-        "indices": "advanced",
-        "currencies": "starter",
-        "futures": "developer",
-    }
-    assert stream_units.stream_units(tiers) == [
-        "stocks delayed",
-        "indices real-time",
-        "currencies real-time",
-        "futures delayed",
-    ]
-    assert stream_units.throughput_units(tiers) == ["stocks delayed", "currencies real-time"]
-
-
-def test_delays_of_delayed_units_only() -> None:
-    assert stream_units.delay_of("futures delayed") == timedelta(minutes=10)
-    assert stream_units.delay_of("stocks real-time") == timedelta()
-    assert stream_units.delay_of("currencies delayed") == timedelta()
-    assert stream_units.unit("options", stream_units.DELAYED) == "options delayed"
+def test_every_subscription_has_a_unit_whatever_the_key_holds() -> None:
+    assert stream_units.stream_units() == ["stocks", "options", "indices", "currencies", "futures"]
+    assert stream_units.throughput_units() == ["stocks", "currencies"]
 
 
 def test_a_night_streams_crypto_and_futures_named_by_what_they_stream() -> None:
-    tiers = {"stocks": "advanced", "currencies": "starter", "futures": "developer"}
-    assert stream_units.night_units(tiers) == ["crypto real-time", "futures delayed"]
-    assert stream_units.night_units({"currencies": "basic", "futures": "advanced"}) == [
-        "futures real-time"
-    ]
-    assert stream_units.delay_of("crypto real-time") == timedelta()
+    assert stream_units.night_units() == ["crypto", "futures"]
+    assert stream_units.subscription_of("crypto") == "currencies"
+    assert stream_units.subscription_of("futures") == "futures"
+    assert stream_units.subscription_of("stocks") == "stocks"

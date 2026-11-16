@@ -5,19 +5,26 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from tests._live import plans, summary
+from tests._live import summary
 
 _SETTLED = {
-    "asserts": ((), ("2",), ()),
-    "records": (("1",), (), ()),
-    "also 2": (("2",), (), ()),
-    "needs": ((), ("3",), ("stocks:starter",)),
-    "fails": (("4",), (), ()),
-    "half": (("5",), (), ()),
-    "other half": (("5",), (), ()),
-    "skipped": (("6",), (), ("stocks:basic",)),
-    "silent": ((), (), ()),
+    "asserts": ((), ("2",)),
+    "records": (("1",), ()),
+    "also 2": (("2",), ()),
+    "refused": ((), ("3",)),
+    "refused again": (("3",), ()),
+    "fails": (("4",), ()),
+    "half": (("5",), ()),
+    "other half": (("5",), ()),
+    "skipped": (("6",), ()),
+    "unlisted": (("7",), ()),
+    "also refused": (("8",), ()),
+    "also unlisted": (("8",), ()),
+    "silent": ((), ()),
 }
+
+_REFUSAL = "refused: HTTP 403 from GET /v3/quotes/AAPL on api.massive.com: not entitled"
+_UNLISTED = "not listed as delayed: Massive labels stocks data DELAYED; add stocks"
 
 _TITLES = {"1": "Whether one thing holds.", "5": "Whether another holds."}
 
@@ -39,62 +46,71 @@ def test_a_question_takes_the_title_of_a_test_about_it() -> None:
     }
 
 
-def _lines(*, narrowed: bool = False, held: plans.LivePlans | None = None) -> list[str]:
+def _lines(*, narrowed: bool = False) -> list[str]:
     outcome = {
         "asserts": "passed",
         "records": "passed",
         "also 2": "passed",
-        "needs": "skipped",
+        "refused": "skipped",
+        "refused again": "skipped",
         "fails": "failed",
         "half": "passed",
         "skipped": "skipped",
+        "unlisted": "skipped",
+        "also refused": "skipped",
+        "also unlisted": "skipped",
         "silent": "passed",
     }
-    return summary.question_lines(
-        _SETTLED,
-        outcome,
-        held or plans.declared_plans(""),
-        titles=_TITLES,
-        narrowed=narrowed,
-    )
+    reasons = {
+        "refused": _REFUSAL,
+        "refused again": _REFUSAL,
+        "skipped": "market closed",
+        "unlisted": _UNLISTED,
+        "also refused": _REFUSAL,
+        "also unlisted": _UNLISTED,
+    }
+    return summary.question_lines(_SETTLED, outcome, reasons, titles=_TITLES, narrowed=narrowed)
 
 
 def test_each_question_is_sorted_by_its_tests_and_shown_with_its_title() -> None:
-    assert _lines()[1:] == [
-        "verified 1 of 6:",
+    assert _lines() == [
+        "verified 1 of 8:",
         "    2",
-        "ran, evidence to read, 1 of 6:",
+        "ran, evidence to read, 1 of 8:",
         "    1: Whether one thing holds.",
-        "1 need Stocks Starter ($29/month):",
+        "refused by Massive, 2 of 8:",
         "    3",
-        "2 not verified (failed or skipped):",
+        f"        {_REFUSAL}",
+        "    8",
+        f"        {_REFUSAL}",
+        f"        {_UNLISTED}",
+        "not listed as delayed, 1 of 8 (add to delayed_subscriptions in your settings file):",
+        "    7",
+        f"        {_UNLISTED}",
+        "not verified (failed or skipped otherwise), 2 of 8:",
         "    4",
         "    6",
-        "1 not verified (partly run):",
+        "not verified (partly run), 1 of 8:",
         "    5 (1 of 2 tests ran): Whether another holds.",
     ]
 
 
-def test_the_plans_head_the_lines() -> None:
-    assert _lines()[0].startswith("plans: stocks=basic")
-
-
 def test_a_narrowed_run_counts_in_its_selection() -> None:
-    assert _lines(narrowed=True)[1].startswith("verified in this selection (run the full")
+    assert _lines(narrowed=True)[0].startswith("verified in this selection (run the full")
 
 
-def test_without_plans_a_skip_is_not_verified() -> None:
-    lines = summary.question_lines(_SETTLED, {"needs": "skipped"}, None, titles={}, narrowed=False)
+def test_a_skip_without_its_reason_is_not_verified() -> None:
+    lines = summary.question_lines(_SETTLED, {"skipped": "skipped"}, {}, titles={}, narrowed=False)
     assert lines == [
         "verified 0 of 1:",
         "ran, evidence to read, 0 of 1:",
-        "1 not verified (failed or skipped):",
-        "    3",
+        "not verified (failed or skipped otherwise), 1 of 1:",
+        "    6",
     ]
 
 
 def test_no_lines_without_a_question() -> None:
-    lines = summary.question_lines(_SETTLED, {"silent": "passed"}, None, titles={}, narrowed=False)
+    lines = summary.question_lines(_SETTLED, {"silent": "passed"}, {}, titles={}, narrowed=False)
     assert lines == []
 
 
@@ -103,14 +119,18 @@ def test_numbered_items_sort_first() -> None:
 
 
 def test_a_question_with_a_failed_test_is_not_verified() -> None:
-    settled = {"passes": ((), ("7",), ()), "fails": ((), ("7",), ())}
+    settled = {"passes": ((), ("7",)), "fails": ((), ("7",)), "refused": ((), ("7",))}
     lines = summary.question_lines(
-        settled, {"passes": "passed", "fails": "failed"}, None, titles={}, narrowed=False
+        settled,
+        {"passes": "passed", "fails": "failed", "refused": "skipped"},
+        {"refused": _REFUSAL},
+        titles={},
+        narrowed=False,
     )
     assert lines == [
         "verified 0 of 1:",
         "ran, evidence to read, 0 of 1:",
-        "1 not verified (failed or skipped):",
+        "not verified (failed or skipped otherwise), 1 of 1:",
         "    7",
     ]
 
@@ -139,7 +159,7 @@ def test_marker_items_reads_both_markers_and_ignores_other_marks() -> None:
         "import pytest\n"
         "@pytest.mark.verifies('2', '3')\n"
         "@pytest.mark.settles('52')\n"
-        "@pytest.mark.needs('stocks:basic')\n"
+        "@pytest.mark.requests(3)\n"
         "def test_x(): ...\n"
     )
     assert _marker_items(source) == {"2", "3", "52"}

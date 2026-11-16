@@ -127,7 +127,7 @@ def _batch(*inserted: datetime, lag: timedelta = timedelta(seconds=2)) -> dict[s
     }
 
 
-_TICKS = Stream("crypto-trades", "currencies real-time", lambda _m: None, "Timestamp", held=False)
+_TICKS = Stream("crypto-trades", "currencies", lambda _m: None, "Timestamp", held=False)
 
 
 # --- the stream day -------------------------------------------------------------------------
@@ -160,15 +160,15 @@ def test_a_stream_day_records_rows_counts_delays_and_samples(
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
-        units=["stocks delayed"],
-        tiers={"stocks": "developer"},
+        units=["stocks"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(seconds=25),
         report=report,
         day_start=START,
         clock=day.clock(),
     )
-    assert seen == [("stocks delayed", "passed", "")]
+    assert seen == [("stocks", "passed", "")]
     assert day.waits == [10.0, 10.0, 5.0]
     [minute_file] = (tmp_path / "rows").glob("stocks-minute-bars-*.parquet")
     assert pq.read_table(minute_file).column("Symbol").to_pylist() == ["AAPL"]
@@ -176,9 +176,8 @@ def test_a_stream_day_records_rows_counts_delays_and_samples(
     assert counts == {"stocks-minute-bars": 1, "stocks-second-bars": 1, "stocks-trades": 1}
     latency = {r["stream"]: r for r in _csv(tmp_path / "latency.csv")}
     assert set(latency) == set(counts)
-    # The trade arrived within moments of its own time; the delayed unit's documented delay
-    # of 15 minutes is taken off, so its delay reads about -15 minutes.
-    assert -16 * 60_000 < float(latency["stocks-trades"]["max_ms"]) < -14 * 60_000
+    # The trade arrived within moments of its own time, and the delay is kept as it arrived.
+    assert -60_000 < float(latency["stocks-trades"]["max_ms"]) < 60_000
     samples = _csv(tmp_path / "samples-process.csv")
     assert len(samples) == 3
     assert float(samples[0]["heap_committed_mb"]) > 0
@@ -198,11 +197,11 @@ def test_a_batch_the_recorder_cannot_write_fails_the_day(
 ) -> None:
     called = threading.Event()
 
-    def broken(unit: str) -> timedelta:
+    def broken(_recorder: object, batch: stream_capture._Batch) -> None:
         called.set()
-        raise ValueError(f"no delay for {unit}")
+        raise ValueError(f"no room for {batch.stream.unit}")
 
-    monkeypatch.setattr(stream_capture, "delay_of", broken)
+    monkeypatch.setattr(stream_capture.Recorder, "_write", broken)
     harness = make_ws_session()
     day = _Day()
 
@@ -216,8 +215,8 @@ def test_a_batch_the_recorder_cannot_write_fails_the_day(
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
-        units=["stocks delayed"],
-        tiers={"stocks": "starter"},
+        units=["stocks"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(seconds=5),
         report=report,
@@ -225,8 +224,8 @@ def test_a_batch_the_recorder_cannot_write_fails_the_day(
         clock=day.clock(),
     )
     [(unit, status, reason)] = seen
-    assert (unit, status) == ("stocks delayed", "failed")
-    assert reason == "stocks-minute-bars: ValueError: no delay for stocks delayed"
+    assert (unit, status) == ("stocks", "failed")
+    assert reason == "stocks-minute-bars: ValueError: no room for stocks"
 
 
 @pytest.mark.jvm_held
@@ -240,8 +239,8 @@ def test_a_restarted_day_records_its_gap_and_fails_past_thirty_minutes(
         start = START + timedelta(minutes=minutes)
         stream_capture.run_stream_day(
             harness.session,
-            units=["indices delayed"],
-            tiers={"indices": "starter"},
+            units=["indices"],
+            delayed=frozenset(),
             folder=tmp_path,
             until=start + timedelta(seconds=1),
             report=report,
@@ -251,9 +250,9 @@ def test_a_restarted_day_records_its_gap_and_fails_past_thirty_minutes(
         runs.append(seen)
     # The second start is 5 minutes after the first's last sample: a gap, but a short one.
     assert runs == [
-        [("indices delayed", "passed", "")],
-        [("indices delayed", "passed", "gaps 5")],
-        [("indices delayed", "failed", "gaps 36")],
+        [("indices", "passed", "")],
+        [("indices", "passed", "gaps 5")],
+        [("indices", "failed", "gaps 36")],
     ]
     gaps = _csv(tmp_path / "gaps.csv")
     assert [g["cause"] for g in gaps] == ["the child restarted"] * 2
@@ -265,23 +264,23 @@ def test_a_unit_without_a_row_after_its_session_opened_fails(
 ) -> None:
     """An acknowledged stream that never delivers fails its unit once its session is open.
 
-    The index session opens at 09:30 New York time, and the delayed feed lags 15 minutes, so
-    from 09:50 a stream day whose index streams recorded no row fails the unit.
+    The index session opens at 09:30 New York time, so from 09:35 a stream day whose index
+    streams recorded no row fails the unit.
     """
     harness = make_ws_session()
     late = START + timedelta(minutes=50)  # 09:50 New York time
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
-        units=["indices delayed"],
-        tiers={"indices": "starter"},
+        units=["indices"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=late + timedelta(seconds=1),
         report=report,
         clock=_Day(now_at=late).clock(),
         day_start=late,
     )
-    assert seen == [("indices delayed", "failed", "no rows during its session's hours")]
+    assert seen == [("indices", "failed", "no rows during its session's hours")]
 
 
 def test_unit_rows_add_up_every_childs_rows_of_the_units_streams(tmp_path: Path) -> None:
@@ -291,15 +290,15 @@ def test_unit_rows_add_up_every_childs_rows_of_the_units_streams(tmp_path: Path)
         "crypto-trades,2026-11-04T14:01,3\n"
         "gone-stream,2026-11-04T14:00,7\n"
     )
-    assert stream_capture.unit_rows(tmp_path, [_TICKS]) == {"currencies real-time": 5}
+    assert stream_capture.unit_rows(tmp_path, [_TICKS]) == {"currencies": 5}
     assert stream_capture.unit_rows(tmp_path / "missing", [_TICKS]) == {}
 
 
-def test_a_units_rows_are_due_after_its_session_opens_and_its_delay() -> None:
+def test_a_units_rows_are_due_after_its_session_opens() -> None:
     day = date(2026, 11, 4)
-    due = stream_capture.rows_due_from("stocks delayed", day)
-    assert due.astimezone(UTC) == datetime(2026, 11, 4, 9, 20, tzinfo=UTC)  # 04:20 New York
-    futures = stream_capture.rows_due_from("futures real-time", day)
+    due = stream_capture.rows_due_from("stocks", day)
+    assert due.astimezone(UTC) == datetime(2026, 11, 4, 9, 5, tzinfo=UTC)  # 04:05 New York
+    futures = stream_capture.rows_due_from("futures", day)
     assert futures.astimezone(UTC) == datetime(2026, 11, 4, 8, 50, tzinfo=UTC)  # 03:50
 
 
@@ -326,15 +325,15 @@ def test_a_stream_day_streams_the_option_contracts_nearest_the_money(
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
-        units=["options delayed"],
-        tiers={"options": "starter"},
+        units=["options"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(hours=1),
         report=report,
         day_start=START,
         clock=day.clock(),
     )
-    assert seen == [("options delayed", "passed", "")]
+    assert seen == [("options", "passed", "")]
     assert day.waits == [10.0, 10.0]  # the wait that says stop ends the day early
     last = (START + timedelta(seconds=10)).isoformat()
     [symbols] = {r["Symbols"] for r in _csv(tmp_path / "samples-streams.csv") if r["time"] == last}
@@ -348,7 +347,7 @@ def test_a_stream_day_already_over_only_reports(
     stream_capture.run_stream_day(
         massive_session,
         units=[],
-        tiers={},
+        delayed=frozenset(),
         folder=tmp_path,
         until=datetime(2020, 1, 2, tzinfo=UTC),  # long past: the real clock is after it
         report=report,
@@ -400,47 +399,47 @@ def test_the_option_contracts_are_the_nearest_expiry_nearest_the_money() -> None
 
 def test_each_unit_streams_its_watchlist(massive_session: MassiveSession) -> None:
     units = [
-        "stocks real-time",
-        "options delayed",
-        "currencies real-time",
-        "indices delayed",
-        "futures delayed",
+        "stocks",
+        "options",
+        "currencies",
+        "indices",
+        "futures",
     ]
     streams = stream_capture.stream_day_streams(
         units,
-        tiers={"stocks": "advanced", "options": "starter"},
         today=date(2026, 10, 29),
         options=["O:SPY261106C00600000"],
     )
     assert [(s.name, s.unit, s.event_column, s.held) for s in streams] == [
-        ("stocks-minute-bars", "stocks real-time", "TimestampEnd", True),
-        ("stocks-second-bars", "stocks real-time", "TimestampEnd", True),
-        ("stocks-trades", "stocks real-time", "Timestamp", False),
-        ("options-minute-bars", "options delayed", "TimestampEnd", True),
-        ("forex-minute-bars", "currencies real-time", "TimestampEnd", True),
-        ("crypto-minute-bars", "currencies real-time", "TimestampEnd", True),
-        ("forex-quotes", "currencies real-time", "Timestamp", False),
-        ("indices-minute-bars", "indices delayed", "TimestampEnd", True),
-        ("futures-minute-bars", "futures delayed", "TimestampEnd", True),
+        ("stocks-minute-bars", "stocks", "TimestampEnd", True),
+        ("stocks-second-bars", "stocks", "TimestampEnd", True),
+        ("stocks-trades", "stocks", "Timestamp", False),
+        ("options-minute-bars", "options", "TimestampEnd", True),
+        ("forex-minute-bars", "currencies", "TimestampEnd", True),
+        ("crypto-minute-bars", "currencies", "TimestampEnd", True),
+        ("forex-quotes", "currencies", "Timestamp", False),
+        ("indices-minute-bars", "indices", "TimestampEnd", True),
+        ("futures-minute-bars", "futures", "TimestampEnd", True),
     ]
     symbols = {s.name: s.query(massive_session)._request.symbols for s in streams}
     assert "ESZ6" in symbols["futures-minute-bars"]
     assert "NQZ6" in symbols["futures-minute-bars"]
     assert "KIMpL" in symbols["stocks-minute-bars"]
-    starter = stream_capture.stream_day_streams(
-        ["stocks delayed", "options delayed"],
-        tiers={"stocks": "starter"},
-        today=date(2026, 10, 29),
-        options=[],
+    no_contracts = stream_capture.stream_day_streams(
+        ["stocks", "options"], today=date(2026, 10, 29), options=[]
     )
-    assert [s.name for s in starter] == ["stocks-minute-bars", "stocks-second-bars"]
+    assert [s.name for s in no_contracts] == [
+        "stocks-minute-bars",
+        "stocks-second-bars",
+        "stocks-trades",
+    ]
 
 
 def test_throughput_streams_every_symbol_of_stocks_and_currencies(
     massive_session: MassiveSession,
 ) -> None:
-    units = ["stocks delayed", "currencies real-time"]
-    streams = stream_capture.throughput_streams(units, tiers={"stocks": "starter"})
+    units = ["stocks", "currencies"]
+    streams = stream_capture.throughput_streams(units)
     assert [(s.name, s.event_column) for s in streams] == [
         ("stocks-all-second-bars", "TimestampEnd"),
         ("crypto-all-trades", "Timestamp"),
@@ -528,22 +527,13 @@ def test_a_stream_day_begun_late_counts_the_lost_hours_as_a_gap(tmp_path: Path) 
     assert gap["cause"] == "the day's first child started late"
 
 
-def test_the_base_stocks_business_plan_streams_no_second_bars() -> None:
-    day = stream_capture.stream_day_streams(
-        ["stocks real-time"], tiers={"stocks": "business"}, today=START.date(), options=[]
-    )
-    assert [s.name for s in day] == ["stocks-minute-bars"]
-    measured = stream_capture.throughput_streams(["stocks real-time"], tiers={"stocks": "business"})
-    assert [s.name for s in measured] == ["stocks-all-minute-bars"]
-
-
 # --- throughput -----------------------------------------------------------------------------
 
 
 def test_the_throughput_hour_starts_later_for_delayed_stocks() -> None:
     day = date(2026, 11, 5)
-    delayed = stream_capture.throughput_window(["stocks delayed"], day)
-    live = stream_capture.throughput_window(["stocks real-time", "currencies real-time"], day)
+    delayed = stream_capture.throughput_window(frozenset({"stocks"}), day)
+    live = stream_capture.throughput_window(frozenset({"currencies"}), day)
     assert [t.isoformat() for t in delayed] == [
         "2026-11-05T09:45:00-05:00",
         "2026-11-05T10:45:00-05:00",
@@ -552,7 +542,7 @@ def test_the_throughput_hour_starts_later_for_delayed_stocks() -> None:
 
 
 def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
-    ws_session: WsSession, tmp_path: Path
+    ws_session: WsSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen, report = _reports()
 
@@ -562,29 +552,41 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
 
     stream_capture.run_throughput(
         ws_session.session,
-        units=["stocks real-time", "currencies real-time"],
-        tiers={"stocks": "advanced", "currencies": "starter"},
+        units=["stocks", "currencies"],
+        delayed=frozenset(),
         folder=tmp_path / "covered",
         until=START + timedelta(seconds=50),
         report=report,
         clock=_Day(action=diagnostics_caught_up).clock(),
         window=(START, START + timedelta(seconds=40)),
     )
-    assert seen == [("stocks real-time", "passed", ""), ("currencies real-time", "passed", "")]
+    assert seen == [("stocks", "passed", ""), ("currencies", "passed", "")]
     summary = json.loads((tmp_path / "covered" / "summary.json").read_text())
     assert summary["covered"] is True
     assert set(summary["streams"]) == {"stocks.bars", "crypto.trades", "forex.quotes"}
     seen, report = _reports()
     stream_capture.run_throughput(
         ws_session.session,
-        units=["stocks delayed"],
-        tiers={"stocks": "starter"},
+        units=["stocks"],
+        delayed=frozenset(),
         folder=tmp_path / "early",
         until=START + timedelta(seconds=10),
         report=report,
         clock=_Day().clock(),
     )
-    assert seen == [("stocks delayed", "failed", "the measured hour was not sampled without a gap")]
+    assert seen == [("stocks", "failed", "the measured hour was not sampled without a gap")]
+    monkeypatch.setattr(stream_capture, "failed_streams", lambda _rows: {"stocks": ["broke"]})
+    seen, report = _reports()
+    stream_capture.run_throughput(
+        ws_session.session,
+        units=["stocks"],
+        delayed=frozenset(),
+        folder=tmp_path / "broken",
+        until=START + timedelta(seconds=10),
+        report=report,
+        clock=_Day().clock(),
+    )
+    assert seen == [("stocks", "failed", "a stream failed: broke")]
 
 
 def test_the_throughput_summary_gives_rates_peaks_and_drift(tmp_path: Path) -> None:
@@ -662,7 +664,7 @@ def test_the_listener_queues_only_updates_that_added_rows(tmp_path: Path) -> Non
         ) -> None:
             queued.append((stream.name, len(columns["Symbol"])))
 
-    stream = stream_capture.Stream("stocks-minute-bars", "stocks delayed", lambda _m: None)
+    stream = stream_capture.Stream("stocks-minute-bars", "stocks", lambda _m: None)
     copier = stream_capture.RowCopier(stream, Queue())
     copier.on_update(_Update({"Symbol": np.array(["AAPL", "NVDA"])}), is_replay=False)
     copier.on_update(_Update({"Symbol": np.array([], dtype=object)}), is_replay=False)
@@ -676,7 +678,53 @@ def test_a_class_whose_stream_failed_is_named_with_its_error() -> None:
         {"Dataset": "forex.quotes", "State": "FAILED", "Error": "HTTP 403 not entitled"},
         {"Dataset": "crypto.bars", "State": "FAILED", "Error": "a later failure"},
     ]
-    assert stream_capture.failed_streams(rows) == {"currencies": "HTTP 403 not entitled"}
+    assert stream_capture.failed_streams(rows) == {
+        "currencies": ["HTTP 403 not entitled", "a later failure"]
+    }
+
+
+def _verdict(
+    *,
+    failures: tuple[str, ...] = (),
+    gaps: timedelta = timedelta(),
+    rows: int = 1,
+    late: bool = True,
+    delayed: bool = False,
+) -> tuple[str, str]:
+    return stream_capture._unit_verdict(
+        failures=list(failures),
+        contracts=True,
+        gaps=gaps,
+        errors=[],
+        rows=rows,
+        late=late,
+        delayed=delayed,
+    )
+
+
+def test_a_units_verdict_tells_massives_refusal_from_a_failure() -> None:
+    """Massive's refusal of every stream of a unit is its answer, not a failure.
+
+    A unit whose streams were all refused and recorded no row is `refused`; one with rows
+    from its other streams passes, quoting the refusal; a stream that failed otherwise fails
+    the unit, refused or not.
+    """
+    refusal = "the server refused the subscription; Massive said: not authorized; HTTP 403"
+    assert _verdict(failures=(refusal,), rows=0) == ("refused", f"refused: {refusal}")
+    assert _verdict(failures=(refusal,)) == ("passed", f"a stream refused: {refusal}")
+    assert _verdict(failures=(refusal, "a socket broke")) == (
+        "failed",
+        "a stream failed: a socket broke",
+    )
+    assert _verdict(gaps=timedelta(minutes=2)) == ("passed", "gaps 2")
+
+
+def test_a_delayed_unit_without_a_row_skips_and_another_fails() -> None:
+    """The delayed feed's lag is not known in advance, so its silence is not a failure."""
+    why = "no rows during its session's hours"
+    assert _verdict(rows=0, delayed=True) == ("skipped", f"{why}, on the delayed feed")
+    assert _verdict(rows=0) == ("failed", why)
+    assert _verdict(rows=0, late=False) == ("passed", "")
 
 
 def test_a_stall_between_samples_is_recorded_as_a_gap(
@@ -728,7 +776,7 @@ def _record_diagnostics_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.mark.jvm_held
-def test_a_stream_that_failed_fails_its_unit(
+def test_a_unit_whose_stream_massive_refused_is_refused(
     *,
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
@@ -752,8 +800,8 @@ def test_a_stream_that_failed_fails_its_unit(
     steps = _record_diagnostics_reads(monkeypatch)
     stream_capture.run_stream_day(
         harness.session,
-        units=["indices delayed"],
-        tiers={"indices": "starter"},
+        units=["indices"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(hours=1),
         report=report,
@@ -763,8 +811,8 @@ def test_a_stream_that_failed_fails_its_unit(
     [(unit, status, reason)] = seen
     # The final read of failed streams waits for the queued diagnostics rows to show first.
     assert steps[-2:] == ["wait", "read"]
-    assert (unit, status) == ("indices delayed", "failed")
-    assert reason.startswith("a stream failed: ")
+    assert (unit, status) == ("indices", "refused")
+    assert reason.startswith("refused: ")
     assert "not authorized" in reason
 
 
@@ -777,19 +825,19 @@ def test_an_options_unit_without_contracts_fails(
     seen, report = _reports()
     stream_capture.run_stream_day(
         harness.session,
-        units=["options delayed"],
-        tiers={"options": "starter"},
+        units=["options"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(hours=1),
         report=report,
         clock=_Day(stop_after=1).clock(),
         day_start=START,
     )
-    assert seen == [("options delayed", "failed", "the SPY chain gave no contract to stream")]
+    assert seen == [("options", "failed", "the SPY chain gave no contract to stream")]
 
 
 @pytest.mark.jvm_held
-def test_a_throughput_stream_that_failed_fails_its_unit(
+def test_a_throughput_stream_massive_refused_refuses_its_unit(
     *,
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
@@ -812,8 +860,8 @@ def test_a_throughput_stream_that_failed_fails_its_unit(
     steps = _record_diagnostics_reads(monkeypatch)
     stream_capture.run_throughput(
         harness.session,
-        units=["currencies real-time"],
-        tiers={"currencies": "starter"},
+        units=["currencies"],
+        delayed=frozenset(),
         folder=tmp_path,
         until=START + timedelta(seconds=50),
         report=report,
@@ -822,5 +870,5 @@ def test_a_throughput_stream_that_failed_fails_its_unit(
     )
     [(unit, status, reason)] = seen
     assert steps[-2:] == ["wait", "read"]
-    assert (unit, status) == ("currencies real-time", "failed")
+    assert (unit, status) == ("currencies", "refused")
     assert "not authorized" in reason

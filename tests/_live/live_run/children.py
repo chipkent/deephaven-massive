@@ -14,7 +14,7 @@ a hang cannot take the program down. This module owns that process:
   sends SIGKILL to the group: a hard stop and a Control-C both end a child this way. `wait`
   waits for the child to end or for its deadline, stopping it at the deadline.
 - **Environment.** `child_environment` is the parent's environment with `CI` removed (the live
-  tests skip under CI), the probed plans, and the library's debug log sent to the attempt.
+  tests skip under CI), and the library's debug log sent to the attempt.
 
 The parent's main thread calls every function; each child's output thread only writes its log.
 """
@@ -41,9 +41,6 @@ if TYPE_CHECKING:
 STOP_GRACE: Final = 60.0
 """Seconds a child gets to end after SIGINT before its process group is killed."""
 
-PLANS_VARIABLE: Final = "MASSIVE_LIVE_PLANS"
-"""The variable that hands the probed plans to the live tests (`plans.PLANS_VARIABLE`)."""
-
 S3_VARIABLES: Final = ("MASSIVE_S3_ACCESS_KEY_ID", "MASSIVE_S3_SECRET_ACCESS_KEY")
 """The S3 pair, which a child that must not read flat files does not get."""
 
@@ -64,33 +61,26 @@ def new_token() -> str:
 def child_environment(
     base: Mapping[str, str],
     *,
-    plans: str,
     debug_log: Path,
-    extra: Mapping[str, str],
     with_s3: bool = True,
 ) -> dict[str, str]:
     """Return the environment of a child.
 
     Args:
         base: The parent's environment.
-        plans: The probed plans in the `MASSIVE_LIVE_PLANS` grammar, such as
-            `"stocks=starter,s3"`.
         debug_log: The attempt's debug log; the library writes its DEBUG log there.
-        extra: Further variables, such as the outcomes file of a pytest child.
         with_s3: Whether the child gets the S3 pair; False keeps it from reading flat files.
 
     Returns:
         The environment: `base` without `CI` (and without the S3 pair when asked), with the
-        plans, the debug log, and `extra`.
+        debug log.
     """
     env = {k: v for k, v in base.items() if k != "CI"}
     if not with_s3:
         for name in S3_VARIABLES:
             env.pop(name, None)
-    env[PLANS_VARIABLE] = plans
     env["DEEPHAVEN_MASSIVE_LOG"] = "DEBUG"
     env["DEEPHAVEN_MASSIVE_LOG_FILE"] = str(debug_log.resolve())
-    env.update(extra)
     return env
 
 
