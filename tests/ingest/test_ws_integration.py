@@ -481,8 +481,9 @@ _HOLD = 90.0
 """Seconds the real-time-only checks keep their streams open: long enough for Massive to answer
 every subscription, and to take an older connection of the key if a newer one counts against it."""
 
-_TAKEN = "another connection with this API key took it"
-"""The library's words for a connection Massive closed because a newer one on the key took it."""
+_TAKEN = "another connection with this API key took"
+"""The start of the library's words, in a stream's error or a connection's last error, for a
+connection Massive closed because a newer one on the key took its place."""
 
 
 def _states(session: dm.MassiveSession, table_rows: TableRows) -> dict[str, tuple[str, str | None]]:
@@ -517,6 +518,7 @@ def _hold(
 def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
     live_config: dm.MassiveConfig,
     *,
+    wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
@@ -526,11 +528,12 @@ def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
     Lists stocks in `MassiveConfig.delayed_subscriptions`, which moves `T.SPY` to
     `delayed.massive.com` and never applies to fair market value, then streams
     `m.stocks.fmv("SPY")`, which uses `business.massive.com`, the one host Massive documents for
-    it. Holds both streams for `_HOLD` seconds and records the two connections and the streams.
-    Passes when neither stream failed because the other's connection took its place (a second
-    connection on one key that Massive counts as the same cluster), and both still run. Skips,
-    quoting Massive, when Massive refused either subscription: the library sent the request and
-    Massive answered.
+    it. Waits for Massive to acknowledge both topics, holds both streams for `_HOLD` seconds,
+    and records the two connections and the streams. Passes when no stream or connection
+    reports that the other connection took its place (a second connection on one key that
+    Massive counts as the same cluster), Massive acknowledged both topics, and both streams
+    still run. Skips, quoting Massive, when Massive refused either subscription and nothing was
+    taken: the library sent the request and Massive answered.
     """
     config = dataclasses.replace(
         live_config,
@@ -540,15 +543,20 @@ def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
     try:
         trades = session.stocks.trades("SPY").blink()
         fmv = session.stocks.fmv("SPY").blink()
+        acked = wait_acked(session, 2, time.monotonic() + _WAIT)
         states = _hold(session, table_rows, 2)
+        last_errors = [
+            str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]
+        ]
         for line in stream_report(session):
             evidence(line)
         session.release(trades)
         session.release(fmv)
     finally:
         session.close()
-    evidence(f"streams after {_HOLD:.0f} s: {states}")
-    taken = {name: error for name, (_, error) in states.items() if error and _TAKEN in error}
+    evidence(f"acknowledged topics {acked}; streams after {_HOLD:.0f} s: {states}")
+    taken = [error for _, error in states.values() if error and _TAKEN in error]
+    taken += [error for error in last_errors if _TAKEN in error]
     assert not taken, f"one connection took the other's place: {taken}"
     refused = {
         name: error
@@ -557,6 +565,7 @@ def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
     }
     if refused:
         pytest.skip(f"Massive refused: {refused}")
+    assert acked == 2, f"Massive acknowledged {acked} of the 2 topics"
     assert {name: state for name, (state, _) in states.items()} == {
         "stocks.trades": "RUNNING",
         "stocks.fmv": "RUNNING",
