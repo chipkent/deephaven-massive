@@ -2,7 +2,7 @@
 
 Date: 2026-10-30
 
-Status: partly superseded: a bar at a stamp Massive is not known to use served as sent by [112](0112-data-table-holds-only-rows-read-whole-unreadable-rows-withheld.md)
+Status: accepted
 
 ## Question
 

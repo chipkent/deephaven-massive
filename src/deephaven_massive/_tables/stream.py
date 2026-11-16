@@ -1739,10 +1739,12 @@ class Flusher:
         """Count a flush's withheld rows toward the plan's run; fail its streams at the limit.
 
         A flush that publishes a row of the plan ends its run. Otherwise its withheld rows
-        extend the run, and once it reaches `DROPPED_RUN_LIMIT` every stream of the dataset on
-        the channel fails with a `MassiveError` naming the run's length and its first row's
-        reason, a defect of the library to fix (`ErrorSource.LIBRARY`), and the run starts
-        over: nothing the dataset's channel sends can be read.
+        extend the run, and once it reaches `DROPPED_RUN_LIMIT` every stream that receives the
+        whole channel (a `dm.ALL` stream, or one of a dataset whose rows name no symbol) fails
+        with a `MassiveError` naming the run's length and its first row's reason, a defect of
+        the library to fix (`ErrorSource.LIBRARY`), and the run starts over: nothing the
+        dataset's channel sends can be read. A stream of named symbols never fails for rows it
+        would not have received; its own symbols' runs judge it (`_counted_symbols`).
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1750,7 +1752,7 @@ class Flusher:
             readers: The dataset's streams on the channel.
 
         Returns:
-            True when the streams were failed, so nothing is published.
+            True when every stream was failed, so nothing is left to count or publish.
         """
         if converted.batch.num_rows:
             self._runs.pop(plan, None)
@@ -1769,8 +1771,10 @@ class Flusher:
             ),
             source=ErrorSource.LIBRARY,
         )
-        self._fail_each(readers, failure)
-        return True
+        whole = plan.symbol_field is None
+        failing = [sink for sink in readers if whole or sink.receives_all]
+        self._fail_each(failing, failure)
+        return len(failing) == len(readers)
 
     def _counted_symbols(
         self,
