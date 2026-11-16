@@ -58,6 +58,7 @@ Use Cases: FLEX trade monitoring, market operations tracking, data auditing.
 | `m` | string | The administrative message text as distributed by OPRA. |
 | `t` | integer | The SIP timestamp in Unix nanoseconds. |
 | `q` | integer | The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). |
+| `rt` | boolean | Whether this message is a retransmission (a replay of a previously sent message, e.g., during gap recovery), rather than an original real-time message. Only present, and set to true, when it is a retransmission; it is omitted otherwise. |
 
 ## Sample Response
 

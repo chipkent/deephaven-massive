@@ -1322,7 +1322,18 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
+    (Transport.REST, path): Deferral(
+        "Massive documented it on 2026-11-16; its dataset needs a public design: the call, its "
+        "arguments, and its columns.",
+        729,
+    )
+    for path in (
+        "/options/v1/open-interest",
+        "/options/v1/unusual-trades",
+        "/options/v1/admin-messages",
+    )
+}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket

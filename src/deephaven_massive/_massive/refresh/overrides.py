@@ -597,6 +597,8 @@ _FILE_TIMES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     {
+        **_for(("/options/v1/admin-messages",), ("timestamp",), _NS_TICKS),
+        **_for(("/options/v1/unusual-trades",), ("sip_timestamp",), _NS_TICKS),
         **_for(BAR_PATHS, ("t",), _MS_BARS),
         **_for(
             ("/v2/last/trade/{stocksTicker}", "/v2/last/trade/{optionsTicker}"),
@@ -1402,6 +1404,8 @@ _NS_FILTER = Unit(
 
 PARAM_UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     {
+        **_for(("/options/v1/admin-messages",), ("timestamp",), _NS_FILTER),
+        **_for(("/options/v1/unusual-trades",), ("sip_timestamp",), _NS_FILTER),
         **_for(
             (
                 "/v3/trades/{stockTicker}",
@@ -1943,6 +1947,16 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
             'quote."), read as `participant_timestamp`: both are milliseconds, and the live reads '
             "of 2026-11-12 found them equal whenever the two carried one quote (1794443156000 "
             "for AUD/USD).",
+        ),
+        ("/options/v1/admin-messages", "timestamp"): Spelling(
+            long_name="sip_timestamp",
+            source="/v3/trades/{optionsTicker} `sip_timestamp`",
+            reason="The REST admin messages' `timestamp` and the admin-message stream's `t` "
+            '(`options/AD`) carry one text, "The SIP timestamp in Unix nanoseconds.", for one '
+            "message: the REST `id` is documented as composed of the SIP timestamp and the "
+            "sequence number, the stream's `q`. Both are nanosecond integers. The stream's `t` "
+            "is already `SipTimestamp`, the name Massive spells `sip_timestamp` for an options "
+            "trade's SIP time.",
         ),
     }
 )
