@@ -220,7 +220,8 @@ then `no example failed`, or `failed:` and the examples' names. Each example's o
 | Verdict | What you do |
 |---|---|
 | `passed` | Nothing |
-| `refused by your plan` | Nothing, unless your plan includes that example's data |
+| `refused by Massive` | Nothing, unless your plan includes that example's data |
+| `not listed as delayed` | List the subscription the error names in `delayed_subscriptions` of your settings file, and run the examples again |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
 <a id="start-the-server"></a>
@@ -1240,7 +1241,8 @@ A report is an issue with a zip of your logs, your keys removed:
    The date, time, and time zone.
 
    ## My setup
-   - Plan of each subscription:
+   - Subscriptions Massive serves me delayed:
+   - Subscriptions whose requests Massive limits per minute:
    - Server: Python environment or Docker
    ```
 

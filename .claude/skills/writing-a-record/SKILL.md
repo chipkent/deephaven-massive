@@ -52,7 +52,7 @@ lives only on its subject's page is `moved to <page, section>`.
 ## A verification item
 
 The title is the question, ending in a question mark. The body says what the library does
-under each answer, what it does until the item is read, and which test reads it, with the data
+under each answer, what it does until the item is read, and which test reads it, with the plan
 it needs. Settling it changes its `Status:` line to the answer, with the date; the body keeps the
 evidence. Retiring it says why on the `Status:` line.
 

@@ -484,12 +484,13 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
     assert examples.stream_verdict(already, [refusal]) is already
 
 
-def test_stream_verdict_counts_a_refused_background_read_as_refused() -> None:
+def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
     passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
     plan = "stocks.bars: the Stocks subscription of your plan does not include this data"
     delayed = "AAPL would be delayed, and ... MassiveConfig.delayed_subscriptions, so ..."
-    for read in (plan, delayed):
-        assert examples.stream_verdict(passed, [read]).status == examples.REFUSED
+    assert examples.stream_verdict(passed, [plan]).status == examples.REFUSED
+    assert examples.stream_verdict(passed, [delayed]).status == examples.NOT_LISTED
+    assert examples.stream_verdict(passed, [plan, delayed]).status == examples.NOT_LISTED
     assert examples.stream_verdict(passed, [plan, "HTTP 500"]).status == examples.FAILED
 
 
@@ -516,15 +517,22 @@ def test_run_example_shares_variables_and_captures_prints(tmp_path: Path) -> Non
     assert namespace["y"] == 6
 
 
-def test_run_example_tells_a_plan_refusal_from_a_failure_under_the_console_lock(
+def test_run_example_tells_a_refusal_from_a_failure_under_the_console_lock(
     tmp_path: Path,
 ) -> None:
     code = "import deephaven_massive as dm\nraise dm.EntitlementError('no plan')\n"
+    unlisted = (
+        "import deephaven_massive as dm\n"
+        "raise dm.EntitlementError('delayed', source=dm.ErrorSource.USER)\n"
+    )
     refused = _write(tmp_path, "01_a.py", code)
     failed = _write(tmp_path, "02_b.py", "print('before')\n1 / 0\n")
+    delayed = _write(tmp_path, "03_c.py", unlisted)
     namespace: dict[str, Any] = {"kept": 1}
     outcome, _ = examples.run_example(refused, namespace)
     assert (outcome.status, outcome.error) == (examples.REFUSED, "EntitlementError: no plan")
+    outcome, _ = examples.run_example(delayed, namespace)
+    assert (outcome.status, outcome.error) == (examples.NOT_LISTED, "EntitlementError: delayed")
     outcome, printed = examples.run_example(failed, namespace)
     assert outcome.status == examples.FAILED
     assert outcome.error.startswith("ZeroDivisionError: division by zero\nTraceback")

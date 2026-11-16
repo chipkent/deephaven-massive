@@ -125,6 +125,30 @@ def test_a_cleared_refusal_reruns_the_other_refused_checks_of_its_subscription_a
 
 
 @pytest.mark.parametrize(
+    ("status", "reason", "reruns"),
+    [
+        ("passed", "", True),
+        ("failed", "call: KeyError", True),
+        ("skipped", "not listed as delayed: list stocks in ...", True),
+        ("skipped", "the market was closed", False),
+        ("skipped", "no frame arrived", False),
+        ("error", "the child ended first", False),
+    ],
+)
+def test_a_refusal_reruns_its_subscription_only_once_massive_answers_otherwise(
+    status: str, reason: str, reruns: bool
+) -> None:
+    """Only an answer from Massive says the key changed; a skip for the market says nothing."""
+    state = _state()
+    first = check_of(state, "evidence", "a.py::t")
+    second = check_of(state, "smoke", "b.py::u")
+    record(state, first, status="refused", reason=REFUSAL, day=DAY)
+    record(state, second, status="refused", reason=REFUSAL, day=DAY)
+    record(state, first, status=status, reason=reason, day=DAY)
+    assert second.rerun is reruns
+
+
+@pytest.mark.parametrize(
     ("name", "reason", "subscription"),
     [
         ("t", REFUSAL, "stocks"),

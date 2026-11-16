@@ -5,5 +5,5 @@ Date: 2026-11-10
 Status: open
 
 Passed through as sent, with Massive's description. Settled by
-`tests/namespaces/test_options_integration.py`, which needs option chain snapshots and records each contract's
+`tests/namespaces/test_options_integration.py` (Options Starter), which records each contract's
 ratio to Black-Scholes gamma from its own inputs.

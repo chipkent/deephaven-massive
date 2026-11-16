@@ -2474,12 +2474,12 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
 # fast, and changes its plans over time, so the live tests, their harness, and their runbooks
 # learn that only from Massive's answers and the owner's settings, never from a plan's name.
 # A plan's name is caught by its word: `Basic`, `Starter`, `Developer`, `Advanced`, `Business`,
-# or `business_expansion`, in any case, as a whole word, in the text a reader reads: a
-# runbook's lines, and a Python file's comments, docstrings, and other strings. A Python name
-# is the name its defining module gives it (`rest_basic_subscriptions`, the keyword `basic=`
-# of the library's rate-limit registry), so the check reads past names. A line that quotes
-# Massive, holding `massive.com` or a request id, may name one, and so may the spec refresh's
-# tests, which parse Massive's plan tables.
+# or `business_expansion`, in any case, as a whole word, in a runbook's lines and in a Python
+# file's comments, docstrings, other strings, and names, each name read as the words its `_`
+# separates (`BASIC_LIMIT`, `classes_on_basic`). The harness may call the library's own names
+# that hold such a word (`_LIBRARY_NAMES`). A line that quotes Massive, holding `massive.com`
+# or a request id, may name one, and so may the spec refresh's tests, which parse Massive's
+# plan tables.
 
 _PLAN_WORD = re.compile(
     r"\b(basic|starter|developer|advanced|business|business_expansion)\b", re.IGNORECASE
@@ -2536,26 +2536,45 @@ def _plan_names(root: Path, files: Iterable[Path]) -> list[str]:
     return found
 
 
-_CODE_TOKENS = frozenset({tokenize.NAME, tokenize.OP, tokenize.NUMBER})
-"""The tokens of code rather than text: names, operators, and numbers, also inside an f-string."""
+_CODE_TOKENS = frozenset({tokenize.OP, tokenize.NUMBER})
+"""The tokens that hold no words: operators and numbers, also inside an f-string."""
+
+_LIBRARY_NAMES = frozenset({"rest_basic_subscriptions", "basic"})
+"""The library's own names that hold a plan's word, which the harness must call:
+`MassiveConfig.rest_basic_subscriptions` and the keyword `basic` of the rate-limit registry's
+`lease`. They are the library's names, so the library's own change renames them."""
 
 
 def _python_prose(source: str) -> dict[int, str]:
-    """Return the text a reader reads in Python source: its comments and strings, by line.
+    """Return the words a reader reads in Python source, by line.
+
+    The words are its comments, its strings, and its names, each name split on `_`; a name of
+    `_LIBRARY_NAMES` is left out, and `basic` only as a keyword argument (`lease(basic=x)`).
 
     Args:
         source: The source.
 
     Returns:
-        Each line number that holds a comment or part of a string, mapped to that text on the
-        line; a name, such as a keyword argument, is left out.
+        Each line number that holds a comment, part of a string, or a name, mapped to that
+        text on the line.
     """
     prose: dict[int, list[str]] = {}
-    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token.type == tokenize.OP:
+            depth += {"(": 1, ")": -1}.get(token.string, 0)
         if token.type in _CODE_TOKENS:
             continue
-        for offset, text in enumerate(token.string.splitlines()):
-            prose.setdefault(token.start[0] + offset, []).append(text)
+        text = token.string
+        if token.type == tokenize.NAME:
+            following = tokens[index + 1].string if index + 1 < len(tokens) else ""
+            keyword = depth > 0 and following == "="
+            if text in _LIBRARY_NAMES and (text != "basic" or keyword):
+                continue
+            text = " ".join(text.split("_"))
+        for offset, line in enumerate(text.splitlines()):
+            prose.setdefault(token.start[0] + offset, []).append(line)
     return {number: " ".join(texts) for number, texts in prose.items()}
 
 
@@ -2575,6 +2594,11 @@ def test_the_live_tests_name_no_plan() -> None:
         ('tier = "business_expansion"', True),
         ("config.rest_basic_subscriptions", False),
         ("lease(basic=config.rest_basic_subscriptions)", False),
+        ("lease(basic=x)", False),
+        ("BASIC_LIMIT = 5", True),
+        ("def classes_on_basic():", True),
+        ("_BASIC_UNDERLYINGS = ()", True),
+        ("basic = 5", True),
         ('reason = f"paced on Basic: {count}"', True),
         ("a 403 from https://massive.com/pricing names Stocks Advanced", False),
         ("Massive: 'upgrade to Business' (request_id 0123456789abcdef0123456789abcdef)", False),

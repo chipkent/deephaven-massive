@@ -5,7 +5,7 @@ Date: 2026-11-11
 Status: settled 2026-11-12: the forex conversion's `last` is the last quote of its `from`/`to` pair
 
 Kept as `Last*` until read, not `LastQuote*`. Settled by
-`tests/massive/refresh/test_overrides_integration.py`, which compares the three
+`tests/massive/refresh/test_overrides_integration.py` (Currencies Starter), which compares the three
 in both directions of AUD/USD when they carry one quote and flags a conversion quote that matches
 the inverse pair's.
 

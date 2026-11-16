@@ -4,5 +4,5 @@ Date: 2026-10-23
 
 Status: open
 
-Topics, the stricter count. Settled by `tests/massive/ws/test_client_integration.py`, which
-needs option quotes and trades streamed.
+Topics, the stricter count. Settled by `tests/massive/ws/test_client_integration.py` (Options
+Advanced).

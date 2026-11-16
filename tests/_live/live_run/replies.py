@@ -35,7 +35,7 @@ from deephaven_massive._massive import set_reply_capture
 from tests._live.calendar import trading_day_before
 from tests._live.live_run.reply_examples import DATA, Example
 from tests._live.live_run.stream_capture import diagnostics_rows, is_refusal
-from tests._live.summary import REFUSED
+from tests._live.summary import NOT_LISTED, REFUSED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -231,11 +231,16 @@ def _verdict(
 
     Returns:
         `(status, reason)`: an example Massive refused is `refused`, its reason starting
-        `summary.REFUSED` and quoting the refusal.
+        `summary.REFUSED` and quoting the refusal; one the settings refused, an
+        `EntitlementError` whose `source` is `ErrorSource.USER` (delayed data of a subscription
+        `delayed_subscriptions` does not list), is `skipped`, its reason starting
+        `summary.NOT_LISTED` and quoting the library's message.
     """
     if count == 0:
         raised = f": {type(error).__name__}: {error}" if error is not None else ""
         return "failed", f"no reply was captured{raised}"
+    if isinstance(error, dm.EntitlementError) and error.source is dm.ErrorSource.USER:
+        return "skipped", NOT_LISTED + " ".join(str(error).split())
     if isinstance(error, dm.EntitlementError):
         return "refused", REFUSED + " ".join(str(error).split())
     if is_refusal(stream_error):

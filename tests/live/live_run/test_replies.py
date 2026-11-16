@@ -227,6 +227,21 @@ class _Recorder:
         return self
 
 
+def test_an_unlisted_delay_skips_as_not_listed_and_massive_refusal_stays_refused() -> None:
+    """The settings refusing delayed data is the owner's to fix, not Massive's refusal."""
+    example = _example("market-status")
+    delayed = dm.EntitlementError("stocks data would be delayed", source=dm.ErrorSource.USER)
+    refused = dm.EntitlementError("HTTP 403: not entitled", status=403)
+    assert replies._verdict(example, error=delayed, stream_error="", count=1) == (
+        "skipped",
+        "not listed as delayed: stocks data would be delayed",
+    )
+    assert replies._verdict(example, error=refused, stream_error="", count=1) == (
+        "refused",
+        "refused: HTTP 403: not entitled",
+    )
+
+
 def test_every_example_has_its_code_and_no_code_lacks_an_example() -> None:
     assert list(replies.CALLS) == [e.name for e in reply_examples.EXAMPLES]
 

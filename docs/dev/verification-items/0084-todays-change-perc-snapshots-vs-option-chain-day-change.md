@@ -5,8 +5,8 @@ Date: 2026-11-11
 Status: settled 2026-11-12: the v2 snapshots' `todaysChange` and `todaysChangePerc` are the option chain's `day.change` and `day.change_percent`
 
 Kept apart as `TodaysChange` and `TodaysChangePerc` until read. Settled by
-`tests/massive/refresh/test_overrides_integration.py`, which reads stock and option chain snapshots
-and checks each side against that definition within about a cent and 0.01 percentage points.
+`tests/massive/refresh/test_overrides_integration.py` (Stocks Starter and Options Starter), which
+checks each side against that definition within about a cent and 0.01 percentage points.
 
 Settled 2026-11-11 and 2026-11-12: five stocks' change was the latest price minus `prevDay.c`, SPY's
 chain's `day.close` minus `day.previous_close`, and each percent 100 times the change over that

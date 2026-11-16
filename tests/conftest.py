@@ -1976,15 +1976,17 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
     of three:
 
     - Massive's refusal: the wire's `WireEntitlementError` (an HTTP 403, a `NOT_AUTHORIZED`
-      envelope, an S3 403), or an `EntitlementError` whose `source` is `ErrorSource.MASSIVE`.
-      The test skips with `refused: <the refusal on one line>` (`refusals.refusal_line`: the
-      status, the request, Massive's text, and for a timeframe refusal the earliest day asked),
-      and the same line is recorded as evidence.
+      envelope, an S3 403), or an `EntitlementError` whose `source` is `ErrorSource.MASSIVE`
+      and that carries Massive's `status`. The test skips with `refused: <the refusal on one
+      line>` (`refusals.refusal_line`: the status, the request, Massive's text, and for a
+      timeframe refusal the earliest day asked), and the same line is recorded as evidence.
     - The owner's settings refusing delayed data: an `EntitlementError` whose `source` is
       `ErrorSource.USER` (Massive labels the data delayed and `delayed_subscriptions` does not
       list its subscription). The test skips with `not listed as delayed: <the library's
       message>`, which names the setting to add.
-    - Anything else fails the test, as does any error of a test that is not live.
+    - Anything else fails the test, as does any error of a test that is not live. That includes
+      an `EntitlementError` the library built with no status, such as a real-time-only
+      stream's on a key whose data Massive labels delayed: Massive refused nothing.
 
     The summary groups the two skips by their prefixes (`summary.REFUSED`,
     `summary.NOT_LISTED`).
@@ -1999,8 +2001,8 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         The call's result, unchanged.
 
     Raises:
-        EntitlementError: When it escapes a test that is not a live test, or its source is
-            neither Massive nor the user.
+        EntitlementError: When it escapes a test that is not a live test, its source is
+            neither Massive nor the user, or its source is Massive but it carries no status.
         WireEntitlementError: When it escapes a test that is not a live test.
     """
     if item.get_closest_marker(_INTEGRATION) is not None or item.get_closest_marker(_SOAK):
@@ -2015,7 +2017,9 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
             raise
         if isinstance(error, EntitlementError) and error.source is ErrorSource.USER:
             reason = f"{summary.NOT_LISTED}{' '.join(str(error).split())}"
-        elif isinstance(error, WireEntitlementError) or error.source is ErrorSource.MASSIVE:
+        elif isinstance(error, WireEntitlementError) or (
+            error.source is ErrorSource.MASSIVE and error.status is not None
+        ):
             reason = f"{summary.REFUSED}{refusals.refusal_line(error)}"
         else:
             raise
@@ -2123,13 +2127,21 @@ def recency_label(
 
     Returns:
         A function of a subscription that has a snapshot (stocks, options, indices, or
-        futures), returning Massive's answer.
+        futures), returning Massive's answer. It raises `ValueError` naming the subscription
+        and the four it covers when given another, such as currencies, which has no snapshot.
     """
     answers = request.config.stash.setdefault(_RECENCY, {})
+    probes = {c.value: probe for c, probe in host_decision.SNAPSHOT_PROBES.items()}
 
     def label(subscription: Subscription) -> recency.RecencyAnswer:
+        if subscription.value not in probes:
+            message = (
+                f"recency_label: {subscription} has no snapshot to read its label from; "
+                f"pass one of {', '.join(sorted(probes))}"
+            )
+            raise ValueError(message)
         if subscription not in answers:
-            snapshot = host_decision.SNAPSHOT_PROBES[dm.AssetClass(subscription.value)]
+            snapshot = probes[subscription.value]
             try:
                 page = live_rest.get(
                     source(Transport.REST, snapshot.path),

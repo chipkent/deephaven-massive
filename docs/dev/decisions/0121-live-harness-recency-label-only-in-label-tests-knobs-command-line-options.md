@@ -8,9 +8,8 @@ Status: accepted
 
 Some open questions ask what Massive sends a key whose data it labels delayed, real-time, or
 not at all, such as whether a real-time key may stream from the delayed feed. Knowing no plan,
-a live test learns the label only by asking Massive.
-May it? And which environment variables may the live
-harness read, now that it no longer reads plans?
+a live test learns the label only by asking Massive. May it? And which environment variables may
+the live harness read, now that it no longer reads plans?
 
 ## Options
 

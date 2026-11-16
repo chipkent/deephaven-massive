@@ -326,9 +326,11 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     A skip never replaces a pass. The unfinished checks of a child stopped on purpose
     (Control-C, a hard stop) come as `interrupted` and are not stored, so they stay due
     without counting as a failure. A refusal stores the subscription it names
-    (`refused_subscription`). When a refused check's result is no longer a refusal, the key
-    gained something: every other refused check of the same subscription is marked to run
-    again at once (`Check.rerun`).
+    (`refused_subscription`). When a refused check's new result is one Massive answered (a
+    pass, a failure, or a skip whose reason starts with `NOT_LISTED`), the key gained
+    something: every other refused check of the same subscription is marked to run again at
+    once (`Check.rerun`). A skip for any other reason, such as a closed market or a stream
+    that sent nothing, says nothing of the key and marks nothing.
 
     Args:
         state: The run's state.
@@ -343,7 +345,10 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     check.last_run, check.rerun = day, False
     if status == "skipped" and check.status == "passed":
         return
-    if check.status == "refused" and status != "refused" and check.subscription:
+    answered = status in {"passed", "failed"} or (
+        status == "skipped" and reason.startswith(NOT_LISTED)
+    )
+    if check.status == "refused" and answered and check.subscription:
         for other in state.checks.values():
             if other is not check and other.status == "refused":
                 other.rerun = other.rerun or other.subscription == check.subscription
