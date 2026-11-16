@@ -31,16 +31,14 @@ block then goes through pure Arrow operations, in this order:
 1. the symbol filter (`pyarrow.compute.is_in` on the symbol header);
 2. the key check on the surviving rows: a row whose key header (`ReadPlan.required`) is empty
    or does not parse as its type, or whose time header the plan's converter cannot place
-   (`ReadPlan.to_ns`), cannot be placed; if every row of the requested symbols in the whole
-   file has such a key, the file raises after its last block, since that is the sign of a
-   change in the file's format rather than of one odd row (one block can hold a single row of
-   an illiquid symbol, so the rule is never applied to a block alone);
+   (`ReadPlan.to_ns`), cannot be placed;
 3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds, which keeps a
    row whose time cannot be read, since no window can place it;
 4. on the rows left, the conversion of every header to its type, and the parsing of list
-   headers (`"12,37"` becomes `[12, 37]`): a value that does not parse is null, and its header
-   is reported in `DriftReport.unconvertible` with the first such text; then the rename from
-   CSV headers to the library's column names.
+   headers (`"12,37"` becomes `[12, 37]`): a value that does not parse, an integer text a
+   `double` header would round among them, is null, and its header is reported in
+   `DriftReport.unconvertible` with the first such text; then the rename from CSV headers to
+   the library's column names.
 
 A row left that the reader could not read whole is marked in the block's `RowMarks`:
 `RowFault.UNREADABLE_KEYS` for a key from step 2, else `RowFault.UNCONVERTIBLE_VALUES` for a
@@ -404,9 +402,7 @@ class FlatFile:
                 header line is longer than `plan.block_size`, not UTF-8, or not valid CSV; if
                 the header names a column twice or lacks a key header of `plan.required`
                 (before the first block, naming the headers); or, after its last block, if
-                every row of the file was malformed, or the file held rows of the requested
-                symbols and every one of them had a key that cannot be read, naming the first
-                one's reason. Every message names the file.
+                every row of the file was malformed. Every message names the file.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
@@ -443,26 +439,15 @@ class FlatFile:
                     check_utf8=False,
                 ),
             )
-            # Rows of the requested symbols the file held, and how many had a key unread.
-            held = unread = 0
-            reason = ""
             for block in self._blocks(text, plan, options):
                 self.rows_read += block.read
                 self.rows_of_symbols += block.considered
                 self.rows_kept += block.rows.num_rows
-                held += block.considered
-                unread += block.unread
-                reason = reason or block.unread_reason
                 yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
                 raise self._error(
                     f"every one of its {self.malformed_lines} lines is malformed, so the file's "
                     f"format may have changed; the first: {self.malformed_reason}"
-                )
-            if held and unread == held:
-                raise self._error(
-                    f"every one of the {held} rows of the requested symbols was dropped, so the "
-                    f"file's format may have changed; the first: {reason}"
                 )
         except (
             pa.ArrowException,
@@ -638,17 +623,16 @@ class FlatFile:
 
         Returns:
             The block's kept rows, possibly none, in the plan's columns, with their drift and
-            marks, and its counts for the whole-file rule of `batches`.
+            marks, and its counts.
         """
         read = block.num_rows
         if plan.symbols is not None:
             block = block.filter(pc.is_in(block[plan.symbol_header], value_set=plan.symbols))
         considered = block.num_rows
         keys = self._keyed(block, plan)
-        first = keys.reasons[min(keys.reasons)][1] if keys.reasons else ""
         block, keyed = _windowed(block, keys, plan)
         rows, drift, marks = self._converted(block, keyed, plan)
-        return _Block(rows, drift, marks, considered, len(keys.reasons), first, read)
+        return _Block(rows, drift, marks, considered, read)
 
     def _converted(
         self, block: pa.RecordBatch, keyed: Mapping[int, tuple[str, str]], plan: ReadPlan
@@ -674,15 +658,14 @@ class FlatFile:
             )
         arrays = []
         odd: dict[str, DriftSample] = {}
-        # A row whose key cannot be read is converted with no text: its values are never
-        # published, and its odd text must not change how the column's other rows convert.
+        # A row whose key cannot be read is converted without its odd text: its values are
+        # never published, and that text must not change how the column's other rows convert.
+        # Its readable keys stay, so a window can still judge the row by them.
         unread = pa.array([row in keyed for row in range(block.num_rows)]) if keyed else None
         for column in plan.columns:
             sent = block[column.header]
-            if unread is not None and (
-                column.read_type != pa.string() or column.list_type is not None
-            ):
-                sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
+            if unread is not None:
+                sent = _without_odd_text(sent, column, unread, key=column.header in plan.required)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
                 self._mark_unfit(sent, failed, column, symbols=symbols, marker=marker, odd=odd)
@@ -768,6 +751,32 @@ class FlatFile:
         return _Keys(reasons, nanos)
 
 
+def _without_odd_text(
+    sent: pa.Array, column: ReadColumn, unread: pa.Array, *, key: bool
+) -> pa.Array:
+    """Blank the text of the rows whose key cannot be read, so it cannot sway the conversion.
+
+    Args:
+        sent: The header's text in each row.
+        column: The header's column.
+        unread: The rows whose key cannot be read.
+        key: Whether the header is a key, whose readable text such a row keeps.
+
+    Returns:
+        The text, null in those rows where it could change how the column converts: every
+        value of a typed or list header, and only an unparseable one of a key header.
+    """
+    if column.read_type == pa.string() and column.list_type is None:
+        return sent  # text converts as itself
+    blank = unread
+    if key and column.list_type is None:
+        parses = pc.fill_null(
+            _parseable(pc.utf8_trim_whitespace(sent), column.read_type), fill_value=True
+        )
+        blank = pc.and_(unread, pc.invert(parses))
+    return pc.if_else(blank, pa.scalar(None, sent.type), sent)
+
+
 def _windowed(
     block: pa.RecordBatch, keys: _Keys, plan: ReadPlan
 ) -> tuple[pa.RecordBatch, Mapping[int, tuple[str, str]]]:
@@ -817,7 +826,7 @@ class _Keys:
 
 @dataclass(frozen=True, slots=True)
 class _Block:
-    """One block's rows as the reader hands them on, and its counts for the whole-file rule.
+    """One block's rows as the reader hands them on, and its counts.
 
     Attributes:
         rows: The kept rows, in the plan's columns.
@@ -825,8 +834,6 @@ class _Block:
             whose keys could be read.
         marks: The kept rows it could not read whole, by index into `rows`.
         considered: The block's rows of the requested symbols, before the window.
-        unread: How many of those had a key that cannot be read.
-        unread_reason: Why the first of them could not be read; `""` when none.
         read: The block's rows, every symbol's.
     """
 
@@ -834,8 +841,6 @@ class _Block:
     drift: DriftReport = dataclasses.field(default_factory=DriftReport)
     marks: RowMarks = dataclasses.field(default_factory=lambda: _NO_MARKS)
     considered: int = 0
-    unread: int = 0
-    unread_reason: str = ""
     read: int = 0
 
 
@@ -1133,15 +1138,67 @@ def _parsed(
     else:
         text = pc.utf8_trim_whitespace(text)
         convert = functools.partial(pc.cast, target_type=read_type)
-    try:
-        return convert(text), None
-    except pa.ArrowInvalid:
-        pass
+    rounded = _rounded_integers(text) if read_type == pa.float64() else None
+    if rounded is None:
+        try:
+            return convert(text), None
+        except pa.ArrowInvalid:
+            pass
     if list_type is None:
         failed = pc.invert(pc.fill_null(_parseable(text, read_type), fill_value=True))
     else:
         failed = _unparseable_lists(text, list_type.value_type)
+    if rounded is not None:
+        failed = pc.or_(failed, rounded)
     return convert(pc.if_else(failed, _NO_TEXT, text)), failed
+
+
+_DOUBLE_DIGITS: Final = 309
+"""The most digits of the integer part of a finite double (about 1.8e308)."""
+
+_LONG_INTEGER: Final = r"^[+-]?[0-9]{16,}$"
+"""An integer's text with enough digits that a double may not hold it exactly (past 2**53)."""
+
+
+def _rounded_integers(text: pa.Array) -> pa.Array | None:
+    """Find the integers' texts a double would round, which a `double` header must not take.
+
+    Arrow parses `9007199254740993` into a `double` as `9007199254740992.0`, a value Massive
+    never sent. Only a text of 16 digits or more can be past 2**53, so one vectorized match
+    finds the few candidates, and only those are checked in Python, exactly.
+
+    Args:
+        text: A `double` header's text, its spaces trimmed.
+
+    Returns:
+        The mask of the texts a double would round; None when there is none.
+    """
+    long = pc.fill_null(pc.match_substring_regex(text, _LONG_INTEGER), fill_value=False)
+    candidates = pc.indices_nonzero(long).to_pylist()
+    rounded = [row for row in candidates if _rounds_text(text[row].as_py())]
+    if not rounded:
+        return None
+    marked = set(rounded)
+    return pa.array([row in marked for row in range(len(text))])
+
+
+def _rounds_text(text: str) -> bool:
+    """Tell whether a double holds an integer's text only rounded, or not at all.
+
+    Args:
+        text: An integer's text, with at least 16 digits.
+
+    Returns:
+        True when its nearest double differs from it (Python compares the two exactly), or it
+        has more digits than any finite double (309), which Python would not even read.
+    """
+    if len(text.lstrip("+-")) > _DOUBLE_DIGITS:
+        return True
+    value = int(text)
+    try:
+        return float(value) != value
+    except OverflowError:
+        return True
 
 
 def _parseable(text: pa.Array, read_type: pa.DataType) -> pa.Array:

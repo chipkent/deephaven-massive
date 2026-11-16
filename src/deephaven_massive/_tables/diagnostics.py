@@ -54,11 +54,12 @@ registry changed. Once the writer is stopped, rows are no longer queued.
 The module also holds the session's `DriftRegistry`, the policy half of runtime schema drift.
 The wire package detects drift (each decoder returns a `DriftReport` of the fields a payload had
 beyond its documented schema, the documented fields it lacked, the fields that held a value that
-does not fit their type, and the rows it dropped because a key could not be read); every
-transport hands those reports to the registry, which logs one WARNING per (dataset, transport,
-field) and per dataset with dropped rows, and keeps the `SchemaDrift` text of each stream and
-connection, a column of both tables. Drift never fails a read: only a payload whose every row
-was dropped fails, where it is found, as the sign of a change in Massive's format.
+does not fit their type), and each transport adds the rows it withheld because the library
+could not read them whole; every transport hands those reports to the registry, which logs one
+WARNING per (dataset, transport, field) and per dataset with withheld rows, and keeps the
+`SchemaDrift` text of each stream and connection, a column of both tables. Drift never fails a
+read: only a payload of which the library could read no row whole fails, where it is found, as
+the sign of a change in Massive's format.
 """
 
 from __future__ import annotations
@@ -821,10 +822,11 @@ _EXTRA: Final = "is not in the schema; it is dropped"
 """What a drift WARNING says of a field the schema does not declare."""
 _MISSING: Final = "is missing; it reads as null"
 """What a drift WARNING says of a vendor-required field a payload lacked."""
-_UNCONVERTIBLE: Final = "held a value that does not fit its type; it reads as null"
+_UNCONVERTIBLE: Final = "held a value that does not fit its type; its row is withheld"
 """What a drift WARNING says of a field that held a value its type cannot hold."""
 _ROUNDED: Final = (
-    "held a whole number beyond 2**53, which its double column holds only rounded; it reads rounded"
+    "held a whole number beyond 2**53, which its double column holds only rounded; its row is "
+    "withheld"
 )
 """What a drift WARNING says of a `long` field whose widening to a `double` rounded a value."""
 
@@ -872,26 +874,26 @@ class DriftRegistry:
     regenerated. The wire decoders, and the timestamp routine after them, report each
     payload's differences as a `DriftReport`: the fields it had that the schema does not
     declare (dropped), the declared fields it lacked (null), the fields that held a value that
-    does not fit their type (null), the `long` fields whose widening into a `double` column
-    rounded a whole number beyond 2**53 (served rounded), and the rows dropped because a key
-    could not be read. Every transport routes those reports here:
+    does not fit their type, the `long` fields whose widening into a `double` column would
+    round a whole number beyond 2**53, and the rows withheld because the library could not read
+    them whole. Every transport routes those reports here:
 
     - `report` logs one WARNING per (dataset, transport, field) for the life of the session,
-      and one WARNING per dataset the first time a row of it is dropped, with the running count
-      of dropped rows at DEBUG after that, at most once a minute. A static verb (`fetch()`,
+      and one WARNING per dataset the first time a row of it is withheld, with the running count
+      of withheld rows at DEBUG after that, at most once a minute. A static verb (`fetch()`,
       `history()`) reports drift only this way.
     - `report_statuses` logs one WARNING per (REST path, status) for a REST envelope status
       outside the documented ones; the page's rows are kept.
     - `record` adds a report to the drift of one stream or connection, its owner, and returns
       the owner's new `SchemaDrift` text when it changed, for the caller to write into the
-      owner's diagnostics row: its drifted fields, and how many of its rows were dropped. So
-      a dropped row stays visible after its one WARNING. The count counts reads, not
+      owner's diagnostics row: its drifted fields, and how many of its rows were withheld. So
+      a withheld row stays visible after its one WARNING. The count counts reads, not
       distinct rows: a `poll()` that reads the same bad row every cycle adds one every cycle.
       `forget` drops an owner once it has left its registry.
 
     Drift is never a failure: one odd value or row never costs the rest of a payload. Only a
-    payload whose every row was dropped fails where it is found, before it reaches the
-    registry, since that is the sign of a change in Massive's format.
+    payload of which the library could read no row whole fails where it is found, before it
+    reaches the registry, since that is the sign of a change in Massive's format.
 
     `SessionCore` creates one per session, and any library thread calls it. Thread-safe: one
     leaf lock guards its sets and counts, held for set operations and for building a text,
@@ -920,7 +922,7 @@ class DriftRegistry:
             registry.record(7, "REST", drift)  # "REST:halted+, REST:x?"
             registry.record(7, "REST", drift)  # unchanged: None
             registry.record(7, "REST", DriftReport(dropped_rows=2))
-            # "REST:2 rows dropped, REST:halted+, REST:x?"
+            # "REST:2 rows withheld, REST:halted+, REST:x?"
     """
 
     __slots__ = (
@@ -955,19 +957,19 @@ class DriftRegistry:
         where: str,
         symbol: str | None = None,
     ) -> None:
-        """Log a WARNING for each field of `drift` not yet reported, and count dropped rows.
+        """Log a WARNING for each field of `drift` not yet reported, and count withheld rows.
 
         Each field's WARNING names the dataset, the transport, and the field, then where the
         payload came from, the symbol of the first row that showed the field, and for an extra
         field or a value that does not fit that row's value (`DriftReport.samples`), so the
         log says enough to reproduce it: `... (schema drift) at wss://delayed.massive.com/stocks
         channel T; symbol AAPL; first value 182.33`. A field is reported once per session and
-        dataset; the first sample is the one a fix needs. The first rows of a dataset dropped
-        because a key could not be read log one WARNING with the reason of the first of them;
-        later drops log the running count of the dataset's dropped rows at DEBUG, at most once
-        every `DROPPED_COUNT_INTERVAL` seconds per dataset, with the rows dropped since the
-        last such line: drops between are counted, not logged. Ignores `drift.statuses`; see
-        `report_statuses`.
+        dataset; the first sample is the one a fix needs. The first rows of a dataset withheld
+        because the library could not read them whole log one WARNING with the reason of the
+        first of them; later ones log the running count of the dataset's withheld rows at DEBUG,
+        at most once every `DROPPED_COUNT_INTERVAL` seconds per dataset, with the rows withheld
+        since the last such line: rows between are counted, not logged. Ignores
+        `drift.statuses`; see `report_statuses`.
 
         Args:
             dataset: The dataset name, such as `"stocks.trades"`.
@@ -1009,9 +1011,9 @@ class DriftRegistry:
             )
         if drift.dropped_rows and not before:
             logger.warning(
-                "%s: dropped %d %s row(s) whose key cannot be read, the first at %s: %s; such "
-                "rows are dropped and counted: the running count is logged at DEBUG and shown "
-                "in the SchemaDrift of each live table that lost them",
+                "%s: withheld %d %s row(s) the library cannot read whole, the first at %s: %s; "
+                "such rows are withheld and counted: the running count is logged at DEBUG and "
+                "shown in the SchemaDrift of each live table that lost them",
                 dataset,
                 drift.dropped_rows,
                 transport.value,
@@ -1020,8 +1022,8 @@ class DriftRegistry:
             )
         elif due:
             logger.debug(
-                "%s: dropped %d more row(s) whose key cannot be read in the last %.0f s (%d so "
-                "far); the latest %s at %s: %s",
+                "%s: withheld %d more row(s) the library cannot read whole in the last %.0f s "
+                "(%d so far); the latest %s at %s: %s",
                 dataset,
                 total - logged_total,
                 now - logged_at,
@@ -1056,7 +1058,7 @@ class DriftRegistry:
         `<prefix>:<field>?`, and each `long` field whose widening to a `double` rounded a value
         `<prefix>:<field>~`. An owner's entries only accumulate: drift seen once stays shown.
         Dropped rows add one entry per prefix with the owner's running count of dropped reads,
-        `<prefix>:<n> rows dropped`: a row read again (by every cycle of a `poll()`) is counted
+        `<prefix>:<n> rows withheld`: a row read again (by every cycle of a `poll()`) is counted
         again. The count entries, sorted, come before every field entry, so a long text cut at
         `SCHEMA_DRIFT_SHOWN` keeps each prefix's count.
 
@@ -1085,7 +1087,7 @@ class DriftRegistry:
             dropped = self._owner_dropped.setdefault(owner, {})
             if drift.dropped_rows:
                 dropped[prefix] = dropped.get(prefix, 0) + drift.dropped_rows
-            counts = {f"{name}:{count} {_rows(count)} dropped" for name, count in dropped.items()}
+            counts = {f"{name}:{count} {_rows(count)} withheld" for name, count in dropped.items()}
             # Built under the lock, so the text is the owner's entries at this moment.
             text = ", ".join(sorted(counts) + sorted(seen))
         if len(text) > SCHEMA_DRIFT_SHOWN:

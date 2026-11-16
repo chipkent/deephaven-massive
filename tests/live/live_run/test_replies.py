@@ -249,12 +249,12 @@ def test_an_unlisted_delay_skips_as_not_listed_and_massive_refusal_stays_refused
 
 
 def test_an_entitlement_error_the_library_built_fails_not_refused() -> None:
-    """A refusal with no status of Massive's, such as a real-time-only stream's, is no reply."""
+    """A refusal the library built, with no status of Massive's, is no reply."""
     example = _example("market-status")
-    built = dm.EntitlementError("streams only in real time")
+    built = dm.EntitlementError("not entitled")
     assert replies._verdict(example, error=built, stream_error="", count=1) == (
         "failed",
-        "EntitlementError: streams only in real time",
+        "EntitlementError: not entitled",
     )
 
 

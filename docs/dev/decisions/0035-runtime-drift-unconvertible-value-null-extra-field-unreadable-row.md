@@ -2,7 +2,7 @@
 
 Date: 2026-10-30
 
-Status: accepted
+Status: partly superseded: a value that does not fit its column becoming null, by [112](0112-data-table-holds-only-rows-read-whole-unreadable-rows-withheld.md)
 
 ## Question
 

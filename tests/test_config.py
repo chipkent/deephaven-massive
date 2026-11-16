@@ -979,8 +979,8 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             "on_error: {malformed_row: raise}\n",
             (
                 ", line 1, column 12: on_error has no cause 'malformed_row'; the causes are "
-                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, malformed_rows, "
-                "refused_venues"
+                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, unreadable_keys, "
+                "unconvertible_values, malformed_rows, refused_venues"
             ),
         ),
         (
@@ -1282,7 +1282,7 @@ def test_the_example_file_sets_every_setting_to_its_example_value(tmp_path: Path
 def test_the_example_file_comments_each_setting_and_marks_its_defaults() -> None:
     text = _config._example_file()
     assert text.startswith(
-        "# Plans that stream 15 minutes late: Stocks Starter and Options Developer.\n"
+        "# Subscriptions whose data Massive serves you delayed, 15 minutes late.\n"
         "delayed_subscriptions: [options, stocks]\n\n"
     )
     assert "\nmax_outage: 600\n" in text

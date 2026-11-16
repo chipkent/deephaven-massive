@@ -78,8 +78,6 @@ CANONICAL = [
     (FUT, "6A:XF:AUDUSD:Q6"),
     (IDX, "I:SPX"),
     (IDX, "I:AAVE10RP"),
-    (IDX, "I:APy"),
-    (IDX, "I:spx"),  # Massive's pattern allows lower case
     (FX, "C:EURUSD"),
     (CRY, "X:BTCUSD"),
     (CRY, "X:1INCHUSDT"),
@@ -115,6 +113,8 @@ NOT_CANONICAL = [
     (IDX, "SPX"),
     (IDX, "i:SPX"),
     (IDX, "I:"),
+    (IDX, "I:spx"),  # Massive's WebSocket pattern allows lower case; its tickers are upper case
+    (IDX, "I:SPx"),
     (FX, "C:EURUS1"),
     (FX, "C:EUR/USD"),
     (FX, "EURUSD"),
@@ -320,7 +320,6 @@ def test_canonical_symbol_takes_a_stock_convention(
         (SymbolConvention.YAHOO, "CELG-RI"),  # rights
         (SymbolConvention.YAHOO, "DCOM-P"),  # a generic preferred and class P read alike
         (SymbolConvention.YAHOO, "ABC-U"),  # class U collides with units
-        (SymbolConvention.YAHOO, "brk-b"),
         (SymbolConvention.YAHOO, "BRK-B-C"),
         (SymbolConvention.NASDAQ, "AAC+"),
         (SymbolConvention.NASDAQ, "AAC="),
@@ -364,6 +363,32 @@ def test_class_u_converts_under_no_convention() -> None:
     assert dm.canonical_symbol("ABC.V", STK, convention=SymbolConvention.NASDAQ) == "ABC.V"
 
 
+CONVENTIONS = [SymbolConvention.YAHOO, SymbolConvention.NASDAQ, SymbolConvention.CMS]
+
+
+@pytest.mark.parametrize("convention", CONVENTIONS)
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (" ABC ", r"^' ABC ' has surrounding whitespace; write 'ABC'$"),
+        ("", r"^'' is empty, not a ticker$"),
+        ("  ", r"^'  ' is only whitespace, not a ticker$"),
+        (
+            "abc",
+            (
+                r"^'abc' is not a {name} ticker: the {name} convention writes tickers in upper "
+                r"case; use 'ABC' if that is the ticker you mean$"
+            ),
+        ),
+    ],
+)
+def test_a_convention_names_whitespace_emptiness_and_case(
+    convention: SymbolConvention, text: str, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message.format(name=convention.name)):
+        dm.canonical_symbol(text, STK, convention=convention)
+
+
 def test_a_convention_refuses_another_class_prefix() -> None:
     with pytest.raises(ValueError, match="is a crypto ticker"):
         dm.canonical_symbol("X:BTC-USD", STK, convention=SymbolConvention.YAHOO)
@@ -383,7 +408,7 @@ def test_the_massive_convention_is_the_default_for_every_class() -> None:
     assert dm.canonical_symbol("EUR/USD", FX) == "C:EURUSD"
     assert dm.canonical_symbol("KIMpL", STK, convention=massive) == "KIMpL"
     assert dm.canonical_symbol("SPX", IDX, convention=massive) == "I:SPX"
-    with pytest.raises(ValueError, match="another convention"):
+    with pytest.raises(ValueError, match="if it is Yahoo's spelling"):
         dm.canonical_symbol("BRK-B", STK, convention=massive)  # Yahoo's or Nasdaq's dash
 
 
@@ -424,14 +449,13 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
             dm.canonical_symbol_stock,
             "BRK-B",
             (
-                r"^'BRK-B' is not a Massive stock ticker: it uses another "
-                r"convention's separators\. Name the convention it comes from: "
-                r".*dm\.SymbolConvention\.YAHOO, "
-                r"dm\.SymbolConvention\.NASDAQ, dm\.SymbolConvention\.CMS"
+                r"^'BRK-B' is not a Massive stock ticker; if it is Yahoo's spelling, pass "
+                r"convention=dm\.SymbolConvention\.YAHOO to dm\.canonical_symbol or "
+                r"dm\.canonicalize_symbols \(NASDAQ and CMS are the others\)$"
             ),
         ),
-        (dm.canonical_symbol_stock, "BRK/B", "another convention's separators"),
-        (dm.canonical_symbol_stock, "BRK B", "another convention's separators"),
+        (dm.canonical_symbol_stock, "BRK/B", "if it is Yahoo's spelling"),
+        (dm.canonical_symbol_stock, "BRK B", "if it is Yahoo's spelling"),
         (
             dm.canonical_symbol_stock,
             "kimpl",
@@ -484,7 +508,19 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
             "AAPL",
             r"^'AAPL' is an underlying, not an OCC option symbol such as",
         ),
-        (dm.canonical_symbol_option, "O:AAPL250132C00150000", "with a real expiry date"),
+        (
+            dm.canonical_symbol_option,
+            "O:AAPL250132C00150000",
+            (
+                r"^'O:AAPL250132C00150000' has the OCC shape, but its expiry 250132 \(YYMMDD\) "
+                r"is not a real date$"
+            ),
+        ),
+        (
+            dm.canonical_symbol_option,
+            "AAPL250230C00150000",
+            r"^'AAPL250230C00150000' has the OCC shape, but its expiry 250230",
+        ),
         (dm.canonical_symbol_option, "BRKB 250117C00400000", "with a real expiry date"),
         (dm.canonical_symbol_future, " ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
         (dm.canonical_symbol_future, "", r"^'' is not a Massive futures ticker: a contract is"),
@@ -514,6 +550,14 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         (dm.canonical_symbol_future_spread, "X:BTCUSD", "is a crypto ticker"),
         (dm.canonical_symbol_future, "X:ESZ5", "is a crypto ticker"),
         (dm.canonical_symbol_index, "S P X", r"^'S P X' is not a Massive index ticker"),
+        (
+            dm.canonical_symbol_index,
+            "spx",
+            (
+                r"^'spx' is not a Massive index ticker: index tickers are upper case; use "
+                r"'I:SPX' if that is the ticker you mean$"
+            ),
+        ),
         (dm.canonical_symbol_index, "C:EURUSD", "is a forex ticker"),
         (dm.canonical_symbol_forex, "EU1/USD", "two three-letter codes"),
         (dm.canonical_symbol_forex, "EURO/USD", "two three-letter codes"),
@@ -807,7 +851,7 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
     reader = WireSymbols("partners.tmx.corporate_events", STK, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
-    assert read.unreadable == (" x",)
+    assert read.unreadable_rows.to_pylist() == [False, False, True]
 
 
 CONVERTERS = [

@@ -89,7 +89,6 @@ from deephaven_massive._errors import (
     source_of,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -114,6 +113,7 @@ from deephaven_massive._tables.liveness import (
     release_scope,
     weak_owner_callback,
 )
+from deephaven_massive._tables.problem_events import LoggedProblems
 from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.stream_ids import next_stream_id
@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import DriftReport, Transport
+    from deephaven_massive._tables.problem_events import ProblemSink
     from deephaven_massive._tables.transports import (
         FlatFileTransport,
         IngestPorts,
@@ -367,6 +368,8 @@ class SessionCore:
         self._paused_cycle_warned: int | None = None
         # The session's once-per-session warnings, such as history()'s unfilled columns.
         self.warnings: Final = BoundedLog(logger, limit=SESSION_WARNINGS, level=logging.WARNING)
+        # Receives the events of the rows the session's transports withhold.
+        self.problems: Final[ProblemSink] = LoggedProblems()
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -386,28 +389,15 @@ class SessionCore:
     def policy(self) -> ResolvedPolicy:
         """The session's setting of every cause: `MassiveConfig.on_error`, then the defaults.
 
-        A call's own policy is on its `Request`; this one serves what no call owns, such as the
-        session's schemas (`raw_symbol`).
+        A call's own policy is on its `Request`; this one serves what no call owns.
         """
         return resolve_policy(None, self.config.on_error)
 
-    @property
-    def raw_symbol(self) -> bool:
-        """Whether the session's datasets that read their symbol from rows have `RawSymbol`.
-
-        They do when the session's `unreadable_symbols` keeps an unreadable spelling's rows
-        (`LOG`, the default, or `IGNORE`). A call's own setting never changes a schema: it
-        decides only whether such a row fails the call.
-        """
-        return not effect_of(self.policy.unreadable_symbols).fails
-
     def dataset_schema(self, spec: DatasetSpec) -> Schema:
-        """Return a dataset's schema in this session: `Catalog.dataset_schema` with `RawSymbol`.
+        """Return a dataset's schema in this session (`Catalog.dataset_schema`).
 
         Every result, `columns()` table, and transport plan of the session reads its columns
-        here, or builds them from `raw_symbol`, so they agree on whether the `RawSymbol` column
-        exists: it does when the session's `unreadable_symbols` is `LOG` (the default) or
-        `IGNORE` and the dataset reads its symbol from rows.
+        here, so they agree; no setting changes a schema.
 
         Args:
             spec: The dataset.
@@ -415,7 +405,7 @@ class SessionCore:
         Returns:
             The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
         """
-        return self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
+        return self.catalog.dataset_schema(spec)
 
     @property
     def closed(self) -> bool:

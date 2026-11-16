@@ -2,8 +2,8 @@
 
 Massive serves each WebSocket cluster (`/stocks`, `/options`, ...) from several hosts:
 `socket.massive.com`, the real-time feed; `delayed.massive.com`, the delayed feed (15 minutes
-behind, 10 for futures); and `business.massive.com` for the Business plans' fair-market-value
-(FMV) channels. The user chooses the feed per subscription with
+behind, 10 for futures); and `business.massive.com`, the one host Massive documents for the
+fair-market-value (FMV) channels. The user chooses the feed per subscription with
 `MassiveConfig.delayed_subscriptions`, and the choice is deterministic: a stream never moves
 between feeds. This module decides the host once per (asset class, channel family), before the
 first connection, and never by opening a connection to try:
@@ -13,8 +13,7 @@ first connection, and never by opening a connection to try:
   it against `delayed_subscriptions`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
   delayed feed, so no answer from Massive changes the host;
-- forex and crypto have one documented host, `socket.massive.com`, real-time on every plan, so
-  no request is made;
+- forex and crypto have one documented host, `socket.massive.com`, so no request is made;
 - every other subscription uses the real-time feed. Its class's snapshot (`SNAPSHOT_PROBES`) is
   read first, and when Massive labels it delayed (`recency_labels.read_labels`: the envelope
   status, or a `timeframe` field), the verb raises `EntitlementError` naming the evidence and
@@ -22,21 +21,20 @@ first connection, and never by opening a connection to try:
   nothing is guessed: a refused snapshot, an undocumented label, or no label at all streams
   from the real-time host, and a refusal from Massive fails the refused streams.
 
-A dataset Massive streams only in real time (`DatasetSpec.real_time_only`: fair market value,
-the options admin messages) has no delayed feed, yet it shares its class's decision, which is
-cached per class and family. So `require_real_time` checks each such stream when it opens: a
-session whose `delayed_subscriptions` lists its subscription is refused with `ValueError`, and a
-key whose data Massive labels delayed with an `EntitlementError` saying that the plan does not
-include the dataset.
+A dataset Massive documents only in real time (`DatasetSpec.real_time_only`: fair market value,
+the options admin messages) gets its family's decision like any other stream: the FMV family's
+host is fixed, and the admin messages follow their class's feed. Whether Massive serves it there
+is Massive's answer, so a refused subscription fails the stream with Massive's text, and the
+library never refuses it first.
 
-Recency follows the host (`recency_of`): the real-time and Business hosts serve real-time
+Recency follows the host (`recency_of`): the real-time and FMV hosts serve real-time
 data, the delayed host delayed data, and any other pinned host `UNKNOWN`, which is never shown
 as real-time.
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
 already become its public exception there. A decision that raises is not cached, so the next
-verb decides again and sees a plan upgraded meanwhile. The REST transport holds a session's
+verb decides again and sees what Massive answers then. The REST transport holds a session's
 decisions, single-flight (`_ingest/shared_lookup.py`), and writes the `m.connections()` rows
 that record them. Nothing here starts a thread or calls Deephaven.
 """
@@ -47,7 +45,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
+from deephaven_massive._config import DELAYED_HOST, DELAYED_PREFIX, FMV_HOST, REALTIME_HOST
 from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._enums import (
     AssetClass,
@@ -58,7 +56,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import EntitlementError
 from deephaven_massive._ingest.recency_labels import (
-    DelayedDataError,
     RecencyLabels,
     delayed_refusal,
     read_labels,
@@ -81,7 +78,6 @@ __all__ = [
     "real_time_note",
     "recency_of",
     "refused_snapshot",
-    "require_real_time",
     "unlabelled",
 ]
 
@@ -147,9 +143,9 @@ _NO_TIMEFRAME: Final = "no timeframe in the {} snapshot"
 def unlabelled(evidence: str) -> bool:
     """Return whether a host decision's evidence is a snapshot that carried no recency label.
 
-    Such a snapshot proves nothing about the plan: a base Business key's (without the trades
-    and quotes expansion) carries none, and its plan may serve the class's streams on another
-    host than the real-time one, so a refusal's message names `MassiveConfig.websocket_hosts`.
+    Such a snapshot says nothing about which host serves the key's streams: Massive may serve
+    them on another host than the real-time one, so a refusal's message names
+    `MassiveConfig.websocket_hosts`.
 
     Args:
         evidence: The decision's evidence, such as `"no timeframe in the stocks snapshot"`.
@@ -167,8 +163,8 @@ _REFUSED_SNAPSHOT: Final = "the host check's snapshot ({}) was refused: {}"
 def refused_snapshot(evidence: str) -> bool:
     """Return whether a host decision's evidence is a snapshot Massive refused.
 
-    Massive refuses the snapshot on its free Basic plan, which has no live (WebSocket) data on
-    either feed, so a stream refusal after it gains nothing from the delayed feed.
+    A key Massive refuses the snapshot may have no live (WebSocket) data of the class on either
+    feed, so a stream refusal after it quotes the snapshot's refusal and names the REST reads.
 
     Args:
         evidence: The decision's evidence, such as
@@ -190,11 +186,11 @@ def recency_of(host: str) -> Recency:
         host: The hostname.
 
     Returns:
-        `REALTIME` for the real-time and Business hosts, `DELAYED` for a delayed feed (a host
+        `REALTIME` for the real-time and FMV hosts, `DELAYED` for a delayed feed (a host
         whose name starts with `delayed.`), and `UNKNOWN` for any other (a pinned host the
         library does not know).
     """
-    if host in (REALTIME_HOST, BUSINESS_HOST):
+    if host in (REALTIME_HOST, FMV_HOST):
         return Recency.REALTIME
     if host.startswith(DELAYED_PREFIX):
         return Recency.DELAYED
@@ -294,16 +290,16 @@ def decide(
 ) -> HostDecision:
     """Decide the WebSocket host of an asset class and channel family.
 
-    The rules, in order: the FMV family is `business.massive.com` (a real-time-only stream's
-    own check is `require_real_time`); a TICK host pinned in
+    The rules, in order: the FMV family is `business.massive.com`, whatever the settings; a TICK
+    host pinned in
     `websocket_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
     uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
-    drops the per-ticker rows that carry an `error` (a ticker the plan does not include counts
-    as absent), and streams from the real-time feed unless a label says delayed
+    drops the per-ticker rows that carry an `error` (a ticker Massive refuses counts as
+    absent), and streams from the real-time feed unless a label says delayed
     (`_from_labels`). A refused snapshot (HTTP 403, `NOT_AUTHORIZED`, or rows that all carry
     an `error`, such as `NOT_ENTITLED`) says nothing certain
-    about the WebSocket plan: the class streams from the real-time feed, a WARNING names
+    about the WebSocket feeds: the class streams from the real-time feed, a WARNING names
     Massive's text, and a refusal from the WebSocket server fails the refused streams.
 
     Runs on the calling thread; the only I/O is `fetch`, which blocks for one request.
@@ -330,16 +326,12 @@ def decide(
     subscription = subscription_of(asset_class)
     listed = subscription in delayed_subscriptions
     if family is ChannelFamily.FMV:
-        return HostDecision(
-            BUSINESS_HOST, Recency.REALTIME, "FMV is Business-only; fixed host (docs)"
-        )
+        return HostDecision(FMV_HOST, Recency.REALTIME, "FMV channel's documented host")
     pinned = websocket_hosts.get(asset_class)
     if pinned is not None:
         return HostDecision(pinned, recency_of(pinned), "websocket_hosts")
     if asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
-        return HostDecision(
-            REALTIME_HOST, Recency.REALTIME, "single documented host; Starter is real-time"
-        )
+        return HostDecision(REALTIME_HOST, Recency.REALTIME, "single documented host")
     if listed:
         logger.info(
             "%s WebSocket host: %s (MassiveConfig.delayed_subscriptions)",
@@ -377,8 +369,8 @@ def _from_snapshot(
         return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, error))
     entitled = [row for row in answer.rows if not is_error_row(row)]
     if answer.rows and not entitled:
-        # Massive can refuse a whole snapshot with HTTP 200 and an error on every row (a
-        # Basic key's `NOT_ENTITLED`), which is a refusal like a 403.
+        # Massive can refuse a whole snapshot with HTTP 200 and an error on every row (such as
+        # `NOT_ENTITLED`), which is a refusal like a 403.
         first = answer.rows[0]
         refusal = f"{first.get('error')}: {first.get('message', '')}".rstrip(": ")
         return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, refusal))
@@ -386,71 +378,12 @@ def _from_snapshot(
     return _from_labels(asset_class, subscription=subscription, labels=labels)
 
 
-def require_real_time(
-    spec: DatasetSpec,
-    resolve: Callable[[], HostDecision],
-    *,
-    delayed_subscriptions: AbstractSet[Subscription],
-) -> HostDecision:
-    """Decide a stream's host, refusing delayed data for a dataset that streams only in real time.
-
-    A real-time-only dataset (`DatasetSpec.real_time_only`) has no delayed feed. Its class's
-    decision is shared with the class's other streams and cached, so the refusal is made here,
-    for the one stream, and never cached: the next call checks again. Any other dataset gets the
-    decision, or the error, of `resolve` unchanged. Runs on the verb's thread; the only I/O is
-    `resolve`'s.
-
-    Args:
-        spec: The stream's dataset.
-        resolve: Decides the host of the dataset's class and family (the REST transport's
-            `resolve_host`, cached per session).
-        delayed_subscriptions: `MassiveConfig.delayed_subscriptions`.
-
-    Returns:
-        The decision.
-
-    Raises:
-        ValueError: If the dataset is real-time only and `delayed_subscriptions` lists its
-            subscription, the one way a session reads it from Massive's delayed feed.
-        EntitlementError: If the dataset is real-time only and Massive labels the key's data of
-            its subscription delayed: the plan does not include the dataset. The message says
-            where its plans are listed.
-
-    `resolve` raises the `AuthenticationError`, `EntitlementError`, or `MassiveError` of the
-    host decision.
-    """
-    if not spec.real_time_only:
-        return resolve()
-    asset_class = spec.single_class
-    subscription = subscription_of(asset_class)
-    try:
-        decision = resolve()
-    except DelayedDataError as error:
-        logger.debug("%s refused, real-time only: %s", spec.name, error)
-        raise EntitlementError(
-            f"{spec.name} streams only in real time, and Massive labels this key's "
-            f"{subscription} data delayed, so its plan does not include it; "
-            f"{real_time_note(spec)}"
-        ) from error
-    # The configuration pins a delayed host only for a listed subscription, so the list alone
-    # says whether the session reads the subscription from the delayed feed.
-    if subscription not in delayed_subscriptions:
-        return decision
-    # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
-    logger.debug("%s refused, real-time only: %s is delayed", spec.name, subscription)
-    raise ValueError(
-        f"{spec.name} streams only in real time, and Massive has no delayed feed of it, but "
-        f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}; "
-        "stream it from a session whose delayed_subscriptions does not list it"
-    )
-
-
 def real_time_note(spec: DatasetSpec) -> str:
     """Say that a dataset streams only in real time, and where its plans are listed.
 
-    A refusal of a real-time-only stream adds it, whether the library refuses the stream at the
-    call (`require_real_time`) or Massive refuses its subscription, so the user learns which
-    plans include the dataset rather than a fix of the feed that cannot apply.
+    Massive's refusal of a real-time-only stream's subscription adds it, so the user learns that
+    the dataset's documented feed is the real-time one, and finds on its generated page what
+    Massive's documentation says about it.
 
     Args:
         spec: A real-time-only dataset.

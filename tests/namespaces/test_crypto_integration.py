@@ -15,7 +15,6 @@ WARNING that it may cover other days.
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import math
 import time
@@ -32,7 +31,6 @@ from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-    from contextlib import AbstractContextManager
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -54,7 +52,6 @@ Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
-SkipIfRealTimeOnlyRefused: TypeAlias = "Callable[[], AbstractContextManager[None]]"
 CryptoReport: TypeAlias = "Callable[..., list[str]]"
 
 _PAIR = "X:BTCUSD"
@@ -568,14 +565,13 @@ def test_crypto_ticker_list_currencies_join(
 @pytest.mark.verifies("3")
 @pytest.mark.timeout(160)
 def test_fmv_frames_convert_to_a_current_instant(
-    live_config: dm.MassiveConfig,
+    live_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
     *,
     wait_rows: WaitRows,
     wait_acked: WaitAcked,
     stream_report: Report,
     skip_if_not_entitled: SkipIfNotEntitled,
-    skip_if_real_time_only_refused: SkipIfRealTimeOnlyRefused,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
@@ -585,27 +581,17 @@ def test_fmv_frames_convert_to_a_current_instant(
     library reads each value by its magnitude and logs once which unit the column arrived
     in. Streams `X:BTCUSD`'s fair market value, asserts that Massive acknowledged the topic,
     and records the first rows, their age, and that log line; a refused stream skips, quoting
-    Massive, and so does the library's refusal at the call when Massive labels the key's
-    currencies data delayed, quoting the library. Massive serves the fair market value only
-    in real time, so the session leaves currencies out of `delayed_subscriptions`, as a user
-    streaming it would. Crypto trades
-    around the clock, so rows are required. Passes when the first row's instant is within a
-    day of now; the logged unit settles which unit Massive sends.
+    Massive. Crypto trades around the clock, so rows are required. Passes when the first
+    row's instant is within a day of now; the logged unit settles which unit Massive sends.
     """
     caplog.set_level(logging.INFO, logger="deephaven_massive")
-    listed = live_config.delayed_subscriptions - {dm.Subscription.CURRENCIES}
-    session = dm.MassiveSession(dataclasses.replace(live_config, delayed_subscriptions=listed))
-    try:
-        with skip_if_real_time_only_refused():
-            table = session.crypto.fmv(_PAIR).append_only()
-        acked = wait_acked(session, 1, time.monotonic() + _STREAM_WAIT)
-        rows = wait_rows(session, table, time.monotonic() + _STREAM_WAIT)
-        for line in stream_report(session):
-            evidence(line)
-        skip_if_not_entitled(session)
-        session.release(table)
-    finally:
-        session.close()
+    table = live_session.crypto.fmv(_PAIR).append_only()
+    acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
+    rows = wait_rows(live_session, table, time.monotonic() + _STREAM_WAIT)
+    for line in stream_report(live_session):
+        evidence(line)
+    skip_if_not_entitled(live_session)
+    live_session.release(table)
     detected = [r.getMessage() for r in caplog.records if "read by magnitude" in r.message]
     evidence(f"magnitude rule log: {detected}")
     now = time.time_ns()

@@ -21,6 +21,7 @@ from deephaven_massive._enums import AssetClass, NotBars, Timespan
 from deephaven_massive._massive import (
     DriftReport,
     Field,
+    RowFault,
     Source,
     Transport,
     WireType,
@@ -36,27 +37,41 @@ MEMBERSHIP = type(source(W, "stocks/T").memberships[0])
 
 
 def test_widening_a_large_integer_to_a_double_rounds_it_and_says_which() -> None:
-    # The value is served as the cast left it; the first one it changed is returned as sent.
+    # The value is cast as the lattice join means it; the rows it changed are returned.
     big = pa.array([2**53, None, 2**53 + 1, 2**63 - 1], pa.int64())
     widened, rounded = widen(big, pa.float64())
     assert widened.to_pylist() == [float(2**53), None, float(2**53), float(2**63)]
-    assert rounded == 2**53 + 1
+    assert rounded is not None
+    assert rounded.to_pylist() == [False, False, True, True]
     exact = pa.array([2**53, -(2**53), None, 7], pa.int64())
     assert widen(exact, pa.float64())[1] is None
-    assert widen(pa.array([2**63 - 1], pa.int64()), pa.float64())[1] == 2**63 - 1
+    top = widen(pa.array([2**63 - 1], pa.int64()), pa.float64())[1]
+    assert top is not None
+    assert top.to_pylist() == [True]
 
 
 def test_rounded_fields_note_each_field_once_with_its_first_value() -> None:
     rounded = RoundedFields()
     assert rounded.drift() == DriftReport()
-    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key="s")
-    rounded.widen(pa.array([2**53 + 3], pa.int64()), pa.float64(), wire_key="s")
-    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key=None)
-    rounded.widen(pa.array([5], pa.int64()), pa.float64(), wire_key="v")
+    assert rounded.failures() == []
+    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key="s", column="S")
+    rounded.widen(pa.array([1, 2**53 + 3], pa.int64()), pa.float64(), wire_key="s", column="S")
+    rounded.widen(pa.array([2**53 + 1], pa.int64()), pa.float64(), wire_key=None, column="X")
+    rounded.widen(pa.array([5], pa.int64()), pa.float64(), wire_key="v", column="V")
     drift = rounded.drift()
     assert drift.rounded == frozenset({"s"})
     assert drift.fields_drifted
     assert drift.samples["s"].value == str(2**53 + 1)
+    # Each column that rounded a value gives its rows to withhold, with each row's reason.
+    failures = rounded.failures()
+    assert [(f, rows.to_pylist(), column) for f, rows, column, _ in failures] == [
+        (RowFault.UNCONVERTIBLE_VALUES, [True], "S"),
+        (RowFault.UNCONVERTIBLE_VALUES, [False, True], "S"),
+        (RowFault.UNCONVERTIBLE_VALUES, [True], "X"),
+    ]
+    assert failures[1][3](1) == (
+        f"S holds {2**53 + 3}, a whole number its double column would round"
+    )
 
 
 def test_widening_gives_each_column_its_merged_arrow_type() -> None:

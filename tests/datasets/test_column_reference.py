@@ -738,7 +738,7 @@ def test_the_rendered_index() -> None:
 
 def test_the_rendered_stocks_trades_page() -> None:
     page = _rendered()["stocks.trades.md"]
-    columns = _CATALOG.dataset_schema(_STOCK_TRADES, raw_symbol=True).columns
+    columns = _CATALOG.dataset_schema(_STOCK_TRADES).columns
     schema = {c.name: c for c in columns}
     symbol = schema["Symbol"].description.replace("|", "\\|")
     stamp = schema["Timestamp"].description.replace("|", "\\|")
@@ -746,7 +746,6 @@ def test_the_rendered_stocks_trades_page() -> None:
     assert "Received" not in schema
     day = schema["Date"].description
     insert = schema["TimestampInsert"].description
-    raw = schema["RawSymbol"].description
     every = "REST, flat files, WebSocket"
     expected = f"""# m.stocks.trades
 
@@ -793,7 +792,6 @@ Massive's pages state them.
 | `Symbol` | String | {symbol} | {every} |
 | `Date` | String | {day} | {every} |
 | `Timestamp` | Instant | {stamp} | {every} |
-| `RawSymbol` | String | {raw} | {every} |
 | `Price` | double | The price, bid \\| ask. | {every} |
 | `TimestampInsert` | Instant | {insert} | {every} |
 
@@ -810,7 +808,6 @@ the request.
 | `Symbol` | request, `ticker` | `ticker` | `sym` |
 | `Date` |  |  |  |
 | `Timestamp` | `t` | `sip_timestamp` | `t` |
-| `RawSymbol` | request, `ticker` | `ticker` | `sym` |
 | `Price` | `p`, `price` | `price` | `p` |
 | `TimestampInsert` |  |  |  |
 
@@ -846,7 +843,7 @@ def test_the_rendered_ratios_page() -> None:
     # A page that lists no plan shows its summaries; a page of no plan tables adds nothing.
     assert "\n| Plan |" not in page
     assert "\n- Ratios (Massive): Access. Recency.\n" in page
-    # No RawSymbol column, and no Read from column for a dataset of one transport.
+    # No Read from column for a dataset of one transport.
     assert "RawSymbol" not in page
     assert "| Column | Type | Description |\n" in page
     assert "| `PriceEarnings` | double | Price \\| earnings. |\n" in page
@@ -1053,7 +1050,7 @@ def test_the_column_report_reads_back_every_dataset_of_the_real_pages() -> None:
     # A first rendering names every dataset as new, with its whole column list.
     report = column_changes({}, pages)
     assert len(report) == len(CATALOG.by_name)
-    snapshots = CATALOG.dataset_schema(CATALOG.by_name["snapshots"], raw_symbol=True)
+    snapshots = CATALOG.dataset_schema(CATALOG.by_name["snapshots"])
     assert f"m.snapshots: new dataset with {len(snapshots.columns)} columns" in report
 
 

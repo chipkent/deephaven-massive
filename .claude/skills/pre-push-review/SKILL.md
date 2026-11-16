@@ -79,6 +79,10 @@ look for:
   it, or retried forever. State written before an operation that can still fail. For a new rule
   or check, write down the case that would defeat it (the value it was not written for, the
   spelling that passes it and still means something else) and try it before the push.
+- **A value the library didn't read.** For each column the diff fills, say whether the value
+  comes from Massive's payload as sent or from the library. A null, default, rounded,
+  re-stamped, or guessed library value in a data table is a blocker (`AGENTS.md`, **A data
+  table holds only what Massive sent, read whole**).
 - **Contract drift.** A public change (`AGENTS.md`, **A public change needs the owner's request
   or approval**) without matching docs and tests, or without a decision entry in the form
   `writing-a-record` gives (its Options what was weighed, its Ruling no wider than the owner's

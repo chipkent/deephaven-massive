@@ -1080,7 +1080,7 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
     """
     wire = _transports(spec)
     several = len(wire) > 1
-    schema = catalog.dataset_schema(spec)  # the default session's columns, RawSymbol included
+    schema = catalog.dataset_schema(spec)
     header = ["Column", "Type", "Description", *(["Read from"] if several else [])]
     lines = ["", "## Columns", "", _row(header), _row(["---"] * len(header))]
     lines.extend(_row(_cells(column, several=several)) for column in schema.columns)

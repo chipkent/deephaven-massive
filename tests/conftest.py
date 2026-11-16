@@ -1961,10 +1961,7 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
       list its subscription). The test skips with `not listed as delayed: <the library's
       message>`, which names the setting to add.
     - Anything else fails the test, as does any error of a test that is not live. That includes
-      an `EntitlementError` the library built with no status, such as a real-time-only
-      stream's on a key whose data Massive labels delayed: Massive refused nothing. A test
-      that opens such a stream skips on that one refusal itself
-      (`skip_if_real_time_only_refused`).
+      an `EntitlementError` the library built with no status: Massive refused nothing.
 
     The summary groups the two skips by their prefixes (`summary.REFUSED`,
     `summary.NOT_LISTED`).
@@ -2042,40 +2039,6 @@ def skip_if_not_entitled(
             pytest.skip(reasons[0])
 
     return check
-
-
-@pytest.fixture
-def skip_if_real_time_only_refused(
-    evidence: Callable[[str], None],
-) -> Callable[[], contextlib.AbstractContextManager[None]]:
-    """Return a context manager that skips a test whose real-time-only stream the library refused.
-
-    The library refuses a stream Massive serves only in real time (fair market value, the
-    options admin messages) as it opens, with an `EntitlementError` that carries no status,
-    when Massive labels the key's data of its subscription delayed
-    (`refusals.is_real_time_only_refusal`). `pytest_runtest_call` fails a status-less refusal,
-    so a test that opens such a stream wraps the opening in this instead.
-
-    Args:
-        evidence: Records the refusal.
-
-    Returns:
-        A function returning the context manager: it skips the test, `refused: <the library's
-        message on one line>`, on that refusal, and lets every other error through.
-    """
-
-    @contextlib.contextmanager
-    def skipping() -> Iterator[None]:
-        try:
-            yield
-        except EntitlementError as error:
-            if not refusals.is_real_time_only_refusal(error):
-                raise
-            reason = f"{summary.REFUSED}{refusals.refusal_line(error)}"
-            evidence(reason)
-            pytest.skip(reason)
-
-    return skipping
 
 
 _LIMITED_ORDER: Final = ("indices", "futures", "options", "stocks", "currencies")

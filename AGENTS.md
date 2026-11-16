@@ -188,17 +188,33 @@ These protect the owner's repository, money, and secrets.
   the evidence and draft a report to Massive for the owner. Vendor descriptions are
   documentation, not data: a clearly wrong one gets a reasoned `DESCRIPTION_FIXES` entry
   (decision 51).
-- **Failure policy: per value in the config, per request on the call.** A problem with one value
-  in the data (a symbol, a row) is handled as its cause's `dm.OnError` setting in `MassiveConfig`
-  says, since the caller doesn't control which values arrive. `LOG`, the default, skips the value
-  or keeps it with a null, logs it once per distinct value, and lists it in a live table's
-  `m.streams()` `Error`; `IGNORE` does the same, logging only at DEBUG; `RAISE` fails the table. A
-  refusal of part of what a call explicitly asked for (a futures exchange the plan lacks) is
-  decided by a `dm.OnError` argument on that call, which defaults to a `MassiveConfig` setting
-  that is `RAISE` by default, because asking for data the plan lacks is a bug in the caller. Each
-  cause gets its own setting, never a hard-coded failure or a silent skip. A refusal of everything
-  a call asked for, and any problem that affects every row (authentication, a closed session, a
-  plan without the dataset, a library defect), fails the call whatever the setting.
+- **A data table holds only what Massive sent, read whole** (decision 112).
+  - **A null in a data table is Massive's:** a null it sent, or a field it omitted.
+  - **A row the library cannot read or derive whole is withheld:** a symbol or key it can't
+    read, a value that doesn't fit its column, a number the column would round, and a line that
+    isn't a row. A withheld row is never published with a null, a default, a rounded or
+    re-stamped value, or a guess; it is reported with its cause, the symbol as Massive sent it,
+    and its count.
+  - **A column the dataset's docs define as the library's derivation is the library's:**
+    `Date`, `TimestampEnd`, a day bar's 00:00. Where Massive sends its own value, it is never
+    replaced.
+  - **One bad symbol or row never fails the table.** Each cause has its own `dm.ErrorPolicy`
+    setting, set for a session in `MassiveConfig(on_error=...)` and for one call with the
+    dataset method's `on_error=`. The setting decides only whether the table fails (`RAISE`)
+    and how loudly the log reports the problem (`LOG`, the default, warns once per distinct
+    problem; `IGNORE` logs only at DEBUG), never whether a row is published; a live table also
+    lists each skipped symbol in its `m.streams()` `Error` and counts withheld rows in its
+    `SchemaDrift`. A refusal of part of what a call explicitly asked for (a futures
+    exchange the plan lacks) defaults to `RAISE`, because asking for data the plan lacks is a
+    bug in the caller. A new cause gets a new setting, never a hard-coded failure or a silent
+    skip.
+  - **Only a problem that affects every row a table would receive fails it (until decision A
+    lands in #667, also every row of one of its named symbols), whatever the setting:**
+    authentication, a closed session, a plan without the dataset, a refusal of everything a
+    call asked for, a read or stream whose rows it would receive are all withheld (until #704,
+    an `AUTO` `history()` judges its files and each REST read apart, and a read with a value
+    table each value), and a library defect.
+    `docs/configuration.md` says how each read and stream judges that.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the
