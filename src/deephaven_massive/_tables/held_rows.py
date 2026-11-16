@@ -153,8 +153,9 @@ class Settled:
     """What one dataset's rows of one flush come to, after the held rows are settled.
 
     Attributes:
-        rows: The rows to publish, held rows first; None when there are none.
-        generation: The newest socket generation of `rows`.
+        rows: The flush's rows to publish, after `released`; None when there are none.
+        released: Held rows to publish first, dated, one table per socket generation, oldest
+            first, each ticker's rows in arrival order.
         discarded: The rows discarded now, by why (`Readiness.UNLISTED` or
             `Readiness.UNSCHEDULED`) and ticker, each with their count and the reason.
         failed: Each ticker whose streams fail, with the error.
@@ -165,7 +166,7 @@ class Settled:
     """
 
     rows: pa.Table | None
-    generation: int
+    released: tuple[tuple[pa.Table, int], ...] = ()
     discarded: dict[Readiness, dict[str, tuple[int, str]]] = field(default_factory=dict)
     failed: dict[str, MassiveError] = field(default_factory=dict)
     delayed: dict[str, Delayed] = field(default_factory=dict)
@@ -177,12 +178,21 @@ class Settled:
 class _Sorted:
     """One flush's rows sorted into what `settle` does with them, ticker by ticker."""
 
-    publish: list[pa.Table] = field(default_factory=list)
-    generations: list[int] = field(default_factory=list)
+    released: dict[int, list[pa.Table]] = field(default_factory=dict)
     discarded: dict[Readiness, dict[str, tuple[int, str]]] = field(default_factory=dict)
     failed: dict[str, MassiveError] = field(default_factory=dict)
     resumed: set[str] = field(default_factory=set)
     dropped: set[str] = field(default_factory=set)
+
+    def release(self, rows: pa.Table, generation: int) -> None:
+        """Publish held rows of one socket generation, after those released before them.
+
+        Args:
+            rows: The rows, dated.
+            generation: Their socket generation.
+        """
+        if rows.num_rows:
+            self.released.setdefault(generation, []).append(rows)
 
     def discard(self, state: LookupState, ticker: str, rows: int) -> None:
         """Count rows of a ticker discarded now.
@@ -319,7 +329,6 @@ class HeldRows(Generic[_K]):
             self._settle_held(held, ticker, states[ticker], out=out, now=now, times=times)
         rows = None
         if batch is not None:
-            out.generations.append(generation)
             rows = self._take(
                 held,
                 batch,
@@ -333,11 +342,12 @@ class HeldRows(Generic[_K]):
         delayed = self._delayed(held, now)
         if not held:
             del self._held[key]
-        if rows is not None and rows.num_rows:
-            out.publish.append(rows)
         return Settled(
-            _joined([t for t in out.publish if t.num_rows]),
-            max(out.generations, default=generation),
+            rows if rows is not None and rows.num_rows else None,
+            tuple(
+                (pa.concat_tables(tables), released)
+                for released, tables in sorted(out.released.items())
+            ),
             out.discarded,
             out.failed,
             delayed,
@@ -384,7 +394,9 @@ class HeldRows(Generic[_K]):
                 out.discard(state, ticker, waiting.rows)
             case Readiness.READY:
                 del held[ticker]
-                self._ready(held, ticker, waiting=waiting, state=state, out=out, times=times)
+                self._ready(
+                    held, ticker, waiting=waiting, state=state, out=out, now=now, times=times
+                )
                 if waiting.reported and ticker not in held:
                     out.resumed.add(ticker)
                     logger.info(
@@ -403,20 +415,24 @@ class HeldRows(Generic[_K]):
         waiting: _Waiting,
         state: LookupState,
         out: _Sorted,
+        now: float,
         times: TimeRule,
     ) -> None:
         """Date a ready ticker's held rows: publish them, or hold or withhold those left undated.
 
-        A row no loaded session holds waits for its product's schedule to load again; once a
-        load that began after the row was held answers without such a session, the row is
-        withheld (`Readiness.UNSCHEDULED`), with the sessions nearest it.
+        A row no loaded session holds waits for its product's schedule to load again, and
+        every later row of the ticker waits behind it, so none overtakes it. Once a load that
+        began after the row was held answers without such a session, the row is withheld
+        (`Readiness.UNSCHEDULED`), with the sessions nearest it. A reload that Massive refused,
+        or that has failed past `max_outage`, fails the ticker's streams instead.
 
         Args:
             held: The dataset's held tickers, which no longer hold this one.
             ticker: The ticker.
             waiting: Its held rows.
             state: Its state, ready.
-            out: Receives what to publish and discard.
+            out: Receives what to publish, discard, and fail.
+            now: The clock's time.
             times: How the dataset fills its rows' time columns.
         """
         kept: list[_Part] = []
@@ -424,25 +440,45 @@ class HeldRows(Generic[_K]):
         why = ""
         for part in waiting.parts:
             rows, placed = self._fill(part.rows, times)
-            unplaced = pc.invert(placed)
-            out.publish.append(rows.filter(placed))
-            out.generations.append(part.generation)
-            left = rows.filter(unplaced)
-            if not left.num_rows:
+            if kept:  # an earlier row waits: every later one waits behind it
+                kept.append(_part(rows, part.generation, held_at=part.held_at))
                 continue
-            if state.loaded_at is not None and state.loaded_at >= part.held_at:
+            final = state.loaded_at is not None and state.loaded_at >= part.held_at
+            first = None if final else _first(pc.invert(placed))
+            head = rows if first is None else rows.slice(0, first)
+            head_placed = placed if first is None else placed.slice(0, first)
+            out.release(head.filter(head_placed), part.generation)
+            left = head.filter(pc.invert(head_placed))
+            if left.num_rows:  # a load since the rows were held has no session for them
                 column = left.column(time_column(times.row_times)).combine_chunks()
                 instant = pc.cast(column, pa.int64())
                 why = why or self._calendar.unplaced(ticker, instant[0].as_py())
                 lost += left.num_rows
-            else:
-                kept.append(_part(left, generation=part.generation, held_at=part.held_at))
+            if first is not None:
+                tail = rows.slice(first)
+                kept.append(
+                    _part(
+                        tail.take(pa.array(range(tail.num_rows))),
+                        part.generation,
+                        held_at=part.held_at,
+                    )
+                )
         if lost:
             out.discard(LookupState(Readiness.UNSCHEDULED, why), ticker, lost)
-        if kept:
-            held[ticker] = _Waiting(
-                kept, since=waiting.since, reported=waiting.reported, reason=_UNPLACED
-            )
+        if not kept:
+            return
+        # The rows still waiting depend on a reload that may be refused, or out of reach.
+        failure = (
+            _refused(ticker, state)
+            if state.error is not None
+            else self._outage(ticker, state, since=waiting.since, now=now)
+        )
+        if failure is not None:
+            out.failed[ticker] = failure
+            return
+        held[ticker] = _Waiting(
+            kept, since=waiting.since, reported=waiting.reported, reason=_UNPLACED
+        )
 
     def _take(
         self,
@@ -484,7 +520,7 @@ class HeldRows(Generic[_K]):
         if ready:  # dated again, through one answer of the calendar
             batch, placed = self._fill(batch, times)
             named = pc.is_in(symbols, value_set=pa.array(sorted(ready), pa.string()))
-            waits = pc.or_(waits, pc.and_(named, pc.invert(placed)))
+            waits = pc.or_(waits, _behind(symbols, pc.and_(named, pc.invert(placed))))
         waits = pc.fill_null(waits, fill_value=False)
         _hold(held, batch.filter(waits), states=states, out=out, now=now, generation=generation)
         return batch.filter(pc.invert(waits))
@@ -726,18 +762,38 @@ def _part(rows: pa.Table, generation: int, *, held_at: float) -> _Part:
     return _Part(rows, generation, held_at, rows.get_total_buffer_size())
 
 
-def _joined(tables: list[pa.Table]) -> pa.Table | None:
-    """Return tables of one schema as one, in order: none, the only one as it is, or a copy.
+def _first(flags: pa.Array) -> int | None:
+    """Return the index of the first set flag, or None when none is set.
 
     Args:
-        tables: The tables, each with rows.
+        flags: Booleans, one per row.
 
     Returns:
-        None for no table; else their rows.
+        The index, or None.
     """
-    if not tables:
-        return None
-    return tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+    found = pc.index(flags, value=True).as_py()
+    return None if found < 0 else found
+
+
+def _behind(symbols: pa.Array, waits: pa.Array) -> pa.Array:
+    """Extend the rows that wait to every later row of the same ticker.
+
+    Args:
+        symbols: The rows' tickers.
+        waits: Which rows must wait.
+
+    Returns:
+        Which rows wait: each ticker's first waiting row and every row of it after.
+    """
+    if not pc.any(waits).as_py():
+        return waits
+    positions = pa.array(range(len(symbols)), pa.int64())
+    behind = waits
+    for ticker in pc.unique(symbols.filter(waits)).to_pylist():
+        mine = pc.equal(symbols, ticker)
+        start = pc.min(positions.filter(pc.and_(mine, waits))).as_py()
+        behind = pc.or_(behind, pc.and_(mine, pc.greater_equal(positions, start)))
+    return behind
 
 
 def _refused(ticker: str, state: LookupState) -> MassiveError:

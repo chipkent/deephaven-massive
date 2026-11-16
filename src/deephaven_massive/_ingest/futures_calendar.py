@@ -578,7 +578,15 @@ class FuturesCalendar:
                 f"Massive's futures schedules hold no session of its product {product}",
             )
         if product in self._sessions:
-            return LookupState(Readiness.READY, loaded_at=self._loaded[product])
+            # A reload still failing or refused concerns the rows the loaded sessions lack.
+            reload = self._schedules.get(product)
+            return LookupState(
+                Readiness.READY,
+                reload.error if reload is not None else "",
+                failing_since=None if reload is None else reload.failing_since,
+                error=None if reload is None else reload.refused,
+                loaded_at=self._loaded[product],
+            )
         lookup = self._due(self._schedules, product, now=now, asks=products)
         if lookup.refused is not None:
             return LookupState(
@@ -712,12 +720,11 @@ class FuturesCalendar:
             for product in batch.products - self._sessions.keys():
                 self._due(self._schedules, product, now=now, asks=products)
             reloads = {p for p in batch.reloads if now - self._reloads.get(p, -spacing) >= spacing}
+            for product in reloads:
+                self._reloads[product] = now
             for product in reloads | stale:
-                running = self._schedules.get(product)
-                if running is None or not running.queued:
-                    self._reloads[product] = now
-                    self._schedules[product] = _Lookup()
-                    products.add(product)
+                # A reload that failed waits for its retry, as any lookup does.
+                self._due(self._schedules, product, now=now, asks=products)
         self._put_lookups(tickers, products)
 
     def _put_lookups(self, tickers: set[str], products: set[str]) -> None:
@@ -1091,6 +1098,12 @@ def _ticker_state(lookup: _Lookup, now: float) -> LookupState:
         return LookupState(
             Readiness.REFUSED, "Massive refused the lookup of its product", error=lookup.refused
         )
+    if lookup.failing_since is not None:  # an outage now outranks an earlier answer
+        return LookupState(
+            Readiness.WAITING,
+            f"looking up its product failed: {lookup.error}",
+            failing_since=lookup.failing_since,
+        )
     if lookup.unlisted_since is not None:
         missing = now - lookup.unlisted_since
         why = lookup.error or ("neither Massive's futures snapshot nor its contracts list holds it")
@@ -1098,12 +1111,6 @@ def _ticker_state(lookup: _Lookup, now: float) -> LookupState:
         if missing >= UNLISTED_AFTER.total_seconds():
             return LookupState(Readiness.UNLISTED, why)
         return LookupState(Readiness.WAITING, why)
-    if lookup.failing_since is not None:
-        return LookupState(
-            Readiness.WAITING,
-            f"looking up its product failed: {lookup.error}",
-            failing_since=lookup.failing_since,
-        )
     return LookupState(Readiness.WAITING, "its product is being looked up")
 
 

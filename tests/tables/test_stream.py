@@ -1066,9 +1066,9 @@ class FuturesFlush:
             self.flusher.routes.add("T", opened.sink)
             self.sinks.append(opened.sink)
 
-    def send(self, *tickers: str) -> None:
+    def send(self, *tickers: str, generation: int = 1) -> None:
         rows = [futures_trade(t, BEFORE_ROLL_MS) for t in tickers]
-        self.flusher.rows("T", frame(rows, "futures/T"), {}, generation=1)
+        self.flusher.rows("T", frame(rows, "futures/T"), {}, generation=generation)
         self.flusher.flush()
 
     def published(self) -> dict[int, int]:
@@ -1101,6 +1101,16 @@ def test_futures_rows_wait_for_their_date_then_publish_in_order(
     assert flush.held.rows_of(flush.plan) == 0
     assert not any(sink.failed for sink in flush.sinks)
     assert flush.events == []
+
+
+def test_held_rows_of_two_sockets_publish_each_with_its_own(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5", generation=1)
+    flush.send("NQM5", generation=2)  # after a reconnect
+    flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.flusher.flush()
+    assert flush.published()[1] == 2
+    assert flush.sinks[0].rows_generation == 2
 
 
 def test_held_rows_never_count_as_dropped(futures_flush: FuturesFlush) -> None:
@@ -1216,6 +1226,15 @@ def test_past_the_byte_limit_the_streams_of_the_dataset_fail(
 ) -> None:
     monkeypatch.setattr(held_rows, "HELD_BYTES_LIMIT", 1)
     futures_flush.send("NQM5")
+    assert all(sink.failed for sink in futures_flush.sinks)
+
+
+def test_held_rows_past_the_byte_limit_fail_their_streams_between_frames(
+    futures_flush: FuturesFlush, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    futures_flush.send("NQM5")
+    monkeypatch.setattr(held_rows, "HELD_BYTES_LIMIT", 1)
+    futures_flush.flusher.flush()  # no new rows: the held ones are settled alone
     assert all(sink.failed for sink in futures_flush.sinks)
 
 

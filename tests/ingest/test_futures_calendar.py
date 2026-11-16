@@ -988,3 +988,38 @@ def test_a_lookup_the_worker_has_no_rule_for_is_a_logged_defect(
         )
     ]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])
+
+
+def test_a_failure_after_an_answer_without_the_ticker_is_an_outage(
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
+) -> None:
+    # The lists lacked it, then stopped answering: the outage counts, not the old answer.
+    state(calendar, "GONEZ6")
+    fetch.answers[SNAPSHOT_PATH] = MassiveError("HTTP 503", status=503)
+    fetch.answers[CONTRACTS_PATH] = MassiveError("HTTP 503", status=503)
+    clock.now += RETRY_DELAYS[0]
+    found = state(calendar, "GONEZ6")
+    assert (found.readiness, found.failing_since) == (Readiness.WAITING, clock.now)
+    clock.now += UNLISTED_AFTER.total_seconds()
+    assert state(calendar, "GONEZ6").readiness is Readiness.WAITING  # never discarded
+
+
+def test_a_failed_reload_waits_for_its_retry_and_shows_on_the_ready_state(
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
+) -> None:
+    watched(calendar, "ESM4")
+    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 500", status=500)
+    clock.now += timedelta(days=1).total_seconds()
+    correct(calendar, [FOLDED])  # a day old: reloaded, and it fails
+    idle(calendar)
+    found = state(calendar, "ESM4")
+    assert (found.readiness, found.failing_since) == (Readiness.READY, clock.now)
+    asked = fetch.paths().count(SCHEDULES_PATH)
+    correct(calendar, [FOLDED])
+    correct(calendar, [FOLDED])
+    idle(calendar)
+    assert fetch.paths().count(SCHEDULES_PATH) == asked  # its retry is not due yet
+    clock.now += RETRY_DELAYS[0]
+    correct(calendar, [FOLDED])
+    idle(calendar)
+    assert fetch.paths().count(SCHEDULES_PATH) == asked + 1

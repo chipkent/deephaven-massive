@@ -1641,19 +1641,48 @@ class Flusher:
         if self._counted(plan, converted, readers=readers):
             return
         self._counted_symbols(plan, converted, readers=readers)
-        generation = batch.generation
         if self._held is not None and plan.symbol_field is not None:
             settled = self._held.settle(
-                plan, converted.batch, generation=generation, times=plan.times
+                plan, converted.batch, generation=batch.generation, times=plan.times
             )
             readers = self._apply_settled(plan, settled, readers, held=self._held)
             if not readers:
                 return
+            self._publish_released(plan, settled, readers=readers, updates=updates)
             converted = _with_rows(converted, settled.rows)
-            generation = settled.generation
         self._publish_converted(
-            plan, converted, readers=readers, updates=updates, generation=generation
+            plan, converted, readers=readers, updates=updates, generation=batch.generation
         )
+
+    def _publish_released(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        *,
+        readers: list[StreamSink],
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Publish a dataset's released held rows, one table per socket generation, oldest first.
+
+        Each table carries its own generation, so a stream that receives only rows of the
+        dropped socket never counts as recovered. Held rows were counted toward the runs when
+        they arrived, so they are not counted again.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total and `Error` notes.
+        """
+        for rows, generation in settled.released:
+            converted = Converted(rows, DriftReport(), Withheld(rows))
+            self._publish_converted(
+                plan,
+                _with_rows(converted, rows),
+                readers=readers,
+                updates=updates,
+                generation=generation,
+            )
 
     def _publish_converted(
         self,
@@ -1714,16 +1743,8 @@ class Flusher:
             try:
                 result = held.settle(plan, None, generation=0, times=plan.times)
                 readers = self._apply_settled(plan, result, readers, held=held)
-                if readers and result.rows is not None:
-                    # Held rows were counted toward the runs when they arrived.
-                    converted = Converted(result.rows, DriftReport(), Withheld(result.rows))
-                    self._publish_converted(
-                        plan,
-                        _with_rows(converted, result.rows),
-                        readers=readers,
-                        updates=updates,
-                        generation=result.generation,
-                    )
+                if readers:
+                    self._publish_released(plan, result, readers=readers, updates=updates)
             except Exception as error:  # one dataset's failure never costs the others their rows
                 failure = _defect(plan, f"could not publish its held rows: {error}")
                 mark_failure_logged(failure)

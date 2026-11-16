@@ -50,6 +50,7 @@ class FakeCalendar:
         self.found: dict[str, LookupState] = {}
         self.dates: dict[str, str | None] = {}  # what `correct` gives each ticker's rows
         self.asked: list[set[str]] = []
+        self.placed_from: dict[str, int] = {}  # instants before it have no loaded session
         self.dead = False
 
     def alive(self) -> bool:
@@ -66,7 +67,13 @@ class FakeCalendar:
     def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
         assert instants.type == pa.int64()
         assert len(dates) == len(symbols)
-        return pa.array([self.dates.get(s) for s in symbols.to_pylist()], pa.string())
+        return pa.array(
+            [
+                None if t < self.placed_from.get(s, 0) else self.dates.get(s)
+                for s, t in zip(symbols.to_pylist(), instants.to_pylist(), strict=True)
+            ],
+            pa.string(),
+        )
 
 
 class Clock:
@@ -106,17 +113,21 @@ def batch(*rows: tuple[str | None, str | None, float]) -> pa.Table:
     )
 
 
-def published(rows: pa.Table | None) -> list[tuple[str | None, str | None, float]]:
-    if rows is None:
-        return []
-    return list(
-        zip(
+def published(settled: held_rows.Settled) -> list[tuple[str | None, str | None, float]]:
+    # The released rows, then the flush's, in the order the flush publishes them.
+    tables = [rows for rows, _ in settled.released]
+    if settled.rows is not None:
+        tables.append(settled.rows)
+    return [
+        row
+        for rows in tables
+        for row in zip(
             rows.column("Symbol").to_pylist(),
             rows.column("Date").to_pylist(),
             rows.column("Price").to_pylist(),
             strict=True,
         )
-    )
+    ]
 
 
 def settle(held: HeldRows[str], rows: pa.Table | None, *, generation: int = 1) -> held_rows.Settled:
@@ -139,7 +150,7 @@ def test_waiting_rows_are_held_and_publish_dated_before_newer_rows(
     first = settle(
         held, batch(("ESZ6", None, 1.0), ("NQZ6", "2026-11-16", 2.0), ("ESZ6", None, 3.0))
     )
-    assert published(first.rows) == [("NQZ6", "2026-11-16", 2.0)]
+    assert published(first) == [("NQZ6", "2026-11-16", 2.0)]
     assert held.holding() == ("trades",)
     assert held.rows_of("trades") == 2
     assert held.total_bytes > 0
@@ -148,12 +159,12 @@ def test_waiting_rows_are_held_and_publish_dated_before_newer_rows(
     calendar.version += 1
     second = settle(held, batch(("ESZ6", None, 4.0)), generation=2)
     # The held rows first, in arrival order, then the newer row, all dated.
-    assert published(second.rows) == [
+    assert published(second) == [
         ("ESZ6", "2026-11-17", 1.0),
         ("ESZ6", "2026-11-17", 3.0),
         ("ESZ6", "2026-11-17", 4.0),
     ]
-    assert second.generation == 2
+    assert [generation for _, generation in second.released] == [1]  # the held rows' socket
     assert held.holding() == ()
 
 
@@ -166,7 +177,7 @@ def test_a_held_ticker_whose_new_rows_are_dated_releases_its_held_rows_first(
     calendar.found["ESZ6"] = READY
     calendar.dates["ESZ6"] = "2026-11-17"
     settled = settle(held, batch(("ESZ6", "2026-11-17", 2.0)))
-    assert published(settled.rows) == [("ESZ6", "2026-11-17", 1.0), ("ESZ6", "2026-11-17", 2.0)]
+    assert published(settled) == [("ESZ6", "2026-11-17", 1.0), ("ESZ6", "2026-11-17", 2.0)]
 
 
 def test_a_row_no_loaded_session_holds_waits_for_a_reload_then_is_withheld(
@@ -199,7 +210,7 @@ def test_a_reload_that_places_held_rows_publishes_them(
     settle(held, batch(("ESZ6", None, 1.0)))
     calendar.dates["ESZ6"] = "2026-11-17"
     calendar.version += 1
-    assert published(settle(held, None).rows) == [("ESZ6", "2026-11-17", 1.0)]
+    assert published(settle(held, None)) == [("ESZ6", "2026-11-17", 1.0)]
 
 
 def test_rows_of_a_product_with_no_schedule_are_withheld(
@@ -208,13 +219,13 @@ def test_rows_of_a_product_with_no_schedule_are_withheld(
     none = LookupState(Readiness.UNSCHEDULED, "Massive's futures schedules hold no session of BZT")
     calendar.found["BZTZ6"] = none
     settled = settle(held, batch(("BZTZ6", None, 1.0), ("ESZ6", "2026-11-16", 2.0)))
-    assert published(settled.rows) == [("ESZ6", "2026-11-16", 2.0)]
+    assert published(settled) == [("ESZ6", "2026-11-16", 2.0)]
     assert settled.discarded == {Readiness.UNSCHEDULED: {"BZTZ6": (1, none.reason)}}
 
 
 def test_rows_without_a_symbol_are_never_held(held: HeldRows[str]) -> None:
     settled = settle(held, batch((None, None, 1.0)))
-    assert published(settled.rows) == [(None, None, 1.0)]
+    assert published(settled) == [(None, None, 1.0)]
 
 
 def test_held_tickers_are_checked_when_the_calendar_learns_something_or_a_second_passes(
@@ -240,7 +251,7 @@ def test_unlisted_rows_are_discarded_and_counted(
     calendar.found["GONEZ6"] = gone
     calendar.version += 1
     settled = settle(held, batch(("GONEZ6", None, 3.0), ("ESZ6", "2026-11-16", 4.0)))
-    assert published(settled.rows) == [("ESZ6", "2026-11-16", 4.0)]
+    assert published(settled) == [("ESZ6", "2026-11-16", 4.0)]
     assert settled.discarded == {Readiness.UNLISTED: {"GONEZ6": (3, gone.reason)}}
     assert held.holding() == ()
 
@@ -442,7 +453,7 @@ def test_a_held_dated_row_publishes_once_its_ticker_is_ready(
     calendar.found["ESZ6"] = READY
     calendar.dates["ESZ6"] = "2026-11-17"
     calendar.version += 1
-    assert published(settle(held, None).rows) == [
+    assert published(settle(held, None)) == [
         ("ESZ6", "2026-11-17", 1.0),
         ("ESZ6", "2026-11-17", 2.0),
     ]
@@ -482,3 +493,62 @@ def test_a_state_no_case_handles_is_refused(
     calendar.found["ESZ6"] = LookupState("bogus")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(AssertionError):
         settle(held, batch(("ESZ6", None, 2.0)))
+
+
+def test_a_row_left_waiting_keeps_every_later_row_of_its_ticker_behind_it(
+    held: HeldRows[str], calendar: FakeCalendar
+) -> None:
+    # The first row lies outside the loaded sessions, the second inside: the second must not
+    # publish before the reload decides the first.
+    settle(held, batch(("ESZ6", None, 0.5)))  # held while its lookup runs
+    calendar.found["ESZ6"] = LookupState(Readiness.READY, loaded_at=0.0)
+    calendar.dates["ESZ6"] = "2026-11-17"
+    calendar.placed_from["ESZ6"] = 10**18 + 1  # the first row's instant is unplaced
+    settled = settle(
+        held, batch(("ESZ6", None, 1.0), ("ESZ6", None, 2.0), ("NQZ6", "2026-11-16", 3.0))
+    )
+    assert published(settled) == [("NQZ6", "2026-11-16", 3.0)]
+    assert held.rows_of("trades") == 3
+    calendar.version += 1
+    assert published(settle(held, None)) == []  # still behind it
+    assert held.rows_of("trades") == 3
+    calendar.placed_from.clear()  # the reload placed it
+    calendar.version += 1
+    assert published(settle(held, None)) == [
+        ("ESZ6", "2026-11-17", 0.5),
+        ("ESZ6", "2026-11-17", 1.0),
+        ("ESZ6", "2026-11-17", 2.0),
+    ]
+
+
+@pytest.mark.parametrize("refused", [True, False], ids=["refused", "outage"])
+def test_a_failing_reload_fails_the_rows_waiting_on_it(
+    held: HeldRows[str], calendar: FakeCalendar, clock: Clock, *, refused: bool
+) -> None:
+    calendar.found["ESZ6"] = LookupState(Readiness.READY, loaded_at=0.0)
+    calendar.placed_from["ESZ6"] = 2 * 10**18  # no loaded session holds it
+    settle(held, batch(("ESZ6", None, 1.0)))
+    clock.now += 301.0
+    calendar.found["ESZ6"] = LookupState(
+        Readiness.READY,
+        "loading the schedule of its product ES failed: HTTP 503",
+        failing_since=None if refused else 0.0,
+        error=EntitlementError("HTTP 403", status=403) if refused else None,
+        loaded_at=0.0,
+    )
+    calendar.version += 1
+    failure = str(settle(held, None).failed["ESZ6"])
+    assert ("HTTP 403" if refused else "longer than MassiveConfig.max_outage") in failure
+    assert held.holding() == ()
+
+
+def test_released_rows_keep_their_own_socket_generation(
+    held: HeldRows[str], calendar: FakeCalendar
+) -> None:
+    settle(held, batch(("ESZ6", None, 1.0)), generation=1)
+    calendar.found["ESZ6"] = READY
+    calendar.dates["ESZ6"] = "2026-11-17"
+    calendar.version += 1
+    settled = settle(held, batch(("NQZ6", None, 2.0)), generation=2)  # held: still waiting
+    assert [generation for _, generation in settled.released] == [1]
+    assert settled.rows is None
