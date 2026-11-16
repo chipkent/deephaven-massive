@@ -34,6 +34,9 @@ Evidence: TypeAlias = "Callable[[str], None]"
 _TARGET: Final = "/v3/trades/BRK%2FB?limit=1"
 """One trade of the ticker `BRK/B`, its slash percent-encoded, as `request_target` would send it
 were the refusal lifted."""
+_UNAUTHORIZED: Final = 401
+_SERVER_ERROR: Final = 500
+"""The lowest HTTP status of a server's failure, which says nothing about the path."""
 
 
 @pytest.mark.settles("115")
@@ -46,7 +49,8 @@ def test_massive_answers_a_path_ticker_holding_an_encoded_slash(
     Sends the target once, raw, outside the run's rate governor, with the key in the header,
     without following a redirect, and records the status, the message, the redirect's
     `Location`, and the row count. The library's own target builder refuses the value first,
-    which the test shows. Passes on any answer, which it records; skips on a 403.
+    which the test shows. Passes on any answer about the path, which it records; skips on a
+    403; fails on a 401 or a 5xx, which say only that the key or the server failed.
 
     Reading it: a 404, a redirect, or an empty 200 means the refusal stands on evidence, since
     none of them serves Berkshire B's trades; rows mean Massive reads `%2F` as `BRK.B`, and a
@@ -80,3 +84,5 @@ def test_massive_answers_a_path_ticker_holding_an_encoded_slash(
     evidence(f"verdict {verdict}")
     if response.status == 403:
         pytest.skip(f"not entitled to stock trades ({message})")
+    assert response.status != _UNAUTHORIZED, f"Massive refused the key: {message!r}"
+    assert response.status < _SERVER_ERROR, f"HTTP {response.status}: {message!r}"
