@@ -96,6 +96,37 @@ def test_the_intro_is_the_text_before_the_first_anchor(page: Path, tmp_path: Pat
     assert [b.code for b in doc_examples.intro_blocks(plain)] == ["only = 1\n"]
 
 
+def test_examples_group_each_block_with_the_blocks_that_continue_it(page: Path) -> None:
+    assert doc_examples.examples(page) == [
+        doc_examples.Example("", [doc_examples.Block("intro = 1\n", continues=False)]),
+        doc_examples.Example(
+            "first",
+            [
+                doc_examples.Block("x = 1\n", continues=False),
+                doc_examples.Block("y = x + 1\n", continues=True),
+            ],
+        ),
+        doc_examples.Example("second", [doc_examples.Block("z = 3\n", continues=False)]),
+    ]
+
+
+def test_an_example_continues_across_a_section_and_may_start_continuing(tmp_path: Path) -> None:
+    path = tmp_path / "page.md"
+    path.write_text(
+        '```python continues\na = 1\n```\n<a id="next"></a>\n```python continues\nb = a\n```\n',
+        encoding="utf-8",
+    )
+    assert doc_examples.examples(path) == [
+        doc_examples.Example(
+            "",
+            [
+                doc_examples.Block("a = 1\n", continues=True),
+                doc_examples.Block("b = a\n", continues=True),
+            ],
+        )
+    ]
+
+
 @pytest.mark.parametrize(("delayed", "line"), [(True, "[stocks]"), (False, "[]")])
 def test_the_readmes_commands_save_each_plans_settings_file(
     tmp_path: Path, *, delayed: bool, line: str

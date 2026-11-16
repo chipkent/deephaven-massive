@@ -55,7 +55,7 @@ import queue
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import numpy as np
 
@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from deephaven.table import Table
-    from deephaven.table_listener import TableListenerHandle, TableUpdate
+    from deephaven.table_listener import TableListenerHandle
 
     from deephaven_massive import MassiveSession
 
@@ -542,6 +542,31 @@ def _listen(table: Table, stream: Stream, recorder: Recorder) -> TableListenerHa
     return handle
 
 
+class RowQueue(Protocol):
+    """Where a `RowCopier` queues the rows it copies: a `Recorder`."""
+
+    def put(self, stream: Stream, columns: dict[str, np.ndarray[Any, Any]], /) -> None:
+        """Queue one update's added rows (`Recorder.put`).
+
+        Args:
+            stream: The stream.
+            columns: The added rows, by column.
+        """
+        ...
+
+
+class AddedRows(Protocol):
+    """A table update, as a `RowCopier` reads it: Deephaven's `TableUpdate`."""
+
+    def added(self) -> dict[str, np.ndarray[Any, Any]]:
+        """Return the update's added rows, by column.
+
+        Returns:
+            The rows.
+        """
+        ...
+
+
 class RowCopier:
     """The listener of one stream's blink table: it hands each update's added rows on.
 
@@ -550,7 +575,7 @@ class RowCopier:
     the recorder, whose own thread writes them.
     """
 
-    def __init__(self, stream: Stream, recorder: Recorder) -> None:
+    def __init__(self, stream: Stream, recorder: RowQueue) -> None:
         """Remember where the rows go.
 
         Args:
@@ -560,7 +585,7 @@ class RowCopier:
         self._stream = stream
         self._recorder = recorder
 
-    def on_update(self, update: TableUpdate, is_replay: bool) -> None:
+    def on_update(self, update: AddedRows, is_replay: bool) -> None:
         """Queue one update's added rows, when it has any.
 
         Args:

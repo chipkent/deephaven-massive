@@ -12,7 +12,10 @@ from deephaven import dtypes, new_table
 from deephaven.column import int_col, string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.symbols import strict_converter
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
+from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.symbols import _row_converter
 
@@ -21,9 +24,6 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
-
-
-YAHOO = SymbolConvention.YAHOO
 
 
 def values(table: Table, column: str = "Symbol") -> list[object]:
@@ -59,43 +59,49 @@ def test_canonicalize_a_static_table_with_a_convention(dh_exec_ctx: object) -> N
     assert values(result) == ["BRK.B", "BACpL", "AAPL"]
 
 
-def test_text_a_converter_does_not_recognize_stays_as_written(dh_exec_ctx: object) -> None:
-    # Massive answers it: the library judges no ticker's shape.
-    table = new_table([string_col("Symbol", ["EUR/USD", "not a pair"])])
-    result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.RAISE)
-    assert values(result) == ["C:EURUSD", "not a pair"]
-
-
 def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
-    # A Yahoo dot names a listing outside the US, and Massive's dot a share class.
-    table = new_table([string_col("Symbol", ["BRK-B", *(f"V{i}.L" for i in range(1, 7))])])
+    table = new_table([string_col("Symbol", ["BRK-B", "b1", "b2", "b3", "b4", "b5", "b6"])])
     with pytest.raises(
-        ValueError, match=r"^6 value\(s\) of Symbol do not convert to stocks symbols: "
+        ValueError, match=r"^7 value\(s\) of Symbol are not stocks symbols: "
     ) as raised:
-        dm.canonicalize_symbols(table, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.RAISE)
+        dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
     message = str(raised.value)
-    assert "'V1.L' names another instrument" in message
-    assert "'V5.L'" in message  # the first five in sorted order
-    assert "'V6.L'" not in message
+    assert "'BRK-B' is not a Massive stock ticker" in message
+    assert "'b4'" in message  # the first five in sorted order
+    assert "'b5'" not in message
     assert message.endswith("Pass on_error=dm.OnError.LOG to null them instead")
 
 
 def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bad = [f"B{i:02}.L" for i in range(25)]
+    bad = [f"b{i:02}" for i in range(25)]
     # Out of order in the table: the values are logged sorted, before the formula runs.
-    table = new_table([string_col("Symbol", ["BRK-B", *reversed(bad), "B00.L"])])
+    table = new_table([string_col("Symbol", ["EUR/USD", *reversed(bad), "b00"])])
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
-        result = dm.canonicalize_symbols(
-            table, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.LOG
-        )
-    assert values(result) == ["BRK.B", *[None] * 26]
+        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.LOG)
+    assert values(result) == ["C:EURUSD", *[None] * 26]
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == 21  # twenty values, then one record that says the rest are not
-    assert messages[0].startswith("canonicalize_symbols: 'B00.L' names another instrument")
-    assert messages[0].endswith("; its rows get a null Symbol")
+    assert messages[0] == (
+        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
+        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
+    )
     assert messages[-1] == "20 values were reported; further ones are not logged"
+
+
+def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    table = new_table([string_col("Symbol", ["EUR/USD", "b00"])])
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.symbols"):
+        result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.IGNORE)
+    assert values(result) == ["C:EURUSD", None]
+    message = (
+        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
+        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
+    )
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, message)]
 
 
 def test_canonicalize_a_refreshing_table(
@@ -104,14 +110,12 @@ def test_canonicalize_a_refreshing_table(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        result = dm.canonicalize_symbols(
-            source, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.RAISE
-        )
+        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     assert result.is_refreshing
-    source.add(new_table([string_col("Symbol", ["BRK-B", None])]))
+    source.add(new_table([string_col("Symbol", ["BTC-USD", None])]))
     wait_for(lambda: result.size == 2)
-    assert values(result) == ["BRK.B", None]
-    source.add(new_table([string_col("Symbol", ["VOD.L"])]))  # a later bad row fails the table
+    assert values(result) == ["X:BTCUSD", None]
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))  # a later bad row fails the table
     wait_for(lambda: bool(result.j_table.isFailed()))
     scope.release()
 
@@ -120,13 +124,10 @@ def test_a_bad_initial_row_of_a_refreshing_table_raises(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
-    source.add(new_table([string_col("Symbol", ["VOD.L"])]))
+    source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
-    with (
-        scope.open(),
-        pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol do not convert to stocks"),
-    ):
-        dm.canonicalize_symbols(source, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.RAISE)
+    with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
+        dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     scope.release()
 
 
@@ -136,14 +137,12 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
-        result = dm.canonicalize_symbols(
-            source, AssetClass.STOCKS, convention=YAHOO, on_error=OnError.LOG
-        )
+        result = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.LOG)
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
-        source.add(new_table([string_col("Symbol", ["BRK-B", "VOD.L", None, "VOD.L"])]))
+        source.add(new_table([string_col("Symbol", ["BTC-USD", "no pe!", None, "no pe!"])]))
         wait_for(lambda: result.size == 4)
-    assert values(result) == ["BRK.B", None, None, None]
-    assert caplog.text.count("'VOD.L' names another instrument") == 1
+    assert values(result) == ["X:BTCUSD", None, None, None]
+    assert caplog.text.count("cannot read 'no pe!'") == 1
     failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
     scope.release()
@@ -202,26 +201,27 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None
         dm.canonicalize_symbols(sizes, AssetClass.FOREX)
 
 
-def test_the_row_converter_raises_or_nulls() -> None:
+def test_the_row_converter_raises_or_nulls(caplog: pytest.LogCaptureFixture) -> None:
     # Called from a Python thread: Deephaven runs a formula on its own threads, which line
     # coverage before 3.14 cannot see.
-    refused: list[tuple[str, str]] = []
-
-    def convert(text: str) -> str | None:
-        return dm.canonical_symbol(text, AssetClass.STOCKS, convention=YAHOO)
-
-    def refuse(value: str, reason: str) -> None:
-        refused.append((value, reason))
-
-    strict = _row_converter(convert, refuse, OnError.RAISE)
+    convert = strict_converter(AssetClass.FOREX, SymbolConvention.MASSIVE)
+    log = BoundedLog(logging.getLogger("deephaven_massive._tables.symbols"), limit=5, level=30)
+    strict = _row_converter(
+        convert, effect=effect_of(OnError.RAISE), log=log, consequence="its rows get a null S"
+    )
     assert strict(None) is None
-    assert strict("BRK-B") == "BRK.B"
-    with pytest.raises(ValueError, match=r"'VOD\.L' names another instrument"):
-        strict("VOD.L")
-    lenient = _row_converter(convert, refuse, OnError.LOG)
-    assert lenient("VOD.L") is None
-    assert lenient("BAC-PL") == "BACpL"
-    assert [value for value, _ in refused] == ["VOD.L"]
+    assert strict("EUR/USD") == "C:EURUSD"
+    with pytest.raises(ValueError, match="cannot read 'no pe!'"):
+        strict("no pe!")
+    lenient = _row_converter(
+        convert, effect=effect_of(OnError.LOG), log=log, consequence="its rows get a null S"
+    )
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
+        assert lenient("no pe!") is None
+        assert lenient("GBP-USD") == "C:GBPUSD"
+    assert [m.split(";")[0] for m in caplog.messages] == [
+        "canonicalize_symbols: cannot read 'no pe!' as a forex pair of two three-letter codes"
+    ]
 
 
 def _listeners(table: Table) -> int:

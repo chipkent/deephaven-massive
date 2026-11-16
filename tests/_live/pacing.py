@@ -28,7 +28,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import threading
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
 
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from types import ModuleType
 
-    from deephaven_massive._massive import RequestGovernor
+    from deephaven_massive._massive import BucketState
 
 BASIC_LIMIT: Final = BASIC_REQUESTS_PER_MINUTE
 """The most REST requests a live test may send to one class on Basic: a minute's worth, so no
@@ -207,6 +207,47 @@ def over_the_limit(cases: Iterable[LiveCase]) -> list[str]:
     ]
 
 
+class WallClock(Protocol):
+    """The governor's time source, as `WaitProgress` reads it."""
+
+    def time(self) -> float:
+        """Return the wall-clock time, in seconds since the epoch.
+
+        Returns:
+            The time.
+        """
+        ...
+
+
+class PacedGovernor(Protocol):
+    """The key's rate governor, as `WaitProgress` reads it: a `RequestGovernor`."""
+
+    @property
+    def clock(self) -> WallClock:
+        """The governor's time source."""
+        ...
+
+    def snapshot(self) -> tuple[BucketState, ...]:
+        """Return the state of every bucket (`RequestGovernor.snapshot`).
+
+        Returns:
+            The states.
+        """
+        ...
+
+    def estimate(self, bucket: str, requests: int, /) -> float | None:
+        """Return how long new requests of a bucket take to start (`RequestGovernor.estimate`).
+
+        Args:
+            bucket: The bucket.
+            requests: The new requests.
+
+        Returns:
+            The seconds, or None when the bucket is unpaced.
+        """
+        ...
+
+
 class WaitProgress:
     """Prints one line each time a request of a live test starts to wait for a request slot.
 
@@ -225,7 +266,7 @@ class WaitProgress:
     """
 
     def __init__(
-        self, governor: RequestGovernor, *, requests: int, write: Callable[[str], None]
+        self, governor: PacedGovernor, *, requests: int, write: Callable[[str], None]
     ) -> None:
         """Remember each bucket's waiting requests and attempts as the test begins.
 

@@ -58,14 +58,10 @@ def test_path_values_are_percent_encoded_whole() -> None:
     assert target == "/v1/open-close/I%3ASPX%20X/2026-01-02"
 
 
-@pytest.mark.parametrize(
-    ("ticker", "segment"), [("BRK/B", "BRK%2FB"), ("..", "%2E%2E"), (".", "%2E"), ("a.b", "a.b")]
-)
-def test_a_path_value_never_leaves_its_segment(ticker: str, segment: str) -> None:
-    # A `/` is sent encoded, and so is a value of only dots: neither can reach another
-    # endpoint. Massive answers the ticker as sent.
-    target = query.request_target(_PATH, {"stockTicker": ticker, "date": date(2026, 1, 2)}, {})
-    assert target == f"/v1/open-close/{segment}/2026-01-02"
+def test_a_path_value_with_a_slash_is_refused() -> None:
+    # Massive answers 404 for a `%2F` segment, so such a value could never succeed.
+    with pytest.raises(ValueError, match=r"path parameters \['stockTicker'\] contain '/'"):
+        query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
 
 
 def test_query_values_are_percent_encoded() -> None:

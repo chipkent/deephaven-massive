@@ -73,7 +73,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 
-from deephaven_massive._massive.net.errors import WireError
+from deephaven_massive._massive.net.errors import WireError, WireFailure
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample
 
 if TYPE_CHECKING:
@@ -457,7 +457,7 @@ class FlatFile:
                 host=self._host,
                 path=self._key,
                 # A body that broke off is a transport failure; any other is the file's content.
-                unreadable=not self._dropped.is_set(),
+                kind=(WireFailure.NO_ANSWER if self._dropped.is_set() else WireFailure.UNREADABLE),
             ) from error
 
     def _blocks(
@@ -600,14 +600,14 @@ class FlatFile:
             reason: What is wrong with the file.
 
         Returns:
-            `WireError("cannot read <location>: <reason>")`, marked `unreadable`, for the
-            caller to raise.
+            `WireError("cannot read <location>: <reason>")`, `WireFailure.UNREADABLE`, for
+            the caller to raise.
         """
         return WireError(
             f"cannot read {self._location}: {reason}",
             host=self._host,
             path=self._key,
-            unreadable=True,
+            kind=WireFailure.UNREADABLE,
         )
 
     def _apply(

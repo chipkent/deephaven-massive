@@ -105,7 +105,8 @@ class SymbolReadRow:
         rows: Its rows in the result.
         attempts: Reads started since it was last added.
         next_attempt_at: When its next read begins; set only while `RETRYING`.
-        error: The text of its latest failure; None once a read succeeds.
+        error: The text of its latest failure; once a read succeeds, why the library skipped
+            it (`SymbolRows.skipped`), or None.
         updated_at: When the row was made.
     """
 

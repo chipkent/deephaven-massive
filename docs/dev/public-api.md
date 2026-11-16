@@ -84,3 +84,14 @@ from dataset methods.
 
 Each public class's docstring states the line that imports it, such as
 `from deephaven_massive.queries import FetchQuery`, so the path is one `help()` away.
+
+## Arguments and reach
+
+- `symbols` is the first positional argument of every query method that takes symbols, a
+  point-in-time argument is `as_of`, and each signature shows the default Massive's
+  specification gives. `None` means only "not sent", never a mode.
+- Flat files have no namespace or method of their own: `history(source=...)` reaches them.
+- Partner datasets stay nested under `m.partners.<vendor>`.
+- A package name holds no underscore inside it (PEP 8): `flatfiles`, not `flat_files`.
+- A query has no run-time hint for a method it lacks: a missing method raises Python's own
+  `AttributeError`, as tab completion and `hasattr` expect.

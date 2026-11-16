@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: grade-a-dense-reference-entry
+expected_outcome: |
+  score-sheet.md, from agents/editor.md run on the unlisted_symbols setting entry and the
+  troubleshooting row of 2026-11-15, fails the fragment with a holistic score of 5 or less,
+  applies the one-read cap, and faults the enumerated paragraph and the three-symptom cell.
+context:
+  scaffold_script: place-files.sh

@@ -261,8 +261,9 @@ def conversion_quote(
     Reads `/v1/conversion/{from}/{to}`, `/v1/last_quote/currencies/{from}/{to}`, and the v2
     forex snapshot of `C:{from}{to}` back to back, up to `QUOTE_TRIES` times, and records each
     one's quote. SAME when, in a try where the conversion's `last.timestamp` equals the last
-    quote's and both carry a bid and an ask, the two quotes' bid and ask are equal, and the
-    snapshot's `lastQuote` has the same bid and ask whenever its `t` is that timestamp too.
+    quote's and both carry a bid and an ask, the two quotes' bid, ask, and exchange are equal,
+    and the snapshot's `lastQuote` has the same bid, ask, and exchange whenever its `t` is that
+    timestamp too.
     DIFFERENT when such a try disagrees, or when any try's conversion bid lies within
     `_INVERSE_TOLERANCE` of the inverse of the last quote's ask but not of its bid (the
     inverse pair's quote); INCONCLUSIVE when no try read one quote on both.
@@ -295,19 +296,44 @@ def conversion_quote(
             f"snapshot lastQuote={snapped}"
         )
         differing += _inverse(converted, quoted)
-        prices = (converted.get("bid"), converted.get("ask"), quoted.get("bid"), quoted.get("ask"))
-        stamp = converted.get("timestamp")
-        if stamp is None or stamp != quoted.get("timestamp") or None in prices:
+        same = _same_quote(converted, quoted, snapped)
+        if same is None:
             continue
-        same = prices[:2] == prices[2:]
-        if snapped.get("t") == stamp:
-            same = same and (snapped.get("b"), snapped.get("a")) == prices[:2]
         compared += 1
         differing += not same
     evidence(f"{compared} of {QUOTE_TRIES} tries read one quote on both endpoints")
     verdict = _verdict(compared=compared, differing=differing)
     evidence(f"conversion {base}->{quote} last is the pair's last quote: {verdict}")
     return Outcome(verdict=verdict, rows=counts)
+
+
+def _same_quote(
+    converted: Mapping[str, Any], quoted: Mapping[str, Any], snapped: Mapping[str, Any]
+) -> bool | None:
+    """Compare one try's conversion quote with the pair's last quote and snapshot quote.
+
+    Args:
+        converted: The conversion's `last` object.
+        quoted: The last quote's `last` object.
+        snapped: The v2 forex snapshot's `lastQuote` object.
+
+    Returns:
+        `None` when the conversion and the last quote are not one quote's time or lack a bid
+        or an ask; else whether their bid, ask, and exchange are equal, and the snapshot's
+        too when its `t` is that time.
+    """
+    prices = (converted.get("bid"), converted.get("ask"), quoted.get("bid"), quoted.get("ask"))
+    stamp = converted.get("timestamp")
+    if stamp is None or stamp != quoted.get("timestamp") or None in prices:
+        return None
+    exchange = converted.get("exchange")
+    same = prices[:2] == prices[2:] and exchange == quoted.get("exchange")
+    if snapped.get("t") == stamp:
+        same = same and (snapped.get("b"), snapped.get("a"), snapped.get("x")) == (
+            *prices[:2],
+            exchange,
+        )
+    return same
 
 
 def _rows(

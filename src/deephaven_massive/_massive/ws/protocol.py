@@ -30,7 +30,7 @@ tested without a socket; `ws.client` owns the socket and calls in here:
   this module's logger, once, where it is decoded.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
-  one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
+  one must wait at least. The overrides use the shared `net` helpers: `is_certificate_failure`
   and the `Retry-After` reader.
 
 Topics are exact strings throughout: nothing here matches one topic as a prefix of another.
@@ -51,10 +51,22 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Literal, NamedTuple
 
 from websockets.client import process_exception
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import (
+    InvalidHandshake,
+    InvalidProxy,
+    InvalidProxyMessage,
+    InvalidProxyStatus,
+    InvalidStatus,
+    ProxyError,
+)
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, is_tls_failure
+from deephaven_massive._massive.net.errors import (
+    LIBRARY_BUG_REPORT,
+    WireError,
+    WireFailure,
+    is_certificate_failure,
+)
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
@@ -262,8 +274,10 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     websockets' public rule, `websockets.client.process_exception`, decides: it retries an
     `OSError`, a timeout, an EOF during the upgrade, and HTTP 500, 502, 503, and 504, and
     treats everything else (HTTP 400 or 404, an invalid URI, ...) as fatal. Two cases override
-    it: an HTTP 429 is always retried, after its `Retry-After`, and a TLS certificate failure
-    is always fatal, although it is an `OSError`.
+    it: an HTTP 429 is always retried, after its `Retry-After`; a proxy that could not reach
+    the server (any status but 407, or a reply that is not HTTP) is retried, as the REST and
+    flat-file clients retry it; and a TLS certificate failure is always fatal, although it is
+    an `OSError`.
 
     Args:
         error: What opening the socket (TCP, TLS, proxy, HTTP upgrade) raised.
@@ -279,26 +293,70 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         the `Retry-After` of an HTTP 429 (0.0 when absent or unreadable), and 0.0 otherwise,
         so the backoff alone decides.
     """
-    if is_tls_failure(error):
+    if is_certificate_failure(error):
         return WireError(
             f"TLS certificate verification failed for {host}: {error}; "
             "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
             host=host,
             path=path,
+            kind=WireFailure.LOCAL,
         )
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
         wait = retry_after_seconds(error.response.headers.get("Retry-After"), now)
         return 0.0 if wait is None else wait
-    if process_exception(error) is None:
+    if _proxy_failed_to_connect(error) or process_exception(error) is None:
         return 0.0
+    if isinstance(error, InvalidProxyStatus):
+        status = error.response.status_code
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
+    kind = _fatal_kind(error)
+    fix = (
+        "; check the proxy, and its user and password, in HTTPS_PROXY"
+        if kind is WireFailure.LOCAL
+        else ""
+    )
     return WireError(
-        f"WebSocket connection to {host}{path} failed: {reason}",
+        f"WebSocket connection to {host}{path} failed: {reason}{fix}",
         status=status,
         host=host,
         path=path,
+        kind=kind,
     )
+
+
+def _proxy_failed_to_connect(error: Exception) -> bool:
+    """Tell whether a proxy answered for a server it could not reach, rather than refusing.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        True for a proxy's status other than 407 (such as its own 502) and for a proxy reply
+        that is not HTTP: no answer from the server, which the clients retry alike.
+    """
+    if isinstance(error, InvalidProxyStatus):
+        return error.response.status_code != HTTPStatus.PROXY_AUTHENTICATION_REQUIRED
+    return isinstance(error, InvalidProxyMessage)
+
+
+def _fatal_kind(error: Exception) -> WireFailure:
+    """Return what kind of failure a connection attempt websockets does not retry is.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        `LOCAL` for a proxy that refused the credentials (HTTP 407) or is configured wrong
+        (the proxy settings are this machine's); `REFUSED` for a server that answered but
+        refused or broke the handshake (an HTTP status such as 401 or 404 included); and
+        `CLIENT_DEFECT` for anything else, such as a URI the client built wrong.
+    """
+    if isinstance(error, ProxyError | InvalidProxy):
+        return WireFailure.LOCAL
+    if isinstance(error, InvalidHandshake):
+        return WireFailure.REFUSED
+    return WireFailure.CLIENT_DEFECT
 
 
 def _quote(value: object) -> str:
@@ -713,7 +771,10 @@ class FrameDecoder:
             into: The channel's accumulator for this frame.
         """
         error = WireError(
-            f"dropped {self._about(channel, item, problem)}", host=self._host, path=self._path
+            f"dropped {self._about(channel, item, problem)}",
+            host=self._host,
+            path=self._path,
+            kind=WireFailure.UNREADABLE,
         )
         raw = row_excerpt(item)
         logger.debug("%s; the row: %s", error, raw)

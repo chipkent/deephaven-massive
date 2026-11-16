@@ -439,17 +439,15 @@ class SymbolConvention(StrEnum):
 
     Massive writes a share class as `.B` (`BRK.B`) and a preferred as a lower-case `p` and its
     series (`KIMpL`), as the CTA's CQS convention does, so CQS text needs no conversion. The
-    other members name one other US stock convention: `YAHOO` and `CMS` convert its share
-    classes and preferreds, and `NASDAQ` its preferreds, whose classes Nasdaq writes as Massive
-    does. None converts warrants, units, rights, or when-issued shares, for which Massive
-    documents no spelling. Other text comes back unchanged, except a spelling Massive reads as
-    another instrument (Yahoo's `VOD.L`, Nasdaq's `ABC.U`), which raises `ValueError`.
+    other members name the exact grammar of one other US stock convention; only plain
+    tickers, share classes, and preferreds convert, because Massive documents no spelling for
+    warrants, units, rights, or when-issued shares.
 
-    - `MASSIVE`: Massive's own spelling, the default. A forex, crypto, index, or option symbol in
-      another unambiguous spelling of its class converts (`EUR/USD` to `C:EURUSD`, `SPX` to
-      `I:SPX` for the indices class), and any other text comes back unchanged. So does a stock
-      ticker in another convention's spelling, since `-` means a class to Yahoo and a preferred
-      to Nasdaq. It is the only member every class takes.
+    - `MASSIVE`: Massive's own spelling, the default. A canonical ticker comes back unchanged;
+      a forex, crypto, index, or option symbol in another unambiguous spelling of its class
+      converts (`EUR/USD` to `C:EURUSD`, `SPX` to `I:SPX` for the indices class); a stock
+      ticker in another convention's spelling raises, since `-` means a class to Yahoo and a
+      preferred to Nasdaq. It is the only member every class takes.
     - `YAHOO`: Yahoo Finance; a class is `-B` (`BRK-B`), a preferred `-P` and its series
       (`BAC-PL`).
     - `NASDAQ`: the Nasdaq Integrated Platform symbology (the "NASDAQ Symbol" column of
@@ -478,39 +476,30 @@ class SymbolConvention(StrEnum):
 class OnError(StrEnum):
     """What a problem does: fail, or keep going with or without a log record.
 
-    One enum for every problem a caller may choose to skip, used in these places:
+    One bad symbol or row never stops a table by default. The members:
 
-    - `canonicalize_symbols(on_error=)`, for a value Massive would read as another
-      instrument, such as Yahoo's `VOD.L`. The default there is `LOG`.
-    - `MassiveConfig.unsendable_symbols`, for a row of a table of symbols passed as `symbols` that
-      the library refuses: an empty value, one with `,` or `*`, or an options, index, forex,
-      or crypto symbol without its class's prefix. Such a `str` or list value you pass always
-      raises, whatever the setting.
-      The default is `LOG`.
-    - `MassiveConfig.unlisted_symbols`, for a crypto pair that Massive's crypto ticker list does
-      not hold, in a stream, `fetch()`, or `poll()`. The default is
-      `LOG`.
-    - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
-      cannot read. The default is `LOG`.
-    - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
-      `history()`, or `poll()`, or one a `poll()` table cannot read. The default is `LOG`.
-    - `MassiveConfig.malformed_rows`, for a line of a flat file that is not a readable row. The
-      default is `LOG`.
-    - The `refused_venues` argument of the futures `trades`, `quotes`, and `bars`, and
-      `MassiveConfig.refused_venues` for a call that leaves it out, for a futures exchange the
-      call names in `venues` whose flat files Massive refuses. The default is `RAISE`.
-
-    The members:
-
-    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`), and a
-      live table fails when the bad value arrives.
-    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at WARNING for
-      a value the user supplied, and at ERROR, as a library defect to report, for a spelling from
-      Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
-      bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
-      unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
-      A refused futures exchange's files are skipped, with one WARNING per call naming them.
+    - `RAISE`: fail whatever met the problem. A check at the call raises, and so does a call
+      with `wait=True`. A live table fails. A watchlist read by `fetch()` or `history()` fails
+      only the symbols it met, and `m.symbol_reads()` shows them `FAILED`. A bad watchlist row
+      under `noncanonical_symbols` is the exception: it fails the whole result.
+    - `LOG`: skip the value and keep going. Each distinct value is logged once, up to a fixed
+      number of values: at WARNING, or at ERROR for a library defect to report. A stream or `poll()`
+      table names each value it skips in its `Error` in `m.streams()`. Under
+      `unreadable_symbols` a bad row of Massive's data is kept, with the text in `RawSymbol`.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
+
+    Each cause has its own setting, documented where it is taken:
+
+    - `MassiveConfig.noncanonical_symbols`: a table's row that isn't Massive's exact ticker.
+    - `MassiveConfig.unavailable_symbols`: a symbol Massive has no data for.
+    - `MassiveConfig.unreadable_symbols`: a symbol in Massive's data the library can't read.
+    - `MassiveConfig.malformed_rows`: a flat-file line that isn't a readable row.
+    - `MassiveConfig.refused_venues`, and the `refused_venues` argument of the futures `trades`,
+      `quotes`, and `bars`: a futures exchange the call names whose flat files Massive refuses.
+      The default is `RAISE`; every other setting's is `LOG`.
+    - The `on_error` argument of `canonicalize_symbols` (default `LOG`), and of
+      `canonical_symbol` and the per-class converters (default `RAISE`, where `LOG` and
+      `IGNORE` return None): a value that doesn't convert.
 
     Example:
         ::
@@ -518,7 +507,7 @@ class OnError(StrEnum):
             import deephaven_massive as dm
 
             assert dm.OnError("log") is dm.OnError.LOG
-            strict = dm.MassiveConfig(unsendable_symbols=dm.OnError.RAISE)
+            strict = dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)
     """
 
     RAISE = "raise"

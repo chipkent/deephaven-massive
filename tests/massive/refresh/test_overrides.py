@@ -320,6 +320,7 @@ def test_every_spelling_cites_a_source_and_gives_a_reason() -> None:
         assert entry.source
         assert entry.reason
         assert entry.long_name == naming.snake(entry.long_name)
+        assert entry.long_name or not entry.whole_key
     for shared in overrides.SHARED_DESCRIPTIONS.values():
         assert shared.reason
         assert len(shared.long_names) >= 2
@@ -349,7 +350,24 @@ def test_the_futures_snapshot_takes_the_quote_and_trade_names() -> None:
     assert futures.field("LastTradeTimestamp").wire_key == "last_trade.last_updated"
 
 
-def test_the_conversion_s_last_quote_prices_take_the_quote_names() -> None:
+def test_the_option_chain_takes_the_v2_snapshots_names_for_its_day_change() -> None:
+    chain = spec.source(Transport.REST, _CHAIN)
+    stocks = spec.source(Transport.REST, "/v2/snapshot/locale/us/markets/stocks/tickers")
+    assert chain.field("TodaysChange").wire_key == "day.change"
+    assert chain.field("TodaysChangePerc").wire_key == "day.change_percent"
+    assert stocks.field("TodaysChange").wire_key == "todaysChange"
+    assert stocks.field("TodaysChangePerc").wire_key == "todaysChangePerc"
+
+
+def test_a_whole_key_spelling_names_a_field() -> None:
+    for (source, key), entry in overrides.SPELLINGS.items():
+        if entry.whole_key:
+            assert key in {f.wire_key for f in spec.source(Transport.REST, source).fields}, key
+
+
+def test_the_conversion_s_last_quote_takes_the_snapshot_s_quote_names() -> None:
     conversion = spec.source(Transport.REST, "/v1/conversion/{from}/{to}")
-    assert conversion.field("LastBidPrice").wire_key == "last.bid"
-    assert conversion.field("LastAskPrice").wire_key == "last.ask"
+    assert conversion.field("LastQuoteBidPrice").wire_key == "last.bid"
+    assert conversion.field("LastQuoteAskPrice").wire_key == "last.ask"
+    assert conversion.field("LastQuoteExchange").wire_key == "last.exchange"
+    assert conversion.field("LastQuoteParticipantTimestamp").wire_key == "last.timestamp"

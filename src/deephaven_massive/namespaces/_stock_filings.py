@@ -508,7 +508,7 @@ class StocksFilingsNamespace(Namespace):
             TypeError: If an argument has the wrong type, such as a form type that isn't a `str`.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker isn't Massive's exact ticker;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -568,7 +568,7 @@ class StocksFilingsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker isn't Massive's exact ticker;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -630,7 +630,7 @@ class StocksFilingsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker isn't Massive's exact ticker;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -751,7 +751,7 @@ class StocksFilingsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker is empty or holds `,` or `*`;
+                - a ticker isn't Massive's exact ticker;
                 - a bound isn't a date, or `end` is before `start`;
                 - `order` is given without `sort`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.

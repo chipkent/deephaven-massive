@@ -9,7 +9,7 @@ import pyarrow as pa
 import pytest
 
 from deephaven_massive._datasets import wire_symbols
-from deephaven_massive._datasets.symbols import canonical_symbol_crypto
+from deephaven_massive._datasets.symbols import is_canonical
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     canonical_from_wire,
@@ -76,21 +76,21 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (IDX, "I:SPX", "I:SPX"),
         (IDX, "SPX", "I:SPX"),  # the endpoint's class adds the prefix
         (IDX, "spx", "I:spx"),  # never re-cased
-        (IDX, "S P X", "I:S P X"),  # any other text is kept as Massive wrote it
+        (IDX, "S P X", None),
         (FUT, "BOB 02-01 U6", "BOB 02-01 U6"),
         (FUT, "ZZ:NEW COMBO Z6", "ZZ:NEW COMBO Z6"),  # a row keeps a form not seen yet
-        (FUT, " ESZ5", " ESZ5"),
+        (FUT, " ESZ5", None),
         (OPT, "O:AAPL250117C00150000", "O:AAPL250117C00150000"),
-        (OPT, "AAPL250117C00150000", "AAPL250117C00150000"),
+        (OPT, "AAPL250117C00150000", None),
         (STK, "KIMpL", "KIMpL"),
-        (STK, "BRK/B", "BRK/B"),
+        (STK, "BRK/B", None),
         (FUT, "ESZ5", "ESZ5"),
         (ClassFromPrefix.ANY, "X:BTC-USD", "X:BTCUSD"),
         (ClassFromPrefix.ANY, "C:EURUSD", "C:EURUSD"),
         (ClassFromPrefix.ANY, "X:EUR-USD", "X:EURUSD"),  # without the forex class, X: is crypto
         (ClassFromPrefix.ANY, "I:SPX", "I:SPX"),
         (ClassFromPrefix.ANY, "AAPL", "AAPL"),
-        (ClassFromPrefix.ANY, "aapl", "aapl"),
+        (ClassFromPrefix.ANY, "aapl", None),
     ],
 )
 def test_canonical_from_wire(
@@ -135,7 +135,7 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
     assert len(rows) > 20
     for row in rows:
         ticker, websocket = row["ticker"], row["websocket"]
-        assert canonical_symbol_crypto(ticker) == ticker
+        assert is_canonical(CRY, ticker)
         base, quote = websocket.split("-")
         split = (base, quote)
         assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
@@ -264,20 +264,6 @@ def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
         None,
         "SPX",  # a futures code, not an option's
     ]
-
-
-@pytest.mark.parametrize(
-    ("asset_class", "symbol"),
-    [(CRY, "BTCUSD"), (FX, "EURUSD"), (IDX, "SPX")],
-)
-def test_a_symbol_without_its_class_prefix_goes_on_the_wire_as_written(
-    asset_class: AssetClass, symbol: str
-) -> None:
-    # No spelling is derived from text that lacks Massive's prefix: `BTCUSD` is never cut into
-    # `X:CUSD`, nor `EURUSD` read as `C:EURUSD`. Massive answers the text as written.
-    assert wire_spellings(asset_class, symbol) == (symbol,)
-    if asset_class is not CRY:  # a crypto topic takes its split from Massive's list alone
-        assert ws_symbol(asset_class, symbol, {}) == symbol
 
 
 def test_a_class_with_no_spellings_is_a_defect() -> None:

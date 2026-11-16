@@ -62,22 +62,23 @@ Settings:
     `help(dm.MassiveConfig)` lists every setting.
 
 Symbols:
-    Datasets send each symbol as written, so spell Massive's tickers: `AAPL`, `BRK.B`,
-    `O:SPY271217C00700000`, `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. A ticker Massive has
-    no data for gives no rows. `dm.ALL` means every symbol, in the datasets that take it. A
-    table with a `Symbol` column works too. A live one is a watchlist, which the library
-    follows as you add and delete rows. `dm.canonical_symbol` and `dm.canonicalize_symbols`
-    convert other spellings, such as Yahoo's `BRK-B`.
+    Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
+    `I:SPX`, `C:EURUSD`, `X:BTCUSD`, and `ESZ6`. `dm.ALL` means every symbol, in the datasets
+    that take it. A table with a `Symbol` column works too. A live one is a watchlist, which
+    the library follows as you add and delete rows. `dm.canonical_symbol` and
+    `dm.canonicalize_symbols` convert other spellings, such as Yahoo's `BRK-B`.
 
 Enums:
     An argument with a fixed set of values takes an enum member, such as `dm.Timespan.MINUTE`.
     `dm.Timespan("minute")` converts text to a member.
 
 Errors:
-    Errors from Massive, failed reads, and failed live tables are all `dm.MassiveError`s.
-    `dm.AuthenticationError` means Massive refused your keys. `dm.EntitlementError` means your
-    plan doesn't include the data. Each error's `cause` is a `dm.ErrorCause`, which says
-    whether the error is expected, a mistake in your code, or a bug in the library to report.
+    `dm.MassiveError` covers every error Massive reports and every failure inside a method of
+    a query, such as `fetch()`. `dm.AuthenticationError` means your API key is missing or Massive
+    refused your keys. `dm.EntitlementError` means your plan doesn't include the data.
+    `dm.SessionClosedError` means the session is closed. Each error's `source` says what
+    stopped the call, as a `dm.ErrorSource`. Its `is_retryable` says whether the same call may
+    succeed later, and its `is_bug` whether a bug caused it.
     A wrong argument raises `TypeError` or `ValueError` at the call instead.
     `dm.enable_debug_logging()` records what the library does, for a bug report.
 
@@ -118,8 +119,11 @@ from deephaven_massive._datasets.symbols import (
     canonical_symbol,
     canonical_symbol_crypto,
     canonical_symbol_forex,
+    canonical_symbol_future,
+    canonical_symbol_future_spread,
     canonical_symbol_index,
     canonical_symbol_option,
+    canonical_symbol_stock,
     canonical_symbol_stock_cms,
     canonical_symbol_stock_nasdaq,
     canonical_symbol_stock_yahoo,
@@ -150,8 +154,9 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    SessionClosedError,
 )
 from deephaven_massive._session import MassiveSession
 from deephaven_massive._tables.symbols import canonicalize_symbols
@@ -167,7 +172,7 @@ __all__ = [
     "DateLike",
     "Direction",
     "EntitlementError",
-    "ErrorCause",
+    "ErrorSource",
     "FilterValue",
     "FuturesVenue",
     "HistorySource",
@@ -182,6 +187,7 @@ __all__ = [
     "PollMode",
     "Reread",
     "SeriesType",
+    "SessionClosedError",
     "Sip",
     "Subscription",
     "SymbolConvention",
@@ -193,8 +199,11 @@ __all__ = [
     "canonical_symbol",
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
+    "canonical_symbol_future",
+    "canonical_symbol_future_spread",
     "canonical_symbol_index",
     "canonical_symbol_option",
+    "canonical_symbol_stock",
     "canonical_symbol_stock_cms",
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",

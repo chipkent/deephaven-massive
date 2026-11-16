@@ -13,7 +13,7 @@ m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `Symbol`
-- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol` and `LastTimestamp`
+- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol` and `LastQuoteParticipantTimestamp`
 
 [Dataset index](README.md)
 
@@ -45,16 +45,16 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Converted` | double | The result of the conversion. |
 | `From` | String | The "from" currency symbol. |
 | `InitialAmount` | double | The amount to convert. |
-| `LastBidPrice` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastAskPrice` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteBidPrice` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteAskPrice` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteParticipantTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
 | `To` | String | The "to" currency symbol. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -65,10 +65,10 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Converted` | `converted` |
 | `From` | `from` |
 | `InitialAmount` | `initialAmount` |
-| `LastBidPrice` | `last.bid` |
-| `LastAskPrice` | `last.ask` |
-| `LastExchange` | `last.exchange` |
-| `LastTimestamp` | `last.timestamp` |
+| `LastQuoteBidPrice` | `last.bid` |
+| `LastQuoteAskPrice` | `last.ask` |
+| `LastQuoteExchange` | `last.exchange` |
+| `LastQuoteParticipantTimestamp` | `last.timestamp` |
 | `To` | `to` |
 | `TimestampInsert` |  |
 

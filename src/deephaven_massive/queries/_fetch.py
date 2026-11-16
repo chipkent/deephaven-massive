@@ -106,10 +106,10 @@ def _read_value_table(
     """Read a table passed where the dataset takes one value, once, as `_read_symbol_table` does.
 
     A row that is not a value the dataset takes (an underlying that is not a stock or index
-    ticker) follows `MassiveConfig.unsendable_symbols` (`SymbolRowRule.for_values`).
+    ticker) follows `MassiveConfig.noncanonical_symbols` (`SymbolRowRule.for_values`).
 
     Args:
-        core: The session core, for its execution context and its `unsendable_symbols`.
+        core: The session core, for its execution context and its `noncanonical_symbols`.
         spec: The dataset.
         values: The boxed table and the argument it stands for.
         query: The `repr` of the query whose verb reads it, which the messages name.
@@ -124,12 +124,12 @@ def _read_value_table(
             for a static read, if it holds no value at all; under `RAISE`, the `ValueError` of
             `read_symbols` for a bad row.
     """
-    rule = SymbolRowRule.for_values(spec, values, core.config.unsendable_symbols)
+    rule = SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, values.table, stream_id=None)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the {values.argument} table can be sent, so "
+            f"{query}: no row of the {values.argument} table is a value this dataset takes, so "
             f"the result would read nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
@@ -242,25 +242,21 @@ class FetchQuery(Query):
                 - it runs on a Deephaven update-graph thread;
                 - the endpoint doesn't take one of the query's parameters or filters;
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
-                - no row of a table of symbols can be sent.
-            AuthenticationError: If Massive refuses your API key, including while the library
-                reads Massive's crypto ticker list.
-            EntitlementError: If Massive refuses your plan, including while the library reads
-                Massive's crypto ticker list, or delays current data whose subscription isn't in
+                - no row of a table of symbols is Massive's exact ticker.
+            AuthenticationError: With `wait=True`, if Massive rejects your API key.
+            EntitlementError: With `wait=True`, if your plan doesn't include the data, or Massive
+                delays current data whose subscription isn't in
                 `MassiveConfig.delayed_subscriptions`. The message names the setting to change.
-            MassiveError: If:
-                - the session is closed;
-                - Massive's crypto ticker list can't be read;
-                - a crypto pair is missing from that list, under
-                  `unlisted_symbols=dm.OnError.RAISE`;
+            SessionClosedError: If the session is closed.
+            MassiveError: With `wait=True`, if:
                 - a rate limit outlasts the retries;
                 - a request fails in any other way;
+                - Massive has no data for a symbol, under `unavailable_symbols=dm.OnError.RAISE`;
                 - for a watchlist, every symbol's read failed.
 
-        Without `wait=True`, an error the background read meets fails the table instead of
-        raising: it is logged and shows in `Error` of `m.streams()`. A watchlist's table fails
-        when every symbol it held at the call fails for good, such as on a plan without the
-        dataset.
+        Without `wait=True`, an error from Massive fails the table instead of raising: it is
+        logged and shows in `Error` of `m.streams()`. A watchlist's table fails when every symbol
+        it held at the call fails for good, such as on a plan without the dataset.
 
         Example:
             ::
@@ -279,8 +275,6 @@ class FetchQuery(Query):
         """Run `fetch()` as call `call`.
 
         A refreshing symbol table is followed (`_followed_fetch`). A static one is read once.
-        A crypto pair that Massive's crypto ticker list does not hold, in code or in a table,
-        follows `MassiveConfig.unlisted_symbols`.
 
         Args:
             call: The call id.
@@ -296,18 +290,17 @@ class FetchQuery(Query):
             return self._value_fetch(call, self._request.value_table, wait=wait)
         if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
             return self._followed_fetch(call, symbols, wait=wait)
-        unlisted = self._core.config.unlisted_symbols
         request = self._static_request()
         rest = self._core.rest_transport()
-        if not wait:  # a parameter error, and an unlisted pair under RAISE, raise now
-            rest.check_fetch(spec, request, split_pairs=self._splits_pairs_at_call)
+        if not wait:  # a parameter error raises now
+            rest.check_fetch(spec, request)
         return self._result(
             call,
             request,
             wait=wait,
             transport=Transport.REST,
             note=rest_recency_note(spec, self._core.config.delayed_subscriptions),
-            run=lambda stop: rest.fetch(spec, request, call=call, stop=stop, unlisted=unlisted),
+            run=lambda stop: rest.fetch(spec, request, call=call, stop=stop),
         )
 
     def _followed_fetch(self, call: int, symbols: SymbolTable, *, wait: bool) -> Table:
@@ -333,7 +326,7 @@ class FetchQuery(Query):
         request = replace(self._request, symbols=call_time)
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, the first read checks them
-            rest.check_fetch(spec, request, split_pairs=False)
+            rest.check_fetch(spec, request)
         plan = FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -352,7 +345,7 @@ class FetchQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=symbols.table,
-            rule=SymbolRowRule.of(spec, core.config.unsendable_symbols),
+            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
             reread=Reread.ALWAYS,
             plan=plan,
             note=note if recency is None else f"{note} {recency}",
@@ -382,9 +375,8 @@ class FetchQuery(Query):
         names = _read_value_table(core, spec, values, query=repr(self))
         request = self._static_request()
         rest = core.rest_transport()
-        if not wait:  # a parameter error and a pair passed in code raise now, as they would
-            splits = self._splits_pairs_at_call
-            rest.check_fetch(spec, request.for_value(names[0]), split_pairs=splits)
+        if not wait:  # a parameter error raises now
+            rest.check_fetch(spec, request.for_value(names[0]))
         return self._result(
             call,
             request,
@@ -428,8 +420,7 @@ class FetchQuery(Query):
         request = self._static_request()
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, each read checks them
-            splits = self._splits_pairs_at_call
-            rest.check_fetch(spec, request.for_value(call_time[0]), split_pairs=splits)
+            rest.check_fetch(spec, request.for_value(call_time[0]))
         plan = FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -451,7 +442,7 @@ class FetchQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=values.table,
-            rule=SymbolRowRule.for_values(spec, values, core.config.unsendable_symbols),
+            rule=SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols),
             reread=Reread.ALWAYS,
             plan=plan,
             note=note if recency is None else f"{note} {recency}",
@@ -484,7 +475,7 @@ class FetchQuery(Query):
         can fix, such as a rejected key.
 
         A poll skips a symbol it can't read and lists it in `m.streams()`. To fail the table
-        instead, set `unsendable_symbols`, `unlisted_symbols`, or `unavailable_symbols` in
+        instead, set `noncanonical_symbols` or `unavailable_symbols` in
         `MassiveConfig` to `dm.OnError.RAISE`.
 
         Args:
@@ -506,14 +497,10 @@ class FetchQuery(Query):
                 - it runs on a Deephaven update-graph thread;
                 - `interval` is shorter than 1 second or isn't finite;
                 - a news or filings feed has neither `start` nor `limit`;
-                - no row of a table of symbols can be sent;
+                - no row of a table of symbols is Massive's exact ticker;
                 - an endpoint doesn't take one of the query's parameters or filters.
-            AuthenticationError: If Massive refuses your API key, including while the library
-                reads Massive's crypto ticker list.
-            EntitlementError: If Massive refuses your plan, including while the library reads
-                Massive's crypto ticker list.
-            MassiveError: If the session is closed, Massive's crypto ticker list can't be read, or
-                a crypto pair is missing from that list under `unlisted_symbols=dm.OnError.RAISE`.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the call meets a bug in the library.
         """
         period = _interval(interval)
         asked = _require_enum(mode, PollMode, "mode")

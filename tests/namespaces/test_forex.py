@@ -12,7 +12,6 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-import re
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -205,18 +204,24 @@ def test_snapshot_rows_lead_with_their_symbol(spec: DatasetSpec) -> None:
 def test_conversion_keeps_the_vendor_symbol() -> None:
     columns = _schema(forex.CONVERSION)
     assert next(iter(columns)) == "Symbol"
-    assert {"Converted", "InitialAmount", "LastAskPrice", "LastBidPrice", "LastTimestamp"} <= set(
-        columns
-    )
-    assert columns["LastTimestamp"] is ColumnType.INSTANT
+    assert {
+        "Converted",
+        "InitialAmount",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
+    } <= set(columns)
+    assert columns["LastQuoteParticipantTimestamp"] is ColumnType.INSTANT
 
 
 # --- factories ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("symbols", ["C:eur-usd", "C:EUR/USD", "C:eurusd"])
-def test_any_pair_spelling_with_the_forex_prefix_is_sent_as_written(
-    massive_session: dm.MassiveSession, symbols: str
+@pytest.mark.parametrize(
+    "symbols", ["EUR/USD", "eur-usd", "EURUSD", "eurusd", "c:eurusd", ["EUR/USD", "C:EURUSD"]]
+)
+def test_only_the_canonical_ticker_is_taken(
+    massive_session: dm.MassiveSession, symbols: str | list[str]
 ) -> None:
     forex_ns = massive_session.forex
     factories: tuple[Callable[[str | list[str]], Query], ...] = (
@@ -227,19 +232,8 @@ def test_any_pair_spelling_with_the_forex_prefix_is_sent_as_written(
     )
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
-        assert factory(symbols)._request.symbols == (symbols,)  # Massive answers it
-
-
-@pytest.mark.parametrize("symbols", ["EURUSD", "eur-usd", "c:eurusd", "X:BTCUSD"])
-def test_a_symbol_without_the_forex_prefix_is_refused(
-    massive_session: dm.MassiveSession, symbols: str
-) -> None:
-    with pytest.raises(
-        ValueError,
-        match=rf"^forex\.quotes: '{re.escape(symbols)}' lacks the C: prefix of every forex "
-        r"ticker, such as 'C:EURUSD'; pass Massive's ticker$",
-    ):
-        massive_session.forex.quotes(symbols)
+        with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
+            factory(symbols)
 
 
 def test_quotes(massive_session: dm.MassiveSession) -> None:
@@ -383,12 +377,14 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        (["C:EURUSD", "C:GBPUSD,C:USDJPY"], "cannot send the symbol 'C:GBPUSD,C:USDJPY'"),
-        ("", "cannot send the symbol ''"),
+        ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
+        ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
+        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
+        ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
         ([], "no symbols"),
     ],
 )
-def test_pairs_no_request_can_carry_fail_at_construction(
+def test_invalid_pairs_fail_at_construction(
     massive_session: dm.MassiveSession, symbols: str | list[str], message: str
 ) -> None:
     forex_ns = massive_session.forex
@@ -785,9 +781,9 @@ def test_conversion_sends_the_pair_amount_and_precision(
         "Symbol",
         "Converted",
         "InitialAmount",
-        "LastAskPrice",
-        "LastBidPrice",
-        "LastTimestamp",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
     )
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
@@ -1192,23 +1188,9 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     assert revised == {
         "forex.snapshots": ("Updated",),
         "forex.movers": ("Updated",),
-        "forex.conversion": ("LastTimestamp",),
+        "forex.conversion": ("LastQuoteParticipantTimestamp",),
         "forex.last_quote": ("Timestamp",),
         "forex.previous_day_bar": ("TimestampStart",),
     }
     for name, keys in revised.items():
         assert set(keys) <= set(CATALOG.dataset_schema(CATALOG.by_name[name]).column_names)
-
-
-def test_a_forex_table_row_without_its_prefix_is_skipped_and_one_with_no_data_gives_no_rows(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # Under the default `unsendable_symbols`, a row without the C: prefix is skipped and
-    # never sent; a ticker with it that Massive has no data for gives no rows, not an error.
-    fake_rest.reply(
-        "/v2/snapshot/locale/global/markets/forex/tickers", Reply({"status": "OK", "tickers": []})
-    )
-    table = new_table([string_col("Symbol", ["EURUSD", "C:NODATA"])])
-    out = rest_session.forex.snapshots(table).fetch(wait=True)
-    assert out.size == 0
-    assert [query["tickers"] for _, query in fake_rest.get_queries()] == [["C:NODATA"]]

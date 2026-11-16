@@ -64,17 +64,17 @@ class ValueTable:
             chain's path segment), `"underlying_ticker"`, or `"product_code"`.
         column: The table's column that holds the values: `"Symbol"` for underlyings,
             `"ProductCode"` for product codes, as `m.futures.products()` rows carry them.
+        underlying: True when each value must be a stock or index ticker (an underlying);
+            False for a product code, which is kept as written.
         table: The user's table.
-        pairs_refused: True for the options contracts list, which answers a currency or crypto
-            pair with no error and no rows: a pair row is refused as the pair passed alone is.
         table_id: `id(table)`, the identity for equality and hashing.
     """
 
     argument: str
     parameter: str
     column: str
+    underlying: bool
     table: Table = field(compare=False)
-    pairs_refused: bool = False
     table_id: int = field(init=False)
 
     def __post_init__(self) -> None:

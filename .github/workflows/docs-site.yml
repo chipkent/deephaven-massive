@@ -1,0 +1,77 @@
+name: Docs site
+
+# Publishes the documentation site, the user pages and the API reference that zensical.toml
+# describes, to GitHub Pages from each push to main. Both jobs stay off until the repository
+# variable PUBLISH_DOCS is exactly "true" (Settings, Secrets and variables, Actions, Variables);
+# unset, or any other value, skips them, so a merge publishes nothing. Turning it on takes two
+# steps: set Settings, Pages, Source to "GitHub Actions", then set PUBLISH_DOCS. The CI workflow's
+# site job builds the same site, checking links and docstrings, on every pull request that changes
+# its sources, so a broken page fails there before it reaches main.
+#
+# The deployment lives in a workflow of its own because the release workflow calls ci.yml with
+# read-only permissions, and a called workflow whose job asks for more fails to start, even
+# when that job would be skipped.
+
+on:
+  push:
+    branches: [main]
+  # Publishes main again by hand, such as right after PUBLISH_DOCS is set.
+  workflow_dispatch:
+
+concurrency:
+  # One deployment at a time, never cancelled: GitHub Pages refuses a deployment while another
+  # is in progress, and a cancelled one can leave the site half replaced.
+  group: docs-site
+  cancel-in-progress: false
+
+# Each job asks for what it needs and nothing more.
+permissions: {}
+
+jobs:
+  build:
+    name: build the site
+    if: ${{ vars.PUBLISH_DOCS == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # uv reads the project's metadata, whose version comes from the git history and tags.
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # No uv.lock is committed; key the cache on the declared dependencies.
+          cache-dependency-glob: pyproject.toml
+      - name: Set up Python
+        run: uv python install 3.14
+      - name: Build the site
+        # The site group holds the site generator and its API reference plugin, which reads the
+        # package source without importing it, so the project itself is not installed.
+        run: uv run --python 3.14 --only-group site zensical build --strict --clean
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: publish to GitHub Pages
+    needs: build
+    if: ${{ vars.PUBLISH_DOCS == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      # Publishing the uploaded site, and the token GitHub signs to prove where it came from.
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

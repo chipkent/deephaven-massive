@@ -81,10 +81,13 @@ from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     BrokenGuaranteeError,
+    ErrorSource,
     MassiveError,
     library_bug,
     required,
+    source_of,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
@@ -108,6 +111,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
     from deephaven_massive._massive import DriftReport
+    from deephaven_massive._tables.publisher import Publisher
 
 __all__ = [
     "CONNECTIONS",
@@ -245,8 +249,8 @@ class NotePart(StrEnum):
     STALE_SYMBOLS = "stale_symbols"
     """`dm.ALL` symbols whose rows are being dropped, so their last values may be stale."""
     SKIPPED_PAIRS = "skipped_pairs"
-    """Crypto pairs a symbol table added that the stream skips: Massive's crypto ticker list
-    does not split them, or could not be read."""
+    """Crypto pairs, passed in code or added by a symbol table, that the stream skips:
+    Massive's crypto ticker list does not split them, or could not be read."""
     POLL_CYCLE = "poll_cycle"
     """A `poll()` cycle failed; the next one runs as scheduled."""
     LEFT_OUT = "left_out"
@@ -488,8 +492,8 @@ class StreamRow:
             (`transport:field+` for an extra field, `transport:field-` for a missing one,
             `transport:field?` for one that held a value that does not fit); null while there
             is none. Separate from `error`, so drift never hides a failure.
-        skipped: The symbol-table values the stream or poll skips because no request
-            can carry them (`skipped_rows_text` in `_tables/watchlist.py`); null while none
+        skipped: The symbol-table values the stream or poll skips because they are not
+            Massive's tickers (`skipped_rows_text` in `_tables/watchlist.py`); null while none
             is. Not a column of its own: the `Error` column shows it after `notes` while the
             stream runs (`as_row`).
         notes: The current warnings that leave the stream running, each a named part, in
@@ -1141,12 +1145,13 @@ class _KeyedTable:
         """
         self.name: Final = name
         self.schema: Final = schema
-        blink, self.publisher = blink_publisher(
+        blink, publisher = blink_publisher(
             name,
             col_defs(schema),
             on_shutdown=functools.partial(_log_shut_down, name),
             release_later=release_later,
         )
+        self.publisher: Publisher = publisher
         self.table: Final = blink.last_by(list(keys))
 
     def add(self, rows: Sequence[ConnectionRow | StreamRow | RateLimitRow | SymbolReadRow]) -> None:
@@ -1598,12 +1603,14 @@ def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
         death: What ended the thread.
 
     Returns:
-        Such as `MassiveError("MassiveSession #1: its reaper thread died (SystemExit()); this
-        table no longer updates")`.
+        Such as `MassiveError("MassiveSession #1: its reaper thread died (KeyboardInterrupt());
+        this table no longer updates; open a new dm.MassiveSession() to read again")`. A death
+        of an `Exception` is a bug, whose message says how to report it instead.
     """
-    return MassiveError(
-        f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
-    )
+    source = source_of(death)
+    text = f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
+    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}; {NEW_SESSION}"
+    return MassiveError(message, source=source)
 
 
 def _pascal_case(name: str) -> str:

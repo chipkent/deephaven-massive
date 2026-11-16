@@ -16,6 +16,7 @@ from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Ord
 from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
+from deephaven_massive._tables.transports import Unsplit
 
 R = Transport.REST
 
@@ -508,7 +509,7 @@ def test_symbol_request_fills_a_pair_with_its_two_currencies() -> None:
     path = _rest_path(CRYPTO_LAST_PATH)
     assert rest_requests._symbol_request(
         CRYPTO_LAST, "X:BTCUSD", path, targets=["from"], param=None, split=split_pair
-    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {})
+    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {}, None)
 
 
 def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
@@ -522,20 +523,31 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     path = _rest_path("/v2/reference/news")
     assert rest_requests._symbol_request(
         news, "AAPL", path, targets=[], param="ticker", split=split_pair
-    ) == ("AAPL", {}, {"ticker": "AAPL"})
+    ) == ("AAPL", {}, {"ticker": "AAPL"}, None)
 
 
-def test_a_forex_symbol_without_its_prefix_is_sent_whole() -> None:
-    # Codes are derived only from Massive's `C:` form; other text goes on the wire as written,
-    # and Massive answers it.
-    spec = DatasetSpec(
-        name="forex.last_quote",
-        summary="A dataset for the tests.",
-        asset_class=AssetClass.FOREX,
-        fetch_path="/v1/last_quote/currencies/{from}/{to}",
+def test_a_pair_with_no_split_is_a_call_that_is_never_sent() -> None:
+    # The call carries why, so the read reports the pair without sending anything.
+    path = _rest_path(CRYPTO_LAST_PATH)
+    missing = Unsplit("not listed", no_data=True)
+    calls = rest_requests.plan_calls(
+        CRYPTO_LAST, path, Request(), symbols=("X:DOTUSD",), split=lambda _: missing
     )
-    assert rest_requests._pair(spec, "C:EURUSD", split_pair) == ("EUR", "USD")
-    assert rest_requests._pair(spec, "EURUSD", split_pair) == ("EURUSD", "")
+    assert [(call.symbol, call.path_params, call.unsplit) for call in calls] == [
+        ("X:DOTUSD", {}, missing)
+    ]
+
+
+def test_a_split_with_an_outcome_no_case_names_is_refused() -> None:
+    path = _rest_path(CRYPTO_LAST_PATH)
+    with pytest.raises(AssertionError):
+        rest_requests.plan_calls(
+            CRYPTO_LAST,
+            path,
+            Request(),
+            symbols=("X:DOTUSD",),
+            split=lambda _: None,  # type: ignore[arg-type,return-value]  # the point: refused
+        )
 
 
 def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:

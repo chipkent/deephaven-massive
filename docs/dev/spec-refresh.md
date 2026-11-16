@@ -19,6 +19,8 @@ gate, and what to do when a refresh adds something new.
   (JDK 17 or later).
 - **The hand input**: the only place a person adds knowledge the vendor's specifications lack.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
+  Hand input names, groups, and verifies; it never lists a schema's columns, and an entry that
+  names something the snapshot no longer generates fails the refresh.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
   - `refresh/overrides.py`: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES`,
     `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
@@ -30,6 +32,12 @@ gate, and what to do when a refresh adds something new.
   its pages, rendered by
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
+
+A schema is fixed before data arrives, merged at run time from the generated files and never
+inferred from data: a live table needs its full column set before its first row, the first
+message may omit optional fields, and two sessions must agree on a shape. Each dataset page
+links only its own Massive documentation: for a source several classes share, its own class's
+page.
 
 Never edit `spec/*.json` or `docs/datasets/` by hand. Their parity tests compare them byte for
 byte with what the generators produce.
@@ -59,7 +67,7 @@ uv run pytest tests/datasets/test_column_reference.py -q     # the column-refere
    they are different fields that happen to share a text, add a `SHARED_DESCRIPTIONS` entry
    saying why. If the documentation leaves any doubt, write a live test that reads both fields
    for one symbol back to back, record a verification item, and ask the owner before renaming
-   ([decision 101](decisions.md)).
+   ([decision 101](decisions/0101-same-field-one-column-name-across-datasets-spellings.md)).
 4. A vendor description that is clearly wrong for its source (another asset class's or event's
    text, or a statement Massive's own documentation of the field contradicts) is corrected the
    same way, by a `DESCRIPTION_FIXES` entry that quotes it.
@@ -97,6 +105,10 @@ be read by a dataset. When a refresh adds one, the same pull request adds a data
 source for good, or defers it with an issue. The module docstring of `refresh/exclusions.py`
 explains the three choices, and the coverage test in `tests/datasets/test_catalog.py` says what
 it expects when it fails. An exclusion never means "not yet".
+
+Which endpoints the library supports: every documented one, plus a new one the specification
+has before the documentation catches up. A deprecated or sunset endpoint is excluded with its
+reason, and an undocumented one is not supported.
 
 A new dataset's columns must not bring a second name for a field another dataset already has.
 The `field-spelling` gate catches the fields Massive documents with the same text; it cannot

@@ -16,9 +16,10 @@ already trades for the next session.
   session per `session_end_date`, open from its first event (a pre-open or the open) to its
   last (the close).
 
-Every ticker is looked up as written, a combo (`GCQ6-GCJ7`, `BOB 02-01 U6`) included: Massive's
-contracts list says which product it belongs to, if any, and that product's schedule places its
-rows. A ticker the list does not hold, or whose product has no schedule, is a miss (below).
+Only a single contract ticker is looked up (`symbols.is_futures_contract`). Every other futures
+ticker is a spread or combination (`GCQ6-GCJ7`, `BOB 02-01 U6`, `BZ:BF F7-G7-H7`,
+`6A:XF:AUDUSD:Q6`): `/futures/v1/contracts` lists none of them, and Massive documents no grammar
+that names their legs. The schedules cannot place their rows, so they are misses (below).
 
 A futures stream's verb asks for its contracts (`watch`) and waits, bounded, until their
 products and schedules are loaded (`wait_loaded`), before the stream subscribes, so its first
@@ -27,8 +28,8 @@ on the session's `symbol changes` worker (`_ingest/ws.py`).
 
 `correct` runs on the connection's flush thread and never waits: a row inside a loaded session
 gets that session's date, and a row in the gap between a close and the next loaded session's
-first event gets the next session's date. A row the calendar cannot place is a miss: a contract
-or product still loading (a contract a `dm.ALL` stream adds, or one whose wait
+first event gets the next session's date. A row the calendar cannot place is a miss: a spread,
+a contract or product still loading (a contract a `dm.ALL` stream adds, or one whose wait
 ran out), a row before the first or past the last loaded session, a
 contract Massive's contracts do not list, or a lookup that failed. A miss gets a null `Date`,
 never the 17:00 rule's: without the schedule the rule can be wrong on any weekday (a holiday
@@ -71,14 +72,12 @@ import pyarrow as pa
 
 from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
+from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._enums import Subscription
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    BrokenGuaranteeError,
-    ErrorCause,
     MassiveError,
     failure_text,
-    library_bug,
 )
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._ingest.rest_requests import largest_page
@@ -193,21 +192,20 @@ class ScheduledSession:
     closes: int
 
 
-def _lookup_keys(items: list[object]) -> tuple[set[str], set[str]]:
+def _lookup_keys(items: list[object]) -> tuple[set[str], set[str], list[object]]:
     """Sort queued lookups into the contracts and the products whose schedules to load.
 
     Args:
         items: What the worker took from its queue at once, `_STOP` excepted.
 
     Returns:
-        The contracts, and the products.
-
-    Raises:
-        BrokenGuaranteeError: If an item is not a lookup `FuturesCalendar._put` queues, rather
-            than taking it for one.
+        The contracts, the products, and every item that is not a lookup
+        `FuturesCalendar._put` queues. Such an item is a defect of the library: it is set
+        apart, never taken for a lookup, so the caller logs it and still loads the others.
     """
     contracts: set[str] = set()
     products: set[str] = set()
+    strays: list[object] = []
     for entry in items:
         match entry:
             case ("contracts", frozenset() as keys):
@@ -215,8 +213,8 @@ def _lookup_keys(items: list[object]) -> tuple[set[str], set[str]]:
             case ("schedules", frozenset() as keys):
                 products.update(keys)
             case _:
-                raise BrokenGuaranteeError(library_bug(f"the futures lookup queue holds {entry!r}"))
-    return contracts, products
+                strays.append(entry)
+    return contracts, products, strays
 
 
 class FuturesCalendar:
@@ -299,9 +297,10 @@ class FuturesCalendar:
         table adds some, so their rows are usually placed from the first one.
 
         Args:
-            symbols: Futures tickers, contracts or combos, each looked up as written.
+            symbols: Canonical futures symbols, contracts or spreads; spreads are not looked
+                up.
         """
-        self._ask_contracts(set(symbols))
+        self._ask_contracts({symbol for symbol in symbols if is_futures_contract(symbol)})
 
     def wait_loaded(self, symbols: Iterable[str], timeout: float, *, stop: threading.Event) -> bool:
         """Wait until the products and schedules of some contracts are loaded, or failed.
@@ -313,7 +312,8 @@ class FuturesCalendar:
         the timeout. Never call it on a flush or update-graph thread, which must not wait.
 
         Args:
-            symbols: Futures tickers.
+            symbols: Canonical futures symbols; spreads are skipped, as they are never looked
+                up.
             timeout: The most seconds to wait.
             stop: Ends the wait early: set it, then call `wake()`. The waiting session's close
                 does so, while the calendar, which other sessions share, stays open.
@@ -323,7 +323,7 @@ class FuturesCalendar:
             and every product's schedule is loaded (or failed), or the calendar has closed;
             False when `timeout` passed first or `stop` ended the wait.
         """
-        contracts = set(symbols)
+        contracts = {symbol for symbol in symbols if is_futures_contract(symbol)}
 
         def settled() -> bool:
             if self._closed:
@@ -392,6 +392,10 @@ class FuturesCalendar:
                 continue
             if day is None:
                 continue
+            if not is_futures_contract(symbol):
+                batch.misses[symbol, symbol, day, _SPREAD] = None
+                fixed[row] = None
+                continue
             fixed[row] = self._place(symbol, known, moment=moment, day=day, batch=batch)
         if batch.contracts:
             self._ask_contracts(batch.contracts)
@@ -448,13 +452,6 @@ class FuturesCalendar:
         if product is None or sessions is None:
             key, why = self._unloaded(symbol, product, known=known, batch=batch)
             batch.misses[symbol, key, day, why] = None
-            return None
-        if not sessions:
-            # Massive's schedules list no session for the product (a combo's, say): the daily
-            # reload of every loaded schedule picks up any it adds, so a miss asks for none.
-            batch.misses[
-                symbol, product, day, f"its loaded schedule ({product}) holds no session"
-            ] = None
             return None
         opens = batch.opens.get(product)
         if opens is None:
@@ -604,10 +601,16 @@ class FuturesCalendar:
                     break
             if any(entry is _STOP for entry in items):
                 return
-            contracts: set[str] = set()
-            products: set[str] = set()
+            contracts, products, strays = _lookup_keys(items)
+            for stray in strays:
+                logger.error(
+                    "%s: futures schedules: the lookup queue holds %r, which is no lookup; the "
+                    "worker skips it and loads the others. %s",
+                    self._label,
+                    stray,
+                    LIBRARY_BUG,
+                )
             try:
-                contracts, products = _lookup_keys(items)
                 if contracts:
                     products |= self._load_contracts(contracts)
                 if products:
@@ -615,11 +618,16 @@ class FuturesCalendar:
             except Exception as error:  # a defect or a malformed answer: the worker carries on
                 with self._lock:
                     closed = self._closed
+                why = f"looking it up failed: {error!r}"
                 if not closed:
                     logger.exception(
-                        "%s: futures schedules: a lookup failed. %s", self._label, LIBRARY_BUG
+                        "%s: futures schedules: %s (%s). %s",
+                        self._label,
+                        why,
+                        ", ".join(sorted(contracts | products)),
+                        LIBRARY_BUG,
                     )
-                self._failure(contracts | products, f"looking it up failed: {error!r}")
+                self._failure(contracts | products, why)
                 with self._lock:
                     unknown = {c: None for c in contracts if c not in self._products}
                     self._products = MappingProxyType({**self._products, **unknown})
@@ -649,7 +657,7 @@ class FuturesCalendar:
                         if isinstance(ticker, str) and isinstance(product, str) and ticker in found:
                             found[ticker] = found[ticker] or product
         except MassiveError as error:
-            self._failure(contracts, f"looking up its product failed: {error}", cause=error.cause)
+            self._failure(contracts, f"looking up its product failed: {error}", error)
             with self._lock:
                 unknown = {c: None for c in contracts if c not in self._products}
                 self._products = MappingProxyType({**self._products, **unknown})
@@ -678,7 +686,7 @@ class FuturesCalendar:
             with Cancel(self._stop) as lane:  # the lookup's own lane in the futures bucket
                 rows = self._fetch(self._schedules_path, query, bucket=_BUCKET, cancel=lane)
         except MassiveError as error:
-            self._failure(products, f"loading its schedule failed: {error}", cause=error.cause)
+            self._failure(products, f"loading its schedule failed: {error}", error)
             return
         events: dict[str, dict[date, list[int]]] = {product: {} for product in products}
         for row in rows:
@@ -705,32 +713,40 @@ class FuturesCalendar:
                 self._loaded[product] = self._asked[product] = now
                 self._failed.pop(product, None)
 
-    def _failure(
-        self, keys: set[str], why: str, *, cause: ErrorCause = ErrorCause.EXPECTED
-    ) -> None:
+    def _failure(self, keys: set[str], why: str, error: MassiveError | None = None) -> None:
         """Record that loading some contracts or products failed, and log it once.
 
         Their rows are misses, with a null `Date`; they are asked for again after
         `RELOAD_SPACING`. Nothing is logged once the calendar is closed: a lookup cut short by
         the session closing is no failure. The streams keep running, so an expected failure
         (a refusal, a network failure) logs a WARNING; a defect, such as an answer the library
-        cannot read, logs an ERROR saying whose it is.
+        cannot read, logs an ERROR saying whose it is. A failure that is no `MassiveError` is
+        logged by the caller, with its trace, and not again here.
 
         Args:
             keys: The contracts or products.
             why: The failure, for the log and the misses.
-            cause: Whose problem the failure is; expected by default.
+            error: The `MassiveError` that failed the lookup, whose source the record names and
+                whose `is_bug` sets the level; None for any other failure, which the caller has
+                logged with its trace.
         """
         with self._lock:
             closed = self._closed
             for key in keys:
                 self._failed[key] = why
-        if not closed:
+        if not closed and error is not None:
             logger.log(
-                logging.WARNING if cause is ErrorCause.EXPECTED else logging.ERROR,
+                logging.ERROR if error.is_bug else logging.WARNING,
                 "%s: futures schedules: %s",
                 self._label,
-                failure_text(MassiveError(f"{why} ({', '.join(sorted(keys))})", cause=cause)),
+                failure_text(
+                    MassiveError(
+                        f"{why} ({', '.join(sorted(keys))})",
+                        source=error.source,
+                        is_bug=error.is_bug,
+                    )
+                ),
+                exc_info=error if error.is_bug else None,
             )
 
 
@@ -742,6 +758,9 @@ waits for its contracts' schedules (`wait_loaded`), so these are the rows of con
 reactive table or a `dm.ALL` stream adds, until their lookup ends; a lookup that fails logs a
 WARNING of its own (`_failure`)."""
 
+_SPREAD: Final = "a spread or combination is never looked up in Massive's schedules"
+"""The reason of a miss whose symbol is not a single contract (`symbols.is_futures_contract`)."""
+
 
 def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bool) -> str:
     """Return why a row outside a product's loaded sessions is a miss.
@@ -751,12 +770,14 @@ def _outside(product: str, sessions: tuple[ScheduledSession, ...], *, before: bo
 
     Args:
         product: The product.
-        sessions: Its loaded sessions, oldest first; at least one.
+        sessions: Its loaded sessions, oldest first; possibly none.
         before: True for a row before the first session, False for one after the last.
 
     Returns:
         The reason, such as `its loaded schedule (ES) ends with the session of 2024-04-01`.
     """
+    if not sessions:
+        return f"its loaded schedule ({product}) holds no session"
     if before:
         return f"its loaded schedule ({product}) begins with the session of {sessions[0].day}"
     return f"its loaded schedule ({product}) ends with the session of {sessions[-1].day}"

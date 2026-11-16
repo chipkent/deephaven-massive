@@ -560,10 +560,11 @@ def test_a_failing_scope_release_still_notifies_the_owner(dh_exec_ctx: Execution
     notified: list[str] = []
     broken: LivenessScope = BrokenScope()  # type: ignore[assignment]  # a fake whose release fails
     record = ResultRecord(broken, lambda: notified.append("released"))
-    unused: Reaper = None  # type: ignore[assignment]  # the reap under test never uses it
+    reaper = Reaper(dh_exec_ctx, "unused-reaper")  # the reap under test never uses it
     with pytest.raises(RuntimeError, match="cannot release"):
-        ResultRegistry(threading.RLock(), unused, dh_exec_ctx)._reap(record)
+        ResultRegistry(threading.RLock(), reaper, dh_exec_ctx)._reap(record)
     assert notified == ["released"]
+    reaper.stop()
 
 
 class _Fatal(BaseException):

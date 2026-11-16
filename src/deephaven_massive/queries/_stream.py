@@ -144,11 +144,9 @@ class StreamQuery(Query):
         which has none, gets `ALL`: the stream subscribes its channel's every topic. A static
         table cannot be listened to, so it is read now, like `fetch()` reads one
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
-        stays reactive. A static table with no symbol, with only rows no request can carry,
-        or with any such row under `unsendable_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped. A crypto pair that
-        Massive's crypto ticker list does not hold follows `unlisted_symbols` when the stream
-        opens.
+        stays reactive. A static table with no symbol, with only rows that are not canonical,
+        or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
 
         Args:
             verb: The stream method called, such as `"blink"`, which a refusal names.
@@ -175,13 +173,10 @@ class StreamQuery(Query):
         The result is the shape, described last (`describe`): an append-only or ring table
         copies no attributes, so describing the blink table first would lose them. The schema
         is read before the stream is acquired, so the result is built under no library lock.
-        A reactive symbol table is read first, so a row no request can carry
+        A reactive symbol table is read first, so a row that is not Massive's exact ticker
         fails the call before any stream starts. A crypto pair takes its split from Massive's
-        crypto ticker list when the stream starts (read once per session). A pair the list does
-        not hold, at the call or added later, follows `MassiveConfig.unlisted_symbols`: skipped
-        and listed in `m.streams()` under `LOG` and `IGNORE`, and raised as `MassiveError` before
-        any topic is subscribed under `RAISE`. A list that cannot be read fails the call or the
-        stream under any setting.
+        crypto ticker list, read once per session, after the stream opens, wherever the pair
+        came from (`StreamTransport.open_stream`).
 
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
@@ -236,27 +231,22 @@ class StreamQuery(Query):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
-            AuthenticationError: If Massive refuses your API key at the call, including while the
-                library reads Massive's crypto ticker list. A later refusal fails the table
-                instead.
-            EntitlementError: If Massive refuses your plan while the library reads Massive's
-                crypto ticker list, or Massive's data for this dataset is delayed and its
-                subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
-                the setting to change. For the options admin messages, which stream only in real
-                time, a delayed label means your plan lacks the dataset, and the message links the
-                page that lists the plans that include it.
-            MassiveError: If:
-                - the session is closed;
-                - the stream fails while it opens;
-                - Massive's crypto ticker list can't be read when the call reads it;
-                - a crypto pair is missing from that list, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            AuthenticationError: If Massive rejects your API key while the call checks which feed
+                your plan streams. A later rejection fails the table instead.
+            EntitlementError: If Massive's data for this dataset is delayed and its subscription
+                isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
 
@@ -281,27 +271,22 @@ class StreamQuery(Query):
         Raises:
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
-            AuthenticationError: If Massive refuses your API key at the call, including while the
-                library reads Massive's crypto ticker list. A later refusal fails the table
-                instead.
-            EntitlementError: If Massive refuses your plan while the library reads Massive's
-                crypto ticker list, or Massive's data for this dataset is delayed and its
-                subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
-                the setting to change. For the options admin messages, which stream only in real
-                time, a delayed label means your plan lacks the dataset, and the message links the
-                page that lists the plans that include it.
-            MassiveError: If:
-                - the session is closed;
-                - the stream fails while it opens;
-                - Massive's crypto ticker list can't be read when the call reads it;
-                - a crypto pair is missing from that list, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            AuthenticationError: If Massive rejects your API key while the call checks which feed
+                your plan streams. A later rejection fails the table instead.
+            EntitlementError: If Massive's data for this dataset is delayed and its subscription
+                isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the stream fails while it opens.
         """
         return self._stream(
             blink_to_append_only, self._stream_request("append_only"), verb="append_only"
@@ -332,27 +317,22 @@ class StreamQuery(Query):
             ValueError: At the call, before the table exists, if:
                 - `capacity` is out of range;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
-            AuthenticationError: If Massive refuses your API key at the call, including while the
-                library reads Massive's crypto ticker list. A later refusal fails the table
-                instead.
-            EntitlementError: If Massive refuses your plan while the library reads Massive's
-                crypto ticker list, or Massive's data for this dataset is delayed and its
-                subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
-                the setting to change. For the options admin messages, which stream only in real
-                time, a delayed label means your plan lacks the dataset, and the message links the
-                page that lists the plans that include it.
-            MassiveError: If:
-                - the session is closed;
-                - the stream fails while it opens;
-                - Massive's crypto ticker list can't be read when the call reads it;
-                - a crypto pair is missing from that list, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            AuthenticationError: If Massive rejects your API key while the call checks which feed
+                your plan streams. A later rejection fails the table instead.
+            EntitlementError: If Massive's data for this dataset is delayed and its subscription
+                isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
+                change. For the options admin messages, which stream only in real time, a delayed
+                label means your plan lacks the dataset, and the message links the page that
+                lists the plans that include it.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the stream fails while it opens.
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
@@ -370,8 +350,8 @@ class SymbolStreamQuery(StreamQuery):
 
     The symbols can be a list, a static table, which is read once at the call, or a live table,
     which works as a watchlist: the stream subscribes and unsubscribes as you add and delete
-    rows. By default, a watchlist row that is empty or holds `,` or `*` is
-    skipped and listed in `m.streams()`.
+    rows. A watchlist row that isn't Massive's exact ticker is skipped and listed in
+    `m.streams()`.
     Massive allows 1,000 option contracts on one connection, and the library counts a
     contract's trades and quotes as two. More contracts than that, passed as a list or a static
     table, raise `ValueError`; a watchlist's extra contracts wait for room, and `Deferred` in
@@ -456,25 +436,20 @@ class SymbolStreamQuery(StreamQuery):
             ValueError: At the call, before the table exists, if:
                 - `by` is empty, repeats a column, or names a column the dataset doesn't have;
                 - it runs on a Deephaven update-graph thread;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
                 - the query is of bars that don't stream: only 1-second and 1-minute bars with
                   `multiplier=1` do;
                 - the dataset is fair market value, which streams only in real time, and
                   `MassiveConfig.delayed_subscriptions` lists its subscription.
-            AuthenticationError: If Massive refuses your API key at the call, including while the
-                library reads Massive's crypto ticker list. A later refusal fails the table
-                instead.
-            EntitlementError: If Massive refuses your plan while the library reads Massive's
-                crypto ticker list, or Massive's data for this dataset is delayed and its
-                subscription isn't in `MassiveConfig.delayed_subscriptions`. The message names
-                the setting to change.
-            MassiveError: If:
-                - the session is closed;
-                - the stream fails while it opens;
-                - Massive's crypto ticker list can't be read when the call reads it;
-                - a crypto pair is missing from that list, under
-                  `unlisted_symbols=dm.OnError.RAISE`.
+            AuthenticationError: If Massive rejects your API key while the call checks which feed
+                your plan streams. A later rejection fails the table instead.
+            EntitlementError: If Massive's data for this dataset is delayed and its subscription
+                isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
+                change.
+            SessionClosedError: If the session is closed.
+            MassiveError: If the stream fails while it opens.
         """
         keys = self._last_by_keys(by)
         request = self._stream_request("last_by")

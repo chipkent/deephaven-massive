@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.refresh import __main__ as command
 from deephaven_massive._massive.refresh import drift, fetch, generate, render, snapshot
@@ -115,7 +116,11 @@ def test_check_writes_the_report_to_its_file_and_exits_one_on_drift(
     [
         fetch.FetchError("GET https://api.massive.com/openapi answered HTTP 503"),
         RefreshError([Problem(gate=Gate.SNAPSHOT, source="", key="x", message="edited")]),
-        WireError("HTTP 403 for s3://flatfiles/ at https://files.massive.com", status=403),
+        WireError(
+            "HTTP 403 for s3://flatfiles/ at https://files.massive.com",
+            status=403,
+            kind=WireFailure.REFUSED,
+        ),
         RecursionError("maximum recursion depth exceeded"),
     ],
     ids=["download", "snapshot", "bucket", "recursion"],

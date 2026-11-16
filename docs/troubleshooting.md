@@ -35,9 +35,7 @@ error fails its table, and shows in the `Error` column of its row in `m.streams(
 |---|---|---|
 | A `fetch()` or `history()` table has no rows | The download is still running, it failed, or Massive had no rows. | Find the read's row in `m.streams()`. `LOADING` means its rows are on their way, `FAILED` has the reason in `Error`, and `DONE` means Massive had no rows, as "No rows for a symbol" explains. A watchlist's read shows `RUNNING` once each symbol has been read, and `m.symbol_reads()` shows each symbol's result. |
 | `try`/`except` around `fetch()` or `history()` doesn't catch Massive's error | The call returned before Massive answered, and the error went to the table. | Pass `wait=True` to wait for Massive's answer, so its error raises in the call. |
-| No rows for a symbol | Massive has no data for it in that range, the company changed its ticker, or the symbol isn't Massive's spelling of the ticker. | Look up Massive's ticker by name, such as `m.reference.tickers(search="Berkshire").fetch()`, and pass that ticker. For a renamed company, list its ticker changes with `m.reference.ticker_events("META").fetch()`. |
-| `ValueError: ... 'AAPL' lacks the O: prefix of every options contract ticker ...` | An options, index, forex, or crypto dataset got a symbol without its class's prefix: `O:`, `I:`, `C:`, or `X:`. | Add the prefix the message names, as in `O:AAPL250117C00150000`, `I:SPX`, `C:EURUSD`, or `X:BTCUSD`. To read a stock, use the `m.stocks` dataset instead. |
-| `ValueError: cannot send the symbol ...` | The symbol is empty, or holds `,` or `*`. Massive reads `,` as a separator between tickers, and its streams read `*` as every ticker. | Pass each symbol on its own, as `["AAPL", "MSFT"]`, not `"AAPL,MSFT"`. For every symbol, pass `dm.ALL` where the dataset takes it. |
+| No rows for a symbol | Massive has no data for it in that range, or the company changed its ticker. | List the ticker's changes with `m.reference.ticker_events("META").fetch()`. |
 | `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The plan table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
 | `EntitlementError: the plan does not include ... futures flat files ...` | You named an exchange in `venues` whose flat files your plan doesn't include. | Leave `venues` out to read every exchange your plan allows, name only those exchanges, or pass `refused_venues=dm.OnError.LOG` to skip the refused one. To skip refused exchanges in every call, set `refused_venues` in [`MassiveConfig`](configuration.md#settings-reference). |
 | `EntitlementError: the plan does not include the flat files of any venue requested ...` | Your plan includes no flat files of the exchanges the read asked for. | Name in `venues` only the exchanges your plan includes. If your plan has no flat files for this dataset, read REST instead: pass contract tickers such as `ESZ6` in place of `dm.ALL`, with `source=dm.HistorySource.REST`, if your plan includes the dataset's REST data. The Plans table on each futures page of the [dataset reference](datasets/README.md) shows what each plan includes. |
@@ -59,7 +57,9 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | A stock table stays empty | No stock trades while the market is closed. | Check whether the market is open with `m.reference.market_status().fetch()`. |
 | Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. Leave out `wait=True` from `fetch()` and `history()`: the call returns at once, and its table fills in the background. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
-| A symbol on your watchlist never appears | Massive has no data for it, or its row was skipped. | The result's `m.streams()` row lists each skipped row in `Error`: an empty value, one with `,` or `*`, one without its class's prefix (`O:`, `I:`, `C:`, or `X:`), or, in a crypto stream or `poll()`, a pair that isn't on Massive's crypto ticker list. Fix or delete it. A followed `fetch()` shows such a pair as `DONE` with 0 rows in `m.symbol_reads()`. If nothing is listed, see "No rows for a symbol". [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class, and `help(dm.canonicalize_symbols)` shows how to convert a table of other spellings to it. |
+| A watchlist row never appears, and `Error` names its value | The value isn't Massive's exact ticker, so the table skips the row. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class. |
+| A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. The log names the value. | Run `.where("isNull(Symbol)")` on the converted table to list such rows, and fix them in the table you started from. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
+| A symbol gets no rows, and the log says Massive has no data for it | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
 | `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
 | `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise `max_outage` in [`MassiveConfig`](../README.md#massive-config). |
 | `over capacity: <n>/1000; <k> deferred` in `Error` | Massive allows 1,000 option contracts on one connection, and the library counts a contract's trades and its quotes as two. | Watch fewer contracts. The waiting ones subscribe as others leave. |
@@ -67,6 +67,53 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | `ValueError: ... only 1-second and 1-minute bars at multiplier=1 stream ...` | You called a stream method, such as `last_by()`, on bars Massive doesn't stream. | Pass `dm.Timespan.SECOND` or `dm.Timespan.MINUTE` and leave `multiplier` at 1, or read these bars with `history(start, end)`. |
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
 | A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
+
+<a id="handle-errors"></a>
+
+## Handle errors in code
+
+In a program, read with `wait=True`, so that Massive's errors raise in the call instead of
+failing the table. `dm.MassiveError` covers every error Massive reports and every failure
+inside a method of a query, such as `fetch()` or `last_by()`. A wrong argument raises
+`TypeError` or `ValueError` at the call. Branch on these attributes of a `dm.MassiveError`,
+never on its message:
+
+| Attribute | What it says |
+|---|---|
+| `is_retryable` | `True` when the same call may succeed later, such as after a rate limit (HTTP 429), a failure on Massive's side (HTTP 500, 502, 503, or 504), a connection that kept failing, or a flat file Massive has not published yet. `False` when it can't, such as for a plan that lacks the data, a refused key, a closed session, or a bug. |
+| `is_bug` | `True` for a defect: a bug in the library, or a problem the library caught in your code, such as a watchlist table that failed. The message says how to report the bug, or how to fix your code. |
+| `source` | What stopped the call, as a `dm.ErrorSource`: `MASSIVE` (Massive refused or failed), `NETWORK` (no answer came, such as from a connection that kept failing), `USER` (your code or settings), or `LIBRARY` (a library bug). Later versions may add sources, so handle values you don't know. |
+| `status` | The HTTP status of the answer, such as Massive's 404 or a proxy's 407, or `None` when there was none. |
+
+This example reads Apple's dividends, up to three times, a minute apart:
+
+```python
+import time
+
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+for attempt in range(3):
+    try:
+        dividends = m.stocks.dividends("AAPL").fetch(wait=True)
+        break
+    except dm.MassiveError as e:
+        if e.is_bug:
+            print(f"Report or fix this: {e}")
+        if not e.is_retryable or attempt == 2:
+            raise
+        time.sleep(60)
+```
+
+Before it raises a rate limit, a server failure, or a connection that kept failing, the library
+has already retried, so wait before you call again.
+
+`fetch()` and every other query method raise `dm.SessionClosedError` once you call
+`m.close()`, and so does `m.streams()`. Create a new session to read again.
+
+A `fetch()` or `history()` of a watchlist fails when Massive rejects the API key, or when every
+symbol on the watchlist at the call failed. When only some fail, such as when Massive refuses one
+symbol's request, the log reports them and `m.symbol_reads()` shows each one's error.
 
 <a id="diagnostics"></a>
 

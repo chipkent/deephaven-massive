@@ -40,6 +40,7 @@ from deephaven_massive._errors import (
     raises_through,
     unmatched_form,
 )
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import utc_text
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
@@ -231,14 +232,16 @@ class HistoryQuery(Query):
                 - a bound is a `datetime` without a time zone, unreadable text, or `NaT`;
                 - one bound is a date and the other a time;
                 - `start` is after `end`, or in the future when `end` is left out;
-                - a static table of symbols is empty, or no row of a table of symbols can be sent;
+                - a static table of symbols is empty, or no row of a table of symbols is Massive's
+                  exact ticker;
                 - no source can serve the request; the message gives each reason;
                 - the endpoint doesn't take one of the query's parameters or filters.
             AuthenticationError: With `wait=True`, if Massive or its flat-file server rejects your
                 keys.
             EntitlementError: With `wait=True`, if your plan doesn't include the data from any
                 source the call can use.
-            MassiveError: At the call, if the session is closed. With `wait=True`, also if:
+            SessionClosedError: If the session is closed.
+            MassiveError: With `wait=True`, if:
                 - a request fails;
                 - adjusted bars come back unadjusted, or the reverse;
                 - a trading day's flat file is missing and REST can't serve that day;
@@ -393,6 +396,8 @@ class HistoryQuery(Query):
             files = core.flat_file_transport()
             dates = partition_dates(spec, window)
             forced = source is HistorySource.FLAT_FILES
+            # The plan, and so the result, keeps what the call has logged across its reads.
+            logged = LoggedKeys()
             plan = FollowPlan(
                 Transport.FLAT_FILES,
                 one_scan=True,
@@ -405,6 +410,7 @@ class HistoryQuery(Query):
                     dates=dates,
                     call=call,
                     forced=forced,
+                    logged=logged,
                     stop=stop,
                 ),
             )
@@ -422,7 +428,7 @@ class HistoryQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=symbols.table,
-            rule=SymbolRowRule.of(spec, core.config.unsendable_symbols),
+            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
             reread=reread,
             plan=plan,
             note=f"Follows its symbol table over {span}. {note}",
@@ -443,7 +449,7 @@ class HistoryQuery(Query):
         spec = self._spec
         rest = self._core.rest_transport()
         if not window.empty:  # a parameter error raises now, with symbols or without
-            rest.check_history(spec, request, window, split_pairs=False)
+            rest.check_history(spec, request, window)
         return FollowPlan(
             Transport.REST,
             one_scan=False,
@@ -505,7 +511,7 @@ class HistoryQuery(Query):
         if not forced and rest_history_problem(spec, request) is None:
             # REST may read the days the files lack: its parameter errors raise now, as a read
             # that waits raises them before it reads those days.
-            self._core.rest_transport().check_history(spec, request, window, split_pairs=False)
+            self._core.rest_transport().check_history(spec, request, window)
             # The description is written before the read: it can only say what may happen.
             note = f"{note} A day the flat files cannot serve is read from REST; the log names it."
         return self._result(
@@ -536,8 +542,8 @@ class HistoryQuery(Query):
         """
         spec = self._spec
         rest = self._core.rest_transport()
-        if not wait and not window.empty:  # a parameter error and a pair in code raise now
-            rest.check_history(spec, request, window, split_pairs=self._splits_pairs_at_call)
+        if not wait and not window.empty:  # a parameter error raises now
+            rest.check_history(spec, request, window)
         return self._result(
             call,
             request,

@@ -1,0 +1,5 @@
+# 96. OPRA's admin messages are a stream without symbols, kept as sent
+
+Date: 2026-11-09
+
+Status: moved to `src/deephaven_massive/namespaces/_options.py`, "The admin messages name none"; `src/deephaven_massive/_datasets/catalog.py`, "real_time_only"; `src/deephaven_massive/queries/_stream.py`, "For the options admin messages, which stream only in real time"

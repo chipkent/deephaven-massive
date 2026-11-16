@@ -11,7 +11,8 @@ one field gets one column and one type whichever transport serves it:
   that key, for its name and every other hand entry.
 - **Names.** Each segment of a wire key is translated to Massive's long form: its `SPELLINGS`
   entry's name when Massive spells the same field another way on another endpoint (none, for
-  a wrapper object whose fields that endpoint serves flat); else the vendor's own long key as
+  a wrapper object whose fields that endpoint serves flat, and one name for the whole key, for
+  a field that endpoint serves outside the object); else the vendor's own long key as
   it is; a short key through the lexicon of the object it sits in (`SHAPES`),
   whose entries cite the endpoint that spells the same field out; else an identity entry. The
   last segment is replaced by its `NAMES` entry when Massive names the key nowhere (a name
@@ -281,6 +282,26 @@ class SourceFields:
         )
 
     def long_names(self, raw: RawField) -> list[str]:
+        """Translate a wire key to its long names.
+
+        A field whose `SPELLINGS` entry spells its whole key (`Spelling.whole_key`) takes that
+        one long name, its objects' names dropped; any other field is translated segment by
+        segment (`segment_names`).
+
+        Args:
+            raw: The field.
+
+        Returns:
+            The long names, outermost first. A whole-key spelling that gives a library column
+            (`naming.is_key_column`) is kept, with a `field-spelling` problem.
+        """
+        whole = self.hand.spellings.get((self.source, raw.wire_key))
+        if whole is None or not whole.whole_key:
+            return self.segment_names(raw)
+        self.check_spelled_column(raw, [whole.long_name])
+        return [whole.long_name]
+
+    def segment_names(self, raw: RawField) -> list[str]:
         """Translate each segment of a wire key to its long name.
 
         A segment takes its `SPELLINGS` entry first, under the dotted key up to and including
