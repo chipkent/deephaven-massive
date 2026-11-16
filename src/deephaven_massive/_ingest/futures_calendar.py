@@ -719,11 +719,17 @@ class FuturesCalendar:
                 self._due(self._tickers, ticker, now=now, asks=tickers)
             for product in batch.products - self._sessions.keys():
                 self._due(self._schedules, product, now=now, asks=products)
-            reloads = {p for p in batch.reloads if now - self._reloads.get(p, -spacing) >= spacing}
+            # A row no session holds asks for a reload once per spacing; a reload that failed
+            # follows its own retries, as any lookup does.
+            failing = {p for p in batch.reloads if p in self._schedules}
+            reloads = {
+                p
+                for p in batch.reloads - failing
+                if now - self._reloads.get(p, -spacing) >= spacing
+            }
             for product in reloads:
                 self._reloads[product] = now
-            for product in reloads | stale:
-                # A reload that failed waits for its retry, as any lookup does.
+            for product in reloads | failing | stale:
                 self._due(self._schedules, product, now=now, asks=products)
         self._put_lookups(tickers, products)
 

@@ -98,13 +98,14 @@ class _Part:
     Attributes:
         rows: The rows, in arrival order.
         generation: The newest socket generation of the rows.
-        held_at: When the newest of them was held, seconds since the epoch.
+        held_at: When each of them was held, seconds since the epoch, one per row: merging
+            parts keeps each row's own.
         nbytes: The size of the rows' buffers.
     """
 
     rows: pa.Table
     generation: int
-    held_at: float
+    held_at: pa.Array
     nbytes: int
 
 
@@ -443,8 +444,13 @@ class HeldRows(Generic[_K]):
             if kept:  # an earlier row waits: every later one waits behind it
                 kept.append(_part(rows, part.generation, held_at=part.held_at))
                 continue
-            final = state.loaded_at is not None and state.loaded_at >= part.held_at
-            first = None if final else _first(pc.invert(placed))
+            # A row held before the last load began is final: that load answered for it.
+            final = (
+                pc.less_equal(part.held_at, state.loaded_at)
+                if state.loaded_at is not None
+                else pa.repeat(pa.scalar(value=False), rows.num_rows)
+            )
+            first = _first(pc.and_(pc.invert(placed), pc.invert(final)))
             head = rows if first is None else rows.slice(0, first)
             head_placed = placed if first is None else placed.slice(0, first)
             out.release(head.filter(head_placed), part.generation)
@@ -460,7 +466,7 @@ class HeldRows(Generic[_K]):
                     _part(
                         tail.take(pa.array(range(tail.num_rows))),
                         part.generation,
-                        held_at=part.held_at,
+                        held_at=part.held_at.slice(first),
                     )
                 )
         if lost:
@@ -741,20 +747,22 @@ def _hold(
             reason = state.reason if state is not None and state.reason else _UNPLACED
             waiting = held[ticker] = _Waiting(since=now, reason=reason)
         # Its own buffers, not the flush's.
-        waiting.parts.append(_part(part.take(pa.array(range(count))), generation, held_at=now))
+        held_at = pa.repeat(pa.scalar(now, pa.float64()), count)
+        waiting.parts.append(_part(part.take(pa.array(range(count))), generation, held_at=held_at))
         if len(waiting.parts) > MERGE_AT:
             merged = pa.concat_tables([p.rows for p in waiting.parts]).combine_chunks()
             newest = max(p.generation for p in waiting.parts)
-            waiting.parts = [_part(merged, newest, held_at=max(p.held_at for p in waiting.parts))]
+            each = pa.concat_arrays([p.held_at for p in waiting.parts])
+            waiting.parts = [_part(merged, newest, held_at=each)]
 
 
-def _part(rows: pa.Table, generation: int, *, held_at: float) -> _Part:
+def _part(rows: pa.Table, generation: int, *, held_at: pa.Array) -> _Part:
     """Return held rows with their size.
 
     Args:
         rows: The rows, a copy of their own.
         generation: Their newest socket generation.
-        held_at: When the newest of them was held.
+        held_at: When each of them was held, one per row.
 
     Returns:
         The part.

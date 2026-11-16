@@ -1023,3 +1023,18 @@ def test_a_failed_reload_waits_for_its_retry_and_shows_on_the_ready_state(
     correct(calendar, [FOLDED])
     idle(calendar)
     assert fetch.paths().count(SCHEDULES_PATH) == asked + 1
+
+
+def test_a_failed_reload_for_a_row_no_session_holds_retries_on_time(
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
+) -> None:
+    watched(calendar, "ESM4")
+    row = ("ESM4", "2024-04-01T22:00:00", "2024-04-02")  # past the loaded sessions
+    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 500", status=500)
+    correct(calendar, [row])
+    idle(calendar)
+    asked = fetch.paths().count(SCHEDULES_PATH)
+    clock.now += RETRY_DELAYS[0]  # its retry is due, well before a minute
+    correct(calendar, [row])
+    idle(calendar)
+    assert fetch.paths().count(SCHEDULES_PATH) == asked + 1

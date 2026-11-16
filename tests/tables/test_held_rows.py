@@ -552,3 +552,22 @@ def test_released_rows_keep_their_own_socket_generation(
     settled = settle(held, batch(("NQZ6", None, 2.0)), generation=2)  # held: still waiting
     assert [generation for _, generation in settled.released] == [1]
     assert settled.rows is None
+
+
+def test_merged_rows_keep_the_time_each_was_held(
+    held: HeldRows[str], calendar: FakeCalendar, clock: Clock
+) -> None:
+    # A load that began after the first row was held, but before the merge, still answers
+    # for that row: merging must not make it look newer.
+    calendar.found["ESZ6"] = LookupState(Readiness.READY, loaded_at=0.0)
+    calendar.placed_from["ESZ6"] = 2 * 10**18  # no loaded session holds any row
+    first = clock.now
+    for n in range(held_rows.MERGE_AT + 1):
+        settle(held, batch(("ESZ6", None, float(n))))
+        clock.now += 1
+    assert len(held._held["trades"]["ESZ6"].parts) == 1
+    calendar.found["ESZ6"] = LookupState(Readiness.READY, loaded_at=first)
+    calendar.version += 1
+    settled = settle(held, None)
+    assert settled.discarded[Readiness.UNSCHEDULED]["ESZ6"][0] == 1  # the first row only
+    assert held.rows_of("trades") == held_rows.MERGE_AT
