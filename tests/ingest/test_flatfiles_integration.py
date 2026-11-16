@@ -9,6 +9,7 @@ the check goes on. How to run these tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ Evidence: TypeAlias = "Callable[[str], None]"
 
 _VENUES = ("cme", "cbot", "nymex", "comex")
 _DAY_NS = 86_400 * 1_000_000_000
+_MINUTE_NS = 60 * 1_000_000_000
 _PREFIX_CLASSES = {
     "global_crypto": dm.AssetClass.CRYPTO,
     "global_forex": dm.AssetClass.FOREX,
@@ -199,6 +201,19 @@ def test_ticker_spellings_of_every_flat_file(
     assert not unreadable, f"tickers the library cannot read: {unreadable}"
 
 
+def _days_ended_by(bars: list[tuple[str, int]], instant: int) -> list[str]:
+    """Return the days of the minute bars that ended by an instant, so both reads hold them.
+
+    Args:
+        bars: Each bar's `Date` and `TimestampStart` in nanoseconds.
+        instant: The instant, in nanoseconds since the epoch.
+
+    Returns:
+        The days, sorted.
+    """
+    return sorted({day for day, start in bars if start + _MINUTE_NS <= instant})
+
+
 @pytest.mark.timeout(200)
 def test_auto_minute_bars_through_today_match_rest(
     live_session: dm.MassiveSession,
@@ -217,7 +232,8 @@ def test_auto_minute_bars_through_today_match_rest(
     fill warning. Today's bars keep arriving between the two reads, and Massive may serve the
     key's recent bars late, so only the minutes that start before the latest minute both reads
     hold are compared.
-    Passes when both reads hold the same days, the same minutes (`TimestampStart`) per day
+    Passes when both reads hold the same days among the minutes that ended before the first read
+    began, the same minutes (`TimestampStart`) per day
     before that minute, and no minute twice: no day missing or doubled where the sources meet.
     Skips on a day that is not a trading day, when there is nothing to fill, and when the
     previous day's file is not published yet, when `AUTO` reads REST for both days and the test
@@ -228,6 +244,7 @@ def test_auto_minute_bars_through_today_match_rest(
         pytest.skip(f"not exercised: {today} is not a trading day, so no day is filled from REST")
     query = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE, adjusted=False)
     whole: dict[str, list[tuple[str, int]]] = {}
+    started = time.time_ns()
     for chosen in (dm.HistorySource.AUTO, dm.HistorySource.REST):
         table = query.history(previous_trading_day, today, source=chosen, wait=True)
         rows = table_rows(table.view(["Date", "TimestampStart"]))
@@ -245,9 +262,8 @@ def test_auto_minute_bars_through_today_match_rest(
     if any(previous_trading_day.isoformat() in fill for fill in fills):
         pytest.skip(f"not exercised: the {previous_trading_day} file is not published yet")
     auto, rest = read["auto"], read["rest"]
-    auto_days = sorted({day for day, _ in whole["auto"]})
-    rest_days = sorted({day for day, _ in whole["rest"]})
-    assert auto_days == rest_days, f"AUTO read days {auto_days}, REST read {rest_days}"
+    finished = {name: _days_ended_by(bars, started) for name, bars in whole.items()}
+    assert finished["auto"] == finished["rest"], f"AUTO read days {finished}"
     assert len(set(auto)) == len(auto), "AUTO holds a minute twice"
     assert auto == rest, (
         f"AUTO and REST differ: {len(set(auto) - set(rest))} minutes only in AUTO, "

@@ -169,6 +169,7 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     table_rows: TableRows,
     stream_report: Report,
     monkeypatch: pytest.MonkeyPatch,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """What the session does when its streaming socket drops: reconnect and deliver rows again.
@@ -180,7 +181,7 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     a reconnect, is `CONNECTED` again, its stream is `RUNNING`, and a trade the library
     received after the drop reached the table, within 120 s. Every connection state seen is
     recorded in order, `WAITING_SLOT` included: a reconnect that finds the old connection's
-    slot still held waits for it.
+    slot still held waits for it. A stream Massive refuses skips, quoting Massive.
     """
     sockets: list[tuple[WsClient, _Socket]] = []
 
@@ -196,6 +197,8 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     monkeypatch.setattr(WsClient, "_run_generation", recorded(WsClient._run_generation))
     table = live_session.crypto.trades("X:BTCUSD").append_only()
     first = wait_rows(live_session, table, time.monotonic() + _FIRST_WAIT)
+    if not first:
+        skip_if_not_entitled(live_session)
     assert first, "no X:BTCUSD trade arrived before the drop"
     client, websocket = sockets[-1]
     dropped = time.time_ns()
@@ -340,6 +343,7 @@ def test_a_crypto_stream_follows_its_watchlist(
     dh_exec_ctx: ExecutionContext,
     table_rows: TableRows,
     stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether a stream subscribes and unsubscribes as rows of its watchlist come and go.
@@ -351,7 +355,8 @@ def test_a_crypto_stream_follows_its_watchlist(
     table and `Symbols` drops it once it is deleted, with `X:BTCUSD` still streaming; and after
     it is added again, the table shows no row of it from before (each `X:ETHUSD` row was
     received after the re-add) until a new trade arrives. A failure here means a watchlist edit
-    did not reach Massive, or a deleted pair's row outlived its subscription.
+    did not reach Massive, or a deleted pair's row outlived its subscription. A stream Massive
+    refuses skips, quoting Massive.
     """
     btc, eth = "X:BTCUSD", "X:ETHUSD"
     with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
@@ -373,6 +378,8 @@ def test_a_crypto_stream_follows_its_watchlist(
 
     first = _wait_until(board_rows, lambda rows: btc in pairs(rows))
     evidence(f"{btc} first row: {btc in pairs(first)}; Symbols {symbols()!r}")
+    if btc not in pairs(first):
+        skip_if_not_entitled(live_session)
     assert btc in pairs(first), f"no {btc} trade arrived in {_FOLLOW_WAIT:.0f} s"
 
     watchlist.add(new_table([string_col("Symbol", [eth])]))
