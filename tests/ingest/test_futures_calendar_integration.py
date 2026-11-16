@@ -1556,7 +1556,8 @@ def _place_combo_trades(
         dated = {placed for placed in placements.values() if not placed.startswith("none")}
         if len(dated) > 1:
             tally[_PLACED_APART] += 1
-        elif dated and len(dated) < len(placements):  # a schedule read short may leave a gap
+        elif dated and any(placed.startswith("none") for placed in placements.values()):
+            # some candidates place it and others place it in no session: a short read may do that
             tally["placed by some candidates only"] += 1
         for code, placed in placements.items():
             verdict = (
