@@ -144,6 +144,22 @@ def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -
         read_symbols(rule(), table, stream_id=7)
 
 
+def test_a_refused_stock_row_names_a_convention_that_converts_it(dh_exec_ctx: object) -> None:
+    # Under the default convention, nothing with another source's separators converts.
+    message = invalid_row_message(AssetClass.STOCKS, "BRK-B")
+    assert (
+        "Fix the row, or pass the table through dm.canonicalize_symbols(table, "
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or with the convention "
+        "the tickers come from, which converts what it can and nulls the rest, or, given "
+        "on_error=dm.OnError.RAISE, fails on the rest"
+    ) in message
+    table = new_table([string_col("Symbol", ["BRK-B"])])
+    converted = dm.canonicalize_symbols(
+        table, AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
+    )
+    assert [row[0] for row in converted.iter_tuple(cols="Symbol")] == ["BRK.B"]
+
+
 def test_a_skipped_row_read_before_any_stream_names_the_call(
     dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -2146,9 +2146,7 @@ def test_a_refusal_names_the_alternative_where_one_exists(
         "crypto.last: the Currencies subscription of your plan does not include this data; "
         "Massive answered HTTP 403 from GET /v1/last/crypto/BTC/USD"
     )
-    assert str(info.value).endswith(
-        "; try m.crypto.snapshots(...), which carries the same values and is in more plans"
-    )
+    assert str(info.value).endswith("; try m.crypto.snapshots(...), which carries the same values")
 
 
 @pytest.mark.parametrize(

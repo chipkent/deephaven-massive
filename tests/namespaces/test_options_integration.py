@@ -905,11 +905,12 @@ def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
     """What an Options plan without the admin messages answers, and whether it links their plans.
 
     On Options Starter, Developer, or Business, streams `m.options.admin_messages()` from a
-    session whose `delayed_subscriptions` leaves options out, as the dataset requires. On a
-    plan Massive labels delayed the call raises `dm.EntitlementError`; on base Business the
-    stream's row turns `FAILED` with Massive's refusal of `AD.*`. Passes when one of the two
-    happens and its message ends with the link to the dataset's page of plans. Skips on a plan
-    that includes the channel, which the real-time test checks.
+    session whose `delayed_subscriptions` leaves options out. On a plan Massive labels delayed
+    the call raises the delayed-data `dm.EntitlementError` every options stream gets, naming
+    `delayed_subscriptions`; on base Business the stream's row turns `FAILED` with Massive's
+    refusal of `AD.*`. Passes when one of the two happens and Massive's refusal ends with the
+    link to the dataset's page of plans. Skips on a plan that includes the channel, which the
+    real-time test checks.
     """
     if live_plans.tiers["options"] in _ADMIN_PLANS:
         pytest.skip("the key's Options plan includes the admin messages; the real-time test runs")
@@ -945,7 +946,11 @@ def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
         session.close()
     evidence(f"options {live_plans.tiers['options']}: {outcome}: {message}")
     assert outcome in {"refused at the call", "FAILED"}, f"the admin messages stream is {outcome}"
-    assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
+    if outcome == "refused at the call":
+        assert "would be delayed" in message, "the call's refusal is not the delayed-data error"
+        assert "delayed_subscriptions" in message
+    else:
+        assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
 
 
 _GAMMA_CONTRACTS = 5

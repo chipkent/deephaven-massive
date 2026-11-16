@@ -121,3 +121,19 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
     """
     outcome = same_field.conversion_quote(live_rest, evidence, base=base, quote=quote)
     assert all(outcome.rows)
+
+
+@pytest.mark.settles("138")
+@pytest.mark.requests(2)
+@pytest.mark.timeout(60)
+def test_session_change_is_the_chain_s_day_change(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the unified snapshot's `session.change` is the option chain's `day.change`.
+
+    Runs `same_field.session_change` on up to 20 traded contracts of SPY's chain. The last
+    evidence line is the verdict; each contract's line gives both reads, with the session's
+    early, regular, and late trading changes. A run after the regular session ends also shows
+    whether `session.change` counts late trades that `day.change` does not.
+    """
+    assert all(same_field.session_change(live_rest, evidence).rows)
