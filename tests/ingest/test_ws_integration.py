@@ -26,7 +26,7 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
 from deephaven_massive.queries import StreamHistoryQuery
-from tests._live import streams, summary
+from tests._live import refusals, streams, summary
 from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
@@ -148,9 +148,11 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
     stocks out of `delayed_subscriptions` and pins them to that host, so the library's own check
     of the snapshot does not refuse the stream first, subscribes `AM.AAPL`, minute bars, and
     records the stream's error and the connection's last error. The refusal does not depend on
-    the market being open. Passes when Massive refused the stream: the refusal is the evidence
-    the question asks for, and the error message quotes its text. Skips, quoting the rows, when
-    Massive served the stream with no error.
+    the market being open. Passes when every error is a refusal (`refusals.is_entitlement_text`,
+    such as the library's `refused the subscription to` quoting Massive): the refusal is the
+    evidence the question asks for. Fails on any other error, such as an outage or a taken
+    connection, which says nothing of what Massive allows. Skips, quoting the rows, when Massive
+    served the stream with no error.
     """
     answer = recency_label(dm.Subscription.STOCKS)
     if answer.refusal is not None:
@@ -169,6 +171,8 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
         stream_report=stream_report,
         evidence=evidence,
     )
+    others = [error for error in errors if not refusals.is_entitlement_text(error)]
+    assert not others, f"the stream failed for a reason other than a refusal: {others}"
     if not errors:
         pytest.skip(
             f"Massive served this key real-time rows on socket.massive.com: {rows} AM.AAPL "

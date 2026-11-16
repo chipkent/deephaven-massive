@@ -114,3 +114,25 @@ def test_the_settings_refusal_of_delayed_data_is_matched_by_its_text(*, streams:
     assert refusals.is_not_listed_text(f"read failed: {error}")
     assert not refusals.is_not_listed_text("HTTP 403 from GET /v3/x on api.massive.com: no")
     assert not refusals.is_not_listed_text(None)
+
+
+@pytest.mark.parametrize(
+    ("text", "refusal"),
+    [
+        (
+            (
+                "the WebSocket server socket.massive.com/stocks refused the subscription to "
+                "AM.AAPL; Massive said: not authorized; MassiveConfig.websocket_hosts pins it"
+            ),
+            True,
+        ),
+        ("HTTP 403 from GET /v2/aggs/ticker/AAPL/range on api.massive.com: not entitled", True),
+        ("another connection with this API key took the connection at 2026-11-16T14:00:00Z", False),
+        ("connection lost; reconnecting in 5 s", False),
+        (None, False),
+    ],
+    ids=["ws-refusal", "http-403", "taken", "outage", "none"],
+)
+def test_only_a_refusals_text_counts_as_one(text: str | None, *, refusal: bool) -> None:
+    # A stream's or a followed read's failure is only text; an outage must not pass as a refusal.
+    assert refusals.is_entitlement_text(text) is refusal

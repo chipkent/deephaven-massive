@@ -1910,32 +1910,6 @@ def _write_live_line(config: pytest.Config, prefix: str, line: str) -> None:
         reporter.write_line(f"{prefix}{line}")
 
 
-_ENTITLEMENT_MARKS: Final = (
-    "refused the subscription to",
-    "HTTP 403",
-    "NOT_AUTHORIZED",
-    "not entitled",
-    "may not include this data",
-    "(FMV) data needs",
-)
-"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a topic
-Massive's WebSocket server refused (`the WebSocket server <host> refused the subscription to
-<topics>; Massive said: <its message>; <the feed's hint>`), an HTTP 403, a `NOT_AUTHORIZED`
-envelope, and the hints of a refused topic, including a fair-market-value (FMV) topic's."""
-
-
-def is_entitlement_text(text: object) -> bool:
-    """Return whether an error's text (a failed stream's or poll's `Error`) is a refusal.
-
-    Args:
-        text: The error text, or None.
-
-    Returns:
-        True when it holds one of `_ENTITLEMENT_MARKS`.
-    """
-    return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
-
-
 _CALL_FAILED: Final = pytest.StashKey[bool]()
 """Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
 
@@ -2040,8 +2014,9 @@ def skip_if_not_entitled(
 
     A refused stream or background read does not raise: its row in `m.streams()` turns
     `FAILED` with the refusal as its `Error`. Two refusals skip, as `pytest_runtest_call` skips
-    them when they raise: Massive's (`is_entitlement_text`), and the owner's settings refusing
-    delayed data their `delayed_subscriptions` do not list (`refusals.is_not_listed_text`).
+    them when they raise: Massive's (`refusals.is_entitlement_text`), and the owner's settings
+    refusing delayed data their `delayed_subscriptions` do not list
+    (`refusals.is_not_listed_text`).
     Call this after recording the evidence.
 
     Args:
@@ -2060,7 +2035,7 @@ def skip_if_not_entitled(
             for row in table_rows(session.streams())
             if row["State"] == "FAILED"
         ]
-        reasons = [f"{summary.REFUSED}{e}" for e in errors if is_entitlement_text(e)]
+        reasons = [f"{summary.REFUSED}{e}" for e in errors if refusals.is_entitlement_text(e)]
         reasons += [f"{summary.NOT_LISTED}{e}" for e in errors if refusals.is_not_listed_text(e)]
         if reasons:
             evidence(reasons[0])

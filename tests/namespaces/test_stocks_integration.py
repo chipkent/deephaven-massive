@@ -986,8 +986,12 @@ def test_past_stock_data_is_served_with_the_default_config(
     labels `DELAYED`: the test reads AAPL's previous day bar raw, records the envelope status,
     and skips, quoting it, when the status is not `DELAYED`. A session on the key with no
     subscription listed then reads AAPL's `previous_day_bar` and its `daily_open_close` of the
-    last trading day before the run. Fails if either raises `EntitlementError` or returns no
-    row.
+    last trading day before the run. Fails if the library refuses either read as delayed data
+    the settings do not list (an `EntitlementError` whose source is `ErrorSource.USER`, which
+    the test catches so the live-test hook does not skip on it), or if either returns no row.
+
+    Raises:
+        EntitlementError: When Massive refuses a read, which skips the test, quoting Massive.
     """
     status = _previous_bar_status(live_rest)
     evidence(f"the key's previous day bar envelope status: {status!r}")
@@ -1002,6 +1006,14 @@ def test_past_stock_data_is_served_with_the_default_config(
         evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
         day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch(wait=True)
         evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
+    except dm.EntitlementError as error:
+        if error.source is not dm.ErrorSource.USER:
+            raise  # Massive's refusal: the live-test hook skips, quoting it
+        # The settings' refusal of delayed data is the failure the question asks about; the
+        # hook would report it as a skip.
+        refusal = " ".join(str(error).split())
+        evidence(f"the library refused past data on the default config: {refusal}")
+        pytest.fail(f"the library refused past data on the default config: {refusal}")
     finally:
         session.close()
     assert previous.size == 1, "previous_day_bar returned no row"
