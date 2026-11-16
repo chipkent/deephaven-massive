@@ -21,6 +21,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, WireError, source
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -951,3 +952,57 @@ def test_day_file_before_a_split_is_as_traded(
     evidence(f"{symbol} {_DAY_FILE} {before}: {rows}; REST as-traded close {rest_close}")
     assert rows, f"no {symbol} row in the {before} day file"
     assert abs(float(str(rows[0]["close"])) / rest_close - 1) < _SPLIT_TOLERANCE / 10
+
+
+def _previous_bar_status(client: RestClient) -> str:
+    """Return the envelope status of AAPL's previous day bar, as Massive labels it for a key.
+
+    Returns:
+        The status, such as `"OK"` or `"DELAYED"`.
+    """
+    return client.get(
+        source(Transport.REST, "/v2/aggs/ticker/{stocksTicker}/prev"),
+        {"stocksTicker": _SYMBOL},
+        {},
+        bucket="stocks",
+    ).status
+
+
+@pytest.mark.verifies("73")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_past_stock_data_is_served_with_the_default_config(
+    live_config: dm.MassiveConfig,
+    *,
+    live_rest: RestClient,
+    previous_trading_day: date,
+    evidence: Evidence,
+) -> None:
+    """The previous day's bar and a past day's open and close fetch on the default config.
+
+    Massive labels past data `DELAYED` on some keys, though its rows are final, so only
+    datasets of the market's current state are checked against
+    `MassiveConfig.delayed_subscriptions`. The question needs a key whose past data Massive
+    labels `DELAYED`: the test reads AAPL's previous day bar raw, records the envelope status,
+    and skips, quoting it, when the status is not `DELAYED`. A session on the key with no
+    subscription listed then reads AAPL's `previous_day_bar` and its `daily_open_close` of the
+    last trading day before the run. Fails if either raises `EntitlementError` or returns no
+    row.
+    """
+    status = _previous_bar_status(live_rest)
+    evidence(f"the key's previous day bar envelope status: {status!r}")
+    if status != "DELAYED":
+        pytest.skip(
+            f"Massive labels this key's past stock data {status!r}; the question is about a key "
+            f"whose past data it labels DELAYED"
+        )
+    session = dm.MassiveSession(with_delayed(live_config, frozenset()))
+    try:
+        previous = session.stocks.previous_day_bar(_SYMBOL).fetch(wait=True)
+        evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
+        day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch(wait=True)
+        evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
+    finally:
+        session.close()
+    assert previous.size == 1, "previous_day_bar returned no row"
+    assert day.size == 1, f"daily_open_close returned no row for {previous_trading_day}"

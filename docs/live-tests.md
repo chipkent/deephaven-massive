@@ -101,6 +101,13 @@ happens. A test skips, and prints its reason, when:
   add.
 - A stream of a subscription your settings file lists as delayed delivers no row while its
   market is open. The delayed feed's lag is Massive's, so the test can't tell when a row is due.
+- Your key isn't the kind of key the test's question is about. Four tests ask what Massive
+  does with a key whose stocks data it labels delayed, or real-time, and run on your key: each
+  first reads how Massive labels your stocks data, and skips, quoting Massive's label, when it
+  isn't the one the question needs. `test_what_massive_says_to_a_delayed_key_on_the_real_time_feed`
+  also skips when Massive streams your key from the real-time feed with no error, naming the
+  rows it sent. When Massive refuses that stream, the test passes, and its evidence quotes the
+  refusal, the answer its question asks for.
 - `MASSIVE_API_KEY` or the S3 keys aren't set, or `CI` is set.
 - The market isn't open, or the test can't tell its answer from a network drop.
 

@@ -2,7 +2,8 @@
 
 A few live tests stream from a feed the owner's settings do not choose: the admin messages,
 which Massive serves only in real time, from a session whose `delayed_subscriptions` leaves
-options out, and the delayed-feed test from one that lists stocks. `MassiveConfig` refuses a
+options out, the delayed-feed test from one that lists stocks, and the checks of a key whose
+stocks data Massive labels delayed from one that leaves stocks out. `MassiveConfig` refuses a
 `websocket_hosts` pin that contradicts `delayed_subscriptions` (a `delayed.` host for a
 subscription not listed, or any other host for one that is), so such a test drops the owner's
 pins its listing contradicts and keeps the others.

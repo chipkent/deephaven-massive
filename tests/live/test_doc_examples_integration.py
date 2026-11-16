@@ -16,6 +16,7 @@ servers. The groups follow the README:
 - the hook and Examples 1 to 6 and 13, with no setting, and again paced by a declared limit;
 - Examples 7 to 12, which load the settings file Example 7 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
+- Example 7 without its setting, on a key whose stocks data Massive labels delayed;
 - the streaming example's crypto line;
 - the tester guide's example 10, which describes a key Massive refuses the live minute bars
   and the bars of 2015 to.
@@ -34,6 +35,7 @@ import functools
 import gc
 import itertools
 import re
+import runpy
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -45,7 +47,7 @@ from deephaven import update_graph
 
 import deephaven_massive as dm
 from deephaven_massive._ingest import rate_limits
-from tests._live import doc_examples, streams
+from tests._live import doc_examples, streams, summary
 from tests._live.calendar import NEW_YORK, is_trading_day
 from tests._live.tester.examples import guide_blocks
 
@@ -56,6 +58,8 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
+    from tests._live.recency import RecencyAnswer
+
 pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
@@ -63,6 +67,7 @@ TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
+RecencyLabel: TypeAlias = "Callable[[dm.Subscription], RecencyAnswer]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 ConsoleCommand: TypeAlias = "Callable[..., None]"
 Names: TypeAlias = "dict[str, Any]"
@@ -92,6 +97,9 @@ _BAR_COLUMNS: Final = ("Date", "Open", "High", "Low", "Close", "Volume")
 
 _CRYPTO_LINE: Final = re.compile(r"`(m\.crypto\.bars\([^`]*\)\.last_by\(\))`")
 """The streaming example's line for crypto, inline in its text."""
+
+_DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
+"""What the library's refusal of delayed data says about the setting that would accept it."""
 
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})
 """The stocks Examples 3, 7, 8, 9, and 12 read."""
@@ -739,6 +747,58 @@ def _check_overnight(
 
 
 # --- Single examples ----------------------------------------------------------------------------
+
+
+@pytest.mark.timeout(200)
+def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_key(
+    *,
+    recency_label: RecencyLabel,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: ConsoleCommand,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether Example 7's snapshot fails without its setting on a key whose stocks are delayed.
+
+    First asks Massive how it labels the key's stocks snapshot (`recency_label`), and skips,
+    quoting the answer, when Massive refused the snapshot or does not label it delayed: the
+    question is about a key whose stocks data it labels delayed. Then saves the settings file
+    with `delayed_subscriptions: []`, with the README's own commands, and runs Example 7. The
+    snapshot reads in the background, so the library's refusal fails its table. Passes when the
+    read's row in `m.streams()` is `FAILED` and its `Error` says stocks are not in
+    `delayed_subscriptions`, which sets this refusal apart from Massive's refusal of a snapshot.
+    """
+    answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if not answer.delayed:
+        pytest.skip(
+            f"Massive does not label this key's stocks data delayed ({answer.text()}); the "
+            f"question is about a key whose stocks data it labels delayed"
+        )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    doc_examples.write_settings_file(README, tmp_path, delayed=False)
+    [block] = doc_examples.section_blocks(README, "what-your-plan-allows")
+    script = tmp_path / "settings_example.py"
+    script.write_text(block.code, encoding="utf-8")
+    ran: list[dict[str, Any]] = []
+
+    def example() -> None:
+        ran.append(runpy.run_path(str(script)))
+
+    def errors() -> list[str]:
+        streams = ran[0]["m"].streams()
+        return [str(r["Error"]) for r in table_rows(streams) if r["State"] == "FAILED"]
+
+    with doc_examples.recorded_sessions():
+        console_command(example, timeout=_CONSOLE_WAIT)
+        _wait(lambda: bool(errors()), _FILL_WAIT)
+        failed = errors()
+        ran[0]["m"].close()
+    evidence(f"example 7 without the setting: {failed or 'no failure'}")
+    assert failed, "Example 7 read the snapshot without its setting"
+    assert _DELAYED_REFUSAL in failed[0], "the refusal does not name delayed_subscriptions"
 
 
 @pytest.mark.timeout(150)

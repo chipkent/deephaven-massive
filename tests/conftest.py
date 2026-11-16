@@ -2159,8 +2159,9 @@ def recency_label(
 ) -> Callable[[Subscription], recency.RecencyAnswer]:
     """Return a function that asks Massive how it labels a subscription's current data.
 
-    Only a test whose question is about the label itself uses it: no test reads it to decide
-    whether to run, and nothing of the run depends on it. It sends the snapshot the library's
+    Only a test whose question is about the label itself uses it, and the answer decides only
+    that test's outcome, such as a skip when the key is not the kind its question is about:
+    nothing else of the run depends on it. It sends the snapshot the library's
     own host decision reads (`host_decision.SNAPSHOT_PROBES`), and reads its labels as the
     library does (`recency.answered`): the envelope `status`, and each row's `timeframe`.
     Massive's refusal is an answer too (`recency.refused`). The answer of each subscription is
