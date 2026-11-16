@@ -201,16 +201,20 @@ These protect the owner's repository, money, and secrets.
   - **One bad symbol or row never fails the table.** Each cause has its own `dm.ErrorPolicy`
     setting, set for a session in `MassiveConfig(on_error=...)` and for one call with the
     dataset method's `on_error=`. The setting decides only whether the table fails (`RAISE`)
-    and how loudly the log reports the problem (`LOG`, the default, at WARNING; `IGNORE` at
-    DEBUG), never whether a row is published; a live table also lists the problem in its
-    `m.streams()` `Error`. A refusal of part of what a call explicitly asked for (a futures
+    and how loudly the log reports the problem (`LOG`, the default, warns once per distinct
+    problem; `IGNORE` logs only at DEBUG), never whether a row is published; a live table also
+    lists each skipped symbol in its `m.streams()` `Error` and counts withheld rows in its
+    `SchemaDrift`. A refusal of part of what a call explicitly asked for (a futures
     exchange the plan lacks) defaults to `RAISE`, because asking for data the plan lacks is a
     bug in the caller. A new cause gets a new setting, never a hard-coded failure or a silent
     skip.
-  - **Only a problem that affects every row a table would receive fails it, whatever the
-    setting:** authentication, a closed session, a plan without the dataset, a refusal of
-    everything a call asked for, a read or stream whose rows it would receive are all withheld,
-    and a library defect. `docs/configuration.md` says how each read and stream judges that.
+  - **Only a problem that affects every row a table would receive, a whole batch of them, or
+    every row of one of its named symbols fails it, whatever the setting:** authentication, a
+    closed session, a plan without the dataset, a refusal of everything a call asked for, a
+    batch the library can read none of (a REST page, a flat file, or a stream's run of rows of
+    its channel, of one of its named symbols, or with no readable symbol), since Massive's
+    format has most likely changed, and a library defect. `docs/configuration.md` gives each
+    batch.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the
