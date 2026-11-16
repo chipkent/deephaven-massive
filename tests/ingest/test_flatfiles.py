@@ -4333,3 +4333,21 @@ def test_symbol_filter_raises_a_library_defect_for_a_symbol_table() -> None:
         flatfiles._symbol_filter(
             AssetClass.STOCKS, SymbolTable(new_table([string_col("Symbol", [])]))
         )
+
+
+def test_a_price_a_double_would_round_withholds_its_row(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    odd = {**data[1], "price": "9007199254740993"}
+    fake_s3.put_csv(TRADES_0303, names, [data[0], odd, data[2], data[3]])
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "3", "4"]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "Price", 1)
+    ]
