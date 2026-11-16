@@ -152,10 +152,14 @@ def split_failures(failed: list[str], opened: list[str]) -> tuple[list[str], lis
             (`refusal_recorded`).
 
     Returns:
-        The refusals, those at opening first, and the other failures.
+        The refusals, those at opening first, and the other failures. A stream refused as it
+        opened may also leave a failed row with the same error; it counts once, as the
+        refusal at opening.
     """
-    refused = opened + [f for f in failed if is_refusal(f)]
-    return refused, [f for f in failed if not is_refusal(f)]
+    later = [
+        f for f in failed if is_refusal(f) and not any(" ".join(f.split()) in o for o in opened)
+    ]
+    return opened + later, [f for f in failed if not is_refusal(f)]
 
 
 @contextlib.contextmanager

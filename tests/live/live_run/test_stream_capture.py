@@ -972,3 +972,12 @@ def test_a_throughput_unit_is_refused_only_when_massive_refused_all_its_streams(
     assert steps[-2:] == ["wait", "read"]
     assert (unit, found) == ("currencies", status)
     assert "not authorized" in reason
+
+
+def test_a_stream_refused_as_it_opened_counts_once() -> None:
+    error = "HTTP 403 NOT_AUTHORIZED: not entitled to crypto.bars"
+    refused, broken = stream_capture.split_failures(
+        [error, "HTTP 403 not entitled to forex.quotes"], [f"crypto-bars: {error}"]
+    )
+    assert refused == [f"crypto-bars: {error}", "HTTP 403 not entitled to forex.quotes"]
+    assert broken == []
