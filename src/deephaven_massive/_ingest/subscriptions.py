@@ -110,19 +110,32 @@ def stream_topics(
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
 
 
-def _names(message: str, topic: str) -> bool:
-    """Return whether a server message names a topic whole, not as part of a longer one.
+def _named(message: str, topics: Iterable[str]) -> list[str]:
+    """Return the topics a server message names whole, not as part of a longer one.
 
     Args:
         message: The server's message.
-        topic: The topic, such as `T.CL:BF Q6-U6`, which `T.CL:BF Q6-U6-V6` does not name.
+        topics: The candidate topics, such as `T.1Y:SA 03M` and `T.1Y:SA 03M F6`.
 
     Returns:
-        True when the topic appears with no ticker character (a letter, a digit, `.`, `:`,
-        or `-`) on either side; a sentence's closing `.` after it still counts.
+        The topics, sorted, that appear with no ticker character (a letter, a digit, `.`,
+        `:`, or `-`) on either side, a sentence's closing `.` after one still counting, at a
+        place no longer candidate covers: a topic may hold a space, so `T.1Y:SA 03M F6`
+        names itself, not `T.1Y:SA 03M`, and `T.CL:BF Q6-U6-V6` does not name `T.CL:BF Q6-U6`.
     """
     before, after = r"[A-Za-z0-9:.\-]", r"[A-Za-z0-9:\-]|\.\w"
-    return re.search(rf"(?<!{before}){re.escape(topic)}(?!{after})", message) is not None
+    found = [
+        (match.span(), topic)
+        for topic in sorted(topics)
+        for match in re.finditer(rf"(?<!{before}){re.escape(topic)}(?!{after})", message)
+    ]
+    return sorted(
+        {
+            topic
+            for (start, end), topic in found
+            if not any(s <= start and end <= e and e - s > end - start for (s, e), _ in found)
+        }
+    )
 
 
 class Sender(Protocol):
@@ -509,12 +522,13 @@ class Subscriptions:
         goes unmarked.
 
         A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
-        word of the message, so it counts as named when the message holds it whole.
+        word of the message, so it counts as named when the message holds it whole and no
+        longer wanted topic holds that place.
 
         Args:
             status: A `REFUSED` status.
         """
-        spaced = [t for t in sorted(self._refs) if " " in t and _names(status.message, t)]
+        spaced = _named(status.message, (t for t in self._refs if " " in t))
         if status.topics or spaced:
             named = [t for t in status.topics if t in self._refs]
             self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
