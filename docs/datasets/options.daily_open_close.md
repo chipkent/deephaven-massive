@@ -7,7 +7,7 @@ The open, high, low, close, and volume of each options contract on one day.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.options.daily_open_close(symbols, date, *, adjusted=True)
+m.options.daily_open_close(symbols, date, *, adjusted=True, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -25,6 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`symbols`](README.md#symbols) | Option contracts. `dm.ALL` is refused; for every contract's bar of one day, use `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the flat files. |
 | [`date`](README.md#date) | The trading day, as a date; a `datetime` raises. |
 | [`adjusted`](README.md#adjusted) | Adjusts for splits of the underlying. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -48,7 +49,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |
 | `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |
 | `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |

@@ -367,7 +367,8 @@ def test_fixtures_are_shaped_like_the_generated_fields(
     else:
         found = body[rest.result_key]
         rows = found if isinstance(found, list) else [found]
-    batch, drift = to_batch(rows, rest, required=required)
+    batch, drift, marks = to_batch(rows, rest, required=required)
+    assert marks == {}  # every row read whole
     assert batch.num_rows == len(rows)
     assert drift.extra == frozenset()
 
@@ -377,7 +378,8 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
     rest = CATALOG.rest_path("/v3/snapshot")
-    batch, _ = to_batch(rows, rest, required=("Ticker",))
+    batch, _, marks = to_batch(rows, rest, required=("Ticker",))
+    assert marks == {}  # every row read whole
     table = batch.to_pydict()
     assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
     assert table["UnderlyingAssetTicker"] == ["NCLH", None]
@@ -1410,7 +1412,7 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     assert query._request.symbols is None
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
-        massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
+        massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg, arg-type]  # the refusal
     assert not hasattr(query, "last_by")
     assert not hasattr(query, "fetch")
 

@@ -7,7 +7,7 @@ The trade and quote condition codes, with what each means and how it updates bar
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, sip=None, sort=None, order=None, limit=None, filters=None)
+m.reference.conditions(*, asset_class=None, data_type=None, condition_id=None, sip=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -30,6 +30,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters. Keys: none. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

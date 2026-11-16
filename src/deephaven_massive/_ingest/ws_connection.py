@@ -95,6 +95,7 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
+    RowFault,
     Transport,
     WireAuthError,
     WireError,
@@ -120,7 +121,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import Reject, Source, Status
+    from deephaven_massive._massive import RowMark, RowMarks, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
@@ -261,7 +262,7 @@ class ClientFactory(Protocol):
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
@@ -501,8 +502,8 @@ class Connection:
             sources=sources,
             on_open=self._on_open,
             on_status=self._on_status,
-            on_data=lambda generation, channel, rows, rejects, drift: self._on_data(
-                channel, rows, generation=generation, rejects=rejects, drift=drift
+            on_data=lambda generation, channel, rows, marks, drift: self._on_data(
+                channel, rows, generation=generation, marks=marks, drift=drift
             ),
             on_state=self._on_state,
             reconnect_deadline=self._reconnect_deadline,
@@ -893,23 +894,23 @@ class Connection:
         rows: list[tuple[object, ...]],
         *,
         generation: int,
-        rejects: list[Reject],
+        marks: RowMarks,
         drift: DriftReport,
     ) -> None:
         """Hand one channel's rows to the flush thread, and record the frame's drift.
 
-        A row the client dropped because a key could not be read (a reject) fails no stream:
-        it is counted in the drift (`DriftReport.dropped_rows`, with the first reject's error
-        as the reason), which the flush thread logs and counts for each dataset.
+        A row whose key could not be read (marked `RowFault.UNREADABLE_KEYS`) is dropped here
+        and fails no stream: it is counted in the drift (`DriftReport.dropped_rows`, with the
+        first such row's reason), which the flush thread logs and counts for each dataset. A
+        row marked for another fault is handed on with its null.
 
         Args:
             channel: The channel.
-            rows: The decoded rows, each a tuple of the source's fields, without the dropped
-                ones.
+            rows: The decoded rows, each a tuple of the source's fields.
             generation: The generation of the socket the frame arrived on, which the streams
                 its rows reach record, so only rows of a reconnected socket recover a stream
                 (`_recovered`).
-            rejects: The rows the client dropped.
+            marks: The rows the client could not read whole, by index into `rows`.
             drift: The frame's drift for the channel.
         """
         now = time.time_ns()
@@ -917,15 +918,20 @@ class Connection:
         if self._episodes.down_since is not None:  # data flows again: the outage may be over
             self._episodes.data_since_open = True
             self._check_recovered()
-        self._traffic.received(channel, len(rows), len(rejects), now=now)
-        if rejects:
-            lost = DriftReport(dropped_rows=len(rejects), dropped_reason=rejects[0].error.message)
-            drift = drift.merge(lost)
+        unread = marks.get(RowFault.UNREADABLE_KEYS)
+        if unread is not None:
+            taken = set(unread.rows)
+            rows = [row for index, row in enumerate(rows) if index not in taken]
+            reason = f"dropped {unread.reasons[0]}"
+            drift = drift.merge(DriftReport(dropped_rows=len(unread.rows), dropped_reason=reason))
+        self._traffic.received(
+            channel, len(rows), 0 if unread is None else len(unread.rows), now=now
+        )
         if rows:
             self.flusher.rows(channel, rows, generation=generation)
             self._arm_backlog_row()  # the row write below may be throttled
         if drift.fields_drifted or drift.dropped_rows:
-            self._record_drift(channel, drift, dropped=self._dropped_symbols(rejects))
+            self._record_drift(channel, drift, dropped=self._dropped_symbols(unread))
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -1392,18 +1398,19 @@ class Connection:
             self._write_row()
         self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
 
-    def _dropped_symbols(self, rejects: list[Reject]) -> dict[str, int]:
+    def _dropped_symbols(self, unread: RowMark | None) -> dict[str, int]:
         """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
 
         Args:
-            rejects: The rows the client dropped.
+            unread: The frame's rows whose key could not be read, or None for none.
 
         Returns:
             Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
             not text, or a spelling the library cannot read is left out (the dataset's own run
             still counts it).
         """
-        found = (canonical_from_wire(self.asset_class, r.symbol) for r in rejects if r.symbol)
+        sent = () if unread is None else unread.symbols
+        found = (canonical_from_wire(self.asset_class, symbol) for symbol in sent if symbol)
         return dict(Counter(symbol for symbol in found if symbol is not None))
 
     # --- loop thread: outages and notes --------------------------------------------------------
@@ -1916,7 +1923,7 @@ class _WsClientFactory:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _Client:

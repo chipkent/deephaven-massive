@@ -35,7 +35,7 @@ everything else belongs here:
   list gives. Every pair, whatever its source, is split on the `symbol changes` worker before
   it is subscribed: a crypto stream of a symbol list opens with no topic and submits its pairs
   as its first change, as a symbol table's watch does. A pair the list gives no split for is
-  one Massive has no data for, under `MassiveConfig.unavailable_symbols`: skipped, logged once,
+  one Massive has no data for, under `ErrorPolicy.unavailable_symbols`: skipped, logged once,
   and listed in the stream's `Error` under `LOG` and `IGNORE`, or the stream's failure under
   `RAISE`. A list that cannot be read is an outage of the pairs it leaves unsplit: they wait,
   the stream's `Error` says why, the worker tries again after the reconnect backoff, and the
@@ -85,7 +85,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, Recency
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
@@ -123,6 +124,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._datasets.symbols import NormalizedSymbols
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._ingest.futures_calendar import FuturesCalendar, RowFetch
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import HostDecision, StreamHandle
@@ -164,6 +166,8 @@ class _PairState:
     """A crypto stream's pairs that are not subscribed, and why; guarded by the group's lock.
 
     Attributes:
+        policy: The stream's resolved policy (`Request.on_error`): what a pair Massive has no
+            data for, and a listed pair whose currencies do not join, do.
         skipped: Each pair the list gives no split for, with why, until the stream no longer
             holds it.
         waiting: The pairs waiting for Massive's crypto ticker list to be read.
@@ -173,6 +177,7 @@ class _PairState:
         retry_due: Whether a retry is scheduled, so a change meanwhile schedules no second one.
     """
 
+    policy: ResolvedPolicy
     skipped: dict[str, str] = field(default_factory=dict)
     waiting: set[str] = field(default_factory=set)
     since: float | None = None
@@ -330,7 +335,7 @@ class WsConnections:
         *,
         resolve_host: Callable[[AssetClass, ChannelFamily], HostDecision],
         fetch_rows: RowFetch,
-        crypto_pair: Callable[[str], tuple[str, str] | Unsplit],
+        crypto_pair: Callable[[str, ResolvedPolicy], tuple[str, str] | Unsplit],
         client_factory: ClientFactory | None = None,
     ) -> None:
         """Join the session's connection group; no connection is opened.
@@ -356,7 +361,6 @@ class WsConnections:
         self.fetch_rows = fetch_rows
         self._crypto_pair = crypto_pair
         config = core.config
-        self._unavailable: Final = config.unavailable_symbols
         # A list that cannot be read is retried on the reconnect backoff, up to max_outage.
         self._backoff: Final = (config.reconnect_backoff, config.max_reconnect_backoff)
         self._max_outage: Final = config.max_outage
@@ -465,6 +469,7 @@ class WsConnections:
                 core.dataset_schema(spec),
                 symbols,
                 core=core,
+                policy=request.on_error,
                 stream_id=stream_id,
                 host=decision.host,
                 evidence=decision.evidence,
@@ -492,6 +497,9 @@ class WsConnections:
                 static,
                 refusal_note=real_time_note(spec) if spec.real_time_only else "",
             )
+            if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
+                with self._lock:
+                    self._pair_states[stream_id] = _PairState(request.on_error)
             self._attach(stream)
             if pairs:
                 self._submit_change(self._change_pairs, stream_id, added=pairs, removed=frozenset())
@@ -562,9 +570,7 @@ class WsConnections:
         with self._lock:
             plan = self._plans.get((spec, channel))
         if plan is None:
-            built = ChannelPlan.build(
-                core.catalog, spec, channel, unreadable_symbols=core.config.unreadable_symbols
-            )
+            built = ChannelPlan.build(core.catalog, spec, channel, raw_symbol=core.raw_symbol)
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
         return plan
@@ -969,9 +975,9 @@ class WsConnections:
         whether its thread holds the update graph's lock, which sets how long the lookup waits
         out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, so 10
         minutes). Each pair (`_split`) is subscribed, or skipped, or waits for the list
-        (`_wait`). A skipped pair Massive has no data for follows
-        `MassiveConfig.unavailable_symbols` (`_no_data`); one whose currencies the library
-        cannot read was reported under `unreadable_symbols` by the lookup.
+        (`_wait`). A skipped pair Massive has no data for follows the stream's
+        `unavailable_symbols` (`_no_data`); one whose currencies the library cannot read was
+        reported under its `unreadable_symbols` by the lookup.
 
         Args:
             stream_id: The stream.
@@ -980,18 +986,17 @@ class WsConnections:
         """
         with self._lock:
             state = self._pair_states.get(stream_id)
-            if state is None:
-                if stream_id not in self.group.streams:
-                    return
-                state = self._pair_states[stream_id] = _PairState()
+            if state is None:  # the stream has ended
+                return
             for symbol in removed:
                 state.skipped.pop(symbol, None)
                 state.waiting.discard(symbol)
             asked = sorted(added | state.waiting)
         reader = f"crypto stream {stream_id}"
-        split, unsplit, waiting, failure = self._split(asked)
+        split, unsplit, waiting, failure = self._split(asked, state.policy)
         no_data = {pair: why.why for pair, why in unsplit.items() if why.no_data}
-        if no_data and not self._no_data(stream_id, no_data, reader=reader):
+        unavailable = state.policy.unavailable_symbols
+        if no_data and not self._no_data(stream_id, no_data, reader=reader, setting=unavailable):
             return
         if failure is not None and not failure.is_retryable:
             self._fail(stream_id, copy_error(failure, f"{reader}: {failure}"))
@@ -1007,7 +1012,7 @@ class WsConnections:
             self._schedule_retry(stream_id, delay)
 
     def _split(
-        self, symbols: Iterable[str]
+        self, symbols: Iterable[str], policy: ResolvedPolicy
     ) -> tuple[set[str], dict[str, Unsplit], list[str], MassiveError | None]:
         """Split crypto pairs by Massive's crypto ticker list, stopping at a failed read.
 
@@ -1015,6 +1020,7 @@ class WsConnections:
 
         Args:
             symbols: Canonical crypto tickers, sorted.
+            policy: The stream's resolved policy, for the lookup (`crypto_pair`).
 
         Returns:
             The pairs split, those the list gives no split for with why (`Unsplit`), those left
@@ -1036,7 +1042,7 @@ class WsConnections:
                 split.add(symbol)
                 continue
             try:
-                found = self._crypto_pair(symbol)
+                found = self._crypto_pair(symbol, policy)
             except MassiveError as error:
                 if error.source is ErrorSource.LIBRARY:
                     raise  # a defect is never retried or shown as a waiting pair
@@ -1052,8 +1058,10 @@ class WsConnections:
                     raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
         return split, unsplit, [], None
 
-    def _no_data(self, stream_id: int, no_data: Mapping[str, str], *, reader: str) -> bool:
-        """Apply `MassiveConfig.unavailable_symbols` to the pairs Massive has no data for.
+    def _no_data(
+        self, stream_id: int, no_data: Mapping[str, str], *, reader: str, setting: OnError
+    ) -> bool:
+        """Apply the stream's `unavailable_symbols` to the pairs Massive has no data for.
 
         Under `LOG` each pair is logged once per process at WARNING, under `IGNORE` at DEBUG,
         a bounded number of pairs; under `RAISE` the stream fails.
@@ -1062,19 +1070,19 @@ class WsConnections:
             stream_id: The stream.
             no_data: The pairs, with why.
             reader: Who read them, for the log.
+            setting: The stream's `unavailable_symbols`.
 
         Returns:
             False when the stream failed.
         """
         described = bounded_list([f"{pair} ({why})" for pair, why in sorted(no_data.items())])
-        effect = effect_of(self._unavailable)
+        effect = effect_of(setting)
         if effect.fails:
             self._fail(
                 stream_id,
                 UnavailableSymbolError(
-                    f"{reader}: Massive has no data for {described}. Remove the pair, or set "
-                    "MassiveConfig(unavailable_symbols=dm.OnError.LOG) to skip it and stream "
-                    "the others",
+                    f"{reader}: Massive has no data for {described}. Remove the pair; to skip it "
+                    f"and stream the others, {policy_hint('unavailable_symbols', OnError.LOG)}",
                     source=ErrorSource.MASSIVE,
                 ),
             )

@@ -134,6 +134,7 @@ from deephaven_massive._datasets.row_times import time_rule
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     NEW_SESSION,
     AuthenticationError,
@@ -209,6 +210,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._enums import ChannelFamily, PollMode
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
@@ -255,8 +257,8 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[str]) -> UnavailableSymb
     names = bounded_list(missing)
     logger.debug("%s: Massive has no data for %s; raising", spec.name, names)
     return UnavailableSymbolError(
-        f"{spec.name}: Massive has no data for {names}. Remove the symbol, or set "
-        "MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave it out and read the others",
+        f"{spec.name}: Massive has no data for {names}. Remove the symbol; to leave it out and "
+        f"read the others, {policy_hint('unavailable_symbols', OnError.LOG)}",
         source=ErrorSource.MASSIVE,
     )
 
@@ -563,10 +565,11 @@ class RestReader:
         catalog: The dataset catalog.
         drift: The session's drift registry.
         max_concurrency: The most requests of one fan-out at a time.
-        unreadable_symbols: The session's setting for a symbol spelling the library cannot
-            read (`MassiveConfig.unreadable_symbols`).
-        unavailable_symbols: The session's setting for a symbol Massive has no data for
-            (`MassiveConfig.unavailable_symbols`), which every read follows.
+        policy: The call's resolved policy (`Request.on_error`), or the session's for a read
+            no call owns: what a symbol spelling the library cannot read
+            (`unreadable_symbols`) and a symbol Massive has no data for
+            (`unavailable_symbols`) do.
+        raw_symbol: Whether the session's schemas have `RawSymbol` (`SessionCore.raw_symbol`).
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -582,8 +585,8 @@ class RestReader:
     catalog: Catalog
     drift: DriftRegistry
     max_concurrency: int
-    unreadable_symbols: OnError
-    unavailable_symbols: OnError
+    policy: ResolvedPolicy
+    raw_symbol: bool
     delayed_subscriptions: AbstractSet[Subscription]
     threads: str
     exec_ctx: ExecutionContext
@@ -634,7 +637,7 @@ class RestReader:
         `unreadable_symbols=RAISE`.
         """
         return self.state.crypto.pair(
-            symbol, reader=self, unreadable=self.unreadable_symbols, cancel=cancel
+            symbol, reader=self, unreadable=self.policy.unreadable_symbols, cancel=cancel
         )
 
     def read(
@@ -692,7 +695,7 @@ class RestReader:
                 by every path of a read that spans several.
             on_missing: Given the symbols of the read Massive has no data for, each with why
                 (`_Outcome.missing`), in call order, when there are any; the caller then
-                applies `MassiveConfig.unavailable_symbols` (a `poll()` cycle). None to apply
+                applies `ErrorPolicy.unavailable_symbols` (a `poll()` cycle). None to apply
                 that setting here (`_report_missing`).
 
         Returns:
@@ -706,7 +709,11 @@ class RestReader:
         closed session raises `SessionClosedError("... is closed; ...")`.
         """
         converter = RowConverter.build(
-            self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
+            self.catalog,
+            spec,
+            rest_path,
+            unreadable_symbols=self.policy.unreadable_symbols,
+            raw_symbol=self.raw_symbol,
         )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
@@ -756,7 +763,7 @@ class RestReader:
         `Cancel` token of the read's own (following `cancel`), which is also the read's lane in
         the rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A
         symbol Massive answered HTTP 404 on its first request has no data and follows
-        `MassiveConfig.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
+        `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
         `UnavailableSymbolError`.
 
@@ -785,7 +792,11 @@ class RestReader:
         for rest_path, _ in units:
             if rest_path.template not in converters:
                 converters[rest_path.template] = RowConverter.build(
-                    self.catalog, spec, rest_path, unreadable_symbols=self.unreadable_symbols
+                    self.catalog,
+                    spec,
+                    rest_path,
+                    unreadable_symbols=self.policy.unreadable_symbols,
+                    raw_symbol=self.raw_symbol,
                 )
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
@@ -808,7 +819,7 @@ class RestReader:
             for (rest_path, _), outcome in zip(units, done, strict=True)
             if isinstance(outcome, _Outcome)
         ]
-        refused = effect_of(self.unavailable_symbols).fails
+        refused = effect_of(self.policy.unavailable_symbols).fails
         missing = [o.missing for _, o in answered if o.missing is not None]
         if missing and not refused:
             self._report_missing(spec, missing)
@@ -884,7 +895,7 @@ class RestReader:
             return error
 
     def _report_missing(self, spec: DatasetSpec, missing: Sequence[str]) -> None:
-        """Apply `MassiveConfig.unavailable_symbols` to the symbols a read found no data for.
+        """Apply `ErrorPolicy.unavailable_symbols` to the symbols a read found no data for.
 
         Massive has no data for a symbol it answered HTTP 404 for, and for a crypto pair its
         crypto ticker list gives no split for. Under `LOG` one WARNING per read names each such
@@ -898,7 +909,7 @@ class RestReader:
         Raises:
             UnavailableSymbolError: Under `RAISE` (`_missing_error`).
         """
-        effect = effect_of(self.unavailable_symbols)
+        effect = effect_of(self.policy.unavailable_symbols)
         if effect.fails:
             error = _missing_error(spec, missing)
             raise error
@@ -1642,7 +1653,7 @@ class RestReader:
         cycle's values is read as if passed alone (`Request.for_value`), one after another,
         and the reads are joined: their rows in value order, their requests and pauses summed,
         and what each left out. A value Massive answers with HTTP 404 follows
-        `MassiveConfig.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
+        `ErrorPolicy.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
         left out of the cycle and named in its `left_out`.
 
         Args:
@@ -1661,7 +1672,7 @@ class RestReader:
             The cycle's read (`poll.CycleRows`).
 
         Raises:
-            UnavailableSymbolError: Under `MassiveConfig.unavailable_symbols=RAISE`, for a
+            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
                 value Massive answered with HTTP 404.
             MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
         """
@@ -1689,9 +1700,7 @@ class RestReader:
                 found = f"{value} (HTTP 404 from {template})"
                 self._report_missing(spec, [found])
                 absent.append(found)
-        schema = self.catalog.dataset_schema(
-            spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
-        )
+        schema = self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
         return poll.CycleRows(
             pa.concat_tables([one.rows for one in reads])
             if reads
@@ -1718,7 +1727,7 @@ class RestReader:
         By default one symbol never fails the table. A reactive symbol table can route a new
         symbol to a path that lacks a parameter the caller set (`adjusted=False` on the crypto
         indicators), and Massive can answer HTTP 404 for a symbol (no data).
-        `MassiveConfig.unavailable_symbols` decides (`_unavailable`): under `LOG` and `IGNORE`
+        `ErrorPolicy.unavailable_symbols` decides (`_unavailable`): under `LOG` and `IGNORE`
         such symbols are left out of the cycle and named in its `left_out`, which the table's
         `Error` lists; under `RAISE` the table fails.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
@@ -1740,7 +1749,7 @@ class RestReader:
             before any fan-out), and the symbols it left out, each with why.
 
         Raises:
-            UnavailableSymbolError: Under `MassiveConfig.unavailable_symbols=RAISE`, for a
+            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
                 symbol Massive answered with HTTP 404 or whose path does not take a parameter
                 the poll sends (`_unavailable`).
 
@@ -1775,7 +1784,7 @@ class RestReader:
         *,
         reason: str,
     ) -> None:
-        """Apply `MassiveConfig.unavailable_symbols` to symbols whose path refuses a parameter.
+        """Apply `ErrorPolicy.unavailable_symbols` to symbols whose path refuses a parameter.
 
         Under `LOG` each symbol logs one WARNING per session (then DEBUG), under `IGNORE` only
         DEBUG, and the cycle leaves them out; under `RAISE` the table fails.
@@ -1791,17 +1800,17 @@ class RestReader:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
                 and the setting.
         """
-        if effect_of(self.unavailable_symbols).fails:
+        if effect_of(self.policy.unavailable_symbols).fails:
             raise UnavailableSymbolError(
                 f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
-                "the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
-                "it out and keep polling the others",
+                "the symbol; to leave it out and keep polling the others, "
+                f"{policy_hint('unavailable_symbols', OnError.LOG)}",
                 source=ErrorSource.USER,
                 is_bug=True,
             )
         new = [name for name in symbols if self.state.first("refused", spec.name, template, name)]
         logger.log(
-            effect_of(self.unavailable_symbols, first=bool(new)).level,
+            effect_of(self.policy.unavailable_symbols, first=bool(new)).level,
             "%s poll(): %s left out of the cycle: %s; the table lists %s in its Error and "
             "polls the other symbols",
             spec.name,
@@ -1822,7 +1831,7 @@ class RestReader:
 
         A path that does not take a parameter the caller set (`shared_params` raises
         `ValueError`) is left out with its symbols, and the cycle reads every other path, as
-        `MassiveConfig.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
+        `ErrorPolicy.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
         one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
         A crypto pair Massive's crypto ticker list gives no split for is planned as a call that
         is never sent (`Call.unsplit`): the read reports a pair Massive has no data for as it
@@ -2107,9 +2116,7 @@ class RestReader:
             tables.append(table)
             requests += made
         if not tables:
-            schema = self.catalog.dataset_schema(
-                spec, raw_symbol=not effect_of(self.unreadable_symbols).fails
-            )
+            schema = self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
         per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
@@ -2158,12 +2165,14 @@ class RestEndpoints:
         self._core = core
         self._state = state
 
-    def _reader(self, role: str) -> RestReader:
+    def _reader(self, role: str, policy: ResolvedPolicy) -> RestReader:
         """Return a reader of the session's paths.
 
         Args:
             role: What the reader serves, such as `"call-7"` or `"hosts"`: its fan-out
                 threads are named `"<session prefix> <role> rest_<n>"`.
+            policy: The policy its reads follow: the call's (`Request.on_error`), or the
+                session's (`SessionCore.policy`) for a read no call owns.
 
         Returns:
             The reader.
@@ -2174,8 +2183,8 @@ class RestEndpoints:
             core.catalog,
             core.drift,
             core.config.max_concurrency,
-            core.config.unreadable_symbols,
-            core.config.unavailable_symbols,
+            policy,
+            core.raw_symbol,
             core.config.delayed_subscriptions,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
@@ -2227,7 +2236,7 @@ class RestEndpoints:
         known = self._state.hosts.known(key)
         if known is not None:
             return known  # a decision already made needs no patience (a Java call)
-        reader = self._reader("hosts")
+        reader = self._reader("hosts", self._core.policy)
         # Taken before claiming the decision: a claim is ended only by the block that decides.
         patience = reader.patience()
         claim = self._state.hosts.claim_or_wait(
@@ -2292,9 +2301,11 @@ class RestEndpoints:
 
         A failed request raises the public error of `RestReader.rows`.
         """
-        return self._reader("schedules").rows(template, query, bucket=bucket, cancel=cancel)
+        return self._reader("schedules", self._core.policy).rows(
+            template, query, bucket=bucket, cancel=cancel
+        )
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
+    def crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote, or why it has none (`Unsplit`).
 
         The WebSocket transport calls it on its `symbol changes` worker, for a crypto ticker
@@ -2302,13 +2313,15 @@ class RestEndpoints:
 
         Args:
             symbol: A canonical crypto ticker.
+            policy: The stream's resolved policy, whose `unreadable_symbols` decides what a
+                listed ticker whose currencies do not join does.
 
         Returns:
             `(base, quote)`, or why the pair has no split.
 
         A failed lookup raises the `MassiveError` of `RestReader.crypto_pair`.
         """
-        return self._reader("crypto pairs").crypto_pair(symbol)
+        return self._reader("crypto pairs", policy).crypto_pair(symbol)
 
     def _write_decision(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -2373,7 +2386,7 @@ class RestEndpoints:
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
         """
-        reader = self._reader(f"call-{call}")
+        reader = self._reader(f"call-{call}", request.on_error)
         table, _ = reader.read_fetch(
             spec,
             request,
@@ -2395,7 +2408,9 @@ class RestEndpoints:
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
-        self._reader("check").plan_fetch(spec, request, request.static_symbols, split=_unsplit)
+        self._reader("check", request.on_error).plan_fetch(
+            spec, request, request.static_symbols, split=_unsplit
+        )
 
     def fetch_by_symbol(
         self,
@@ -2427,7 +2442,7 @@ class RestEndpoints:
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}")
+        reader = self._reader(f"call-{call}", request.on_error)
         cancel = as_cancel(stop)
         units, failed = fetch_units(
             reader,
@@ -2486,7 +2501,7 @@ class RestEndpoints:
         Errors are those of `symbol_reads.read_rest_by_value`.
         """
         return read_rest_by_value(
-            self._reader(f"call-{call}"),
+            self._reader(f"call-{call}", request.on_error),
             self._core,
             spec,
             request=request,
@@ -2542,7 +2557,7 @@ class RestEndpoints:
         differs from the request and for a symbol whose later page answers HTTP 404, its data
         cut short.
         """
-        reader = self._reader(f"call-{call}")
+        reader = self._reader(f"call-{call}", request.on_error)
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
@@ -2589,7 +2604,9 @@ class RestEndpoints:
 
         A parameter the path does not take raises the `ValueError` of `shared_params`.
         """
-        _history_plan(self._reader("check"), spec, request, window=window, split=_unsplit)
+        _history_plan(
+            self._reader("check", request.on_error), spec, request, window=window, split=_unsplit
+        )
 
     def history_by_symbol(
         self,
@@ -2622,7 +2639,7 @@ class RestEndpoints:
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}")
+        reader = self._reader(f"call-{call}", request.on_error)
         cancel = as_cancel(stop)
         units, failed = history_units(
             reader, spec, request, window=window, symbols=symbols, cancel=cancel
@@ -2680,7 +2697,7 @@ class RestEndpoints:
         takes fails here (`RestReader.check_parameters`), and the symbols of a path that lacks
         one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
         """
-        reader = self._reader("poll")
+        reader = self._reader("poll", request.on_error)
         if isinstance(request.symbols, SymbolTable) or request.value_table is not None:
             reader.check_parameters(spec, request)
             # The table's symbols choose among every fetch path at each cycle.

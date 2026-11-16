@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         PollMode,
         Recency,
     )
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._errors import MassiveError
     from deephaven_massive._log_limits import LoggedKeys
 
@@ -71,7 +72,7 @@ class Unsplit:
         why: The reason, for the log and a table's `Error`, such as `"Massive's crypto ticker
             list does not hold it"`.
         no_data: True when Massive's crypto ticker list does not hold the pair: Massive has no
-            data for it, and `MassiveConfig.unavailable_symbols` applies. False when the list
+            data for it, and `ErrorPolicy.unavailable_symbols` applies. False when the list
             holds it with currencies that do not join to it: data the library cannot read,
             which the lookup has already reported under `unreadable_symbols`.
     """
@@ -225,7 +226,7 @@ class RestTransport(Protocol):
         """
         ...
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
+    def crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote, or why Massive has no data for it.
 
         Called by the WebSocket transport for each crypto ticker of a stream, on its
@@ -236,6 +237,8 @@ class RestTransport(Protocol):
 
         Args:
             symbol: A canonical crypto ticker.
+            policy: The stream's resolved policy; its `unreadable_symbols` decides what a
+                listed ticker whose currencies do not join does.
 
         Returns:
             `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`; or, for a ticker the list
@@ -670,8 +673,8 @@ class FlatFileTransport(Protocol):
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
             EntitlementError: If the plan does not include the files (S3 answers 403); for
-                futures files the message names the venue and the `venues=` and
-                `refused_venues=` parameters. A skipped venue raises nothing, unless S3
+                futures files the message names the venue, `venues=`, and the
+                `refused_venues` cause. A skipped venue raises nothing, unless S3
                 refused every venue of the call.
             MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is

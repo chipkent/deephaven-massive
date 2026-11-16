@@ -7,7 +7,7 @@ The 20 crypto pairs that gained or lost the most since the previous day's close.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.crypto.movers(direction)
+m.crypto.movers(direction, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -19,9 +19,12 @@ m.crypto.movers(direction)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
 | `direction` | `dm.Direction.GAINERS` or `dm.Direction.LOSERS`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -38,7 +41,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `DayOpen` | double | The open price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. |
 | `DayHigh` | double | The highest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. |
 | `DayLow` | double | The lowest price for the symbol in the given time period. From the `day` object: The most recent daily bar for this ticker. |

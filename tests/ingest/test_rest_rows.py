@@ -83,6 +83,7 @@ def trades_converter() -> rest_rows.RowConverter:
         CATALOG.by_name["stocks.trades"],
         source(Transport.REST, TRADES_PATH),
         unreadable_symbols=OnError.LOG,
+        raw_symbol=True,
     )
 
 
@@ -157,6 +158,7 @@ def test_a_size_beyond_2_53_is_served_rounded_and_reported() -> None:
         CATALOG.by_name["stocks.last_quote"],
         source(Transport.REST, path),
         unreadable_symbols=OnError.LOG,
+        raw_symbol=True,
     )
     rows: list[dict[str, object]] = [
         {"T": "AAPL", "t": WHEN, "s": 2**53 + 1, "S": 100},

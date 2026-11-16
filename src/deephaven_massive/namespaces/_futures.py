@@ -21,8 +21,8 @@ Futures differ from the other asset classes in three ways that show here:
 - **Venues.** Flat files are published per exchange (`us_futures_cme/...`), so `trades`,
   `quotes`, and `bars` take `venues`, a set that picks the flat-file prefixes. Left out, a read
   takes every venue the plan allows and skips each one S3 refuses with a warning. A venue the
-  call names follows `refused_venues` (`MassiveConfig.refused_venues` when left out) when S3
-  refuses it. Streams always use the `/futures` cluster path, whatever the venues.
+  call names follows the `refused_venues` cause of its `dm.ErrorPolicy` when S3 refuses it.
+  Streams always use the `/futures` cluster path, whatever the venues.
 - **Bars.** The aggregates endpoint documents a `session` unit and no `day` unit, but Massive
   serves `1day` bars in the shape of one-session buckets, so `bars` sends `Timespan.DAY` as `day`
   and dates and keeps its bars as it does `Timespan.SESSION` bars.
@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, ClassVar, Final
 from deephaven.table import Table
 
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, OnError, Timespan
+from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["DATASETS", "FuturesNamespace"]
 
@@ -325,7 +326,7 @@ class FuturesNamespace(Namespace):
         symbols: SymbolsLike,
         *,
         venues: AbstractSet[FuturesVenue] | None = None,
-        refused_venues: OnError | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery:
         """Trades of futures contracts, tick by tick.
 
@@ -338,8 +339,8 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            refused_venues: What `history()` does when Massive refuses an exchange named in
-                `venues`. Left out, `MassiveConfig.refused_venues` applies.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -347,7 +348,7 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type, `venues` isn't a set of
-                `dm.FuturesVenue`, or `refused_venues` isn't a `dm.OnError`.
+                `dm.FuturesVenue`, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
@@ -365,7 +366,7 @@ class FuturesNamespace(Namespace):
             query_type=StreamHistoryQuery,
             symbols=symbols,
             venues=venues,
-            refused_venues=refused_venues,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
@@ -374,7 +375,7 @@ class FuturesNamespace(Namespace):
         symbols: SymbolsLike,
         *,
         venues: AbstractSet[FuturesVenue] | None = None,
-        refused_venues: OnError | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery:
         """Best bid and offer quotes of futures contracts, tick by tick.
 
@@ -388,8 +389,8 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            refused_venues: What `history()` does when Massive refuses an exchange named in
-                `venues`. Left out, `MassiveConfig.refused_venues` applies.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -397,7 +398,7 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `symbols` is of another type, `venues` isn't a set of
-                `dm.FuturesVenue`, or `refused_venues` isn't a `dm.OnError`.
+                `dm.FuturesVenue`, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `venues` is empty;
                 - `symbols` is None or empty;
@@ -416,7 +417,7 @@ class FuturesNamespace(Namespace):
             query_type=StreamHistoryQuery,
             symbols=symbols,
             venues=venues,
-            refused_venues=refused_venues,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
@@ -427,7 +428,7 @@ class FuturesNamespace(Namespace):
         *,
         multiplier: int = 1,
         venues: AbstractSet[FuturesVenue] | None = None,
-        refused_venues: OnError | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery | HistoryQuery:
         """Open, high, low, close, and volume bars of futures contracts.
 
@@ -448,8 +449,8 @@ class FuturesNamespace(Namespace):
             multiplier: Units per bar.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            refused_venues: What `history()` does when Massive refuses an exchange named in
-                `venues`. Left out, `MassiveConfig.refused_venues` applies.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -482,7 +483,7 @@ class FuturesNamespace(Namespace):
             timespan=timespan,
             multiplier=multiplier,
             venues=venues,
-            refused_venues=refused_venues,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params, _product_codes)
@@ -495,6 +496,7 @@ class FuturesNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The latest trade, quote, minute bar, and session of each futures contract.
 
@@ -515,6 +517,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead, and a table of product codes caps every code's requests.
             filters: Further endpoint parameters, such as `{"ticker_gte": "ES"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -522,7 +526,7 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
-                a `str`, a sequence of `str`, or a table.
+                a `str`, a sequence of `str`, or a table, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` holds None, or a ticker that isn't Massive's exact ticker;
                 - `order` is given without `sort`;
@@ -545,6 +549,7 @@ class FuturesNamespace(Namespace):
             arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
@@ -558,6 +563,7 @@ class FuturesNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The specification of every listed futures contract.
 
@@ -582,6 +588,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead, and a table of product codes caps every code's requests.
             filters: Further endpoint parameters, such as `{"active": True}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -589,7 +597,8 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, `product_code` isn't a
-                `str`, a sequence of `str`, or a table, or `symbols` or `as_of` is of another type.
+                `str`, a sequence of `str`, or a table, or `symbols` or `as_of` is of another type,
+                or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, or holds a ticker that isn't Massive's exact ticker;
                 - `as_of` is a `datetime` or isn't a date;
@@ -622,6 +631,7 @@ class FuturesNamespace(Namespace):
             arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params, _product_codes, day_argument)
@@ -634,6 +644,7 @@ class FuturesNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The specification of every futures product.
 
@@ -654,6 +665,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A table of product codes caps every code's
                 requests instead.
             filters: Further endpoint parameters, such as `{"sector": "precious"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -661,7 +674,8 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, `product_code` isn't a
-                `str`, a sequence of `str`, or a table, or `as_of` is of another type.
+                `str`, a sequence of `str`, or a table, or `as_of` is of another type, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `as_of` is a `datetime` or isn't a date;
                 - `order` is given without `sort`;
@@ -688,10 +702,13 @@ class FuturesNamespace(Namespace):
             arguments=_REFERENCE_ARGUMENTS,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def exchanges(self, *, limit: int | None = None) -> FetchQuery:
+    def exchanges(
+        self, *, limit: int | None = None, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The exchanges and trading venues of US futures.
 
         Each row holds one venue, such as the Chicago Mercantile Exchange: its id, name, acronym,
@@ -700,13 +717,15 @@ class FuturesNamespace(Namespace):
 
         Args:
             limit: The most rows to return, in total.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/futures.exchanges.md.
 
         Raises:
-            TypeError: If `limit` isn't an `int`.
+            TypeError: If `limit` isn't an `int`, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If `limit` isn't positive.
 
         Example:
@@ -714,7 +733,9 @@ class FuturesNamespace(Namespace):
 
                 venues = m.futures.exchanges().fetch()
         """
-        return build_query(self._core, EXCHANGES, query_type=FetchQuery, limit=limit)
+        return build_query(
+            self._core, EXCHANGES, query_type=FetchQuery, limit=limit, on_error=on_error
+        )
 
     @raises_through(build_query, _product_codes)
     def market_status(
@@ -722,6 +743,7 @@ class FuturesNamespace(Namespace):
         *,
         product_code: str | Sequence[str] | Table | None = None,
         limit: int | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Whether each futures product is trading right now.
 
@@ -739,6 +761,8 @@ class FuturesNamespace(Namespace):
                 table of them in a `ProductCode` column works too. Leave it out for every product.
             limit: The most rows to return, in total. A table of product codes caps every code's
                 requests instead.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -746,7 +770,7 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `product_code` isn't a `str`, a sequence of `str`, or a table, or `limit`
-                isn't an `int`.
+                isn't an `int`, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `product_code` is an empty sequence, or a table without a `ProductCode` column;
                 - `limit` isn't positive.
@@ -764,6 +788,7 @@ class FuturesNamespace(Namespace):
             params=codes,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params, _product_codes)
@@ -777,6 +802,7 @@ class FuturesNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The timed events of each futures product's trading sessions.
 
@@ -799,6 +825,8 @@ class FuturesNamespace(Namespace):
                 requests instead.
             filters: Further endpoint parameters, such as `{"trading_venue": "XCME"}`. Don't pass
                 `session_end_date`, which `start` and `end` set.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -806,7 +834,7 @@ class FuturesNamespace(Namespace):
 
         Raises:
             TypeError: If `sort` isn't a `str`, `order` isn't a `dm.Order`, or `product_code` isn't
-                a `str`, a sequence of `str`, or a table.
+                a `str`, a sequence of `str`, or a table, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `end` is before `start`, or a bound is a `datetime` or can't be read;
                 - `order` is given without `sort`;
@@ -832,4 +860,5 @@ class FuturesNamespace(Namespace):
             arguments=_PRODUCT_CODE_ARGUMENT,
             limit=limit,
             values=values,
+            on_error=on_error,
         )

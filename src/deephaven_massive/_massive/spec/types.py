@@ -14,7 +14,10 @@ contributes to that membership, each under its column there, which may keep only
 keep them all and rename some.
 
 Decoders compare each payload with its source and return a `DriftReport` of the keys that
-were extra or missing.
+were extra or missing, and the `RowMarks` of the rows they could not read whole: each such row
+stays in the payload's batch, with a null where a value could not be read, and its index, the
+field, and the reason are marked by its `RowFault`, so the library alone decides what happens
+to it.
 
 `Provenance` records where the generated values came from: the day the vendor sources were
 fetched, the vendor URL of each source, and what each vendor page says about Massive's plans:
@@ -34,18 +37,20 @@ This module imports only the standard library.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import string
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 from typing_extensions import override
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
 
 
 __all__ = [
@@ -63,6 +68,10 @@ __all__ = [
     "PlanTerms",
     "Provenance",
     "RestPath",
+    "RowFault",
+    "RowMark",
+    "RowMarker",
+    "RowMarks",
     "Source",
     "Transport",
     "WireType",
@@ -894,3 +903,122 @@ class DriftReport:
             dropped_reason=self.dropped_reason or other.dropped_reason,
             samples={**other.samples, **self.samples},
         )
+
+
+class RowFault(StrEnum):
+    """Why a decoder could not read a row whole, named as the `dm.ErrorPolicy` field it follows.
+
+    A row has at most one fault: a decoder marks the first that applies, in this order.
+    """
+
+    UNREADABLE_KEYS = "unreadable_keys"
+    """A key the library needs to place the row (its symbol, its time, or another key the
+    dataset declares) is absent, null, or does not fit."""
+    UNCONVERTIBLE_VALUES = "unconvertible_values"
+    """A value outside the keys does not fit its field's type or named conversion, so the
+    row's batch holds a null there."""
+
+
+@dataclass(frozen=True, slots=True)
+class RowMark:
+    """The rows of one payload that one fault marks, each with where and why.
+
+    The four tuples have one entry per marked row, in ascending row order.
+
+    Attributes:
+        rows: Each marked row's index in the payload, counting every row the decoder read.
+        fields: The long-form column of the row's first value that could not be read.
+        reasons: Why, as the decoder words it: the clause `spec.convert` shares with every
+            decoder (the field, the expected type, and the value's first 200 characters), with
+            the payload's own context; never the row's whole text.
+        symbols: The row's symbol exactly as the wire spells it, or None when the decoder was
+            not told which column holds it, or the row's value there is missing or not text.
+
+    Raises:
+        ValueError: If the tuples differ in length, or `rows` is not strictly ascending.
+    """
+
+    rows: tuple[int, ...]
+    fields: tuple[str, ...]
+    reasons: tuple[str, ...]
+    symbols: tuple[str | None, ...]
+
+    def __post_init__(self) -> None:
+        """Check that the tuples align and the rows ascend.
+
+        Raises:
+            ValueError: If they do not.
+        """
+        if not len(self.rows) == len(self.fields) == len(self.reasons) == len(self.symbols):
+            raise ValueError("a row mark needs one field, reason, and symbol per row")
+        if any(a >= b for a, b in itertools.pairwise(self.rows)):
+            raise ValueError(f"a row mark's rows must ascend: {self.rows}")
+
+
+RowMarks: TypeAlias = Mapping[RowFault, RowMark]
+"""A payload's marked rows by fault. A fault no row has is absent, and a row is under one fault
+at most; the common payload, every row read whole, is empty."""
+
+
+class RowMarker:
+    """Collects the marks of one payload as a decoder reads it, one fault per row.
+
+    A decoder creates one per payload on its own thread and calls `mark` for each row it cannot
+    read whole; `marks` returns them as plain immutable data that may cross threads.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.types import RowFault, RowMarker
+
+            marker = RowMarker()
+            marker.mark(RowFault.UNREADABLE_KEYS, 3, field="Timestamp", reason="no t", symbol="A")
+            marker.mark(RowFault.UNCONVERTIBLE_VALUES, 3, field="Price", reason="x", symbol="A")
+            [mark] = marker.marks().values()
+            assert mark.rows == (3,) and mark.fields == ("Timestamp",)
+    """
+
+    __slots__ = ("_found", "_marked")
+
+    def __init__(self) -> None:
+        """Start with no row marked."""
+        self._found: dict[RowFault, list[tuple[int, str, str, str | None]]] = {}
+        self._marked: set[int] = set()
+
+    def mark(
+        self, fault: RowFault, row: int, *, field: str, reason: str, symbol: str | None
+    ) -> bool:
+        """Mark a row with a fault, unless it already has one.
+
+        Args:
+            fault: The fault.
+            row: The row's index in the payload.
+            field: The long-form column of the value that could not be read.
+            reason: Why (`RowMark.reasons`).
+            symbol: The row's symbol as the wire spells it, or None.
+
+        Returns:
+            True when the row is marked now; False when it already had a fault, which stays.
+        """
+        if row in self._marked:
+            return False
+        self._marked.add(row)
+        self._found.setdefault(fault, []).append((row, field, reason, symbol))
+        return True
+
+    def marks(self) -> RowMarks:
+        """Return the marks so far, by fault, each fault's rows in ascending order.
+
+        Returns:
+            A read-only mapping; empty when no row is marked.
+        """
+        built = {}
+        for fault, found in self._found.items():
+            ordered = sorted(found)
+            built[fault] = RowMark(
+                rows=tuple(r for r, _, _, _ in ordered),
+                fields=tuple(f for _, f, _, _ in ordered),
+                reasons=tuple(why for _, _, why, _ in ordered),
+                symbols=tuple(sym for _, _, _, sym in ordered),
+            )
+        return MappingProxyType(built)

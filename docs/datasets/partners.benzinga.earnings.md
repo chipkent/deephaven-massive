@@ -7,7 +7,7 @@ Earnings announcements of US companies from Benzinga, with estimates and surpris
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.benzinga.earnings(symbols=None, *, sort=None, order=None, limit=None, filters=None)
+m.partners.benzinga.earnings(symbols=None, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -27,6 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"importance_gte": 3}`. Keys: `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`, `date_status`, `date_status_any_of`, `date_status_gt`, `date_status_gte`, `date_status_lt`, `date_status_lte`, `eps_surprise_percent`, `eps_surprise_percent_any_of`, `eps_surprise_percent_gt`, `eps_surprise_percent_gte`, `eps_surprise_percent_lt`, `eps_surprise_percent_lte`, `fiscal_period`, `fiscal_period_any_of`, `fiscal_period_gt`, `fiscal_period_gte`, `fiscal_period_lt`, `fiscal_period_lte`, `fiscal_year`, `fiscal_year_any_of`, `fiscal_year_gt`, `fiscal_year_gte`, `fiscal_year_lt`, `fiscal_year_lte`, `importance`, `importance_any_of`, `importance_gt`, `importance_gte`, `importance_lt`, `importance_lte`, `last_updated`, `last_updated_any_of`, `last_updated_gt`, `last_updated_gte`, `last_updated_lt`, `last_updated_lte`, `revenue_surprise_percent`, `revenue_surprise_percent_any_of`, `revenue_surprise_percent_gt`, `revenue_surprise_percent_gte`, `revenue_surprise_percent_lt`, `revenue_surprise_percent_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -42,7 +43,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The stock symbol of the company reporting earnings." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `ActualEps` | double | The actual earnings per share (EPS) reported by the company for the given period. |
 | `ActualRevenue` | double | The actual revenue reported by the company for the given fiscal period. |
 | `BenzingaId` | String | The identifier used by Benzinga for this record. |
