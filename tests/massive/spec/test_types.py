@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,6 +20,9 @@ from deephaven_massive._massive.spec.types import (
     PlanTerms,
     Provenance,
     RestPath,
+    RowFault,
+    RowMark,
+    RowMarker,
     Source,
     Transport,
     WireType,
@@ -572,3 +576,28 @@ def test_common_type_is_the_narrowest_type_that_holds_both(
 ) -> None:
     assert first.common_type(second) is joined
     assert second.common_type(first) is joined
+
+
+def test_a_row_mark_needs_one_entry_per_row_in_ascending_order() -> None:
+    with pytest.raises(ValueError, match="one field, reason, and symbol per row"):
+        RowMark(rows=(0, 1), fields=("A",), reasons=("x", "y"), symbols=(None, None))
+    with pytest.raises(ValueError, match=r"must ascend: \(1, 1\)"):
+        RowMark(rows=(1, 1), fields=("A", "A"), reasons=("x", "y"), symbols=(None, None))
+
+
+def test_a_marker_keeps_each_row_s_first_fault_and_sorts_the_rows() -> None:
+    marker = RowMarker()
+    assert marker.marks() == {}
+    keys, values = RowFault.UNREADABLE_KEYS, RowFault.UNCONVERTIBLE_VALUES
+    assert marker.mark(values, 5, field="Price", reason="p", symbol="B")
+    assert marker.mark(keys, 2, field="Timestamp", reason="t", symbol=None)
+    assert not marker.mark(keys, 5, field="Timestamp", reason="later", symbol="B")
+    assert marker.mark(values, 1, field="Size", reason="s", symbol="A")
+    marks = marker.marks()
+    assert marks == {
+        keys: RowMark(rows=(2,), fields=("Timestamp",), reasons=("t",), symbols=(None,)),
+        values: RowMark(
+            rows=(1, 5), fields=("Size", "Price"), reasons=("s", "p"), symbols=("A", "B")
+        ),
+    }
+    assert isinstance(marks, MappingProxyType)  # read-only, so they may cross threads

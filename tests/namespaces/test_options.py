@@ -365,7 +365,7 @@ def test_fixtures_are_shaped_like_the_generated_fields(
     else:
         found = body[rest.result_key]
         rows = found if isinstance(found, list) else [found]
-    batch, drift = to_batch(rows, rest, required=required)
+    batch, drift, _ = to_batch(rows, rest, required=required)
     assert batch.num_rows == len(rows)
     assert drift.extra == frozenset()
 
@@ -375,7 +375,7 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
     rest = CATALOG.rest_path("/v3/snapshot")
-    batch, _ = to_batch(rows, rest, required=("Ticker",))
+    batch, _, _ = to_batch(rows, rest, required=("Ticker",))
     table = batch.to_pydict()
     assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
     assert table["UnderlyingAssetTicker"] == ["NCLH", None]

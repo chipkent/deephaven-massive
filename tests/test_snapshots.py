@@ -72,7 +72,7 @@ def test_the_vendor_sample_decodes(load_fixture: Fixture) -> None:
     assert isinstance(rest_path, RestPath)
     rows = vendor_sample(load_fixture)["results"]
     required = [f.column for f in required_fields(snapshots.SNAPSHOTS, rest_path)]
-    batch, report = to_batch(rows, rest_path, required=required)
+    batch, report, _ = to_batch(rows, rest_path, required=required)
     # The vendor's sample sends `details.underlying_ticker`, which its schema lacks.
     assert tuple(sorted(report.extra)) == ("details.underlying_ticker",)
     assert not report.missing

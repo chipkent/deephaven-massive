@@ -18,6 +18,9 @@ from deephaven_massive._massive.spec.types import (
     Param,
     ParamKind,
     RestPath,
+    RowFault,
+    RowMark,
+    RowMarker,
     WireType,
     WireUnit,
 )
@@ -60,10 +63,14 @@ def _odd(wire_type: WireType, value: object) -> tuple[pa.RecordBatch, DriftRepor
     """Read a page whose second row holds a value that does not fit its field.
 
     Returns:
-        The page's batch and drift.
+        The page's batch and drift; the row is marked for its value.
     """
     path = _path(_field("k", WireType.LONG), _field("v", wire_type))
-    return to_batch([{"k": 1}, {"k": 2, "v": value}], path, required={"K"})
+    batch, drift, marks = to_batch([{"k": 1}, {"k": 2, "v": value}], path, required={"K"})
+    [(fault, mark)] = marks.items()
+    assert (fault, mark.rows, mark.fields) == (RowFault.UNCONVERTIBLE_VALUES, (1,), ("V",))
+    assert mark.reasons[0].startswith("/v3/x: row 1: V (wire key 'v') expects")
+    return batch, drift
 
 
 # The batch.
@@ -73,7 +80,7 @@ def test_a_trades_page_becomes_one_batch_in_field_order(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     rows = json.loads(load_fixture("massive/rest", "trades.json"))["results"]
-    batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
+    batch, drift, _marks = to_batch(rows, _TRADES, required={"SipTimestamp"})
     assert batch.schema == pa.schema(
         [
             ("Conditions", pa.list_(pa.int64())),
@@ -106,7 +113,7 @@ def test_a_trades_page_becomes_one_batch_in_field_order(
 
 
 def test_no_rows_give_an_empty_batch_of_the_full_schema() -> None:
-    batch, drift = to_batch([], _TRADES, required={"SipTimestamp"})
+    batch, drift, _marks = to_batch([], _TRADES, required={"SipTimestamp"})
     assert batch.num_rows == 0
     assert batch.schema.names[0] == "Conditions"
     assert batch.num_columns == len(_TRADES.fields)
@@ -133,7 +140,7 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
         {"ticker": "B", "day": None},
         {"ticker": "C", "day": {}, "lastQuote": {}},
     ]
-    batch, drift = to_batch(rows, path, required=())
+    batch, drift, _marks = to_batch(rows, path, required=())
     assert batch.to_pydict() == {
         "Ticker": ["A", "B", "C"],
         "DayC": [1.5, None, None],
@@ -143,7 +150,9 @@ def test_dotted_wire_keys_reach_into_nested_objects() -> None:
 
 
 def test_a_nested_object_that_is_not_an_object_reads_as_absent_and_is_drift() -> None:
-    batch, drift = to_batch([{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=())
+    batch, drift, _marks = to_batch(
+        [{"day": 5}], _path(_field("day.c", WireType.DOUBLE)), required=()
+    )
     assert batch.column(0).to_pylist() == [None]
     assert drift == DriftReport(unconvertible=frozenset({"day"}))
     assert drift.samples["day"] == DriftSample(None, "5")
@@ -154,7 +163,7 @@ def test_a_row_whose_nested_object_is_not_one_is_logged_whole_at_debug(
 ) -> None:
     rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5, "note": "x"}]
     with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
-        batch, _ = to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
+        batch, _, _ = to_batch(rows, _path(_field("day.c", WireType.DOUBLE)), required=())
     assert batch.column(0).to_pylist() == [1.0, None]
     assert caplog.messages == [
         "/v3/x: reading 2 rows one by one: the wire key 'day' holds a value that is not an object",
@@ -162,15 +171,20 @@ def test_a_row_whose_nested_object_is_not_one_is_logged_whole_at_debug(
     ]
 
 
-def test_a_required_key_under_an_object_that_is_not_one_drops_the_row() -> None:
+def test_a_required_key_under_an_object_that_is_not_one_marks_the_row() -> None:
     rows: list[dict[str, object]] = [{"day": {"c": 1.0}}, {"day": 5}]
     path = _path(_field("day.c", WireType.DOUBLE))
-    batch, drift = to_batch(rows, path, required={"DayC"})
-    assert batch.column(0).to_pylist() == [1.0]
-    assert drift.dropped_rows == 1
-    assert drift.dropped_reason == (
-        "/v3/x: row 1: no DayC (wire key 'day.c'), which the dataset needs"
-    )
+    batch, drift, marks = to_batch(rows, path, required={"DayC"})
+    assert batch.column(0).to_pylist() == [1.0, None]
+    assert marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(1,),
+            fields=("DayC",),
+            reasons=("/v3/x: row 1: no DayC (wire key 'day.c'), which the dataset needs",),
+            symbols=(None,),
+        )
+    }
+    assert drift == DriftReport()  # the row's fault is its key: its object is no drift
 
 
 def test_a_dropped_row_is_not_serialized_with_debug_off(
@@ -181,13 +195,13 @@ def test_a_dropped_row_is_not_serialized_with_debug_off(
 
     monkeypatch.setattr(batch_module, "row_excerpt", refuse)
     with caplog.at_level(logging.INFO, logger=batch_module.__name__):
-        batch, drift = to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
-    assert (batch.num_rows, drift.dropped_rows) == (0, 1)
+        batch, _drift, marks = to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
+    assert (batch.num_rows, marks[RowFault.UNREADABLE_KEYS].rows) == (1, (0,))
 
 
 def test_a_json_text_field_keeps_its_object_whole() -> None:
     path = _path(_field("insights", WireType.JSON_TEXT))
-    batch, drift = to_batch([{"insights": [{"a": 1, "b": "é"}]}], path, required=())
+    batch, drift, _marks = to_batch([{"insights": [{"a": 1, "b": "é"}]}], path, required=())
     assert batch.column(0).to_pylist() == ['[{"a":1,"b":"é"}]']
     assert drift == DriftReport()
 
@@ -201,7 +215,7 @@ def test_extra_keys_are_dropped_and_reported_by_their_dotted_key() -> None:
         {"day": {"c": 1.0, "zz": 2}, "new": {"a": 1, "b": 2}},
         {"other": None, "new": 5},
     ]
-    batch, drift = to_batch(rows, path, required=())
+    batch, drift, _marks = to_batch(rows, path, required=())
     assert batch.schema.names == ["DayC"]
     assert drift == DriftReport(extra=frozenset({"day.zz", "new", "other"}))
     # Each extra key's first value, quoted; a REST page leaves the symbol to the caller.
@@ -227,7 +241,7 @@ def test_an_ignored_key_is_dropped_without_drift(caplog: pytest.LogCaptureFixtur
     for page in (rows, rows[1:]):
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
-            batch, drift = to_batch(page, path, required=())
+            batch, drift, _marks = to_batch(page, path, required=())
         assert batch.column("Cik").to_pylist() == ["0000320193"] * len(page)
         assert drift.extra == ({"zz"} if len(page) == 2 else set())
         assert set(drift.samples) == drift.extra
@@ -240,47 +254,71 @@ def test_a_missing_vendor_required_field_is_reported() -> None:
         {"sip_timestamp": 1, "price": 1.0},
         {"sip_timestamp": 2, "price": None},
     ]
-    batch, drift = to_batch(rows, _TRADES, required=())
+    batch, drift, _marks = to_batch(rows, _TRADES, required=())
     assert batch.column(4).to_pylist() == [1.0, None]
     assert drift == DriftReport(missing=frozenset({"price"}))
 
 
 def test_a_missing_optional_field_is_null_and_silent() -> None:
-    batch, drift = to_batch([{"price": 1.0, "sip_timestamp": 1}], _TRADES, required=())
+    batch, drift, _marks = to_batch([{"price": 1.0, "sip_timestamp": 1}], _TRADES, required=())
     assert batch.column(1).to_pylist() == [None]
     assert drift == DriftReport()
 
 
 @pytest.mark.parametrize("row", [{"price": 1.0}, {"price": 1.0, "sip_timestamp": None}])
-def test_a_row_missing_a_required_key_is_dropped_and_counted(row: dict[str, object]) -> None:
+def test_a_row_missing_a_required_key_is_kept_and_marked(row: dict[str, object]) -> None:
     rows: list[dict[str, object]] = [{"price": 1.0, "sip_timestamp": 1}, row, row]
-    batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
-    assert batch.column("SipTimestamp").to_pylist() == [1]
-    assert drift == DriftReport(dropped_rows=2)
-    # The first dropped row's reason, naming the path, the row, and the key.
-    assert drift.dropped_reason == (
-        "/v3/trades/{stockTicker}: row 1: no SipTimestamp (wire key 'sip_timestamp'), "
-        "which the dataset needs"
+    batch, drift, marks = to_batch(rows, _TRADES, required={"SipTimestamp"})
+    assert batch.column("SipTimestamp").to_pylist() == [1, None, None]
+    assert drift == DriftReport()
+    # Each row's reason names the path, the row, and the key.
+    reason = "no SipTimestamp (wire key 'sip_timestamp'), which the dataset needs"
+    assert marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(1, 2),
+            fields=("SipTimestamp", "SipTimestamp"),
+            reasons=(
+                f"/v3/trades/{{stockTicker}}: row 1: {reason}",
+                f"/v3/trades/{{stockTicker}}: row 2: {reason}",
+            ),
+            symbols=(None, None),
+        )
+    }
+
+
+def test_a_required_key_that_does_not_fit_marks_its_row_whatever_else_is_odd() -> None:
+    # The first row's price does not fit either, but the row has one fault, its key, and its
+    # price is no drift of the field.
+    rows: list[dict[str, object]] = [
+        {"sip_timestamp": 4.0, "price": "x", "ticker": "AAPL"},
+        {"sip_timestamp": 7},
+    ]
+    path = RestPath(
+        key=_TRADES.key,
+        fields=(*_TRADES.fields, _field("ticker", WireType.STRING)),
+        params=_TRADES.params,
     )
+    batch, drift, marks = to_batch(rows, path, required={"SipTimestamp"}, symbol="Ticker")
+    assert batch.column("SipTimestamp").to_pylist() == [None, 7]
+    assert drift.unconvertible == frozenset()
+    assert marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,),
+            fields=("SipTimestamp",),
+            reasons=(
+                (
+                    "/v3/trades/{stockTicker}: row 0: SipTimestamp (wire key 'sip_timestamp') "
+                    "expects epoch, got 4.0"
+                ),
+            ),
+            symbols=("AAPL",),
+        )
+    }
 
 
-def test_a_required_key_that_does_not_fit_drops_its_row() -> None:
-    rows: list[dict[str, object]] = [{"sip_timestamp": 4.0}, {"sip_timestamp": 7}]
-    batch, drift = to_batch(rows, _TRADES, required={"SipTimestamp"})
-    assert batch.column("SipTimestamp").to_pylist() == [7]
-    assert drift.dropped_rows == 1
-    assert drift.unconvertible == frozenset()  # a dropped row's value is no drift of a field
-    assert drift.dropped_reason == (
-        "/v3/trades/{stockTicker}: row 0: SipTimestamp (wire key 'sip_timestamp') expects "
-        "epoch, got 4.0"
-    )
-
-
-def test_a_page_whose_every_row_is_dropped_is_returned_empty() -> None:
-    # Whether that is an error is the library's decision, which knows the whole page.
-    batch, drift = to_batch([{"price": 1.0}], _TRADES, required={"SipTimestamp"})
-    assert batch.num_rows == 0
-    assert drift.dropped_rows == 1
+def test_a_symbol_column_the_path_lacks_is_a_caller_error() -> None:
+    with pytest.raises(ValueError, match=r"has no columns \['Nope'\]"):
+        to_batch([], _TRADES, required=(), symbol="Nope")
 
 
 def test_a_required_column_the_path_lacks_is_a_caller_error() -> None:
@@ -308,7 +346,7 @@ def test_a_required_column_the_path_lacks_is_a_caller_error() -> None:
 def test_each_wire_type_lands_in_its_arrow_type(
     wire_type: WireType, value: object, *, arrow_type: pa.DataType, stored: object
 ) -> None:
-    batch, _ = to_batch([{"v": value}], _path(_field("v", wire_type)), required=())
+    batch, _, _ = to_batch([{"v": value}], _path(_field("v", wire_type)), required=())
     assert batch.schema.field(0).type == arrow_type
     assert batch.column(0).to_pylist() == [stored]
 
@@ -316,7 +354,7 @@ def test_each_wire_type_lands_in_its_arrow_type(
 def test_an_iso_instant_lands_as_exact_utc_nanoseconds() -> None:
     path = _path(_field("v", WireType.ISO_INSTANT))
     rows: list[dict[str, object]] = [{"v": "2026-01-02T03:04:05.123456789+01:00"}, {"v": None}]
-    batch, _ = to_batch(rows, path, required=())
+    batch, _, _ = to_batch(rows, path, required=())
     assert batch.schema.field(0).type == pa.timestamp("ns", tz="UTC")
     assert batch.column(0).cast(pa.int64()).to_pylist() == [1767319445_123456789, None]
 
@@ -396,10 +434,11 @@ def test_a_declared_conversion_is_applied_and_named_on_failure() -> None:
         wire_type=WireType.ISO_INSTANT,
         conversion=Conversion.ISO_TEXT_INSTANT,
     )
-    batch, _ = to_batch([{"serverTime": "1970-01-01T00:00:01Z"}], _path(when), required=())
+    batch, _, _ = to_batch([{"serverTime": "1970-01-01T00:00:01Z"}], _path(when), required=())
     assert batch.column(0).cast(pa.int64()).to_pylist() == [1_000_000_000]
-    _, drift = to_batch([{"serverTime": "soon"}], _path(when), required={"ServerTime"})
-    assert "iso-instant (by the conversion iso-text-instant)" in drift.dropped_reason
+    _, _, marks = to_batch([{"serverTime": "soon"}], _path(when), required={"ServerTime"})
+    [reason] = marks[RowFault.UNREADABLE_KEYS].reasons
+    assert "iso-instant (by the conversion iso-text-instant)" in reason
 
 
 # Reading by column and row by row: one result.
@@ -451,13 +490,19 @@ def test_reading_by_column_matches_reading_row_by_row(
     # Every page here is read by column; the row-by-row reading, the reference, agrees on the
     # batch and on the drift.
     with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
-        batch, drift = to_batch(rows, _NESTED, required={"Ticker"} if not rows else ())
+        batch, drift, marks = to_batch(rows, _NESTED, required={"Ticker"} if not rows else ())
     assert caplog.messages == []  # read by column: no page fell back
+    marker = RowMarker()
     reading = batch_module._by_row(
-        rows, _NESTED, objects=batch_module._prefixes(_NESTED.fields), required=()
+        rows,
+        _NESTED,
+        objects=batch_module._prefixes(_NESTED.fields),
+        required=(),
+        symbol=None,
+        marker=marker,
     )
     assert batch.columns == reading.arrays
-    assert (reading.unconvertible, reading.dropped) == ({}, 0)
+    assert (reading.unconvertible, marks, marker.marks()) == ({}, {}, {})
     assert drift == DriftReport(
         extra=frozenset(reading.extra),
         missing=frozenset(reading.missing),
@@ -466,7 +511,7 @@ def test_reading_by_column_matches_reading_row_by_row(
 
 
 def test_the_drift_of_both_readings_names_dotted_keys_and_first_samples() -> None:
-    _, drift = to_batch(_PAGES[2], _NESTED, required=())
+    _, drift, _ = to_batch(_PAGES[2], _NESTED, required=())
     assert drift.extra == {"note", "day.x", "extra", "last.quote.s", "last.flag"}
     assert drift.missing == {"day.v"}
     assert drift.samples["day.x"] == DriftSample(None, '"first"')
@@ -481,6 +526,6 @@ def test_an_integer_a_double_cannot_hold_exactly_is_rounded_by_the_converter(
     big = 2**60 + 1
     with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
         path = _path(_field("v", WireType.DOUBLE))
-        batch, _ = to_batch([{"v": big}, {"v": 2}], path, required=())
+        batch, _, _ = to_batch([{"v": big}, {"v": 2}], path, required=())
     assert batch.column(0).to_pylist() == [float(big), 2.0]
     assert caplog.messages == []
