@@ -279,3 +279,74 @@ def test_conversion_quote_verdicts(
     last = {"bid": 0.731, "ask": 0.732, "exchange": 48, "timestamp": 5}
     _quotes(fake_rest, conversion=conversion, last=last)
     assert same_field.conversion_quote(client, _ignore, base="AUD", quote="USD").verdict == verdict
+
+
+def _traded(ticker: str, *, close: float = 11.0) -> dict[str, Any]:
+    return {
+        "details": {"ticker": ticker},
+        "day": {"close": close, "previous_close": 10.0, "change": 1.0, "change_percent": 10.0},
+    }
+
+
+def _session(ticker: str, *, close: float = 11.0, change: float = 1.0) -> dict[str, Any]:
+    return {
+        "ticker": ticker,
+        "session": {
+            "close": close,
+            "previous_close": 10.0,
+            "change": change,
+            "change_percent": 10.0,
+        },
+    }
+
+
+_CONTRACTS = tuple(f"O:SPY{n:02}" for n in range(same_field.SESSION_CONTRACTS + 1))
+
+
+def test_session_change_reads_the_traded_contracts_again(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    untraded = [{"details": {"ticker": "O:SPYX"}, "day": {}}, {"day": {"change": 1.0}}]
+    chain = untraded + [_traded(t) for t in _CONTRACTS]
+    fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope(chain)))
+    fake_rest.reply("/v3/snapshot", Reply(envelope([_session(t) for t in _CONTRACTS])))
+    lines: list[str] = []
+    outcome = same_field.session_change(client, lines.append)
+    assert outcome == same_field.Outcome(verdict="SAME", rows=(len(chain), len(_CONTRACTS)))
+    read_again = ",".join(_CONTRACTS[: same_field.SESSION_CONTRACTS])
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/v3/snapshot/options/SPY", {"limit": "250"}),
+        ("/v3/snapshot", {"ticker.any_of": read_again}),
+    ]
+    assert (
+        lines[-1]
+        == "unified session.change is the chain day.change: SAME (20 of 20 contracts compared)"
+    )
+
+
+def test_session_change_compares_only_contracts_with_one_close(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    contracts = _CONTRACTS[: same_field.SESSION_WANTED]
+    fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([_traded(t) for t in contracts])))
+    moved = [_session(contracts[0], close=12.0, change=2.0)]
+    missing = [{"ticker": contracts[1], "session": {"close": 11.0}}]
+    fake_rest.reply(
+        "/v3/snapshot",
+        Reply(envelope(moved + missing + [_session(t) for t in contracts[2:]])),
+        Reply(envelope([_session(contracts[0], change=0.5)])),
+    )
+    lines: list[str] = []
+    # A moved close and a missing change leave too few contracts compared to settle anything.
+    assert same_field.session_change(client, lines.append).verdict == "INCONCLUSIVE"
+    assert any("closes differ" in line for line in lines)
+    assert same_field.session_change(client, _ignore).verdict == "DIFFERENT"
+
+
+def test_session_change_without_a_traded_contract_reads_only_the_chain(
+    fake_rest: FakeRestServer, client: RestClient
+) -> None:
+    fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([{"day": {}}])))
+    outcome = same_field.session_change(client, _ignore)
+    assert outcome == same_field.Outcome(verdict="INCONCLUSIVE", rows=(1, 0))
+    assert [path for path, _ in fake_rest.get_queries()] == ["/v3/snapshot/options/SPY"]

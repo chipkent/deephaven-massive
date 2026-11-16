@@ -27,6 +27,9 @@ __all__ = [
     "FOREX_PAIRS",
     "FX",
     "QUOTE_TRIES",
+    "SESSION_CONTRACTS",
+    "SESSION_FIELDS",
+    "SESSION_WANTED",
     "STOCKS",
     "UNIFIED_TIMES",
     "V2_CRYPTO",
@@ -35,6 +38,7 @@ __all__ = [
     "Outcome",
     "chain_day_change",
     "conversion_quote",
+    "session_change",
     "todays_change",
     "updated_times",
 ]
@@ -64,6 +68,24 @@ UNIFIED_TIMES: Final = (
     "last_trade.last_updated",
 )
 """The unified snapshot's update times that `updated_times` compares with the v2 `updated`."""
+
+SESSION_FIELDS: Final = (
+    "price",
+    "close",
+    "previous_close",
+    "change",
+    "change_percent",
+    "early_trading_change",
+    "regular_trading_change",
+    "late_trading_change",
+)
+"""The unified snapshot's `session` fields `session_change` records for each contract."""
+
+SESSION_CONTRACTS: Final = 20
+"""How many contracts with a `day.change` the session-change check reads again."""
+
+SESSION_WANTED: Final = 5
+"""How many contracts the session-change check must compare for a settled answer."""
 
 FX: Final = "currencies"
 """The rate bucket and plan class of forex and crypto, both under the Currencies plans."""
@@ -183,6 +205,72 @@ def chain_day_change(client: RestClient, evidence: Callable[[str], None]) -> Out
     verdict = _verdict(compared=compared, differing=differing)
     evidence(f"chain day.change is the change from previous_close, in percent: {verdict}")
     return Outcome(verdict=verdict, rows=(len(rows),))
+
+
+def session_change(client: RestClient, evidence: Callable[[str], None]) -> Outcome:
+    """Check whether the unified snapshot's `session.change` is the option chain's `day.change`.
+
+    Reads 250 contracts of SPY's chain, then, back to back, the unified snapshot
+    (`/v3/snapshot`) of the first `SESSION_CONTRACTS` of them with a `day.change`. Records,
+    for each, the chain's `day` close, previous close, change, and percent, and the unified
+    snapshot's `SESSION_FIELDS`. A contract is compared only when both reads carry a change
+    and a percent and the same close; different closes mean a trade between the requests.
+    SAME when, for at least `SESSION_WANTED` contracts, `session.change` equals `day.change`
+    within `_CHANGE_TOLERANCE` and `session.change_percent` equals `day.change_percent` within
+    `_PERCENT_TOLERANCE`; DIFFERENT when one does not; INCONCLUSIVE when fewer compare.
+    Massive describes both as the price change from the previous trading day, but the session
+    also has early, regular, and late trading changes, so `session.change` may count trades
+    `day.change` does not: a run after the regular session ends tests that.
+
+    Args:
+        client: The wire REST client.
+        evidence: Records one line of what Massive sent.
+
+    Returns:
+        The verdict, and the number of rows of the chain and, when it was read, of the unified
+        snapshot.
+    """
+    chain = _rows(
+        client, _CHAIN, names={"underlyingAsset": "SPY"}, query={"limit": 250}, bucket="options"
+    )
+    days: dict[str, dict[str, Any]] = {}
+    for row in chain:
+        day, ticker = row.get("day") or {}, (row.get("details") or {}).get("ticker")
+        if ticker and day.get("change") is not None and len(days) < SESSION_CONTRACTS:
+            days[ticker] = day
+    evidence(f"{len(days)} chain contracts with a day.change read again, of {len(chain)}")
+    unified = (
+        _rows(client, _UNIFIED, names={}, query={"ticker.any_of": tuple(days)}, bucket="options")
+        if days
+        else []
+    )
+    sessions = {row.get("ticker"): row.get("session") or {} for row in unified}
+    compared = differing = 0
+    for ticker, day in days.items():
+        session = sessions.get(ticker, {})
+        fields = {key: session.get(key) for key in SESSION_FIELDS}
+        evidence(
+            f"{ticker}: day close={day.get('close')} previous_close={day.get('previous_close')} "
+            f"change={day['change']} change_percent={day.get('change_percent')}; "
+            f"session {fields}"
+        )
+        change, percent = session.get("change"), session.get("change_percent")
+        if change is None or percent is None or day.get("change_percent") is None:
+            continue
+        if day.get("close") != session.get("close"):
+            evidence("  closes differ, so a trade came between the requests: not compared")
+            continue
+        compared += 1
+        differing += (
+            abs(change - day["change"]) > _CHANGE_TOLERANCE
+            or abs(percent - day["change_percent"]) > _PERCENT_TOLERANCE
+        )
+    verdict = _verdict(compared=compared, differing=differing, wanted=SESSION_WANTED)
+    evidence(
+        f"unified session.change is the chain day.change: {verdict} "
+        f"({compared} of {len(days)} contracts compared)"
+    )
+    return Outcome(verdict=verdict, rows=(len(chain), len(unified)))
 
 
 def updated_times(
