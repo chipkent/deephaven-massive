@@ -17,6 +17,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import Page, RestClient, Transport, source
+from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery
 from tests._live import recency
 
 if TYPE_CHECKING:
@@ -134,7 +135,9 @@ def test_minute_bars_of_an_unlabelled_key_stream_from_the_real_time_host(
             f"{answer.text()}; the question is about a key whose stocks snapshot carries no "
             "recency label"
         )
-    table = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
+    bars = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE)
+    assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+    table = bars.append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _STREAM_WAIT)
     hosts = {str(r["Host"]) for r in table_rows(live_session.connections())}
     for line in stream_report(live_session):
@@ -298,14 +301,16 @@ def test_a_delayed_subscription_is_refused_on_the_default_configuration(
                 session.options.chain("SPY").fetch(wait=True)
             else:
                 today = datetime.now(UTC).date()
-                queries = {
+                queries: dict[str, Callable[[], HistoryQuery]] = {
                     "stocks": lambda: session.stocks.bars("AAPL", dm.Timespan.MINUTE),
                     "futures": lambda: session.futures.bars(
                         front_contract("ES", today), dm.Timespan.MINUTE
                     ),
                     "indices": lambda: session.indices.values("I:NDX"),
                 }
-                table = queries[name]().append_only()
+                query = queries[name]()
+                assert isinstance(query, StreamHistoryQuery)  # minute bars and values stream
+                table = query.append_only()
                 pause = threading.Event()  # never set; only paces the polling
                 deadline = time.monotonic() + _STREAM_WAIT
                 while time.monotonic() < deadline and not errors:

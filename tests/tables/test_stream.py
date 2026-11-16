@@ -836,7 +836,6 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
 
 # --- Time columns -------------------------------------------------------------------------------
 
-MINUTE_NS = 60 * 10**9
 # Friday 2025-03-07 16:30 CT and 17:30 CT: the second belongs to Monday 03-10's session.
 BEFORE_ROLL_MS = 1_741_386_600_000
 AFTER_ROLL_MS = 1_741_390_200_000
@@ -909,7 +908,7 @@ def test_a_futures_row_gets_the_rule_session_corrected_by_the_schedules(
     assert alone.batch.column("Date").to_pylist()[2] == "2025-03-07"
 
 
-def test_a_streamed_bar_ends_its_length_after_its_start(
+def test_a_streamed_bar_ends_at_massive_s_end(
     massive_session: dm.MassiveSession,
 ) -> None:
     spec = massive_session._core.catalog.by_name["stocks.bars"]
@@ -920,7 +919,7 @@ def test_a_streamed_bar_ends_its_length_after_its_start(
     row = {
         "Ticker": "AAPL",
         "WindowStart": start,
-        "EndTimestamp": start + 59_999,  # Massive's `e`: recomputed, not kept
+        "EndTimestamp": start + 59_999,  # Massive's `e`, kept as sent
         "Open": 1.0,
         "Close": 1.0,
         "High": 1.0,
@@ -929,12 +928,12 @@ def test_a_streamed_bar_ends_its_length_after_its_start(
     }
     batch = plan.convert(frame([row], "stocks/AM"), {}, arrived=[ARRIVED]).batch
     assert batch.column("TimestampStart").cast(pa.int64()).to_pylist() == [start * 10**6]
-    assert batch.column("TimestampEnd").cast(pa.int64()).to_pylist() == [start * 10**6 + MINUTE_NS]
+    assert batch.column("TimestampEnd").cast(pa.int64()).to_pylist() == [(start + 59_999) * 10**6]
     assert batch.column("Date").to_pylist() == ["2025-03-03"]
     assert "EndTimestamp" not in batch.schema.names
 
 
-def test_a_futures_second_bar_ends_at_the_later_end(
+def test_a_futures_second_bar_ends_at_massive_s_end(
     massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     spec = massive_session._core.catalog.by_name["futures.bars"]
@@ -947,8 +946,8 @@ def test_a_futures_second_bar_ends_at_the_later_end(
         batch = plan.convert(frame(rows, "futures/A"), {}, arrived=[ARRIVED] * 2).batch
     ends = batch.column("TimestampEnd").cast(pa.int64()).to_pylist()
     assert ends == [(start + 60_000) * 10**6, (start + 1_000) * 10**6]
-    # The later end differs from Massive's own `e`, which the library never changes unseen.
-    [notice] = [r for r in caplog.records if "is not its start plus one second" in r.getMessage()]
+    # Massive's `e` is kept, and an end that is not one second on is logged.
+    [notice] = [r for r in caplog.records if "is not its start plus its length" in r.getMessage()]
     assert notice.levelno == logging.WARNING
 
 

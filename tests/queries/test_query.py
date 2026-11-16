@@ -511,7 +511,7 @@ SAMPLE_SYMBOLS = {
 def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query]:
     # One query per kind of call the dataset takes, each with a symbol list and with a reactive
     # symbol table (which changes the shape of `last_by()`): a bars dataset gets them for every
-    # timespan it accepts (the timespan decides whether its stream methods work), any other
+    # timespan it accepts (the timespan decides whether its query has stream methods), any other
     # dataset once.
     symbol = SAMPLE_SYMBOLS[spec.asset_class]
     refused = Timespan.DAY if spec.asset_class is AssetClass.FUTURES else Timespan.SESSION
@@ -525,14 +525,11 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
 def verb_results(query: Query, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
     # Every result shape the query's verbs make, labelled by the call. The last column is a
     # `last_by` key that the aggregation itself would move to the front.
-    spec, request = query._spec, query._request
-    # The stream methods of bars Massive doesn't stream refuse the call (`_check_streams`).
-    streams = not spec.is_bars or (request.timespan in spec.channels and request.multiplier == 1)
-    if isinstance(query, (StreamQuery, NoSymbolStreamQuery)) and streams:
+    if isinstance(query, (StreamQuery, NoSymbolStreamQuery)):
         yield "blink()", query.blink()
         yield "append_only()", query.append_only()
         yield "ring(5)", query.ring(5)
-    if isinstance(query, StreamQuery) and streams:
+    if isinstance(query, StreamQuery):
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
     if isinstance(query, FetchQuery):

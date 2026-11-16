@@ -21,7 +21,6 @@ from deephaven.table_factory import ring_table
 from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
-from deephaven_massive._enums import Timespan
 from deephaven_massive._errors import raises_through
 from deephaven_massive._tables.columns import (
     describe,
@@ -43,57 +42,14 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
 
-__all__ = ["MAX_RING_CAPACITY", "NoSymbolStreamQuery", "StreamQuery", "streaming_bars"]
+__all__ = ["MAX_RING_CAPACITY", "NoSymbolStreamQuery", "StreamQuery"]
 
 logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
-
-
-_SPAN_WORDS: Final = {Timespan.SECOND: "1-second", Timespan.MINUTE: "1-minute"}
-"""How `streaming_bars` names a timespan the WebSocket streams."""
-
-
-def streaming_bars(spec: DatasetSpec) -> str:
-    """Name the bars of a `bars` dataset that Massive streams over the WebSocket.
-
-    Massive streams one bar a second and one a minute, each its own channel; any other
-    timespan, or a multiplier above 1, exists only as history.
-
-    Args:
-        spec: A bars dataset with WebSocket channels.
-
-    Returns:
-        Such as `"1-second and 1-minute bars at multiplier=1"`.
-    """
-    spans = [_SPAN_WORDS[span] for span in Timespan if span in spec.channels]
-    return f"{' and '.join(spans)} bars at multiplier=1"
-
-
-def _check_streams(spec: DatasetSpec, request: Request, *, call: str) -> None:
-    """Refuse a stream of bars the WebSocket doesn't serve, before any stream opens.
-
-    Massive streams only the bars of `streaming_bars`, so the library cannot express a stream
-    of any other bars; every other dataset with channels streams as asked.
-
-    Args:
-        spec: The dataset.
-        request: The query's request, whose timespan and multiplier a bars call sets.
-        call: The query's call and its stream method, which the message names, such as
-            `"m.stocks.bars('AAPL', dm.Timespan.HOUR).blink()"`.
-
-    Raises:
-        ValueError: If the query is of bars that don't stream.
-    """
-    if spec.is_bars and (request.timespan not in spec.channels or request.multiplier != 1):
-        logger.debug("%s refused: these bars don't stream", call)
-        raise ValueError(
-            f"{call}: only {streaming_bars(spec)} stream; read these bars with history(start, end)"
-        )
 
 
 class _StreamShapes(Query):
@@ -111,16 +67,13 @@ class _StreamShapes(Query):
     def _channel(self) -> str:
         """The WebSocket channel: per timespan for bars, otherwise the dataset's channel.
 
-        `_stream_request` refuses bars without a channel before any stream opens, so the
+        A bars query has this class only for bars with a channel (`bar_query_class`), so the
         lookup always finds one.
         """
         return self._spec.channels[timespan_key(self._request.timespan)]
 
-    def _stream_request(self, verb: str) -> Request:
+    def _stream_request(self) -> Request:
         """Return the request the stream is opened for, with a static symbol table read once.
-
-        A `bars()` query of bars the WebSocket doesn't serve is refused first
-        (`_check_streams`).
 
         The request of a stream whose rows name no symbol (`DatasetSpec.names_symbols` False),
         which has none, gets `ALL`: the stream subscribes its channel's every topic. A static
@@ -130,16 +83,11 @@ class _StreamShapes(Query):
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
         `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
 
-        Args:
-            verb: The stream method called, such as `"blink"`, which a refusal names.
-
         Returns:
             The request.
-
         """
         request = self._request
         symbols = request.symbols
-        _check_streams(self._spec, request, call=f"{self!r}.{verb}()")
         if not self._spec.names_symbols:
             # A stream whose rows name no symbol subscribes its channel's every topic, so its
             # stream is keyed as dm.ALL's would be.
@@ -197,7 +145,6 @@ class _StreamShapes(Query):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
     )
@@ -216,8 +163,6 @@ class _StreamShapes(Query):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - the query is of bars that don't stream: only 1-second and 1-minute bars with
-                  `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -230,7 +175,7 @@ class _StreamShapes(Query):
             SessionClosedError: If the session is closed.
             MassiveError: If the stream fails while it opens.
         """
-        return self._stream(lambda blink: blink, self._stream_request("blink"), verb="blink")
+        return self._stream(lambda blink: blink, self._stream_request(), verb="blink")
 
     @_verb
     @raises_through(
@@ -238,7 +183,6 @@ class _StreamShapes(Query):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
     )
@@ -256,8 +200,6 @@ class _StreamShapes(Query):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - the query is of bars that don't stream: only 1-second and 1-minute bars with
-                  `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -270,9 +212,7 @@ class _StreamShapes(Query):
             SessionClosedError: If the session is closed.
             MassiveError: If the stream fails while it opens.
         """
-        return self._stream(
-            blink_to_append_only, self._stream_request("append_only"), verb="append_only"
-        )
+        return self._stream(blink_to_append_only, self._stream_request(), verb="append_only")
 
     @_verb
     @raises_through(
@@ -280,7 +220,6 @@ class _StreamShapes(Query):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
         require_positive_int,
@@ -302,8 +241,6 @@ class _StreamShapes(Query):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - the query is of bars that don't stream: only 1-second and 1-minute bars with
-                  `multiplier=1` do;
                 - the dataset streams only in real time (fair market value, the options admin
                   messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -318,7 +255,7 @@ class _StreamShapes(Query):
         """
         rows = require_positive_int("capacity", capacity, maximum=MAX_RING_CAPACITY)
         return self._stream(
-            lambda blink: ring_table(blink, rows), self._stream_request("ring"), verb="ring"
+            lambda blink: ring_table(blink, rows), self._stream_request(), verb="ring"
         )
 
 
@@ -429,7 +366,6 @@ class StreamQuery(_StreamShapes):
         refuse_update_graph_thread,
         _read_symbol_table,
         read_symbols,
-        _check_streams,
         SharedStreams.result,
         StreamTransport.open_stream,
         _last_by_keys,
@@ -458,8 +394,6 @@ class StreamQuery(_StreamShapes):
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
                 - option contracts passed as a list or a static table pass the connection's limit;
-                - the query is of bars that don't stream: only 1-second and 1-minute bars with
-                  `multiplier=1` do;
                 - the dataset is fair market value, which streams only in real time, and
                   `MassiveConfig.delayed_subscriptions` lists its subscription.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
@@ -471,7 +405,7 @@ class StreamQuery(_StreamShapes):
             MassiveError: If the stream fails while it opens.
         """
         keys = self._last_by_keys(by)
-        request = self._stream_request("last_by")
+        request = self._stream_request()
         symbols = request.symbols
         if not isinstance(symbols, SymbolTable):
             return self._stream(lambda blink: blink.last_by(list(keys)), request, verb="last_by")

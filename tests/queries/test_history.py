@@ -27,7 +27,7 @@ from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
-from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery, _history
+from deephaven_massive.queries import HistoryQuery, _history
 from tests._fakes.queries import (
     BARS_SPEC,
     FF,
@@ -166,7 +166,7 @@ def test_history_rest_rejects_all_except_grouped_daily(
     with pytest.raises(ValueError, match="needs explicit symbols"):
         five.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     daily = make(massive_session, BARS_SPEC, symbols=dm.ALL, timespan=Timespan.DAY)
-    assert type(daily) is StreamHistoryQuery  # every bars call, whatever its timespan
+    assert type(daily) is HistoryQuery  # day bars don't stream
     daily.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert len(rest.calls) == 1
 

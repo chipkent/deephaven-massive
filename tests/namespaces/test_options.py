@@ -40,6 +40,7 @@ from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     NoSymbolStreamQuery,
     Query,
     StreamHistoryQuery,
@@ -191,7 +192,7 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.TRADES, StreamHistoryQuery),
         (options.LAST_TRADE, FetchQuery),
         (options.QUOTES, StreamHistoryQuery),
-        (options.BARS, StreamHistoryQuery),
+        (options.BARS, HistoryQuery),
         (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, StreamQuery),
         (options.ADMIN_MESSAGES, NoSymbolStreamQuery),
@@ -417,21 +418,18 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
 
 
-def test_every_bars_call_is_one_class_and_only_some_stream(
+def test_only_bars_that_stream_get_the_stream_methods(
     massive_session: dm.MassiveSession,
 ) -> None:
     bars = massive_session.options.bars
-    for timespan, multiplier in [
-        (dm.Timespan.MINUTE, 1),
-        (dm.Timespan.SECOND, 1),
-        (dm.Timespan.DAY, 1),
-        (dm.Timespan.MINUTE, 5),
-        (dm.Timespan.HOUR, 1),
+    for timespan, multiplier, expected in [
+        (dm.Timespan.MINUTE, 1, StreamHistoryQuery),
+        (dm.Timespan.SECOND, 1, StreamHistoryQuery),
+        (dm.Timespan.DAY, 1, HistoryQuery),
+        (dm.Timespan.MINUTE, 5, HistoryQuery),
+        (dm.Timespan.HOUR, 1, HistoryQuery),
     ]:
-        assert type(bars(CONTRACT, timespan, multiplier=multiplier)) is StreamHistoryQuery
-    for timespan, multiplier in [(dm.Timespan.DAY, 1), (dm.Timespan.MINUTE, 5)]:
-        with pytest.raises(ValueError, match=r"\.ring\(\): only 1-second and 1-minute bars"):
-            bars(CONTRACT, timespan, multiplier=multiplier).ring(10)
+        assert type(bars(CONTRACT, timespan, multiplier=multiplier)) is expected
     q = bars(CONTRACT, dm.Timespan.DAY, adjusted=False)
     assert (q._request.timespan, q._request.multiplier) == (dm.Timespan.DAY, 1)
     assert q._request.adjusted is False
@@ -1310,10 +1308,10 @@ def bar_frame(event: str) -> dict[str, object]:
             "bars-second",
             "A",
             bar_frame("A"),
-            # The end is the start plus the bar's length, not the frame's `e`.
+            # The end is the frame's `e` as sent, though it is not one second on.
             {
                 "TimestampStart": 1632419640000 * 10**6,
-                "TimestampEnd": 1632419641000 * 10**6,
+                "TimestampEnd": 1632419700000 * 10**6,
                 "Date": "2021-09-23",
                 "Close": 2.05,
             },
