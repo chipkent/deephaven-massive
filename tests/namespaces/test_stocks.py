@@ -40,9 +40,11 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.dates import NEW_YORK
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import ChannelFamily
+from deephaven_massive._ingest.host_decision import SnapshotAnswer, SnapshotProbe, decide
 from deephaven_massive._massive import (
     RequestGovernor,
     RestClient,
+    StatusKind,
     Transport,
     WireType,
     to_batch,
@@ -1597,6 +1599,56 @@ def test_a_frame_lands_in_blink(
     assert row["Date"] is not None
     assert row["TimestampInsert"] is not None  # when the frame arrived
     ws_session.session.release(result)
+
+
+def test_fmv_streams_from_its_host_beside_delayed_stock_trades(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The delayed listing moves the stocks trades to the delayed feed and never applies to FMV,
+    # whose one documented host the library uses; whether Massive serves it is Massive's answer,
+    # and its refusal fails only the FMV table.
+    def refuse_probes(probe: SnapshotProbe) -> SnapshotAnswer:
+        raise AssertionError(f"no snapshot is read for a listed subscription: {probe.path}")
+
+    session = make_ws_session(
+        decide=functools.partial(
+            decide,
+            websocket_hosts={},
+            delayed_subscriptions=frozenset({dm.Subscription.STOCKS}),
+            fetch=refuse_probes,
+        ),
+        delayed_subscriptions={dm.Subscription.STOCKS},
+    )
+    session.server.refuse["FMV.MSFT"] = "not authorized to access FMV.MSFT"
+    trades = session.session.stocks.trades("MSFT").blink()
+    fmv = session.session.stocks.fmv("MSFT").blink()
+    session.subscribed("FMV.MSFT")
+    session.wait(lambda s: any(status.kind is StatusKind.REFUSED for status in s.statuses))
+    session.flush()
+    assert session.urls == [
+        "wss://delayed.massive.com/stocks",
+        "wss://business.massive.com/stocks",
+    ]
+    with session.connections.group.lock:
+        connections = list(session.connections.group.connections.values())
+    for connection in connections:
+        session.on_loop(connection, lambda: None)  # runs the queued row writes
+    assert session.session._core.diagnostics.wait_until_shown(15.0)
+    rows = {r["Dataset"]: r for r in dh_to_pylist(session.session.streams())}
+    shown = {name: (r["Host"], r["Recency"], r["State"]) for name, r in rows.items()}
+    assert shown == {
+        "stocks.trades": ("delayed.massive.com", "DELAYED", "RUNNING"),
+        "stocks.fmv": ("business.massive.com", "REALTIME", "FAILED"),
+    }
+    assert "Massive said: not authorized to access FMV.MSFT" in rows["stocks.fmv"]["Error"]
+    evidence = {r["Family"]: r["Evidence"] for r in dh_to_pylist(session.session.connections())}
+    assert evidence == {
+        "TICK": "MassiveConfig.delayed_subscriptions",
+        "FMV": "FMV channel's documented host",
+    }
+    session.session.release(trades)
+    session.session.release(fmv)
 
 
 # --- End to end: flat files ----------------------------------------------------------------------

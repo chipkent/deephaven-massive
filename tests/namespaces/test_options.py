@@ -29,9 +29,11 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
+from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import Transport, to_batch
 from deephaven_massive._session import CATALOG
@@ -1502,7 +1504,7 @@ def test_one_unreadable_admin_message_never_fails_the_table(
     ws_session.session.release(kept)
 
 
-def test_a_refused_admin_subscription_fails_its_table_and_names_its_plans(
+def test_a_refused_admin_subscription_fails_its_table_and_links_its_page(
     ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
     ws_session.server.refuse["AD.*"] = "not authorized to access AD.*"
@@ -1526,16 +1528,60 @@ def test_a_refused_admin_subscription_fails_its_table_and_names_its_plans(
     ws_session.session.release(trades)
 
 
-def test_admin_messages_refuse_the_delayed_feed_at_the_call(
+def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
     make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Massive documents admin messages only on the real-time feed, but whether it serves them
+    # on the delayed one is its answer: the stream subscribes there, and a refusal fails it.
     delayed = HostDecision("delayed.test", Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
     session = make_ws_session(
         decide=lambda *_: delayed, delayed_subscriptions={dm.Subscription.OPTIONS}
     )
-    with pytest.raises(ValueError, match=r"lists dm\.Subscription\.OPTIONS"):
+    session.server.refuse["AD.*"] = "not authorized to access AD.*"
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.ws"):
+        notices = session.session.options.admin_messages().blink()
+    assert any(
+        "options.admin_messages stream" in r.getMessage()
+        and "only on the real-time feed; subscribing on delayed.test" in r.getMessage()
+        for r in caplog.records
+    )
+    session.wait(lambda s: any(status.kind is _massive.StatusKind.REFUSED for status in s.statuses))
+    session.flush()
+    assert session.urls == ["wss://delayed.test/options"]
+    (row,) = shown_streams(session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert "delayed.test/options refused the subscription to AD.*" in row["Error"]
+    assert "MassiveConfig.delayed_subscriptions lists dm.Subscription.OPTIONS" in row["Error"]
+    assert row["Error"].endswith(
+        "options.admin_messages streams only in real time, on the plans listed at "
+        + page_url(options.ADMIN_MESSAGES)
+    )
+    session.session.release(notices)
+
+
+def test_admin_messages_on_delayed_options_data_raise_the_delayed_data_error(
+    make_ws_session: Callable[..., WsSession],
+) -> None:
+    # The ordinary error of delayed data, as every options stream gets: the library reads no
+    # plan into Massive's label.
+    def labelled_delayed(*_: object) -> HostDecision:
+        raise delayed_refusal(
+            dm.Subscription.OPTIONS,
+            "options streams",
+            "last_trade.timeframe=DELAYED",
+            streams=True,
+        )
+
+    session = make_ws_session(decide=labelled_delayed)
+    with pytest.raises(dm.EntitlementError) as info:
         session.session.options.admin_messages().append_only()
-    assert session.urls == []  # no connection was opened
+    assert str(info.value).startswith(
+        "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED)"
+    )
+    assert "plan" not in str(info.value)
+    assert session.urls == []
 
 
 # --- End to end: flat files ------------------------------------------------------------------

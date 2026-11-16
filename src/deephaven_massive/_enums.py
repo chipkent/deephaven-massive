@@ -607,9 +607,9 @@ def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription |
 class Recency(StrEnum):
     """How fresh the data of a WebSocket host or a live table is (internal).
 
-    `REALTIME` for Massive's real-time and Business hosts, `DELAYED` for its delayed feed, and
+    `REALTIME` for Massive's real-time and FMV hosts, `DELAYED` for its delayed feed, and
     `UNKNOWN` for a pinned host the library does not know, or a REST table of a subscription
-    listed in `MassiveConfig.delayed_subscriptions` (REST serves what the plan serves).
+    listed in `MassiveConfig.delayed_subscriptions` (REST serves what Massive serves the key).
     `UNKNOWN` is never shown as real-time.
     """
 
@@ -621,8 +621,10 @@ class Recency(StrEnum):
 class ChannelFamily(StrEnum):
     """Which group of channels a WebSocket connection carries (internal).
 
-    `FMV` (fair market value) is Business-only and always served from `business.massive.com`;
-    every other channel is in the `TICK` family, whose host depends on the key's plan.
+    `FMV` (fair market value) streams only from `business.massive.com`, the one host Massive
+    documents for it; every other channel is in the `TICK` family, whose host follows
+    `MassiveConfig.delayed_subscriptions`, `MassiveConfig.websocket_hosts`, and Massive's recency
+    label.
     """
 
     TICK = "TICK"
