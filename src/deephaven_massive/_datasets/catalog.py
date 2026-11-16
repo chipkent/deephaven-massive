@@ -369,9 +369,10 @@ class DatasetSpec:
             default), which its tests check is unique per row.
         nullable_poll_keys: The `poll_keys` columns whose null is a value rather than a data
             failure, each mapped to the reason the vendor leaves it empty, such as
-            `{"PutCall": "empty for common stock"}`. A null in any other poll-key column fails
-            the `poll()` table; a catalog gate requires at least one poll-key column outside
-            this map, so a row is never identified by nulls alone. Empty by default.
+            `{"PutCall": "empty for common stock"}`. A row with a null in any other poll-key
+            column is withheld under `unreadable_keys`; a catalog gate requires at least one
+            poll-key column outside this map, so a row is never identified by nulls alone.
+            Empty by default.
         revision_keys: Further columns of a row's identity in an `APPEND` table only, after
             `poll_keys`: a current-state dataset's update time, such as `("Updated",)` on a
             snapshot, so that an explicit `mode=APPEND` appends each new state of a symbol
@@ -835,7 +836,7 @@ class DatasetSpec:
         if optional and "Symbol" in self.poll_keys:
             raise ValueError(
                 f"{self.name}: poll_keys cannot hold Symbol when the symbol is optional: a row "
-                "without one would have a null poll key, which fails the poll() table; declare "
+                "without one would have a null poll key, which withholds the row; declare "
                 "other poll_keys"
             )
         if INSERT in self.poll_keys:

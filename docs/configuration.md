@@ -365,7 +365,8 @@ A key can't be read when it is one of these:
 
 - the row's symbol, its time, or another column its dataset needs, missing or of
   the wrong type;
-- a time of 0, or one outside 1990 to 2100.
+- a time of 0, or one outside 1990 to 2100;
+- a `poll()` table's key column, null or NaN, which would merge unrelated rows.
 
 A symbol that is present but isn't Massive's ticker is `unreadable_symbols`. Set
 `raise` to fail the table at the first such row. Such a row is a sign
