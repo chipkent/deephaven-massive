@@ -7,7 +7,7 @@ Whether the markets are open now, by exchange, currency market, and index group.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.market_status()
+m.reference.market_status(*, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -16,6 +16,14 @@ m.reference.market_status()
 - `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `ServerTime`
 
 [Dataset index](README.md)
+
+## Arguments
+
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
+| Argument | Description |
+| --- | --- |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

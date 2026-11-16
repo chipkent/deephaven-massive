@@ -7,7 +7,7 @@ The timed events of each futures product's trading sessions.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.schedules(*, product_code=None, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.futures.schedules(*, product_code=None, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of product codes caps every code's requests instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"trading_venue": "XCME"}`. Don't pass `session_end_date`, which `start` and `end` set. Keys: `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

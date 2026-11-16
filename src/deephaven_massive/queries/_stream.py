@@ -163,7 +163,13 @@ class StreamQuery(Query):
             # stream is keyed as dm.ALL's would be.
             return replace(request, symbols=ALL)
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
-            read = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
+            read = _read_symbol_table(
+                self._core,
+                self._spec,
+                symbols,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+            )
             return replace(request, symbols=read)
         return request
 
@@ -193,7 +199,14 @@ class StreamQuery(Query):
         spec = self._spec
         symbols = request.symbols  # a static table is already read: never read it twice
         if isinstance(symbols, SymbolTable):
-            _read_symbol_table(self._core, spec, symbols, query=repr(self), live=True)
+            _read_symbol_table(
+                self._core,
+                spec,
+                symbols,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+                live=True,
+            )
         schema = self._core.dataset_schema(spec)
         return self._core.streams.result(
             spec,

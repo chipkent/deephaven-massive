@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._enums import Order
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["DATASETS", "EconomyNamespace"]
 
@@ -125,6 +126,7 @@ class EconomyNamespace(Namespace):
         order: Order | None,
         limit: int | None,
         filters: Mapping[str, FilterValue] | None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Validate the arguments every economy dataset shares and return its query.
 
@@ -136,6 +138,7 @@ class EconomyNamespace(Namespace):
             order: The sort direction, or None.
             limit: The total-row cap, or None.
             filters: Further query parameters, or None.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             The dataset's `FetchQuery`.
@@ -154,6 +157,7 @@ class EconomyNamespace(Namespace):
             params=params,
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -166,6 +170,7 @@ class EconomyNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """US Treasury yields at constant maturities from one month to 30 years, one row per day.
 
@@ -178,6 +183,7 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -203,6 +209,7 @@ class EconomyNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -215,6 +222,7 @@ class EconomyNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """US inflation: CPI, core CPI, and the PCE price indexes and spending, one row per month.
 
@@ -228,6 +236,7 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -253,6 +262,7 @@ class EconomyNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -265,6 +275,7 @@ class EconomyNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """US inflation expectations from market prices and models, one row per day.
 
@@ -278,6 +289,7 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -303,6 +315,7 @@ class EconomyNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -315,6 +328,7 @@ class EconomyNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """US labor-market indicators: unemployment, participation, earnings, and job openings.
 
@@ -328,6 +342,7 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -353,6 +368,7 @@ class EconomyNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -365,6 +381,7 @@ class EconomyNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """US short-term funding conditions: policy, overnight, and repo rates, one row per day.
 
@@ -379,6 +396,7 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -404,4 +422,5 @@ class EconomyNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )

@@ -7,7 +7,7 @@ Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.short_volume(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.short_volume(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. Keys: `short_volume_ratio`, `short_volume_ratio_any_of`, `short_volume_ratio_gt`, `short_volume_ratio_gte`, `short_volume_ratio_lt`, `short_volume_ratio_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -47,7 +48,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AdfShortVolume` | long | Short volume reported via the Alternative Display Facility (ADF), excluding exempt volume. |
 | `AdfShortVolumeExempt` | long | Short volume reported via ADF that was marked as exempt. |
 | `Date` | String | The date of trade activity reported in the format YYYY-MM-DD |

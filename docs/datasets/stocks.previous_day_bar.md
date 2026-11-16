@@ -7,7 +7,7 @@ The previous trading day's bar (open, high, low, close, volume) of US stocks.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.previous_day_bar(symbols, *, adjusted=True)
+m.stocks.previous_day_bar(symbols, *, adjusted=True, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -25,6 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`adjusted`](README.md#adjusted) | Adjusts volume as well as prices. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -46,7 +47,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart` for an intraday or 1-day bar, and null for a bar that spans more than one date (several days, a week or longer, or an intraday bar that crosses midnight). Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 New York time of its window's first day (a week's Monday, a month's, quarter's, or year's first weekday), whichever source serves it. A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which day it covers is not known. Every other stamp, as each source sends it (quoted next), is moved there. From REST `t`: "The Unix millisecond timestamp for the start of the aggregate window." |
 | `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `t.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start; a bar of a day or longer at 00:00 New York time after its window's last day. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Open` | double | The open price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |
 | `High` | double | The highest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |
 | `Low` | double | The lowest price for the symbol in the given time period. Split-adjusted when the query's adjusted is True, the default, served only by REST: a price from before a split is restated in the split's terms (divided by its ratio), so it is not the price that traded. With adjusted=False, from the flat files, and on the WebSocket it is as traded. One history() never mixes the two, and Massive never adjusts for cash dividends. |

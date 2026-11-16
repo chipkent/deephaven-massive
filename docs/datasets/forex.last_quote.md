@@ -7,7 +7,7 @@ The latest best bid and ask of each currency pair.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.forex.last_quote(symbols)
+m.forex.last_quote(symbols, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use `m.forex.snapshots(dm.ALL)`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

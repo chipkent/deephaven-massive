@@ -59,6 +59,7 @@ from deephaven_massive._enums import (
     Timespan,
     _require_enum,
 )
+from deephaven_massive._error_policy import ErrorPolicy, check_policy
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
@@ -452,7 +453,9 @@ class OptionsNamespace(Namespace):
     _path: ClassVar[str] = "options"
 
     @raises_through(build_query)
-    def trades(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def trades(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Trades of US-listed options contracts (OPRA), tick by tick.
 
         Each row holds a trade's price, size, exchange, condition codes, and SIP timestamp.
@@ -461,13 +464,14 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.trades.md.
 
         Raises:
-            TypeError: If `symbols` is of another type.
+            TypeError: If `symbols` is of another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -481,10 +485,14 @@ class OptionsNamespace(Namespace):
                 contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
                 hour = m.options.trades(contract).history(datetime.now(UTC) - timedelta(hours=1))
         """
-        return build_query(self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def last_trade(self, symbols: SymbolsLike) -> FetchQuery:
+    def last_trade(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The latest trade of each US-listed options contract.
 
         Each row holds one contract's most recent trade. A contract with no trade is left out, and
@@ -495,13 +503,14 @@ class OptionsNamespace(Namespace):
         Args:
             symbols: Option contracts. `dm.ALL` is refused; use `chain(underlying)` for every
                 contract of an underlying.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.last_trade.md.
 
         Raises:
-            TypeError: If `symbols` is of another type.
+            TypeError: If `symbols` is of another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -519,10 +528,13 @@ class OptionsNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.options.chain(underlying).fetch()",
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def quotes(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Quotes of US-listed options contracts (OPRA), tick by tick.
 
         Each row holds a quote's bid and ask prices, sizes, and exchanges, with its SIP timestamp.
@@ -531,13 +543,14 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.quotes.md.
 
         Raises:
-            TypeError: If `symbols` is of another type.
+            TypeError: If `symbols` is of another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -549,7 +562,9 @@ class OptionsNamespace(Namespace):
                 contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
                 book = m.options.quotes(contract).last_by()
         """
-        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
     def bars(
@@ -559,6 +574,7 @@ class OptionsNamespace(Namespace):
         *,
         multiplier: int = 1,
         adjusted: bool = True,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
@@ -574,6 +590,7 @@ class OptionsNamespace(Namespace):
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts for splits of the underlying.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query that reads history, and streams 1-second and 1-minute bars at
@@ -602,10 +619,13 @@ class OptionsNamespace(Namespace):
             timespan=timespan,
             multiplier=multiplier,
             adjusted=require_bool("adjusted", adjusted),
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: SymbolsLike, *, adjusted: bool = True) -> FetchQuery:
+    def previous_day_bar(
+        self, symbols: SymbolsLike, *, adjusted: bool = True, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The previous trading day's open, high, low, close, and volume of options contracts.
 
         Each row holds one contract's bar of the previous completed session. A contract with no bar
@@ -616,13 +636,15 @@ class OptionsNamespace(Namespace):
                 `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the
                 flat files.
             adjusted: Adjusts for splits of the underlying.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.previous_day_bar.md.
 
         Raises:
-            TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type.
+            TypeError: If `adjusted` isn't a `bool`, or `symbols` is of another type, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -645,10 +667,13 @@ class OptionsNamespace(Namespace):
             ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> SymbolStreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
         Each row holds a contract's fair market value and when Massive computed it. It streams only
@@ -656,13 +681,14 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.fmv.md.
 
         Raises:
-            TypeError: If `symbols` is of another type.
+            TypeError: If `symbols` is of another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -674,9 +700,12 @@ class OptionsNamespace(Namespace):
                 contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
                 fair = m.options.fmv(contract).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(
+            self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+        )
 
-    def admin_messages(self) -> StreamQuery:
+    @raises_through(check_policy)
+    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """OPRA's administrative messages, including FLEX trade notices, streamed in real time.
 
         Each row holds one message from one exchange: the text exactly as OPRA sends it in
@@ -686,9 +715,15 @@ class OptionsNamespace(Namespace):
         symbols and streams every exchange's messages. The rows have no `Symbol` column, so the
         query has no `last_by()`. There is no history.
 
+        Args:
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md.
+
+        Raises:
+            TypeError: If `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -696,7 +731,7 @@ class OptionsNamespace(Namespace):
                 notices = m.options.admin_messages().append_only()
                 flex = notices.where("Message.contains(`FLEX`)")  # as in the CFLEX sample
         """
-        return build_query(self._core, ADMIN_MESSAGES, query_type=StreamQuery)
+        return build_query(self._core, ADMIN_MESSAGES, query_type=StreamQuery, on_error=on_error)
 
     @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)
     def chain(
@@ -708,6 +743,7 @@ class OptionsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The snapshot of every contract in one underlying's option chain.
 
@@ -718,7 +754,8 @@ class OptionsNamespace(Namespace):
         `SharesPerContract` of 100.
 
         A table of underlyings is read value by value. A row that isn't a stock or index ticker
-        follows `MassiveConfig.noncanonical_symbols`, which skips and logs it by default. A live
+        follows the `noncanonical_symbols` cause of `on_error`, which skips and logs it by
+        default. A live
         table is followed. In a static table, one failed underlying fails the call.
 
         Args:
@@ -731,6 +768,7 @@ class OptionsNamespace(Namespace):
             limit: The most rows to return, in total. A table of underlyings caps every underlying's
                 requests instead.
             filters: Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -776,6 +814,7 @@ class OptionsNamespace(Namespace):
             filters=filters,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params)
@@ -787,6 +826,7 @@ class OptionsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The current snapshot of each requested options contract, with its greeks.
 
@@ -801,6 +841,7 @@ class OptionsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"ticker_gte": "O:AAPL"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -841,6 +882,7 @@ class OptionsNamespace(Namespace):
             params=params,
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(
@@ -858,6 +900,7 @@ class OptionsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
@@ -883,6 +926,7 @@ class OptionsNamespace(Namespace):
             limit: The most rows in total without `symbols`. With them, it counts per contract, so
                 it has no effect.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -943,11 +987,17 @@ class OptionsNamespace(Namespace):
             filters=filters,
             limit=limit,
             values=values,
+            on_error=on_error,
         )
 
     @raises_through(build_query, day_argument)
     def daily_open_close(
-        self, symbols: SymbolsLike, date: DateLike, *, adjusted: bool = True
+        self,
+        symbols: SymbolsLike,
+        date: DateLike,
+        *,
+        adjusted: bool = True,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The open, high, low, close, and volume of each options contract on one day.
 
@@ -960,13 +1010,15 @@ class OptionsNamespace(Namespace):
                 flat files.
             date: The trading day, as a date; a `datetime` raises.
             adjusted: Adjusts for splits of the underlying.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.daily_open_close.md.
 
         Raises:
-            TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
@@ -989,4 +1041,5 @@ class OptionsNamespace(Namespace):
             ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+            on_error=on_error,
         )

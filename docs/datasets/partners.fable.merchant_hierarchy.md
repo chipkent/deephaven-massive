@@ -7,7 +7,7 @@ Fable Data's map from merchants to parent companies, tickers, and industries.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.fable.merchant_hierarchy(*, sort=None, order=None, limit=None, filters=None)
+m.partners.fable.merchant_hierarchy(*, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -26,6 +26,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"listing_status": "public"}`. Keys: `active_from`, `active_from_gt`, `active_from_gte`, `active_from_lt`, `active_from_lte`, `active_to`, `active_to_gt`, `active_to_gte`, `active_to_lt`, `active_to_lte`, `listing_status`, `listing_status_any_of`, `lookup_name`, `lookup_name_any_of`, `lookup_name_gt`, `lookup_name_gte`, `lookup_name_lt`, `lookup_name_lte`, `ticker`, `ticker_any_of`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

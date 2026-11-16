@@ -7,7 +7,7 @@ One day's opening, closing, high, and low levels of each index.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.indices.daily_open_close(symbols, date)
+m.indices.daily_open_close(symbols, date, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`date`](README.md#date) | The day, as a date. A `datetime` raises. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -44,7 +45,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Open` | double | The open value for the symbol in the given time period. |
 | `High` | double | The highest value for the symbol in the given time period. |
 | `Low` | double | The lowest value for the symbol in the given time period. |

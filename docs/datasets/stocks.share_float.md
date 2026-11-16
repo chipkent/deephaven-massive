@@ -7,7 +7,7 @@ The free float of US-listed stocks: the latest count of shares the public can tr
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.share_float(symbols=None, *, sort=None, order=None, limit=None, filters=None)
+m.stocks.share_float(symbols=None, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -27,6 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. Keys: `free_float_percent`, `free_float_percent_gt`, `free_float_percent_gte`, `free_float_percent_lt`, `free_float_percent_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -45,7 +46,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `EffectiveDate` | String | The effective date of the free float measurement. |
 | `FreeFloat` | long | Number of shares freely tradable in the market. Free float shares represent the portion of a company's outstanding shares that is freely tradable in the market, excluding any holdings considered strategic, controlling, or long term. This excludes insiders, directors, founders, 5 percent plus shareholders, cross holdings, government stakes except pensions, restricted or locked up shares, employee plans, and any entities with board influence, leaving only shares that are genuinely available for public trading. |
 | `FreeFloatPercent` | double | Percentage of total shares outstanding that are available for public trading, rounded to two decimal places. |

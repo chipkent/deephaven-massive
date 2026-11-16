@@ -46,6 +46,7 @@ from deephaven_massive.queries import (
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["DATASETS", "ForexNamespace"]
 
@@ -272,7 +273,9 @@ class ForexNamespace(Namespace):
     _path: ClassVar[str] = "forex"
 
     @raises_through(build_query)
-    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def quotes(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick.
 
         Each row holds one quote of Massive's feed, which combines prices from banks and trading
@@ -282,13 +285,15 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
                 `dm.canonical_symbol_forex` converts `EUR/USD`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.quotes.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a currency pair;
@@ -299,10 +304,14 @@ class ForexNamespace(Namespace):
 
                 eur = m.forex.quotes("C:EURUSD").last_by()
         """
-        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def last_quote(self, symbols: SymbolsLike) -> FetchQuery:
+    def last_quote(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The latest best bid and ask of each currency pair.
 
         Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
@@ -312,13 +321,15 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use
                 `m.forex.snapshots(dm.ALL)`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.last_quote.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of a currency pair;
@@ -335,6 +346,7 @@ class ForexNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
+            on_error=on_error,
         )
 
     @raises_through(build_query)
@@ -344,6 +356,7 @@ class ForexNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
@@ -357,6 +370,7 @@ class ForexNamespace(Namespace):
                 takes `dm.ALL` for one-minute and one-day bars.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query that reads history, and streams 1-second and 1-minute bars at
@@ -384,10 +398,13 @@ class ForexNamespace(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
+    def previous_day_bar(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The previous UTC day's open, high, low, close, and volume of each currency pair.
 
         Each row holds one pair's bar of the previous complete UTC day. A pair with no bar gets no
@@ -396,13 +413,15 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair's bar
                 of one day, use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.previous_day_bar.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, or a table, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of a currency pair;
@@ -423,10 +442,13 @@ class ForexNamespace(Namespace):
                 "every ticker's bar of that day"
             ),
             timespan=Timespan.DAY,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> SymbolStreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
         Each row holds one update of Massive's own real-time price estimate. Only Currencies
@@ -434,13 +456,15 @@ class ForexNamespace(Namespace):
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.fmv.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a currency pair;
@@ -451,10 +475,12 @@ class ForexNamespace(Namespace):
 
                 fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(
+            self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def snapshots(self, symbols: SymbolsLike) -> FetchQuery:
+    def snapshots(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """The current state of currency pairs: today's bar, the last minute, and the last quote.
 
         Each row holds one pair's bars for today and the previous UTC day, and its latest minute
@@ -462,13 +488,15 @@ class ForexNamespace(Namespace):
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair Massive tracks.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.snapshots.md.
 
         Raises:
-            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`.
+            TypeError: If `symbols` isn't a `str`, a sequence of `str`, a table, or `dm.ALL`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of a currency pair;
@@ -479,10 +507,12 @@ class ForexNamespace(Namespace):
 
                 latest = m.forex.snapshots(["C:EURUSD", "C:GBPUSD"]).poll(5)
         """
-        return build_query(self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols)
+        return build_query(
+            self._core, SNAPSHOTS, query_type=FetchQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(_require_enum)
-    def movers(self, direction: Direction) -> FetchQuery:
+    def movers(self, direction: Direction, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """The twenty currency pairs that gained or lost the most since the previous UTC close.
 
         Each row holds one pair's snapshot, with the columns of `snapshots()`, ranked by percentage
@@ -492,6 +522,7 @@ class ForexNamespace(Namespace):
 
         Args:
             direction: `dm.Direction.GAINERS` for the largest increases, or `dm.Direction.LOSERS`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -499,7 +530,7 @@ class ForexNamespace(Namespace):
 
         Raises:
             TypeError: If `direction` isn't a `dm.Direction`. `dm.Direction("gainers")` converts
-                text.
+                text, or `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -507,11 +538,19 @@ class ForexNamespace(Namespace):
                 losers = m.forex.movers(dm.Direction.LOSERS).poll(60)
         """
         side = _require_enum(direction, Direction, "direction")
-        return build_query(self._core, MOVERS, query_type=FetchQuery, params={"direction": side})
+        return build_query(
+            self._core, MOVERS, query_type=FetchQuery, params={"direction": side}, on_error=on_error
+        )
 
     @raises_through(build_query, _currency)
     def conversion(
-        self, from_currency: str, to_currency: str, *, amount: float = 1.0, precision: int = 2
+        self,
+        from_currency: str,
+        to_currency: str,
+        *,
+        amount: float = 1.0,
+        precision: int = 2,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """An amount converted between two currencies at the latest quote.
 
@@ -525,6 +564,7 @@ class ForexNamespace(Namespace):
             to_currency: The code of the currency to convert to, such as `"USD"`.
             amount: The amount to convert, any finite number; 1.0 by default.
             precision: The decimal places of the result; 2 by default.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -532,7 +572,8 @@ class ForexNamespace(Namespace):
 
         Raises:
             TypeError: If a currency isn't a `str`, `amount` isn't an `int` or `float`, or
-                `precision` isn't an `int`. A `bool` is neither number.
+                `precision` isn't an `int`. A `bool` is neither number, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If a currency is empty, or `amount` is NaN or infinite.
 
         Example:
@@ -553,4 +594,6 @@ class ForexNamespace(Namespace):
         # The endpoint's `precision` is an enum of digit strings, so it is sent as text. Massive
         # judges the value: it honors 5, which its specification does not list.
         params = {"from": base, "to": target, "amount": amount, "precision": str(precision)}
-        return build_query(self._core, CONVERSION, query_type=FetchQuery, params=params)
+        return build_query(
+            self._core, CONVERSION, query_type=FetchQuery, params=params, on_error=on_error
+        )

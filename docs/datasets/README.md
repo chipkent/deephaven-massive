@@ -310,18 +310,16 @@ The futures exchanges whose flat files `history()` reads, as a set of `dm.Future
 Massive refuses the files of an exchange your plan doesn't include. `history()` reads REST instead when REST can serve the read. When it must read flat files (`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):
 
 - Left out, the read tries every exchange and skips each one Massive refuses. It logs one warning naming them. The table's description names them too. For a watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.
-- An exchange you name follows [`refused_venues`](#refused_venues).
+- An exchange you name follows the `refused_venues` cause of [`on_error`](#on_error).
 - If Massive refuses every exchange, the read fails.
 
-<a id="refused_venues"></a>
+<a id="on_error"></a>
 
-### refused_venues
+### on_error
 
-What a flat-file read does when Massive refuses the files of an exchange you name in [`venues`](#venues). It takes a `dm.OnError`. Left out, it follows `MassiveConfig.refused_venues`, which is `RAISE` unless you set it.
+A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad symbol, row, file line, or refused futures exchange, and each kind is a cause. Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, then `dm.ErrorPolicy.DEFAULTS`. `help(dm.ErrorPolicy)` lists the causes. [Bad symbols and rows](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error) says what each value does.
 
-- `RAISE` fails the read with `EntitlementError`, naming the exchange.
-- `LOG` skips each refused exchange for the whole range, logs one warning naming them, and lists them in the table's description.
-- `IGNORE` skips them too, logging only at DEBUG.
+A live call whose policy changes any cause's setting gets its own stream in `m.streams()`.
 
 ## Column types
 

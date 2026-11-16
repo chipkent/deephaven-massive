@@ -157,7 +157,8 @@ def _fetch(
     m: dm.MassiveSession, spec: DatasetSpec, symbols: list[str], *, adjusted: bool | None = None
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
-    return rest.fetch_by_symbol(spec, Request(adjusted=adjusted), symbols=symbols, call=7)
+    asked = Request(adjusted=adjusted, on_error=m._core.policy)
+    return rest.fetch_by_symbol(spec, asked, symbols=symbols, call=7)
 
 
 def _history(
@@ -168,7 +169,7 @@ def _history(
     adjusted: bool | None = None,
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
-    asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted)
+    asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted, on_error=m._core.policy)
     return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7)
 
 
@@ -348,7 +349,9 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     # A pair Massive has no data for, as a 404 is: no rows under LOG and IGNORE, logged once at
     # WARNING or DEBUG; its own failure under RAISE.
     core = session._core
-    replaced = dataclasses.replace(core.config, unavailable_symbols=setting)
+    replaced = dataclasses.replace(
+        core.config, on_error=dm.ErrorPolicy(unavailable_symbols=setting)
+    )
     monkeypatch.setattr(core, "config", replaced)
     listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
     fake_rest.reply(TICKERS_PATH, Reply(envelope([listed])), Reply(envelope([])))

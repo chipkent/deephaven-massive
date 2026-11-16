@@ -7,7 +7,7 @@ News articles about tickers, with their publishers and sentiment insights.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.news(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.reference.news(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | Each ticker's direction of `sort`, newest first by default. |
 | [`limit`](README.md#limit) | Articles per ticker, or in total without `symbols`. |
 | [`filters`](README.md#filters) | Further endpoint parameters. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

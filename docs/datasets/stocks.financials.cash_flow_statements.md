@@ -7,7 +7,7 @@ Cash flow statements of US public companies, one row per filer and reporting per
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.financials.cash_flow_statements(symbols=None, *, timeframe=None, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.financials.cash_flow_statements(symbols=None, *, timeframe=None, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -30,6 +30,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`. Keys: `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `filing_date`, `filing_date_gt`, `filing_date_gte`, `filing_date_lt`, `filing_date_lte`, `fiscal_quarter`, `fiscal_quarter_gt`, `fiscal_quarter_gte`, `fiscal_quarter_lt`, `fiscal_quarter_lte`, `fiscal_year`, `fiscal_year_gt`, `fiscal_year_gte`, `fiscal_year_lt`, `fiscal_year_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

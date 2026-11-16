@@ -199,7 +199,7 @@ def start(
     return open_poll(
         m._core,
         spec=DIVIDENDS,
-        request=Request(symbols=symbols, value_table=values),
+        request=Request(symbols=symbols, value_table=values, on_error=m._core.policy),
         interval=timedelta(seconds=interval),
         mode=mode,
         query="<Query test>",
@@ -1199,7 +1199,9 @@ def test_a_bad_value_fails_the_poll_under_raise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    strict = dataclasses.replace(
+        core.config, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    )
     monkeypatch.setattr(core, "config", strict)
     codes, values = product_codes(dh_input_table, "ES")
     script.rows()
@@ -1257,7 +1259,9 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
+    strict = dataclasses.replace(
+        core.config, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    )
     monkeypatch.setattr(core, "config", strict)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
@@ -2017,7 +2021,9 @@ def ignoring_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.IGNORE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.IGNORE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -2032,7 +2038,9 @@ def raising_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -2091,8 +2099,10 @@ def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
         "indicators.sma poll(): X:BTCUSD cannot be polled: /v1/indicators/sma/{cryptoTicker} "
-        "does not take ['adjusted']. Remove the symbol, or set MassiveConfig("
-        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+        "does not take ['adjusted']. Remove the symbol; to leave it out and keep polling the "
+        "others, pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset "
+        "method or to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the "
+        "settings file"
     )
     assert fake_rest.requests == []
 
@@ -2112,8 +2122,9 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
         f"indicators.sma: Massive has no data for 1 [MSFT (HTTP 404 from {SMA_STOCK})]. "
-        "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
-        "it out and read the others"
+        "Remove the symbol; to leave it out and read the others, pass "
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or "
+        "to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
     )
 
 

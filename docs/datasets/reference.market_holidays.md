@@ -7,7 +7,7 @@ The upcoming market holidays and early closes, one row per exchange and day.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.market_holidays()
+m.reference.market_holidays(*, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -15,6 +15,14 @@ m.reference.market_holidays()
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `Exchange` and `Date`
 
 [Dataset index](README.md)
+
+## Arguments
+
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
+| Argument | Description |
+| --- | --- |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

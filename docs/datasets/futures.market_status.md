@@ -7,7 +7,7 @@ Whether each futures product is trading right now.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.market_status(*, product_code=None, limit=None)
+m.futures.market_status(*, product_code=None, limit=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -25,6 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | `product_code` | Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A table of them in a `ProductCode` column works too. Leave it out for every product. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of product codes caps every code's requests instead. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

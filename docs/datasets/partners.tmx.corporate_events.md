@@ -7,7 +7,7 @@ Corporate events from TMX: earnings dates, dividends, conferences, and more.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.tmx.corporate_events(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.partners.tmx.corporate_events(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"type": "earnings"}`. Keys: `isin`, `isin_any_of`, `isin_gt`, `isin_gte`, `isin_lt`, `isin_lte`, `status`, `status_any_of`, `status_gt`, `status_gte`, `status_lt`, `status_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `tmx_company_id`, `tmx_company_id_gt`, `tmx_company_id_gte`, `tmx_company_id_lt`, `tmx_company_id_lte`, `tmx_record_id`, `tmx_record_id_any_of`, `tmx_record_id_gt`, `tmx_record_id_gte`, `tmx_record_id_lt`, `tmx_record_id_lte`, `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`, `type`, `type_any_of`, `type_gt`, `type_gte`, `type_lt`, `type_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -44,7 +45,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The company's stock symbol." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `CompanyName` | String | Full name of the company. |
 | `Date` | String | Scheduled date of the corporate event, formatted as YYYY-MM-DD. |
 | `Isin` | String | Standard international identifier for the company's common stock. |

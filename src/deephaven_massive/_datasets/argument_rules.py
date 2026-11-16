@@ -115,18 +115,22 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- Left out, the read tries every exchange and skips each one Massive refuses. It "
             "logs one warning naming them. The table's description names them too. For a "
             "watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.\n"
-            "- An exchange you name follows [`refused_venues`](#refused_venues).\n"
+            "- An exchange you name follows the `refused_venues` cause of "
+            "[`on_error`](#on_error).\n"
             "- If Massive refuses every exchange, the read fails."
         ),
-        "refused_venues": (
-            "What a flat-file read does when Massive refuses the files of an exchange you name "
-            "in [`venues`](#venues). It takes a `dm.OnError`. Left out, it follows "
-            "`MassiveConfig.refused_venues`, which is `RAISE` unless you set it.\n"
+        "on_error": (
+            "A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as "
+            "`dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad "
+            "symbol, row, file line, or refused futures exchange, and each kind is a cause. "
+            "Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, "
+            "then `dm.ErrorPolicy.DEFAULTS`. `help(dm.ErrorPolicy)` lists the causes. "
+            "[Bad symbols and rows]("
+            "https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error"
+            ") says what each value does.\n"
             "\n"
-            "- `RAISE` fails the read with `EntitlementError`, naming the exchange.\n"
-            "- `LOG` skips each refused exchange for the whole range, logs one warning naming "
-            "them, and lists them in the table's description.\n"
-            "- `IGNORE` skips them too, logging only at DEBUG."
+            "A live call whose policy changes any cause's setting gets its own stream in "
+            "`m.streams()`."
         ),
     }
 )

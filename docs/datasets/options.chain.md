@@ -7,7 +7,7 @@ The snapshot of every contract in one underlying's option chain.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.options.chain(underlying, *, contract_type=None, sort=None, order=None, limit=None, filters=None)
+m.options.chain(underlying, *, contract_type=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of underlyings caps every underlying's requests instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`. Keys: `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -48,7 +49,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `details.ticker`: "The ticker symbol for the asset. From the `details` object: The details for this contract." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). |
 | `TodaysChange` | double | The value of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
 | `TodaysChangePerc` | double | The percent of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |

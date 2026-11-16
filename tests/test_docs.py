@@ -54,6 +54,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._error_policy import ResolvedPolicy
 from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
 from deephaven_massive._ingest.clients import SessionClients
@@ -132,11 +133,12 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
 _CRYPTO_PAIRS: dict[str, tuple[str, str]] = {"X:BTCUSD": ("BTC", "USD"), "X:ETHUSD": ("ETH", "USD")}
 
 
-def _crypto_pair(symbol: str) -> tuple[str, str]:
+def _crypto_pair(symbol: str, policy: ResolvedPolicy) -> tuple[str, str]:
     """Answer a crypto lookup as Massive's crypto ticker list does, for the examples' pairs.
 
     Args:
         symbol: The crypto ticker, such as `"X:BTCUSD"`.
+        policy: The stream's policy, which no example's pair needs.
 
     Returns:
         The pair's base and quote currencies.
@@ -702,7 +704,7 @@ def test_the_settings_pages_complete_example_sets_every_setting(
     assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == settings
     assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
     assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
-    assert config.noncanonical_symbols is dm.OnError.RAISE
+    assert config.on_error.noncanonical_symbols is dm.OnError.RAISE
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM

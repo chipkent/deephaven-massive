@@ -284,7 +284,13 @@ class HistoryQuery(Query):
                 call, symbols, first=first, last=last, source=chosen, reread=reread, wait=wait
             )
         if isinstance(symbols, SymbolTable):
-            symbols = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
+            symbols = _read_symbol_table(
+                self._core,
+                self._spec,
+                symbols,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+            )
         # A dataset with a path per symbol class takes its days from its symbols' class.
         listed = symbols if isinstance(symbols, tuple) else ()
         request = replace(self._request, start=first, end=last, symbols=symbols)
@@ -352,7 +358,14 @@ class HistoryQuery(Query):
                 `_check_rest_history` say.
         """
         spec, core = self._spec, self._core
-        call_time = _read_symbol_table(core, spec, symbols, query=repr(self), live=True)
+        call_time = _read_symbol_table(
+            core,
+            spec,
+            symbols,
+            query=repr(self),
+            noncanonical=self._request.on_error.noncanonical_symbols,
+            live=True,
+        )
         request = replace(self._request, start=first, end=last, symbols=call_time)
         window = history_window(
             spec, request, start=first, end=last, classes=map(symbol_class, call_time)
@@ -404,7 +417,7 @@ class HistoryQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=symbols.table,
-            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
+            rule=SymbolRowRule.of(spec, self._request.on_error.noncanonical_symbols),
             reread=reread,
             plan=plan,
             note=f"Follows its symbol table over {span}. {note}",

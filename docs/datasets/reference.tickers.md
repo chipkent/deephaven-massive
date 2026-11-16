@@ -7,7 +7,7 @@ Tickers of stocks, OTC securities, indices, forex, and crypto, with listing deta
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=None, cusip=None, cik=None, as_of=None, active=True, search=None, sort=None, order=None, limit=None, filters=None)
+m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=None, cusip=None, cik=None, as_of=None, active=True, search=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -35,6 +35,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | Per ticker when tickers are named, else in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -60,7 +61,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Active` | Boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. |

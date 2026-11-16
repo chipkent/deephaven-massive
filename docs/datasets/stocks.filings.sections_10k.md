@@ -7,7 +7,7 @@ The text of sections of 10-K annual reports, one row per filing and section.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.filings.sections_10k(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.filings.sections_10k(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"section": "risk_factors"}`. Keys: `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `period_end`, `period_end_gt`, `period_end_gte`, `period_end_lt`, `period_end_lte`, `section`, `section_any_of`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -47,7 +48,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Stock ticker symbol for the company." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Cik` | String | SEC Central Index Key (10 digits, zero-padded). |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). |
 | `FilingUrl` | String | SEC URL source for the full filing. |

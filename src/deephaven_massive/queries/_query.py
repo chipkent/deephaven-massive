@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._enums import OnError
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.session_core import SessionCore
@@ -116,22 +117,29 @@ def _wait(value: object) -> bool:
 
 
 def _read_symbol_table(
-    core: SessionCore, spec: DatasetSpec, symbols: SymbolTable, *, query: str, live: bool = False
+    core: SessionCore,
+    spec: DatasetSpec,
+    symbols: SymbolTable,
+    *,
+    query: str,
+    noncanonical: OnError,
+    live: bool = False,
 ) -> tuple[str, ...]:
-    """Read a symbol table once, under the session's rule for a row that is not a ticker.
+    """Read a symbol table once, under the call's rule for a row that is not a ticker.
 
     The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
     on the caller thread, inside the session's execution context, with no library lock held.
-    A row that is not Massive's exact ticker follows `MassiveConfig.noncanonical_symbols`:
-    under `RAISE` it fails the call; under `LOG` and `IGNORE` it is skipped (and logged once).
+    A row that is not Massive's exact ticker follows the call's `noncanonical_symbols`: under
+    `RAISE` it fails the call; under `LOG` and `IGNORE` it is skipped (and logged once).
     Every live verb calls it before it starts; a static verb (`fetch()`, `history()`) uses the
     symbols it returns.
 
     Args:
-        core: The session core, for its execution context and its `noncanonical_symbols`.
+        core: The session core, for its execution context.
         spec: The dataset, whose asset class the rows must follow.
         symbols: The boxed table, static or refreshing.
         query: The `repr` of the query whose verb reads it, which the messages name.
+        noncanonical: The call's `noncanonical_symbols` (`Request.on_error`).
         live: True for a live verb, which may start on a table with no row yet and follow
             it as rows arrive.
 
@@ -147,7 +155,7 @@ def _read_symbol_table(
     Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names
     `dm.canonicalize_symbols`.
     """
-    rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+    rule = SymbolRowRule.of(spec, noncanonical)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, symbols.table, stream_id=None)
     if rows.skipped and not rows.symbols:
@@ -360,7 +368,13 @@ class Query:
         """
         request = self._request
         if isinstance(request.symbols, SymbolTable):
-            symbols = _read_symbol_table(self._core, self._spec, request.symbols, query=repr(self))
+            symbols = _read_symbol_table(
+                self._core,
+                self._spec,
+                request.symbols,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+            )
             return replace(request, symbols=symbols)
         return request
 

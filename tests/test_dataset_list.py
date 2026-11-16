@@ -91,16 +91,17 @@ def test_every_dataset_has_its_call() -> None:
     calls = dataset_calls()
     assert list(calls) == list(CATALOG.by_name)
     assert calls["stocks.bars"] == DatasetCall(
-        signature="m.stocks.bars(symbols, timespan, *, multiplier=1, adjusted=True)",
+        signature="m.stocks.bars(symbols, timespan, *, multiplier=1, adjusted=True, on_error=None)",
         verbs=("history",),
-        arguments=("symbols", "timespan", "multiplier", "adjusted"),
-        typed=("symbols", "timespan", "multiplier", "adjusted"),
+        arguments=("symbols", "timespan", "multiplier", "adjusted", "on_error"),
+        typed=("symbols", "timespan", "multiplier", "adjusted", "on_error"),
         # Each argument's entry of the docstring's `Args`, its lines joined.
         descriptions=(
             "Stock tickers, or `dm.ALL`.",
             "The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.",
             "Units per bar.",
             "Adjusts volume as well as prices.",
+            "What a bad symbol or row does in this call (`dm.ErrorPolicy`).",
         ),
         # Each verb's call, with its positional arguments, and its docstring's summary.
         methods=calls["stocks.bars"].methods,
@@ -127,7 +128,9 @@ def test_every_dataset_has_its_call() -> None:
     # The session's own dataset method, and defaults written as a user types them.
     assert calls["snapshots"].signature.startswith("m.snapshots(symbols, *, sort=None")
     assert "timespan=dm.Timespan.DAY" in calls["indicators.sma"].signature
-    assert "venues=None, refused_venues=None" in calls["futures.trades"].signature
+    assert "venues=None, on_error=None" in calls["futures.trades"].signature
+    # Every dataset method takes the call's error policy, last.
+    assert all(call.signature.endswith("on_error=None)") for call in calls.values())
 
 
 def test_arguments_named_apart_from_their_wire_parameter() -> None:

@@ -347,7 +347,9 @@ def test_history_rejects_a_symbol_table_without_symbols(
 def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
     # The empty result of a window no row fits in has the session's columns, with RawSymbol
     # exactly when the session keeps unreadable rows, as every other result of it does.
-    config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=unreadable)
+    config = dm.MassiveConfig(
+        api_key="test-key", on_error=dm.ErrorPolicy(unreadable_symbols=unreadable)
+    )
     with dm.MassiveSession(config) as session:
         q = trades(session)
         empty = q._empty_rows()

@@ -7,7 +7,7 @@ The research firms behind Benzinga's analyst ratings.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.benzinga.firms(*, sort=None, order=None, limit=None, filters=None)
+m.partners.benzinga.firms(*, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -26,6 +26,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"benzinga_id_any_of": ["5f3ac1"]}`. Keys: `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

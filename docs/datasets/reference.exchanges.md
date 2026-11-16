@@ -7,7 +7,7 @@ The exchanges, trade reporting facilities, and SIPs Massive knows, with their co
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.exchanges(*, asset_class=None, locale=None)
+m.reference.exchanges(*, asset_class=None, locale=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -18,10 +18,13 @@ m.reference.exchanges(*, asset_class=None, locale=None)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
 | `asset_class` | The asset class whose exchanges to list. Leave it out for every class. Massive lists no index exchanges. |
 | `locale` | The locale whose exchanges to list. Leave it out for both. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

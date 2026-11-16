@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
     from deephaven_massive._session import MassiveSession
 
 __all__ = [
@@ -422,7 +423,9 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         return self._filings
 
     @raises_through(build_query)
-    def trades(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def trades(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Trades of US-listed stocks, tick by tick.
 
         Each row holds one trade reported to the SIP. `Timestamp` is the SIP's time. Streams and
@@ -431,13 +434,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.trades.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -449,10 +454,14 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 recent = m.stocks.trades(["AAPL", "MSFT"]).ring(10_000)
                 friday = m.stocks.trades("AAPL").history("2026-10-30", "2026-10-30")
         """
-        return build_query(self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, TRADES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def last_trade(self, symbols: SymbolsLike) -> FetchQuery:
+    def last_trade(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The latest trade of each US-listed stock.
 
         Each row holds one symbol's most recent trade. A symbol with no trade is left out, and the
@@ -462,13 +471,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
                 ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_trade.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -485,10 +496,13 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def quotes(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def quotes(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """National best bid and offer quotes of US-listed stocks, tick by tick.
 
         Each row holds one NBBO update. `Timestamp` is the SIP's time. Streams and flat-file history
@@ -497,13 +511,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.quotes.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -514,10 +530,14 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 top = m.stocks.quotes(["AAPL", "SPY"]).last_by()
         """
-        return build_query(self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, QUOTES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def last_quote(self, symbols: SymbolsLike) -> FetchQuery:
+    def last_quote(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The latest national best bid and offer of each US-listed stock.
 
         Each row holds one symbol's most recent NBBO. A symbol with no quote is left out, and the
@@ -527,13 +547,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
                 ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.last_quote.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -550,6 +572,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
+            on_error=on_error,
         )
 
     @raises_through(build_query, require_bool)
@@ -560,6 +583,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         *,
         multiplier: int = 1,
         adjusted: bool = True,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed stocks.
 
@@ -577,6 +601,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts volume as well as prices.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query that reads history, and streams 1-second and 1-minute bars at
@@ -603,10 +628,13 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             timespan=timespan,
             multiplier=multiplier,
             adjusted=require_bool("adjusted", adjusted),
+            on_error=on_error,
         )
 
     @raises_through(build_query, require_bool)
-    def previous_day_bar(self, symbols: SymbolsLike, *, adjusted: bool = True) -> FetchQuery:
+    def previous_day_bar(
+        self, symbols: SymbolsLike, *, adjusted: bool = True, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The previous trading day's bar (open, high, low, close, volume) of US stocks.
 
         Each row holds one symbol's bar of the previous completed session. A symbol with no bar is
@@ -616,13 +644,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
                 `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             adjusted: Adjusts volume as well as prices.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.previous_day_bar.md.
 
         Raises:
-            TypeError: If `adjusted` isn't a `bool`, or `symbols` isn't one of the accepted forms.
+            TypeError: If `adjusted` isn't a `bool`, or `symbols` isn't one of the accepted forms,
+                or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -644,10 +674,13 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def luld(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def luld(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> SymbolStreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
         Each row holds one band update from the SIP, with its upper and lower price limits. The
@@ -655,13 +688,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.luld.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -672,10 +707,14 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 bands = m.stocks.luld(dm.ALL).last_by()
         """
-        return build_query(self._core, LULD, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(
+            self._core, LULD, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def imbalances(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def imbalances(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> SymbolStreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
         Each row holds one imbalance message, with the auction's type and time and the imbalance
@@ -683,13 +722,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.imbalances.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -700,10 +741,14 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 closing = m.stocks.imbalances(["AAPL", "MSFT"]).append_only()
         """
-        return build_query(self._core, IMBALANCES, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(
+            self._core, IMBALANCES, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> SymbolStreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row holds one fair market value and the time Massive computed it. It streams only on a
@@ -711,13 +756,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md.
 
         Raises:
-            TypeError: If `symbols` isn't one of the accepted forms.
+            TypeError: If `symbols` isn't one of the accepted forms, or `on_error` isn't a
+                `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -728,10 +775,18 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 fair = m.stocks.fmv(["AAPL"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(
+            self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query, require_bool)
-    def snapshots(self, symbols: SymbolsLike, *, include_otc: bool = False) -> FetchQuery:
+    def snapshots(
+        self,
+        symbols: SymbolsLike,
+        *,
+        include_otc: bool = False,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
         """Current market snapshots of US-listed stocks, one row per ticker.
 
         Each row holds a ticker's state now: the day's bar, the previous day's bar, the latest
@@ -740,6 +795,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
             include_otc: True to include OTC securities.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -747,7 +803,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Raises:
             TypeError: If `include_otc` isn't a `bool`, or `symbols` isn't one of the accepted
-                forms.
+                forms, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -764,10 +820,17 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             query_type=FetchQuery,
             symbols=symbols,
             params={"include_otc": require_bool("include_otc", include_otc)},
+            on_error=on_error,
         )
 
     @raises_through(require_bool, _require_enum)
-    def movers(self, direction: Direction, *, include_otc: bool = False) -> FetchQuery:
+    def movers(
+        self,
+        direction: Direction,
+        *,
+        include_otc: bool = False,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
         """The twenty US stocks with the largest percentage move today, up or down.
 
         Each row holds one mover's full snapshot, as `snapshots()` returns it. In a `poll()` table,
@@ -776,13 +839,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
             include_otc: True to include OTC securities.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.movers.md.
 
         Raises:
-            TypeError: If `direction` isn't a `dm.Direction`, or `include_otc` isn't a `bool`.
+            TypeError: If `direction` isn't a `dm.Direction`, or `include_otc` isn't a `bool`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -797,11 +862,17 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 "direction": _require_enum(direction, Direction, "direction"),
                 "include_otc": require_bool("include_otc", include_otc),
             },
+            on_error=on_error,
         )
 
     @raises_through(build_query, require_bool, day_argument)
     def daily_open_close(
-        self, symbols: SymbolsLike, date: DateLike, *, adjusted: bool = True
+        self,
+        symbols: SymbolsLike,
+        date: DateLike,
+        *,
+        adjusted: bool = True,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The open, close, and pre- and after-market prices of US stocks on one day.
 
@@ -814,13 +885,15 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             date: The trading day, as a date.
             adjusted: Adjusts volume as well as prices. Massive doesn't report the basis of these
                 prices, so the library can't check it.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.daily_open_close.md.
 
         Raises:
-            TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`.
+            TypeError: If `symbols` or `date` is of another type, or `adjusted` isn't a `bool`, or
+                `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker;
@@ -843,6 +916,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -856,6 +930,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Cash dividends of US-listed stocks, one row per distribution.
 
@@ -871,6 +946,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. With a watchlist, `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"distribution_type": "special"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -901,6 +977,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -914,6 +991,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Stock splits, reverse splits, and stock dividends of US-listed stocks.
 
@@ -931,6 +1009,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -961,6 +1040,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -974,6 +1054,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Initial public offerings on US exchanges, upcoming and past, one row per offering.
 
@@ -989,6 +1070,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order: The direction of the rows. Here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
             filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1018,6 +1100,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1031,6 +1114,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Short interest of US-listed stocks, one row per ticker and FINRA settlement date.
 
@@ -1046,6 +1130,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1076,6 +1161,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1089,6 +1175,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Daily short sale volume of US-listed stocks, one row per ticker and trading day.
 
@@ -1104,6 +1191,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1134,6 +1222,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1145,6 +1234,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The free float of US-listed stocks: the latest count of shares the public can trade.
 
@@ -1159,6 +1249,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1186,4 +1277,5 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )

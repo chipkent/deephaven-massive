@@ -7,7 +7,7 @@ The exchanges and trading venues of US futures.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.exchanges(*, limit=None)
+m.futures.exchanges(*, limit=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -23,6 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 

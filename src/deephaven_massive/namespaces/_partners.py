@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
+    from deephaven_massive._error_policy import ErrorPolicy
     from deephaven_massive._session import MassiveSession
     from deephaven_massive.queries import FetchQuery
 
@@ -405,6 +406,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Benzinga's profiles of sell-side analysts, with each analyst's firm and track record.
 
@@ -418,6 +420,7 @@ class PartnersBenzingaNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"firm_name": "Wedbush"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -444,6 +447,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -455,6 +459,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Benzinga analyst insights on US stocks: a rating, a price target, and the reason.
 
@@ -470,6 +475,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"date_gte": "2026-01-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -497,6 +503,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -508,6 +515,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Analyst rating and price-target actions on US stocks, as reported by Benzinga.
 
@@ -523,6 +531,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"rating_action": "upgrades"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -550,11 +559,16 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
     def consensus_ratings(
-        self, symbols: SymbolsLike, *, filters: Mapping[str, FilterValue] | None = None
+        self,
+        symbols: SymbolsLike,
+        *,
+        filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The consensus of analyst ratings and price targets for each US stock, from Benzinga.
 
@@ -567,6 +581,7 @@ class PartnersBenzingaNamespace(Namespace):
             symbols: US stock tickers. `dm.ALL` is refused; pass a list of tickers.
             filters: The range of the ratings to count, such as `{"date_gte": "2026-01-01"}`; leave
                 it out to count every rating.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -592,6 +607,7 @@ class PartnersBenzingaNamespace(Namespace):
             symbols=symbols,
             all_alternative="pass a list of symbols; the endpoint takes one ticker per request",
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -603,6 +619,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Benzinga's bull case and bear case summaries for US stocks.
 
@@ -616,6 +633,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"last_updated_gte": "2026-06-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -643,6 +661,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -654,6 +673,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Earnings and revenue guidance issued by US companies, as reported by Benzinga.
 
@@ -669,6 +689,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"positioning": "primary"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -696,6 +717,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -707,6 +729,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Earnings announcements of US companies from Benzinga, with estimates and surprises.
 
@@ -723,6 +746,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"importance_gte": 3}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -750,6 +774,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -760,6 +785,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The research firms behind Benzinga's analyst ratings.
 
@@ -773,6 +799,7 @@ class PartnersBenzingaNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"benzinga_id_any_of": ["5f3ac1"]}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -797,6 +824,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -810,6 +838,7 @@ class PartnersBenzingaNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Benzinga news articles, with headline, teaser, body, and the tickers each one names.
 
@@ -827,6 +856,7 @@ class PartnersBenzingaNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"channels_any_of": ["earnings"]}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -858,6 +888,7 @@ class PartnersBenzingaNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
 
@@ -897,6 +928,7 @@ class PartnersEtfGlobalNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 
@@ -910,6 +942,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -937,6 +970,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -948,6 +982,7 @@ class PartnersEtfGlobalNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The holdings of US-listed ETFs from ETF Global, one row per fund, date, and holding.
 
@@ -962,6 +997,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"effective_date": "2026-09-18"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -991,6 +1027,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1002,6 +1039,7 @@ class PartnersEtfGlobalNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 
@@ -1015,6 +1053,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1042,6 +1081,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1053,6 +1093,7 @@ class PartnersEtfGlobalNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """ETF Global's profiles of US ETFs: issuer, fees, assets, trading, and exposures.
 
@@ -1067,6 +1108,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1094,6 +1136,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1105,6 +1148,7 @@ class PartnersEtfGlobalNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """ETF Global's classification of US-listed ETFs by strategy, structure, and exposure.
 
@@ -1118,6 +1162,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1145,6 +1190,7 @@ class PartnersEtfGlobalNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
 
@@ -1183,6 +1229,7 @@ class PartnersTmxNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Corporate events from TMX: earnings dates, dividends, conferences, and more.
 
@@ -1200,6 +1247,7 @@ class PartnersTmxNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"type": "earnings"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1231,6 +1279,7 @@ class PartnersTmxNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
 
@@ -1271,6 +1320,7 @@ class PartnersFableNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Daily European consumer spending per merchant, from Fable Data's transaction panel.
 
@@ -1286,6 +1336,7 @@ class PartnersFableNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"parent_name": "Amazon Inc"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1316,6 +1367,7 @@ class PartnersFableNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(list_query)
@@ -1326,6 +1378,7 @@ class PartnersFableNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Fable Data's map from merchants to parent companies, tickers, and industries.
 
@@ -1339,6 +1392,7 @@ class PartnersFableNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters, such as `{"listing_status": "public"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1365,6 +1419,7 @@ class PartnersFableNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
 

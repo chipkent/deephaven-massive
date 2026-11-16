@@ -7,7 +7,7 @@ An amount converted between two currencies at the latest quote.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
+m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -19,12 +19,15 @@ m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
 | `from_currency` | The code of the currency to convert from, such as `"AUD"`. Massive answers HTTP 404 to a code it doesn't know, such as `"aud"`, and the read raises `MassiveError`. |
 | `to_currency` | The code of the currency to convert to, such as `"USD"`. |
 | `amount` | The amount to convert, any finite number; 1.0 by default. |
 | `precision` | The decimal places of the result; 2 by default. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
 
 ## Plans
 
@@ -41,7 +44,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `symbol`: "The symbol pair that was evaluated from the request." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Converted` | double | The result of the conversion. |
 | `From` | String | The "from" currency symbol. |
 | `InitialAmount` | double | The amount to convert. |
