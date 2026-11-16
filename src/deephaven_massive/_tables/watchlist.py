@@ -674,12 +674,29 @@ class _SymbolCounter(TableListener):
                 del counts[symbol]
 
 
+def _watched_symbols(watchlist: Table) -> Table:
+    """Return the watchlist's distinct symbols, without a null.
+
+    A join matches a null key to a null key, so a null watchlist row (a row
+    `canonicalize_symbols` could not convert, or an input-table row left empty) would match
+    every data row whose symbol the library could not read, which `unreadable_symbols` keeps
+    with a null `Symbol`. A null row watches nothing.
+
+    Args:
+        watchlist: The user's symbol table; only its `Symbol` column is read.
+
+    Returns:
+        A table with one `Symbol` column, one row per symbol the watchlist holds.
+    """
+    return watchlist.where(f"!isNull({_SYMBOL})").select_distinct(_SYMBOL)
+
+
 def watched_rows(table: Table, watchlist: Table, *, key: str = _SYMBOL) -> Table:
     """Keep the rows of a table whose symbol the watchlist holds, following its changes.
 
-    The result is what `table.where_in(watchlist, f"{key}=Symbol")` returns: a row is kept while
-    its symbol is in the watchlist, and leaves when the symbol does. A blink table stays a blink
-    table. Duplicate watchlist rows count once.
+    A row is kept while its symbol is in the watchlist, and leaves when the symbol does, as
+    `where_in` would keep it. A blink table stays a blink table. Duplicate watchlist rows count
+    once. A null watchlist row watches nothing, so a row with a null symbol is never kept.
 
     It is built from a join instead of `where_in`, because Deephaven 42.7's `where_in` delivers
     a failure of each of its two tables to its result: when the watchlist fails and the table
@@ -701,7 +718,7 @@ def watched_rows(table: Table, watchlist: Table, *, key: str = _SYMBOL) -> Table
     Returns:
         The table's rows whose symbol the watchlist holds, with the table's columns.
     """
-    marks = watchlist.select_distinct(_SYMBOL).update_view(f"{_WATCHED} = true")
+    marks = _watched_symbols(watchlist).update_view(f"{_WATCHED} = true")
     joined = table.natural_join(marks, on=f"{key}={_SYMBOL}", joins=_WATCHED)
     return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)
 
@@ -716,7 +733,8 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
     including a row the blink table holds from the cycle that just ran. A symbol deleted and
     added again is a new row of the distinct watchlist, stamped with a new cycle, so a row that
     entered the table before the cycle in which its symbol last joined stays hidden until the
-    symbol's next row. The rule compares only the update graph's own cycle numbers, never a
+    symbol's next row. A null watchlist row watches nothing, so a row with a null symbol never
+    shows. The rule compares only the update graph's own cycle numbers, never a
     wall clock, so neither a row's `TimestampInsert` nor a clock running behind can hide it.
 
     Meant for `last_by()` keyed by `Symbol`: the aggregation remembers every key it has seen,
@@ -749,7 +767,7 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
         # keeps every cycle out until both sides exist, so the symbols and rows present now get
         # equal steps. `update`, never `update_view`, on both sides: a view would compute the
         # step when a row is read, not in the cycle the row changed.
-        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
+        added = _watched_symbols(watchlist).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
         # Stamped before the aggregation: a formula that reads no column is not computed again
         # when a row is modified, so after `last_by` it would keep the step of each key's first
         # row.
