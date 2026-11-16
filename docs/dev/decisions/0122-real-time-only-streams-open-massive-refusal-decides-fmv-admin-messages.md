@@ -23,9 +23,11 @@ dataset. Should the library keep refusing these itself?
 
 ## Ruling
 
-Option 1. The owner ruled on 2026-11-16 in the coordinating session that the library must not
-block what Massive might serve now or later; whether a key may stream a dataset is learned from
-Massive's answer. Recorded in the pull request that removed the refusals.
+Option 1, ruled by the owner on 2026-11-16 in the coordinating session. The library doesn't
+refuse a real-time-only stream (fair market value, the options admin messages) before asking
+Massive. The stream opens on its documented host or its class's feed, and Massive's refusal
+fails the table with Massive's text and a link to the dataset's page. Whether a key may stream
+a dataset is learned from Massive's answer.
 
 ## Reason
 
