@@ -333,12 +333,17 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
 def test_history_rejects_a_symbol_table_without_symbols(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
-    for content in ([], [None]):
+    every_row_null = (
+        r"^m\.stocks\.trades\(\): every row's Symbol is null; a table from "
+        r"dm\.canonicalize_symbols nulls the rows it cannot convert, and its log names each value$"
+    )
+    for content, message in (
+        ([], r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"),
+        ([None, None], every_row_null),
+    ):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
-            with pytest.raises(
-                ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
-            ):
+            with pytest.raises(ValueError, match=message):
                 q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
@@ -346,8 +351,8 @@ def test_history_rejects_a_symbol_table_without_symbols(
 
 @pytest.mark.parametrize("unreadable", list(dm.OnError))
 def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
-    # The empty result of a window no row fits in has the session's columns, with RawSymbol
-    # exactly when the session keeps unreadable rows, as every other result of it does.
+    # The empty result of a window no row fits in has the session's columns, as every other
+    # result of it does, whatever the session's setting.
     config = dm.MassiveConfig(
         api_key="test-key", on_error=dm.ErrorPolicy(unreadable_symbols=unreadable)
     )
@@ -355,7 +360,7 @@ def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None
         q = trades(session)
         empty = q._empty_rows()
         names = [c.name for c in empty.columns]
-        assert ("RawSymbol" in names) is (unreadable is not dm.OnError.RAISE)
+        assert "RawSymbol" not in names
         assert names == [name for (name,) in q.columns().iter_tuple(cols="Name")]
 
 

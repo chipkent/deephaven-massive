@@ -327,58 +327,58 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
         (
             on_host(REALTIME_HOST),
             (
-                "the futures subscription's plan may not include this data in real time; if its "
-                "data is delayed, use Massive's delayed futures feed: "
+                "the key's plan may not include this data in real time; if Massive serves your "
+                "futures data delayed, use its delayed feed: "
                 "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
             ),
         ),
         (
-            # A snapshot without a label (a base Business key's) proves nothing about the
-            # plan: its data may be served on another host, which websocket_hosts pins.
+            # A snapshot without a label says nothing about the host: Massive may serve the
+            # data on another host, which websocket_hosts pins.
             on_host(REALTIME_HOST, "no timeframe in the futures snapshot"),
             (
-                "the futures snapshot carried no recency label, as a Business plan's without "
-                "the trades and quotes expansion does, so the plan may serve this data on "
-                "another host: pin it with MassiveConfig(websocket_hosts={dm.AssetClass.FUTURES: "
-                "\"<host>\"}); if the plan's data is delayed instead, use Massive's delayed "
-                "futures feed: dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
+                "the futures snapshot carried no recency label, so the library used the "
+                "real-time host; if Massive serves this data on another host, pin it with "
+                'MassiveConfig(websocket_hosts={dm.AssetClass.FUTURES: "<host>"}); if Massive '
+                "serves your futures data delayed, use its delayed feed: "
+                "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
             ),
         ),
         (
-            # A refused snapshot is a Basic key's, which has no live data on either feed, so
+            # A refused snapshot is quoted: the key may have no live data on either feed, so
             # the delayed feed is no advice.
             on_host(
                 REALTIME_HOST,
                 "the host check's snapshot (/futures/v1/snapshot) was refused: not entitled",
             ),
             (
-                "Massive also refused the futures snapshot, as it does on the free Basic plan, "
-                "which includes no live (WebSocket) futures data on either feed; read the data "
-                "with fetch(), poll(), or history() instead"
+                "Massive also refused the futures snapshot (the host check's snapshot "
+                "(/futures/v1/snapshot) was refused: not entitled), so the key's plan may "
+                "include no live (WebSocket) futures data; read it with fetch(), poll(), or "
+                "history() instead"
             ),
         ),
         (
             # A key whose snapshot proved real-time data gains nothing from the delayed feed.
             on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
             (
-                "the futures subscription's plan is real-time (last_trade.timeframe=REAL-TIME) "
-                "but may not include this data; it may need a higher plan or an add-on"
+                "the futures snapshot is real-time (last_trade.timeframe=REAL-TIME), but the "
+                "key's plan may not include this data"
             ),
         ),
         (
             on_host(DELAYED_HOST, "MassiveConfig.delayed_subscriptions"),
             (
                 "MassiveConfig.delayed_subscriptions lists dm.Subscription.FUTURES, so its streams "
-                "use Massive's delayed feed; whether Massive serves it to every plan is "
-                "unverified; to use the real-time feed, remove dm.Subscription.FUTURES from "
-                "delayed_subscriptions"
+                "use Massive's delayed feed; to use the real-time feed, remove "
+                "dm.Subscription.FUTURES from delayed_subscriptions"
             ),
         ),
         (
             on_host("futures.example.com", "websocket_hosts"),
             (
-                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the plan may "
-                "not include this data here"
+                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
+                "plan may not include this data there"
             ),
         ),
     ],
@@ -534,7 +534,7 @@ def test_one_acknowledgement_frame_rewrites_the_row_once(
     ws_session.session.release(result)
 
 
-def test_an_index_value_refusal_names_the_business_host(ws_session: WsSession) -> None:
+def test_an_index_value_refusal_names_their_documented_host(ws_session: WsSession) -> None:
     connection = ws_connection.Connection(
         ws_session.connections.group,
         exec_ctx=ws_session.session._core.exec_ctx,
@@ -546,7 +546,7 @@ def test_an_index_value_refusal_names_the_business_host(ws_session: WsSession) -
     )
     connection._refused(("V.I:SPX",), "not authorized")
     assert connection._last_error is not None
-    assert "index values may need business.massive.com" in connection._last_error
+    assert "(Massive documents index values only on business.massive.com)" in connection._last_error
     assert "websocket_hosts[AssetClass.INDICES]" in connection._last_error
     connection.close()
     assert connection.join(TIMEOUT)
@@ -565,7 +565,7 @@ def test_a_connection_skips_a_session_that_is_gone(
     monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     ws_session.on_loop(connection, connection._write_row)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
-    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift, dropped={}))
+    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift))
     assert written == []
     monkeypatch.undo()
     assert ws_session.on_loop(
@@ -1110,22 +1110,6 @@ def test_buffered_rows_are_shown_until_they_are_published(
 _URL = "wss://socket.test/stocks"
 
 
-def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSession) -> None:
-    result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.subscribed("T.AAPL")
-    connection = ws_session.connection()
-    symbols = ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
-    unread = _massive.RowMark(
-        rows=tuple(range(len(symbols))),
-        fields=("SipTimestamp",) * len(symbols),
-        reasons=("no t",) * len(symbols),
-        symbols=symbols,
-    )
-    assert connection._dropped_symbols(unread) == {"BRK.A": 2, "MSFT": 1}
-    assert connection._dropped_symbols(None) == {}
-    del result
-
-
 def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     ws_session: WsSession, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1148,9 +1132,10 @@ def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     [dropped] = [m for m in caplog.messages if m.startswith("cannot place a T row for AAPL")]
     assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
-    # The odd rows failed no stream: stream 1 got both rows it could read.
+    # The odd rows failed no stream: stream 1 got the one row read whole; the row with a bad
+    # price was withheld, and the timeless one counts as dropped traffic.
     assert summary.startswith(
-        f"{_URL}: last 60 s: 1 data batches, rows T=2, 1 dropped; rows per stream 1 [1=2], "
+        f"{_URL}: last 60 s: 1 data batches, rows T=2, 1 dropped; rows per stream 1 [1=1], "
         "streams with no rows 1 [2]; 2 of 2 topics acknowledged 2 [T.AAPL, T.MSFT], added 2 "
         "[T.AAPL, T.MSFT], removed 0 [], 0 pending, 0 with no acknowledgement; last data T "
     )
@@ -1978,22 +1963,25 @@ def test_a_reconnect_keeps_the_one_summary_timer(
     del result
 
 
-def test_a_refused_fmv_topic_needs_a_business_plan(ws_session: WsSession) -> None:
-    # FMV is never pinned, so the refusal names the plan, not `websocket_hosts`.
+def test_a_refused_fmv_topic_names_its_one_host(ws_session: WsSession) -> None:
+    # FMV is never pinned, so the refusal names Massive's answer, not `websocket_hosts`.
     connection = ws_connection.Connection(
         ws_session.connections.group,
         exec_ctx=ws_session.session._core.exec_ctx,
         url="wss://business.massive.com/forex",
         asset_class=AssetClass.FOREX,
         family=ChannelFamily.FMV,
-        decision=HostDecision("business.massive.com", Recency.REALTIME, "FMV is Business-only"),
+        decision=HostDecision(
+            "business.massive.com", Recency.REALTIME, "FMV channel's documented host"
+        ),
         sessions=None,
     )
     connection._refused(("FMV.C:EURUSD",), "not authorized")
     assert connection._last_error is not None
     assert connection._last_error.endswith(
-        "fair-market-value (FMV) data needs a Business plan of the currencies subscription; "
-        "MassiveConfig.websocket_hosts never applies to it"
+        "Massive said: not authorized; fair-market-value (FMV) data streams only from "
+        "business.massive.com, the one host Massive documents for it; "
+        "MassiveConfig.websocket_hosts never applies to FMV"
     )
     connection.close()
     assert connection.join(TIMEOUT)

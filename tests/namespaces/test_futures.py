@@ -525,7 +525,8 @@ def test_contracts_name_the_contract_symbol_from_the_row() -> None:
     )
     assert (spec.symbol_param, spec.symbols_per_request) == ("ticker.any_of", 250)
     schema = CATALOG.dataset_schema(spec)
-    assert schema.column_names[:2] == ("Symbol", "RawSymbol")
+    assert schema.column_names[0] == "Symbol"
+    assert "RawSymbol" not in schema.column_names
     assert "Ticker" not in schema.column_names
     assert spec.poll_keys == ("Symbol", "Date")
 
@@ -872,7 +873,6 @@ def test_contracts_over_rest(
         ("ESZ6", "ES", True, "2026-12-18")
     ]
     assert out[0]["TradeTickSize"] == 0.25
-    assert out[0]["RawSymbol"] is None
     assert "Ticker" not in out[0]
 
 

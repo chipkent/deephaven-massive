@@ -51,7 +51,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker for the option contract." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AdditionalUnderlyings` | String | If an option contract has additional underlyings or deliverables associated with it, they will appear here. See here (https://www.optionseducation.org/referencelibrary/faq/splits-mergers-spinoffs-bankruptcies) for some examples of what might cause a contract to have additional underlyings. The column holds Massive's value as JSON text. |
 | `Cfi` | String | The 6 letter CFI code of the contract (defined in ISO 10962 (https://en.wikipedia.org/wiki/ISO_10962)) |
 | `CompanyTicker` | String | KPI binary options only. The ticker of the company the KPI belongs to, like NFLX. |
@@ -81,7 +80,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `ticker` |
 | `OptionRoot` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AdditionalUnderlyings` | `additional_underlyings` |
 | `Cfi` | `cfi` |
 | `CompanyTicker` | `company_ticker` |

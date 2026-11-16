@@ -103,7 +103,33 @@ of three values:
 | `raise` | Fails whatever met the problem. |
 
 Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`. A symbol the library can't read logs an error instead of a warning.
+in `m.streams()`.
+
+The library never publishes a row of Massive's data it can't read whole: it leaves the row
+out. Three causes cover such rows: `unreadable_keys`, `unreadable_symbols`, and
+`unconvertible_values`. Their setting decides only whether the table fails and how loudly the
+log reports the row.
+
+Whatever the setting, a read or stream fails when the library can read none of the rows it
+would receive, since Massive's format has most likely changed. Rows outside the call's symbols
+or range are ignored for this rule:
+
+| Read or stream | Fails when the library can read none of |
+|---|---|
+| A `fetch()` or `history()` from REST | The rows of all its pages. |
+| A `history()` from flat files | The rows of all its files. |
+| A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
+| A `poll()` table | The rows of one cycle's read. |
+| A `dm.ALL` stream | 100 consecutive rows of its channel. |
+| A stream of named symbols | 100 consecutive rows of one of its symbols. |
+| A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
+
+Two reads are still judged in parts
+([#704](https://github.com/chipkent/deephaven-massive/issues/704)). An `AUTO` `history()` that
+fills days from REST judges its files and each REST read apart: one read per filled day, or
+one for all the filled days of bars a day or longer. So a REST read whose rows are all
+unreadable fails the call. And a `fetch()` or `poll()` with a value table judges each value's
+read apart, so one value whose rows are all unreadable fails the call or the table.
 
 Under `raise`:
 
@@ -125,10 +151,10 @@ sets every cause at once.
 
 ### Every setting in one file
 
-This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account with Stocks Starter, Options Developer, and Indices Business, and the free Basic plan of Currencies and Futures:
+This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account whose stocks and options data Massive serves delayed, whose index values Massive serves on business.massive.com, and whose Currencies and Futures subscriptions are on the free Basic plan:
 
 ```yaml
-# Plans that stream 15 minutes late: Stocks Starter and Options Developer.
+# Subscriptions whose data Massive serves you delayed, 15 minutes late.
 delayed_subscriptions: [options, stocks]
 
 # Subscriptions on the free Basic plan, held to five requests a minute.
@@ -154,6 +180,10 @@ on_error:
   unreadable_symbols: log  # the default
   # A symbol Massive has no data for.
   unavailable_symbols: log  # the default
+  # A row of Massive's data whose key the library can't read.
+  unreadable_keys: log  # the default
+  # A row of Massive's data with a value the library can't read.
+  unconvertible_values: log  # the default
   # A flat-file line that isn't a readable row.
   malformed_rows: log  # the default
   # A futures exchange you name that the plan lacks.
@@ -193,15 +223,17 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
-| `delayed_subscriptions` | Lists the subscriptions whose plan gets Massive's delayed data, as Stocks Starter and Developer do, so their streams and snapshots work. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
+| `delayed_subscriptions` | Lists the subscriptions whose data Massive serves you delayed, so their streams use Massive's delayed feed and their snapshots accept its `DELAYED` label. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
 | `rest_basic_subscriptions` | Lists the subscriptions on Massive's free Basic plan, so their requests keep to Basic's five a minute from the start. | A list of any of `stocks`, `options`, `indices`, `currencies`, or `futures`, such as `[options]`, or `[]` for none | `[]` |
 | `max_outage` | Sets how many seconds a stream or `poll()` table may stay cut off from Massive before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
 | `max_concurrency` | Sets how many REST requests the session runs at a time, and separately how many flat files it reads at a time. | A positive whole number, such as `4` | `8` |
 | `on_error.noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
-| `on_error.unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read as Massive's ticker. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unreadable_symbols` | Decides whether a row of Massive's data whose symbol the library can't read as Massive's ticker fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unreadable_keys` | Decides whether a row of Massive's data whose key the library can't read fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unconvertible_values` | Decides whether a row of Massive's data holding a value the library can't read as its column's type fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
@@ -226,9 +258,9 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 
 #### delayed_subscriptions
 
-List each subscription on a Starter or Developer plan of stocks, options, or futures,
-or on Indices Starter. Those plans stream data 15 minutes late, or 10 for futures.
-Leave out Advanced and Business plans, which are real-time. Never list
+Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
+minutes late, or 10 for futures. Fair market value (FMV) streams always use
+`business.massive.com`, the one host Massive documents for them. Never list
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
@@ -308,12 +340,9 @@ ticker, or the call raises `ValueError`. A table whose every row is bad raises
 
 #### on_error.unreadable_symbols
 
-Set `raise` when a table must fail rather than keep such a row. By
-default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
-column. Such a symbol is a library bug. To report it, see
+Set `raise` to fail the table at the first such row. Such a symbol is a
+library bug. To report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
-Only the session's setting decides the column. Under `raise` in
-`MassiveConfig`, no table has a `RawSymbol` column, whatever a call sets.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
 written together. Under `log` or `ignore` it gets no rows. A
@@ -329,6 +358,33 @@ setting says.
 This setting also covers a watchlist symbol a `poll()` can't request with your
 arguments. For example, an indicator poll with `adjusted=False` can't request a
 crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
+
+#### on_error.unreadable_keys
+
+A key can't be read when it is one of these:
+
+- the row's symbol, its time, or another column its dataset needs, missing or of
+  the wrong type;
+- a time of 0, or one outside 1990 to 2100.
+
+A symbol that is present but isn't Massive's ticker is `unreadable_symbols`. Set
+`raise` to fail the table at the first such row. Such a row is a sign
+that Massive's format changed.
+
+#### on_error.unconvertible_values
+
+A value the library can't read is one of these:
+
+- a value of another type, or a whole number that a `double` column would round;
+- a time outside 1990 to 2100 in any column but the row's own time;
+- the start of a bar of a day or longer stamped at a time Massive isn't known to
+  use.
+
+In those other columns a time of 0 is a null, as Massive means it, and the row is
+kept.
+
+Set `raise` when a table must fail rather than leave out a row with a
+value it can't read.
 
 #### on_error.malformed_rows
 
@@ -370,8 +426,9 @@ raises `EntitlementError`.
 
 #### websocket_hosts
 
-Set `indices` to `business.massive.com` to stream index values on a real-time Indices
-plan. Massive's documentation lists no other host for them, delayed or real-time. Set
+Set `indices` to `business.massive.com` to stream index values when Massive serves
+your index values there. Massive's documentation lists no other host for them,
+delayed or real-time. Set
 nothing else unless Massive tells you to.
 
 Without an entry, a subscription listed in `delayed_subscriptions` streams from

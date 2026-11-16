@@ -175,16 +175,12 @@ class _StreamShapes(Query):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts passed as a list or a static table pass the connection's limit;
-                - the dataset streams only in real time (fair market value, the options admin
-                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
+                - option contracts passed as a list or a static table pass the connection's limit.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change. For the options admin messages, which stream only in real time, a delayed
-                label means your plan lacks the dataset, and the message links the page that
-                lists the plans that include it.
+                change.
             SessionClosedError: If the session is closed.
             MassiveError: If the stream fails while it opens.
         """
@@ -212,16 +208,12 @@ class _StreamShapes(Query):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts passed as a list or a static table pass the connection's limit;
-                - the dataset streams only in real time (fair market value, the options admin
-                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
+                - option contracts passed as a list or a static table pass the connection's limit.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change. For the options admin messages, which stream only in real time, a delayed
-                label means your plan lacks the dataset, and the message links the page that
-                lists the plans that include it.
+                change.
             SessionClosedError: If the session is closed.
             MassiveError: If the stream fails while it opens.
         """
@@ -253,16 +245,12 @@ class _StreamShapes(Query):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts passed as a list or a static table pass the connection's limit;
-                - the dataset streams only in real time (fair market value, the options admin
-                  messages) and `MassiveConfig.delayed_subscriptions` lists its subscription.
+                - option contracts passed as a list or a static table pass the connection's limit.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription
                 isn't in `MassiveConfig.delayed_subscriptions`. The message names the setting to
-                change. For the options admin messages, which stream only in real time, a delayed
-                label means your plan lacks the dataset, and the message links the page that
-                lists the plans that include it.
+                change.
             SessionClosedError: If the session is closed.
             MassiveError: If the stream fails while it opens.
         """
@@ -406,9 +394,7 @@ class StreamQuery(_StreamShapes):
                 - it runs on a Deephaven update-graph thread;
                 - a static table of symbols is empty, or no row of a table of symbols is Massive's
                   exact ticker;
-                - option contracts passed as a list or a static table pass the connection's limit;
-                - the dataset is fair market value, which streams only in real time, and
-                  `MassiveConfig.delayed_subscriptions` lists its subscription.
+                - option contracts passed as a list or a static table pass the connection's limit.
             AuthenticationError: If Massive rejects your API key while the call checks which feed
                 your plan streams. A later rejection fails the table instead.
             EntitlementError: If Massive's data for this dataset is delayed and its subscription

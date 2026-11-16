@@ -182,7 +182,7 @@ def test_the_wire_details_of_the_specs() -> None:
 
 
 def columns(spec: DatasetSpec) -> list[tuple[str, str]]:
-    return [(c.name, c.type.value) for c in CRYPTO.dataset_schema(spec, raw_symbol=False).columns]
+    return [(c.name, c.type.value) for c in CRYPTO.dataset_schema(spec).columns]
 
 
 def test_trades_schema() -> None:
@@ -710,7 +710,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
+def test_a_daily_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -719,29 +719,25 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
 ) -> None:
     caplog.set_level(logging.WARNING)
     # The documented sample sits at midnight New York time, 05:00 UTC: maybe another day cut.
-    # The bar is served as sent: its stamp, a day later its end, and no Date.
+    # Which day the bar covers would be a guess, so it is withheld; a page of no other bar
+    # fails the read.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    out = rows(rest_session.crypto.previous_day_bar("X:BTCUSD").fetch(wait=True))
-    new_york = NOV_15 + 5 * 3_600_000
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
-        (None, new_york * MS, (new_york + DAY_MS) * MS)
-    ]
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        rest_session.crypto.previous_day_bar("X:BTCUSD").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
         "crypto.previous_day_bar: a 1-day bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/prev "
         "is stamped 2020-11-15T05:00:00+00:00, which is not a stamp Massive is known to use"
     )
     caplog.clear()
-    # The grouped-daily samples sit at no day boundary at all: each bar ends a day after its
-    # stamp, after the range's one day, so the range holds neither; each time of day warns.
+    # The grouped-daily samples sit at no day boundary at all: each is withheld, and each
+    # time of day warns.
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
-    every = rows(
+    with pytest.raises(dm.MassiveError, match="could read none of the 2 rows"):
         rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY).history(
             "2020-02-02", "2020-02-02", source=dm.HistorySource.REST, wait=True
         )
-    )
-    assert every == []
     warnings = stamp_warnings(caplog)
     assert len(warnings) == 2
     assert "/v2/aggs/grouped/locale/global/market/crypto/{date} is stamped 2020-02-02T20:48" in (
@@ -1051,7 +1047,7 @@ def test_one_flat_file_block_round_trips(
     assert {r["Date"] for r in found} == {"2023-03-28"}
 
 
-def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_served_with_a_warning(
+def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
     *,
     s3_session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -1068,11 +1064,9 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_served_with_a_warning
     empty = "ticker,volume,open,close,high,low,window_start,transactions\n"
     fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-29.csv.gz", make_csv_gz(empty))
     q = s3_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
-    out = rows(q.history("2023-03-28", "2023-03-29", source=dm.HistorySource.FLAT_FILES, wait=True))
-    # The bar keeps its stamp, ends a day later, and has no Date; the range holds that window.
-    assert [(r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
-        ("X:BTCUSD", None, stamp, stamp + 86_400 * 10**9)
-    ]
+    # The bar is withheld; a file of no other bar fails the read.
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        q.history("2023-03-28", "2023-03-29", source=dm.HistorySource.FLAT_FILES, wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
         "crypto.bars: a 1-day bar of X:BTCUSD from the flat files global_crypto/day_aggs_v1 is "

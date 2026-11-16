@@ -906,14 +906,18 @@ class DriftReport:
 
 
 class RowFault(StrEnum):
-    """Why a decoder could not read a row whole, named as the `dm.ErrorPolicy` field it follows.
+    """Why the library could not read a row whole, named as the `dm.ErrorPolicy` field it follows.
 
-    A row has at most one fault: a decoder marks the first that applies, in this order.
+    A row has at most one fault, the first found: a decoder marks a row first, and each of
+    the library's later steps marks only a row not marked yet.
     """
 
     UNREADABLE_KEYS = "unreadable_keys"
     """A key the library needs to place the row (its symbol, its time, or another key the
     dataset declares) is absent, null, or does not fit."""
+    UNREADABLE_SYMBOLS = "unreadable_symbols"
+    """The row's symbol is text the library cannot read as Massive's ticker. The library
+    marks it, after decoding; a decoder never does."""
     UNCONVERTIBLE_VALUES = "unconvertible_values"
     """A value outside the keys does not fit its field's type or named conversion, so the
     row's batch holds a null there."""

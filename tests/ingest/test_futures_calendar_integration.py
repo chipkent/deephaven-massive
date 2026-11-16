@@ -619,6 +619,9 @@ _LATENCY_RUNS = 5
 _LATENCY_PAGES = 4
 """The most pages of one lookup the latency check reads, each a request."""
 
+_SERVER_ERROR = 500
+"""The lowest HTTP status of a server's failure, which the latency check records as evidence."""
+
 
 def _timed(
     client: RestClient, path: str, query: Mapping[str, object]
@@ -655,10 +658,18 @@ def test_contract_and_schedule_lookup_latency(
     whole schedule lookup (`product_code.any_of` over its window) for 1, 20, and 100
     products, each up to 4 pages. Records each lookup's seconds, median, and slowest, with
     its rows and pages, and whether it ended within 4 pages (if not, its times are of its
-    first 4 pages). A time includes any wait for the key's rate limit.
+    first 4 pages). A time includes any wait for the key's rate limit. A lookup Massive's
+    servers fail with an HTTP 5xx after the client's retries (the contract lookup of 100
+    tickers, which sends no `date`, answered HTTP 504 on 2026-11-16) is recorded with its
+    error and not timed again.
 
-    Passes when every request is answered; the times are evidence. Sends at most 102
-    requests: 2, then 5 lookups timed 5 times at up to 4 pages each.
+    Passes when some lookup is answered and every other failed with a 5xx; the times and
+    failures are evidence. Sends at most 102 requests: 2, then 5 lookups timed 5 times at up
+    to 4 pages each, a failed request counting with its retries.
+
+    Raises:
+        WireError: When a lookup fails other than with an HTTP 5xx: a refused key or plan, a
+            refused request, or an answer the client cannot read.
     """
     query = {"date": recent_monday, "active": True, "type": "single", "limit": _LIST_PAGE}
     singles = _page(live_rest, _CONTRACTS, query=query)
@@ -693,8 +704,16 @@ def test_contract_and_schedule_lookup_latency(
         )
         for n in (1, 20, 100)
     ]
+    answered = 0
     for label, path, lookup in lookups:
-        seconds, rows, pages, ended = _timed(live_rest, path, lookup)
+        try:
+            seconds, rows, pages, ended = _timed(live_rest, path, lookup)
+        except WireError as error:
+            if error.status is None or error.status < _SERVER_ERROR:
+                raise
+            evidence(f"{label}: failed: {error}")
+            continue
+        answered += 1
         evidence(
             f"{label}: {rows} rows in up to {pages} pages"
             f"{'' if ended else ' (a run stopped at the page cap: its time is of the first pages)'}"
@@ -702,6 +721,7 @@ def test_contract_and_schedule_lookup_latency(
             f"{[round(s, 3) for s in seconds]}, median {statistics.median(seconds):.3f}, "
             f"slowest {max(seconds):.3f}"
         )
+    assert answered, "no lookup was answered"
 
 
 _LISTING_DAYS = 90

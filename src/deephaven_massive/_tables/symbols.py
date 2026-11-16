@@ -27,6 +27,7 @@ from deephaven import dtypes
 from deephaven.table import Table
 
 from deephaven_massive._datasets.symbols import (
+    CLASS_NOUNS,
     LOGGED_VALUES,
     check_convention,
     convert_under,
@@ -106,14 +107,16 @@ def canonicalize_symbols(
 
     Args:
         table: Any table with a `String` column of symbols.
-        asset_class: The class of every symbol in the column. Required: nothing is inferred.
+        asset_class: The class of every symbol in the column. Required: nothing is inferred,
+            so a table that mixes classes is converted one class's rows at a time.
         column: The column to convert, `"Symbol"` by default. The converted values replace
             the column's values and keep its name, so a column named anything but `Symbol`
             must be renamed before the table is passed as `symbols=`
             (`.rename_columns("Symbol = Ticker")`). Every other column is kept unchanged.
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
-            for stocks only, `YAHOO`, `NASDAQ`, or `CMS`.
+            for stocks only, `YAHOO`, `NASDAQ`, or `CMS`: the source the tickers came from,
+            not the exchange they trade on.
         on_error: What a value that does not convert does. `OnError.LOG`, the default,
             writes a null symbol for it and logs the value once at WARNING; `OnError.IGNORE`
             writes a null symbol and logs it at DEBUG only; `OnError.RAISE` fails.
@@ -147,7 +150,7 @@ def canonicalize_symbols(
     if refused and effect.fails:
         shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
-            f"{len(refused)} value(s) of {column} are not {resolved.value} symbols: "
+            f"{len(refused)} value(s) of {column} are not {CLASS_NOUNS[resolved]} tickers: "
             f"{shown}. Pass on_error=dm.OnError.LOG to null them instead"
         )
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none

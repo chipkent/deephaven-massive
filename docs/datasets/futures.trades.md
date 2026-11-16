@@ -47,7 +47,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket |
 | `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session Massive's futures schedules place it in (between two sessions, the next one). A row they cannot place has a null Date, since the 17:00 Chicago rule can be wrong around a holiday, and the stream keeps running: a spread, a contract whose schedule lookup failed or did not load before the stream opened, or a row outside the loaded schedule logs a WARNING (once per product and date); a contract still being looked up (one a live watchlist or dm.ALL adds) logs at DEBUG only; a row with no readable symbol has a null Date too. From REST and flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST and flat files `timestamp`: "The time when the trade was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. | REST, flat files, WebSocket |
 | `Price` | double | The trade price is quoted per unit of the underlying asset, with the total contract value determined by multiplying by the contract’s specific multiplier. | REST, flat files, WebSocket |
 | `Size` | double | The total number of contracts exchanged between buyers and sellers on a given trade. | REST, flat files, WebSocket |
 | `Correction` | long | The trade correction indicator. | flat files |
@@ -68,7 +67,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | `ticker` | `ticker` | `sym` |
 | `Date` | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | `timestamp` | `timestamp` | `t` |
-| `RawSymbol` | `ticker` | `ticker` | `sym` |
 | `Price` | `price` | `price` | `p` |
 | `Size` | `size` | `size` | `s` |
 | `Correction` |  | `correction` |  |

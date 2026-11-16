@@ -455,7 +455,9 @@ class SymbolConvention(StrEnum):
     - `CMS`: the root, a space, and a suffix, as many broker and FIX systems write it; a class
       is ` B` (`BRK B`), a preferred ` PR` and its optional series (`BAC PRL`).
 
-    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only.
+    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only. Each names a source of symbols, not an
+    exchange: pick the one the tickers came from, not where the stock trades. `NASDAQ` reads
+    `BRK-B` as a preferred, `BRKpB`, whatever exchange lists Berkshire.
 
     Example:
         ::
@@ -484,8 +486,8 @@ class OnError(StrEnum):
       under `noncanonical_symbols` is the exception: it fails the whole result.
     - `LOG`: skip the value and keep going. Each distinct value is logged once, up to a fixed
       number of values: at WARNING, or at ERROR for a library defect to report. A stream or `poll()`
-      table names each value it skips in its `Error` in `m.streams()`. Under
-      `unreadable_symbols` a bad row of Massive's data is kept, with the text in `RawSymbol`.
+      table names each value it skips in its `Error` in `m.streams()`. A row of Massive's data
+      the library can't read whole is never published, under any setting.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Each cause has its own setting in `dm.ErrorPolicy`, set for the session
@@ -607,9 +609,9 @@ def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription |
 class Recency(StrEnum):
     """How fresh the data of a WebSocket host or a live table is (internal).
 
-    `REALTIME` for Massive's real-time and Business hosts, `DELAYED` for its delayed feed, and
+    `REALTIME` for Massive's real-time and FMV hosts, `DELAYED` for its delayed feed, and
     `UNKNOWN` for a pinned host the library does not know, or a REST table of a subscription
-    listed in `MassiveConfig.delayed_subscriptions` (REST serves what the plan serves).
+    listed in `MassiveConfig.delayed_subscriptions` (REST serves what Massive serves the key).
     `UNKNOWN` is never shown as real-time.
     """
 
@@ -621,8 +623,10 @@ class Recency(StrEnum):
 class ChannelFamily(StrEnum):
     """Which group of channels a WebSocket connection carries (internal).
 
-    `FMV` (fair market value) is Business-only and always served from `business.massive.com`;
-    every other channel is in the `TICK` family, whose host depends on the key's plan.
+    `FMV` (fair market value) streams only from `business.massive.com`, the one host Massive
+    documents for it; every other channel is in the `TICK` family, whose host follows
+    `MassiveConfig.delayed_subscriptions`, `MassiveConfig.websocket_hosts`, and Massive's recency
+    label.
     """
 
     TICK = "TICK"

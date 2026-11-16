@@ -189,17 +189,21 @@ def _double(value: object) -> float:
         `value` as a `float`.
 
     Raises:
-        UnconvertibleError: If `value` is not a number, is a `bool`, or is an integer too large
-            for a double.
+        UnconvertibleError: If `value` is not a number, is a `bool`, or is an integer a double
+            cannot hold exactly (beyond 2**53, and not a multiple the double holds), which it
+            would round.
     """
     if type(value) is float:  # what a JSON decoder gives for nearly every such value
         return value
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise UnconvertibleError
     try:
-        return float(value)
+        converted = float(value)
     except OverflowError:
         raise UnconvertibleError from None
+    if isinstance(value, int) and int(converted) != value:
+        raise UnconvertibleError
+    return converted
 
 
 def _of_type(kind: type[_T]) -> Callable[[object], _T]:
@@ -687,19 +691,24 @@ def _numbers_or_nulls(values: Sequence[object]) -> TypeGuard[list[int | float | 
     return set(map(type, values)) <= _NUMBERS
 
 
+_EXACT_INTEGER: Final = 2**53
+"""Every integer within this many of zero is a double exactly; past it, only some are."""
+
+
 def _as_floats(values: list[object]) -> list[object] | None:
     """Return a column of integers, floats, and nulls as floats, as the `double` converter gives.
 
     A `double` column often mixes integers in (a price of exactly 100 is sent as `100`), so this
     converts the whole list with the builtin `float`, not the converter's Python call per value.
-    `float` rounds a large integer exactly as the converter does.
+    An integer a double cannot hold exactly, which `float` would round, makes it give up, so the
+    converter judges that value on its own and refuses it.
 
     Args:
         values: Integers, floats, and `None`s, which stay `None`.
 
     Returns:
-        A new list of floats (and `None`s); or None when an integer is too large for a double,
-        which the converter refuses.
+        A new list of floats (and `None`s); or None when an integer is one a double cannot
+        hold exactly, which the converter refuses.
 
     Raises:
         TypeError: A defect of the library, if a value is neither null, an `int`, nor a `float`:
@@ -707,13 +716,19 @@ def _as_floats(values: list[object]) -> list[object] | None:
     """
     try:
         if _numbers_only(values):
-            return list(map(float, values))
-        if not _numbers_or_nulls(values):
+            floats: list[object] = list(map(float, values))
+        elif _numbers_or_nulls(values):
+            floats = [None if v is None else float(v) for v in values]
+        else:
             raise TypeError(_unexpected("a double column", values, _NUMBERS))
-        floats: list[object] = [None if v is None else float(v) for v in values]
     except OverflowError:
         return None
-    return floats
+    # Python compares an int with a float exactly, so a rounded one differs.
+    inexact = any(
+        type(v) is int and not -_EXACT_INTEGER <= v <= _EXACT_INTEGER and float(v) != v
+        for v in values
+    )
+    return None if inexact else floats
 
 
 _TEXTS: Final = frozenset({str, NoneType})

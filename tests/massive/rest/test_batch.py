@@ -518,14 +518,13 @@ def test_the_drift_of_both_readings_names_dotted_keys_and_first_samples() -> Non
     assert drift.samples["extra"] == DriftSample(None, '{"deep": true}')
 
 
-def test_an_integer_a_double_cannot_hold_exactly_is_rounded_by_the_converter(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # Arrow refuses an integer it would round; the column goes through the converter, which
-    # rounds it as a JSON number is, so the page is still read column by column.
-    big = 2**60 + 1
-    with caplog.at_level(logging.DEBUG, logger=batch_module.__name__):
-        path = _path(_field("v", WireType.DOUBLE))
-        batch, _, _ = to_batch([{"v": big}, {"v": 2}], path, required=())
-    assert batch.column(0).to_pylist() == [float(big), 2.0]
-    assert caplog.messages == []
+def test_an_integer_a_double_cannot_hold_exactly_marks_its_row() -> None:
+    # A double would round it, so it is no value Massive sent: its row is marked, and a large
+    # integer a double holds exactly still reads.
+    path = _path(_field("v", WireType.DOUBLE))
+    rows: list[dict[str, object]] = [{"v": 2**60 + 1}, {"v": 2**60}, {"v": 2}]
+    batch, drift, marks = to_batch(rows, path, required=())
+    assert batch.column(0).to_pylist() == [None, 2.0**60, 2.0]
+    assert drift.unconvertible == frozenset({"v"})
+    [(fault, mark)] = marks.items()
+    assert (fault, mark.rows) == (RowFault.UNCONVERTIBLE_VALUES, (0,))

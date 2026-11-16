@@ -475,3 +475,139 @@ def test_a_crypto_stream_follows_its_watchlist(
     live_session.release(board)
     assert not stale, f"the table showed an {eth} row from before the re-add: {stale}"
     assert rows, f"no new {eth} trade arrived in {_FOLLOW_WAIT:.0f} s after re-adding it"
+
+
+_HOLD = 90.0
+"""Seconds the real-time-only checks keep their streams open: long enough for Massive to answer
+every subscription, and to take an older connection of the key if a newer one counts against it."""
+
+_TAKEN = "another connection with this API key took"
+"""The start of the library's words, in a stream's error or a connection's last error, for a
+connection Massive closed because a newer one on the key took its place."""
+
+
+def _states(session: dm.MassiveSession, table_rows: TableRows) -> dict[str, tuple[str, str | None]]:
+    """Return each stream's state and error in `m.streams()`, by its dataset."""
+    return {
+        str(r["Dataset"]): (str(r["State"]), r["Error"] and str(r["Error"]))
+        for r in table_rows(session.streams())
+    }
+
+
+def _hold(
+    session: dm.MassiveSession, table_rows: TableRows, datasets: int
+) -> dict[str, tuple[str, str | None]]:
+    """Wait `_HOLD` seconds, or until every one of `datasets` streams has failed.
+
+    Returns:
+        The streams' states and errors at the end (`_states`).
+    """
+    deadline = time.monotonic() + _HOLD
+    pause = threading.Event()  # never set; only paces the wait
+    states = _states(session, table_rows)
+    while time.monotonic() < deadline:
+        failed = [state for state, _ in states.values() if state == "FAILED"]
+        if len(failed) == datasets:
+            break
+        pause.wait(1.0)
+        states = _states(session, table_rows)
+    return states
+
+
+@pytest.mark.timeout(180)
+def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
+    live_config: dm.MassiveConfig,
+    *,
+    wait_acked: WaitAcked,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """Whether stocks FMV streams beside delayed stock trades, and whether either takes the other.
+
+    Lists stocks in `MassiveConfig.delayed_subscriptions`, which moves `T.SPY` to
+    `delayed.massive.com` and never applies to fair market value, then streams
+    `m.stocks.fmv("SPY")`, which uses `business.massive.com`, the one host Massive documents for
+    it. Waits for Massive to acknowledge both topics, holds both streams for `_HOLD` seconds,
+    and records the two connections and the streams. Passes when no stream or connection
+    reports that the other connection took its place (a second connection on one key that
+    Massive counts as the same cluster), Massive acknowledged both topics, and both streams
+    still run. Skips, quoting Massive, when Massive refused either subscription and nothing was
+    taken: the library sent the request and Massive answered.
+    """
+    config = dataclasses.replace(
+        live_config,
+        delayed_subscriptions=live_config.delayed_subscriptions | {dm.Subscription.STOCKS},
+    )
+    session = dm.MassiveSession(config)
+    try:
+        trades = session.stocks.trades("SPY").blink()
+        fmv = session.stocks.fmv("SPY").blink()
+        acked = wait_acked(session, 2, time.monotonic() + _WAIT)
+        states = _hold(session, table_rows, 2)
+        last_errors = [
+            str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]
+        ]
+        for line in stream_report(session):
+            evidence(line)
+        session.release(trades)
+        session.release(fmv)
+    finally:
+        session.close()
+    evidence(f"acknowledged topics {acked}; streams after {_HOLD:.0f} s: {states}")
+    taken = [error for _, error in states.values() if error and _TAKEN in error]
+    taken += [error for error in last_errors if _TAKEN in error]
+    assert not taken, f"one connection took the other's place: {taken}"
+    refused = {
+        name: error
+        for name, (state, error) in states.items()
+        if state == "FAILED" and error and "refused the subscription to" in error
+    }
+    if refused:
+        pytest.skip(f"Massive refused: {refused}")
+    assert acked == 2, f"Massive acknowledged {acked} of the 2 topics"
+    assert {name: state for name, (state, _) in states.items()} == {
+        "stocks.trades": "RUNNING",
+        "stocks.fmv": "RUNNING",
+    }
+
+
+@pytest.mark.timeout(180)
+def test_admin_messages_on_the_delayed_options_feed(
+    live_config: dm.MassiveConfig,
+    *,
+    wait_acked: WaitAcked,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """What Massive answers to the options admin messages on its delayed feed.
+
+    Massive documents `AD.*` only on the real-time feed, and the library sends it wherever the
+    session's options streams go, so Massive's answer decides. Lists options in
+    `MassiveConfig.delayed_subscriptions`, streams `m.options.admin_messages()` on
+    `delayed.massive.com`, and records Massive's acknowledgement or refusal. Passes when Massive
+    acknowledged `AD.*` there and the stream runs; messages come only with FLEX activity or an
+    exchange's notice, so no row is required. Skips, quoting Massive, when Massive refused it:
+    the refusal is then the table's error, which the evidence records.
+    """
+    config = dataclasses.replace(
+        live_config,
+        delayed_subscriptions=live_config.delayed_subscriptions | {dm.Subscription.OPTIONS},
+    )
+    session = dm.MassiveSession(config)
+    try:
+        table = session.options.admin_messages().append_only()
+        acked = wait_acked(session, 1, time.monotonic() + _WAIT)
+        states = _states(session, table_rows)
+        for line in stream_report(session):
+            evidence(line)
+        session.release(table)
+    finally:
+        session.close()
+    evidence(f"AD.* acknowledged topics {acked}; streams {states}")
+    state, error = states["options.admin_messages"]
+    if state == "FAILED" and error and "refused the subscription to" in error:
+        pytest.skip(f"Massive refused: {error}")
+    assert acked, "Massive neither acknowledged nor refused AD.* on the delayed options feed"
+    assert state == "RUNNING", f"the admin messages stream is {state}: {error}"

@@ -746,14 +746,14 @@ def test_consensus_ratings_send_one_request_per_symbol(
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    # `Symbol` is the row's own ticker; one Massive spells in a way the library cannot read
-    # leaves `Symbol` null and keeps the spelling in `RawSymbol`.
+    # `Symbol` is the row's own ticker; a row Massive spells in a way the library cannot read
+    # is withheld, and the readable row beside it lands.
     echoes = {
-        "BRK.B": {"ticker": "BRK/B", "buy_ratings": 6},
-        "MSFT": {"ticker": "MSFT", "buy_ratings": 9},
+        "BRK.B": [{"ticker": "BRK/B", "buy_ratings": 6}, {"ticker": "BRK.B", "buy_ratings": 7}],
+        "MSFT": [{"ticker": "MSFT", "buy_ratings": 9}],
     }
-    for ticker, row in echoes.items():
-        fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
+    for ticker, page in echoes.items():
+        fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope(page)))
     table = rest_session.partners.benzinga.consensus_ratings(
         ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
     ).fetch(wait=True)
@@ -763,11 +763,9 @@ def test_consensus_ratings_send_one_request_per_symbol(
         ("/benzinga/v1/consensus-ratings/MSFT", window),
     ]
     assert "Ticker" not in table.column_names
-    out = dh_to_pylist(table.view(["Symbol", "RawSymbol", "BuyRatings"]))
-    assert sorted((r["RawSymbol"] or "", r["Symbol"], r["BuyRatings"]) for r in out) == [
-        ("", "MSFT", 9),
-        ("BRK/B", None, 6),
-    ]
+    assert "RawSymbol" not in table.column_names
+    out = dh_to_pylist(table.view(["Symbol", "BuyRatings"]))
+    assert sorted((r["Symbol"], r["BuyRatings"]) for r in out) == [("BRK.B", 7), ("MSFT", 9)]
 
 
 def test_a_consensus_row_without_its_ticker_fails(

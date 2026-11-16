@@ -444,7 +444,7 @@ class DatasetSpec:
             no reference endpoint may set it, and never with `serves_current_data`.
         refused_alternative: The dataset to suggest when Massive refuses this dataset's REST
             requests (HTTP 403), such as `"stocks.snapshots"` for `stocks.last_trade`: one
-            that serves the same data and that more plans include. None, the default,
+            that serves the same data. None, the default,
             suggests nothing.
         names_symbols: True, the default, for a dataset whose call takes symbols or whose rows
             each name an instrument. False for a stream whose rows name none, such as the
@@ -454,13 +454,12 @@ class DatasetSpec:
             other transport, not bars, may set it False, and then no source declares a `symbol`
             key; every source of such a dataset in a kind declares its `time` key (the
             `declared keys` gate).
-        real_time_only: True for a stream Massive serves only in real time, with no delayed
+        real_time_only: True for a stream Massive documents only in real time, with no delayed
             feed: fair market value, and the options admin messages, whose page documents only
-            the real-time feed. Its stream verbs refuse delayed data at the call rather than open
-            a stream Massive would refuse (`host_decision.require_real_time`): `ValueError` when
-            `MassiveConfig.delayed_subscriptions` lists the subscription, `EntitlementError`
-            when Massive labels the plan's data delayed. False, the default,
-            otherwise. Only a dataset with channels may set it.
+            the real-time feed. Its streams open like any other, and when Massive refuses one,
+            the error adds the documented feed and the dataset's page
+            (`host_decision.real_time_note`). False, the default, otherwise. Only a dataset with
+            channels may set it.
     """
 
     name: str
@@ -1000,7 +999,7 @@ class Catalog:
         self._by_name: Final = MappingProxyType(by_name)
         self._sources: Final = source_tables
         self._lock: Final = threading.Lock()
-        self._schemas: dict[tuple[DatasetSpec, bool], Schema] = {}
+        self._schemas: dict[DatasetSpec, Schema] = {}
 
     @property
     def by_name(self) -> Mapping[str, DatasetSpec]:
@@ -1050,8 +1049,8 @@ class Catalog:
             ranked.append((ranks[str(spec.group)], min(positions, default=0), index, spec))
         return tuple(spec for *_, spec in sorted(ranked, key=lambda r: r[:3]))
 
-    def dataset_schema(self, spec: DatasetSpec, *, raw_symbol: bool = True) -> Schema:
-        """Return a dataset's merged schema, computed once per shape and cached on the catalog.
+    def dataset_schema(self, spec: DatasetSpec) -> Schema:
+        """Return a dataset's merged schema, computed once and cached on the catalog.
 
         The merge of `schema.dataset_schema` over the members of the dataset's kind, or over
         the dataset alone when it is in no kind. The first call for a dataset computes it
@@ -1061,10 +1060,6 @@ class Catalog:
 
         Args:
             spec: The dataset; a dataset in a kind must be in this catalog.
-            raw_symbol: True, the default, for a session whose `unreadable_symbols` keeps an
-                unreadable row (`LOG`, its default, or `IGNORE`): a dataset that reads its
-                symbol from rows then has a `RawSymbol` column (`schema.dataset_schema`).
-                False for a session whose `unreadable_symbols` is `RAISE`, which has none.
 
         Returns:
             The schema: `Symbol`, `Date`, `Timestamp`, `TimestampStart`, and `TimestampEnd`
@@ -1078,7 +1073,7 @@ class Catalog:
         key, and an unknown source the `KeyError` of `source`.
         """
         with self._lock:
-            cached = self._schemas.get((spec, raw_symbol))
+            cached = self._schemas.get(spec)
         if cached is not None:
             return cached
         if spec.kind is None:
@@ -1087,9 +1082,9 @@ class Catalog:
             members = self.members(spec.kind)
             if spec not in members:
                 raise LookupError(f"{spec.name} is not in the catalog of its kind {spec.kind}")
-        schema = dataset_schema(spec, members, self.source, raw_symbol=raw_symbol)
+        schema = dataset_schema(spec, members, self.source)
         with self._lock:
-            return self._schemas.setdefault((spec, raw_symbol), schema)
+            return self._schemas.setdefault(spec, schema)
 
     def history_columns(self, spec: DatasetSpec, transport: Transport) -> frozenset[str]:
         """Return the columns a `history()` read of one transport fills, by the generated schemas.
