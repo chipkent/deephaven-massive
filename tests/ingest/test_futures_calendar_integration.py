@@ -1272,8 +1272,8 @@ def test_snapshot_lookup_by_ticker_list(live_rest: RestClient, *, evidence: Evid
     `fields` and with `fields=details.ticker,details.product_code`. Each runs 5 times, the
     six taking turns. Records each lookup's rows, how many of its tickers came back, its JSON
     bytes, its first row, and its seconds per run, median, and slowest; and per size, whether
-    `fields` was honored: the rows hold `details` with `ticker` and `product_code` only, and
-    fewer bytes than the same lookup without it. A lookup Massive refuses with an HTTP 4xx
+    `fields` was honored: every row holds `details` with `ticker` and `product_code` only, the
+    same tickers come back as without it, in fewer bytes. A lookup Massive refuses with an HTTP 4xx
     other than for the key (a URL too long, a `fields` it does not take) is recorded with
     Massive's answer and not sent again.
 
@@ -1335,14 +1335,42 @@ def test_snapshot_lookup_by_ticker_list(live_rest: RestClient, *, evidence: Evid
         whole, chosen = first.get((size, False)), first.get((size, True))
         if whole is None or chosen is None:
             continue
-        keys = sorted({key for row in chosen for key in row})
-        nested = sorted({key for row in chosen for key in row.get("details") or {}})
-        evidence(
-            f"fields at {size} tickers: honored "
-            f"{keys == ['details'] and set(nested) <= {'ticker', 'product_code'}}: row keys "
-            f"{keys}, details keys {nested}; bytes {len(json.dumps(chosen))} with it, "
-            f"{len(json.dumps(whole))} without"
-        )
+        evidence(f"fields at {size} tickers: {_fields_verdict(chosen, whole)}")
+
+
+def _tickers_of(rows: Sequence[Mapping[str, Any]]) -> set[object]:
+    """Collect the `details.ticker` of snapshot rows.
+
+    Returns:
+        The tickers, with None for a row without one.
+    """
+    return {
+        details.get("ticker") if isinstance(details := row.get("details"), dict) else None
+        for row in rows
+    }
+
+
+def _fields_verdict(chosen: Sequence[Mapping[str, Any]], whole: Sequence[Mapping[str, Any]]) -> str:
+    """Judge whether Massive honored `fields=details.ticker,details.product_code`.
+
+    It did when every row holds `details` alone, with `ticker` and `product_code` alone, the
+    same tickers come back as without `fields`, and the rows take fewer bytes.
+
+    Returns:
+        The verdict, with what it rests on.
+    """
+    shapes = Counter(
+        (tuple(sorted(row)), tuple(sorted(row.get("details") or {}))) for row in chosen
+    )
+    wanted = (("details",), ("product_code", "ticker"))
+    same = _tickers_of(chosen) == _tickers_of(whole)
+    smaller = len(json.dumps(chosen)) < len(json.dumps(whole))
+    honored = bool(chosen) and set(shapes) == {wanted} and same and smaller
+    return (
+        f"honored {honored}: (row keys, details keys) by rows {dict(shapes)}, the same tickers "
+        f"as without fields {same}, bytes {len(json.dumps(chosen))} with it and "
+        f"{len(json.dumps(whole))} without"
+    )
 
 
 _COMBO_POOL = 100
@@ -1455,6 +1483,11 @@ def _candidate_sessions(
     return spans
 
 
+_PLACED_APART = "placed apart"
+"""The tally of the trades a combo's candidates place in different sessions: the only trades
+that tell the snapshot's product from the others."""
+
+
 @dataclass(frozen=True)
 class _Candidates:
     """A combo's candidate products: the snapshot's, every one, and whether they discriminate."""
@@ -1480,7 +1513,8 @@ def _place_combo_trades(
 
     Returns:
         The trades by candidate (`product` for the snapshot's, `other`) and verdict (`agree`
-        with the trade's `session_end_date`, `disagree`, or `none` when no session holds it).
+        with the trade's `session_end_date`, `disagree`, or `none` when no session holds it),
+        and under `_PLACED_APART` the trades the candidates place in different sessions.
 
     Raises:
         WireError: When the read fails other than by such a refusal.
@@ -1508,8 +1542,12 @@ def _place_combo_trades(
             continue
         local = _instant(stamp).astimezone(_CHICAGO)
         parts[f"{local:%a} {'evening' if local.hour >= 17 else 'day'}"] += 1
-        for code in candidates.codes:
-            placed = _session_holding(spans.get(code, {}), stamp)
+        placements = {
+            code: _session_holding(spans.get(code, {}), stamp) for code in candidates.codes
+        }
+        if len(set(placements.values())) > 1:
+            tally[_PLACED_APART] += 1
+        for code, placed in placements.items():
             verdict = (
                 "agree" if placed == day else "none" if placed.startswith("none") else ("disagree")
             )
@@ -1518,7 +1556,7 @@ def _place_combo_trades(
                 unlike.append((code, _chicago(stamp), str(day), placed))
     evidence(
         f"{ticker!r} (product {candidates.product_code!r}, candidates {list(candidates.codes)}, "
-        f"discriminating {candidates.discriminating}): {len(trades)} trades, {dict(tally)}, by "
+        f"sessions differ {candidates.discriminating}): {len(trades)} trades, {dict(tally)}, by "
         f"part {dict(parts)}, disagreements (candidate, trade in Chicago, Massive's session, the "
         f"schedule's) {unlike[:5]}"
     )
@@ -1551,11 +1589,12 @@ def test_combo_trade_sessions_by_snapshot_product(
     own `session_end_date`. Records per combo and in total: trades that agree, disagree
     (each listed), and that no session holds, by candidate (the snapshot's product or
     another), and the trades by Chicago weekday and part of the session (from 17:00, the
-    evening that belongs to the next day); and how many combos discriminate. A trades read
+    evening that belongs to the next day); and how many combos have a trade their candidates
+    place in different sessions, the only trades that discriminate. A trades read
     Massive refuses (a ticker it cannot take in the path) is recorded, not failed.
 
     The snapshot's product dates combos when its trades agree; that settles it against the
-    other candidates only for the discriminating combos, so with none the evidence says the
+    other candidates only by the trades they place apart, so with none the evidence says the
     question stays open. Run on a weekday, so trades from both parts of a session are read.
     Passes when every request is answered or refused as above and a combo's trade is read;
     the counts are evidence. Sends at most 48 requests.
@@ -1579,8 +1618,9 @@ def test_combo_trade_sessions_by_snapshot_product(
         "candidates' sessions differ"
     )
     totals: Counter[str] = Counter()
+    telling = 0
     for ticker in combos:
-        totals += _place_combo_trades(
+        tally = _place_combo_trades(
             live_rest,
             ticker,
             _Candidates(listed[ticker].product_code, candidates[ticker], ticker in deciding),
@@ -1588,10 +1628,12 @@ def test_combo_trade_sessions_by_snapshot_product(
             since=now - _COMBO_DAYS,
             evidence=evidence,
         )
-    picked = len(deciding & set(combos))
+        totals += tally
+        telling += tally[_PLACED_APART] > 0
     evidence(
-        f"total over {len(combos)} combos, {picked} discriminating"
-        f"{'' if picked else ' (none: the snapshot product against the others stays open)'}: "
+        f"total over {len(combos)} combos, {len(deciding & set(combos))} whose candidates' "
+        f"sessions differ, {telling} with a trade they place apart"
+        f"{'' if telling else ' (none: the snapshot product against the others stays open)'}: "
         f"{dict(totals)}"
     )
     assert totals, "no combo trade was read"
