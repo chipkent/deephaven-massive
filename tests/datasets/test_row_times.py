@@ -41,10 +41,16 @@ from deephaven_massive._datasets.row_times import (
     stamp_rule,
     time_column,
     time_rule,
-    within,
+    whole,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
+
+
+def within(rows: pa.Table, bounds: BarBounds) -> pa.Table:
+    # The bars `whole` keeps.
+    return rows.filter(whole(rows, bounds))
+
 
 INSTANT = pa.timestamp("ns", tz="UTC")
 A, T = AssetClass, Timespan
@@ -119,7 +125,7 @@ def test_only_bars_whose_window_lies_in_the_range_are_kept() -> None:
     )
     assert within(unknown, by_label).num_rows == 2
     ticks = pa.RecordBatch.from_pydict({"Price": [1.0]})
-    assert within(ticks, by_label) is ticks
+    assert within(ticks, by_label).equals(ticks)
 
 
 def fill(rule: TimeRule, rows: pa.RecordBatch) -> dict[str, list[object]]:

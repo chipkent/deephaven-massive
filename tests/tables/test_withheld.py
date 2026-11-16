@@ -25,6 +25,7 @@ from deephaven_massive._tables.withheld import (
     mark_failures,
     marked_count,
     merged,
+    placed,
     setting_of,
     with_marks,
     withhold_rows,
@@ -143,6 +144,29 @@ def test_in_window_judges_each_bound_on_its_own() -> None:
     times = pa.array([True, False, True])
     kept = in_window(rows, (("Date", sessions), ("Timestamp", times)))
     assert kept.to_pylist() == [True, False, False]
+
+
+def test_placed_judges_rows_whose_keys_read_and_keeps_those_it_cannot_place() -> None:
+    # Rows: a value marked, judged out; read whole, judged in; a key marked, kept unjudged;
+    # read whole, judged out. The judgment never sees the mark columns.
+    times = pa.record_batch({"Timestamp": pa.array([5, 6, None, 8], pa.int64())})
+    rows = with_marks(times, {VALUES: one_mark(0), KEYS: one_mark(2)}, sent=None)
+    seen: list[list[str]] = []
+
+    def keep(judged: pa.RecordBatch | pa.Table) -> pa.Array:
+        seen.append(judged.schema.names)
+        assert judged.column("Timestamp").to_pylist() == [5, 6, 8]
+        return pa.array([False, True, False])
+
+    kept = placed(rows, keep)
+    assert kept.column("Timestamp").to_pylist() == [6, None]
+    assert kept.column(FAULT).to_pylist() == [None, KEYS.value]
+    assert seen == [["Timestamp"]]
+    # A table's chunks are judged as one, and no rows ask for no judgment.
+    table = pa.Table.from_batches([rows.slice(0, 2), rows.slice(2)])
+    assert placed(table, lambda _judged: pa.chunked_array([[True, False, True]])).num_rows == 3
+    assert placed(rows.slice(0, 0), keep).num_rows == 0
+    assert len(seen) == 1
 
 
 # --- withhold_rows and Withheld ----------------------------------------------------------------

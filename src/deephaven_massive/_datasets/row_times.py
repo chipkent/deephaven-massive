@@ -64,7 +64,7 @@ The indices' extra hour is conservative: an index day bar is stamped at midnight
 and whether it covers the New York or the Chicago day is not verified, so its end is the later
 of the two. A futures bar longer than one session whose label may not yet be its bucket's last
 session has a `TimestampEnd` that can still move, so `history()` returns it only once it has
-certainly ended (`within`, `bar_periods.futures_bar_ended`). The next midnight is always the
+certainly ended (`whole`, `bar_periods.futures_bar_ended`). The next midnight is always the
 calendar's next midnight in the zone, never 24 hours later, so a day across a daylight-saving
 change keeps its true length.
 
@@ -159,7 +159,7 @@ __all__ = [
     "stamp_rule",
     "time_column",
     "time_rule",
-    "within",
+    "whole",
 ]
 
 logger = logging.getLogger(__name__)
@@ -472,8 +472,8 @@ class BarBounds:
     futures_completion: FuturesBarCompletion | None = None
 
 
-def within(rows: _Rows, bounds: BarBounds) -> _Rows:
-    """Keep the bars whose filled window lies inside a range: the whole-window rule.
+def whole(rows: _Rows, bounds: BarBounds) -> pa.Array:
+    """Tell which bars' filled window lies inside a range: the whole-window rule.
 
     `history()` keeps a bar only when its window has ended by the end of the range and by
     now, judged by the same `TimestampEnd` a join on the end uses, so a bar a join would not
@@ -488,11 +488,11 @@ def within(rows: _Rows, bounds: BarBounds) -> _Rows:
         bounds: The window (`HistoryWindow.bars`).
 
     Returns:
-        The rows kept, in order; every row of a batch without the bar columns.
+        The mask of the bars to keep; every row of a batch without the bar columns.
     """
     names = rows.schema.names
     if END not in names:
-        return rows
+        return pa.repeat(pa.scalar(value=True), rows.num_rows)
     ends = rows.column(END)
     latest = pa.scalar(epoch_ns(bounds.latest), ends.type)
     keep = pc.fill_null(pc.less_equal(ends, latest), fill_value=True)
@@ -502,7 +502,7 @@ def within(rows: _Rows, bounds: BarBounds) -> _Rows:
         keep = pc.and_(keep, pc.fill_null(late, fill_value=True))
     if bounds.futures_completion is not None and START in names:
         keep = pc.and_(keep, _futures_ended(rows, bounds.futures_completion))
-    return rows.filter(keep)
+    return keep
 
 
 def _futures_ended(rows: _Rows, completion: FuturesBarCompletion) -> pa.Array:
@@ -941,7 +941,7 @@ class TimeRule:
         Its `TimestampStart` stays Massive's `window_start`, and it ends at 17:00 Chicago time
         on its label, Massive's `session_end_date`, which is the bar's last session. Only a
         1-session bar keeps its `Date`. Whether a longer bar has certainly ended is judged
-        apart (`within`), since its label can still move while its bucket is open.
+        apart (`whole`), since its label can still move while its bucket is open.
 
         Args:
             rows: The batch, whose `Date` holds the bars' `session_end_date`.

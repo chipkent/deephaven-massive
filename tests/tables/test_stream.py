@@ -2616,3 +2616,28 @@ def test_a_stream_reads_its_symbols_once_for_a_batch_s_withheld_rows(
     flusher.flush()
     assert [(event.symbol, event.rows) for event in events] == [("AAPL", 1)]
     assert recorded == [1]
+
+
+def test_rows_with_no_readable_symbol_beside_another_symbol_s_rows_never_fail_a_quiet_stream(
+    massive_session: dm.MassiveSession, flusher: Flusher, *, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AAPL and MSFT share channel T, and MSFT keeps publishing. Rows with no readable symbol
+    # could be MSFT's, so they never fail the quiet AAPL stream; each one still counts in
+    # AAPL's SchemaDrift, since it could have been AAPL's.
+    core = massive_session._core
+    aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
+    msft, _ = make_sink(core, ("MSFT",), stream_id=2)
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    recorded: dict[int, int] = {}
+
+    def record(stream_id: int, _transport: object, drift: DriftReport) -> None:
+        recorded[stream_id] = recorded.get(stream_id, 0) + drift.dropped_rows
+
+    monkeypatch.setattr(core, "record_stream_drift", record)
+    nameless = [trade("AAPL", Ticker=None)] * 10
+    for _ in range(stream.DROPPED_RUN_LIMIT // 10 + 1):
+        flusher.rows("T", frame([*nameless, trade("MSFT")]), unread_keys(*range(10)), generation=1)
+        flusher.flush()
+    assert (aapl.failed, msft.failed) == (False, False)
+    assert recorded[1] == 10 * (stream.DROPPED_RUN_LIMIT // 10 + 1)

@@ -133,8 +133,9 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
 ) -> None:
     """Which spelling REST rows write for a share class and a preferred, and what is published.
 
-    Reads Massive's ticker list for the four tickers (one request, reference data), so the
-    evidence shows the list's own spelling of each; then each ticker's previous day bar through
+    Reads Massive's ticker list for each of the four tickers (four requests, reference data,
+    since the list takes one `ticker` a request), so the evidence shows the list's own spelling
+    of each; then each ticker's previous day bar through
     the library (four requests, `/v2/aggs/ticker/{ticker}/prev`), and the grouped daily bars of
     the most recent Monday through the library and raw (two requests), kept to rows whose
     ticker starts with one of the four roots, so a row Massive writes as `BRK/B` or `KIM-L` is
@@ -147,12 +148,14 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
     report to Massive, and a spelling in the raw lines beside a canonical one is a second form
     Massive writes for the same stock.
     """
-    listed = live_rest.get(
-        source(Transport.REST, _TICKER_LIST),
-        {},
-        {"ticker.any_of": ",".join(_TICKERS), "market": "stocks"},
-        bucket="other",
-    ).rows
+    ticker_list = source(Transport.REST, _TICKER_LIST)
+    listed = [
+        row
+        for ticker in _TICKERS
+        for row in live_rest.get(
+            ticker_list, {}, {"ticker": ticker, "market": "stocks"}, bucket="other"
+        ).rows
+    ]
     evidence(f"ticker list spellings: {_spelled(listed, 'ticker')}")
     withheld = _withheld(live_session, monkeypatch)
     problems: list[str] = []
@@ -194,8 +197,9 @@ def test_flat_file_rows_spell_share_classes_and_preferreds_canonically(
 
     Reads the whole `us_stocks_sip/day_aggs_v1` file of the most recent Monday raw, no REST
     request, and records every `ticker` text that starts with one of the four roots; then the
-    library's `history(source=FLAT_FILES)` of the four tickers for that day, every published
-    `Symbol`, and the text of every row withheld for a symbol the library cannot read.
+    library's as-traded (`adjusted=False`) `history(source=FLAT_FILES)` of the four tickers
+    for that day, since flat-file bars are unadjusted, every published `Symbol`, and the text
+    of every row withheld for a symbol the library cannot read.
 
     Reading it: the four tickers among the raw spellings, and four canonical published rows,
     mean the file writes the ticker list's spelling; a raw spelling such as `BRK/B` beside no
@@ -207,7 +211,7 @@ def test_flat_file_rows_spell_share_classes_and_preferreds_canonically(
     spellings = _spelled(raw[0], "ticker")
     evidence(f"{_DAY_FILE} {recent_monday}: raw ticker spellings of the four roots: {spellings}")
     withheld = _withheld(live_session, monkeypatch)
-    bars = live_session.stocks.bars(list(_TICKERS), dm.Timespan.DAY).history(
+    bars = live_session.stocks.bars(list(_TICKERS), dm.Timespan.DAY, adjusted=False).history(
         recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
     )
     rows = table_rows(bars)
