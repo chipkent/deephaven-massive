@@ -1201,7 +1201,9 @@ def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
 def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One odd row fails nothing; a run of them with nothing published means the format changed.
+    # One odd row fails nothing; a run of them with nothing published means the format changed,
+    # which fails the dm.ALL stream: every row of the channel is its. The AAPL stream's own rows
+    # are half the run, so it goes on.
     core = massive_session._core
     every, _ = make_sink(core, ALL)
     aapl, _ = make_sink(core, ("AAPL",))
@@ -1228,7 +1230,7 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
         )
         flusher.flush()
     assert every.failed
-    assert aapl.failed
+    assert not aapl.failed
     error = next(r.getMessage() for r in caplog.records if "were withheld" in r.getMessage())
     assert error.startswith(
         f"test.trades stream 1 failed: test.trades: the last {2 * half} rows of channel T were "
@@ -2260,3 +2262,20 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
     assert [r.getMessage().split(". ")[0] for r in caplog.records] == [
         f"{flusher._thread.name}: could not report the withheld rows of stream 2"
     ]
+
+
+def test_a_named_stream_never_fails_for_another_symbol_s_withheld_rows(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    # AAPL and MSFT share channel T. A run of MSFT rows the library cannot read, with no AAPL
+    # row at all (after hours, say), fails the MSFT stream by its symbol's run; the AAPL stream
+    # received none of those rows, so it goes on.
+    core = massive_session._core
+    aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
+    msft, _ = make_sink(core, ("MSFT",), stream_id=2)
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    odd = [trade("MSFT", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT
+    flusher.rows("T", frame(odd), {}, generation=1)
+    flusher.flush()
+    assert (aapl.failed, msft.failed) == (False, True)

@@ -199,11 +199,9 @@ from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
 from deephaven_massive._tables.withheld import (
-    REASON,
     Withheld,
     failure_of,
     mark,
-    marked_count,
     withhold_rows,
 )
 
@@ -1239,20 +1237,19 @@ class RestReader:
         windowed = pa.Table.from_batches(
             [keep_window(batch, window, time=time_name) for batch in batches]
         )
-        asked = windowed.num_rows
-        if asked and marked_count(windowed) == asked:
-            first = windowed.column(REASON)[0].as_py()
-            raise RowDataError(
-                f"{spec.name}: the library could read none of the {asked} rows of the read's "
-                f"symbols and window on a page from {where} whole, so Massive's format may have "
-                f"changed; the first: {first}"
-            )
         symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
         withheld = withhold_rows(windowed, symbol=symbol)
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
             if record is not None:
                 record(withheld.drift)
+        asked = windowed.num_rows
+        if asked and withheld.total == asked:
+            raise RowDataError(
+                f"{spec.name}: the library could read none of the {asked} rows of the read's "
+                f"symbols and window on a page from {where} whole, so Massive's format may have "
+                f"changed; the first: {withheld.first_reason}"
+            )
         whole = [whole_bars(fill(batch), window) for batch in withheld.rows.to_batches()]
         logger.debug(
             "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",

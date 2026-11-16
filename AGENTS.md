@@ -188,7 +188,7 @@ These protect the owner's repository, money, and secrets.
   the evidence and draft a report to Massive for the owner. Vendor descriptions are
   documentation, not data: a clearly wrong one gets a reasoned `DESCRIPTION_FIXES` entry
   (decision 51).
-- **A data table holds only what Massive sent, read whole** (decision 112).
+- **A data table holds only what Massive sent, read whole.**
   - **A null in a data table is Massive's:** a null it sent, or a field it omitted.
   - **A row the library cannot read or derive whole is withheld:** a symbol or key it can't
     read, a value that doesn't fit its column, a number the column would round, and a line that

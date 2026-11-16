@@ -1836,11 +1836,12 @@ def test_row_symbols_are_canonical(
         assert (
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]["Converted"] == 65.5
         )
-        # A page of one such row fails whatever the setting: no row of it could be read.
+        # Under RAISE the row's cause fails the read first.
         with pytest.raises(
             RowDataError,
-            match=r"^forex\.conversion: the library could read none of the 1 rows .* the first: "
-            r"Massive sent the symbol 'not a pair', a spelling the library cannot read\.",
+            match=r"^forex\.conversion: Massive sent rows the library cannot read whole, which it "
+            r"withheld \(1 under unreadable_symbols\); the first: Massive sent the symbol "
+            r"'not a pair', a spelling the library cannot read\.",
         ):
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
 
@@ -4624,7 +4625,8 @@ def test_each_rest_verb_follows_the_call_s_unavailable_symbols_over_the_session_
 def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The session keeps a row whose symbol the library cannot read; a call under RAISE fails.
+    # A call under RAISE fails on the row's cause; under the session's LOG the row is withheld,
+    # and a page whose only row is withheld fails as one the library could read none of.
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX"}
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
@@ -4632,10 +4634,10 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
     strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
     params = {"from": "AUD", "to": "XXX"}
     with dm.MassiveSession(config) as m:
-        with pytest.raises(dm.MassiveError, match=r"Massive sent the symbol 'not a pair'"):
+        with pytest.raises(dm.MassiveError, match=r"\(1 under unreadable_symbols\)"):
             fetch(m, CONVERSION, params=params, on_error=strict)
-        (row,) = fetch(m, CONVERSION, params=params)
-    assert (row["Symbol"], row["RawSymbol"]) == (None, "not a pair")
+        with pytest.raises(dm.MassiveError, match=r"could read none of the 1 rows"):
+            fetch(m, CONVERSION, params=params)
 
 
 def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
