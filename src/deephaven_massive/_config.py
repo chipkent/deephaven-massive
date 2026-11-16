@@ -305,15 +305,16 @@ class MassiveConfig:
 
             - A stream counts the time its connection is down.
             - A `poll()` table counts the time its polls keep failing or stop arriving.
-            - A `fetch()` or `history()` without `wait=True` counts the time it waits out
-              Massive's rate limits.
+            - A `fetch()` or `history()` of a list of symbols without `wait=True` counts the
+              time it waits out Massive's rate limits.
             - A watchlist's `fetch()` or `history()` counts, for each symbol, the time its
               reads keep failing with a temporary error. Then `m.symbol_reads()` shows that
               symbol `FAILED`.
 
-            While a table waits, its `m.streams()` row shows why in `Error`. `m.rate_limits()`
-            shows a rate-limit wait. A failed table stays failed, so call the method again for
-            a new one. See
+            While a stream, a `poll()` table, or a watchlist waits, its `m.streams()` row shows
+            why in `Error`. `m.rate_limits()` shows a rate-limit wait. A failed table stays
+            failed, so call the method again for a new one. To read a failed watchlist symbol
+            again, delete its row and add it back. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults

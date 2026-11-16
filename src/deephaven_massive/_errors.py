@@ -312,10 +312,10 @@ class MassiveError(Exception):
         times. Wait before you call again. A read raises a rate-limit error once waiting out
         Massive's rate limits would take it past its limit:
 
-        - 10 minutes in all for a call with `wait=True`;
-        - 90 seconds for a call inside a console command;
-        - `max_outage` in `MassiveConfig` for a `fetch()` or `history()` without `wait=True`,
-          and for a watchlist's reads after the call returns.
+        - 90 seconds for a `wait=True` call inside a console command;
+        - 10 minutes for any other `wait=True` call;
+        - `max_outage` in `MassiveConfig` for a `fetch()` or `history()` without `wait=True`;
+        - `max_outage` for a watchlist's reads after the call returns.
         """
         return self._is_retryable
 

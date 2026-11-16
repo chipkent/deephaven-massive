@@ -30,8 +30,8 @@ def frame_bytes(rows: Sequence[tuple[object, ...]]) -> int:
     """Estimate the memory one frame's decoded rows take, in bytes.
 
     The list's own size, plus the first row's size (its tuple and each of its values) for every
-    row. Values the rows share, such as small integers, are counted in each row, so the
-    estimate errs high.
+    row. Values the rows share, such as small integers, are counted in each row, and a list
+    value counts only its own size, not its items'.
 
     Args:
         rows: The frame's rows of one channel, each a tuple of its fields; at least one.

@@ -1224,10 +1224,10 @@ class Flusher:
     until their memory would pass `row_memory.HELD_BYTES_LIMIT`: a flush that falls that far
     behind (the update graph stalled, as by a long console command) has stopped keeping up, and
     the server's memory must not go with it. The limit counts the rows as the Python objects the
-    buffers hold, an estimate that errs high; it bounds the buffers, and a flush that drains
-    them still converts what it took. The frame that would pass it, and every frame after
-    it, is dropped, and the next flush discards the buffered rows and fails every stream the
-    connection routes then, with an error that names the limit and when the rows began to be
+    buffers hold, as `row_memory.frame_bytes` estimates them; it bounds the buffers, and a flush
+    that drains them still converts what it took. The frame that would pass it, and every frame
+    after it, is dropped, and the next flush discards the buffered rows and fails every stream
+    the connection routes then, with an error that names the limit and when the rows began to be
     missing (`_overflowed`); the streams routed after that flush get their rows as usual.
 
     It remembers the canonical symbol of each wire spelling it has read, per dataset and channel,
