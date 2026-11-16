@@ -439,3 +439,22 @@ def test_a_branch_without_a_pull_request_is_measured_against_main(
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 1
+
+
+def test_a_question_wrapped_across_blockquote_lines_is_one_question(check: ModuleType) -> None:
+    body = (
+        "- The owner approved on 2026-11-15:\n"
+        "  > May the rules keep refusing invalid\n"
+        "  > inputs?\n"
+        "  > Yes.\n"
+    )
+    assert check.find_problems(body, [], "") == []
+
+
+def test_a_wrapped_question_s_second_line_is_not_its_answer(check: ModuleType) -> None:
+    body = (
+        "- The owner approved on 2026-11-15:\n"
+        "  > May the rule permit a literal '?' in\n"
+        "  > the documented examples?\n"
+    )
+    assert len(check.find_problems(body, [], "")) == 1

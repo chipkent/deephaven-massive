@@ -82,6 +82,11 @@ DECISION_REFERENCE: Final = re.compile(r"\bdecision (\d+)\b", re.IGNORECASE)
 DATE: Final = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 #: Paired quotation marks, straight or curly, and a blockquote line: each a quotation.
 QUOTATIONS: Final = re.compile(r'"([^"]*)"|“([^”]*)”|^\s*>\s*(\S.*)$', re.MULTILINE)
+#: A blockquote line that does not end a question, and the next blockquote line that goes on with
+#: it: Markdown wraps one paragraph across lines, so the two are one quotation.
+WRAPPED_BLOCKQUOTE: Final = re.compile(
+    r"^(\s*>\s*\S[^\n]*?)(?<!\?)[ \t]*\n\s*>\s*(?=\S)", re.MULTILINE
+)
 #: A question of fifteen characters or more, so a stray "?" in a short quotation is not one.
 QUESTION_LENGTH: Final = 15
 #: Where the decisions live, relative to the repository root the script runs from.
@@ -188,11 +193,16 @@ def is_answered_question(text: str) -> bool:
     Returns:
         True when the text holds a `DATE`, a quotation of `QUESTION_LENGTH` characters or more
         that holds a `?` (the question), and a quotation right after it (the answer).
-        Quotations are paired quotation marks or blockquote lines, paired in order, so the
-        prose between two quotations never counts as one. A question alone approves nothing,
+        Quotations are paired quotation marks or blockquote paragraphs, paired in order, so
+        the prose between two quotations never counts as one. Blockquote lines wrapped from one
+        paragraph are one quotation, but a line that ends in `?` ends the question, so the answer
+        may follow on the next line. A question alone approves nothing,
         and neither does an answer whose question is not shown before it.
     """
-    quotations = ["".join(groups).strip() for groups in QUOTATIONS.findall(text)]
+    joined = text
+    while (rejoined := WRAPPED_BLOCKQUOTE.sub(r"\1 ", joined)) != joined:
+        joined = rejoined
+    quotations = ["".join(groups).strip() for groups in QUOTATIONS.findall(joined)]
     answered = any(
         "?" in question and len(question) >= QUESTION_LENGTH and answer
         for question, answer in itertools.pairwise(quotations)

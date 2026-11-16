@@ -45,7 +45,8 @@ apply.
   Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
   pushed branch, or release, and spending money or changing access. **An approval is a
   decision file or the owner's answer to a question.** Cite the decision file that records
-  the ruling by its number (`decision 97`). Before a file exists, show the question as it was
+  the ruling by its number (`decision 97`); a file the same PR adds does not count. Before a
+  file exists, show the question as it was
   asked together with the owner's answer, as written and dated, from a message in the session;
   a question alone approves nothing. A GitHub comment under the owner's login counts only once
   the owner confirms it in the session, since an agent may have posted it. "Owner-approved",
