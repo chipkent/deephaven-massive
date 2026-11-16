@@ -1257,9 +1257,9 @@ class RestReader:
         symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
         withheld = withhold_rows(windowed, symbol=symbol)
         if withheld.groups:
-            self._report_withheld(spec, withheld, where=where)
-            if record is not None:
+            if record is not None:  # first, so a table that fails still shows its count
                 record(withheld.drift)
+            self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
         if asked and withheld.total == asked:
             raise RowDataError(

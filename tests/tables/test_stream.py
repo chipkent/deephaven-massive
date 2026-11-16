@@ -2260,7 +2260,7 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
         flusher._report_events(
             [
                 stream._StreamProblems(
-                    sink, (event(sink.stream_id),), DriftReport(dropped_rows=1), None, "here"
+                    sink, (event(sink.stream_id),), DriftReport(dropped_rows=1), None, "here", 1
                 )
                 for sink in (gone, failing, live)
             ]

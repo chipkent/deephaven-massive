@@ -1166,6 +1166,8 @@ class _StreamProblems:
         logged: The plan's withheld rows as drift, for the session's `DriftRegistry`, when the
             stream's policy logs them above DEBUG; None when it does not.
         where: The flush thread and channel.
+        payload: Which converted batch of the flusher the rows came from, so a session counts
+            each batch's withheld rows once, however many of its streams read it.
     """
 
     sink: StreamSink
@@ -1173,6 +1175,7 @@ class _StreamProblems:
     lost: DriftReport
     logged: DriftReport | None
     where: str
+    payload: int
 
 
 def _do_nothing() -> None:
@@ -1222,6 +1225,7 @@ class Flusher:
         "_new_generation",
         "_noted",
         "_on_new_generation",
+        "_payloads",
         "_runs",
         "_sessions",
         "_stale",
@@ -1286,6 +1290,8 @@ class Flusher:
         # Flush-lock state: the problem events a flush found, per stream, which it hands to
         # their sessions once it has released the flush lock (`_report_events`).
         self._events: list[_StreamProblems] = []
+        # Flush-lock state: how many batches have withheld rows, to tell their reports apart.
+        self._payloads = 0
         # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
         self._new_generation = False
         # Guarded by the backlog lock, a leaf lock.
@@ -1664,6 +1670,8 @@ class Flusher:
         """
         kept: list[StreamSink] = []
         named = plan.symbol_field is not None
+        self._payloads += 1
+        payload = self._payloads
         for sink in readers:
             holds = sink.holds if named and not sink.receives_all else None
             counts = withheld.counts(holds)
@@ -1682,7 +1690,7 @@ class Flusher:
                 dropped_rows=sum(counts.values()), dropped_reason=withheld.first_reason
             )
             logged = withheld.drift if logs_withheld(counts, sink.policy) else None
-            self._events.append(_StreamProblems(sink, found, lost, logged, where))
+            self._events.append(_StreamProblems(sink, found, lost, logged, where, payload))
             failure = failure_of(
                 counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
             )
@@ -2000,7 +2008,7 @@ class Flusher:
         Args:
             events: Each stream's withheld rows of the flush.
         """
-        logged: set[tuple[SessionCore, str, str]] = set()
+        logged: set[tuple[SessionCore, int]] = set()
         for found in events:
             sink = found.sink
             core = sink.core()
@@ -2009,7 +2017,7 @@ class Flusher:
             try:
                 core.problems(found.events)
                 core.record_stream_drift(sink.stream_id, Transport.WS, found.lost)
-                once = (core, sink.plan.dataset, found.where)
+                once = (core, found.payload)
                 if found.logged is not None and once not in logged:
                     logged.add(once)
                     core.drift.report(

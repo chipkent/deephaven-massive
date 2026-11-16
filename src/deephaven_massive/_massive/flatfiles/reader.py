@@ -658,15 +658,14 @@ class FlatFile:
             )
         arrays = []
         odd: dict[str, DriftSample] = {}
-        # A row whose key cannot be read is converted with no text: its values are never
-        # published, and its odd text must not change how the column's other rows convert.
+        # A row whose key cannot be read is converted without its odd text: its values are
+        # never published, and that text must not change how the column's other rows convert.
+        # Its readable keys stay, so a window can still judge the row by them.
         unread = pa.array([row in keyed for row in range(block.num_rows)]) if keyed else None
         for column in plan.columns:
             sent = block[column.header]
-            if unread is not None and (
-                column.read_type != pa.string() or column.list_type is not None
-            ):
-                sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
+            if unread is not None:
+                sent = _without_odd_text(sent, column, unread, key=column.header in plan.required)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
                 self._mark_unfit(sent, failed, column, symbols=symbols, marker=marker, odd=odd)
@@ -750,6 +749,32 @@ class FlatFile:
                     why = f"{header} holds {text[:_SAMPLE_LIMIT]!r}, which is not {read_type}"
                 reasons[row] = (columns[header], why)
         return _Keys(reasons, nanos)
+
+
+def _without_odd_text(
+    sent: pa.Array, column: ReadColumn, unread: pa.Array, *, key: bool
+) -> pa.Array:
+    """Blank the text of the rows whose key cannot be read, so it cannot sway the conversion.
+
+    Args:
+        sent: The header's text in each row.
+        column: The header's column.
+        unread: The rows whose key cannot be read.
+        key: Whether the header is a key, whose readable text such a row keeps.
+
+    Returns:
+        The text, null in those rows where it could change how the column converts: every
+        value of a typed or list header, and only an unparseable one of a key header.
+    """
+    if column.read_type == pa.string() and column.list_type is None:
+        return sent  # text converts as itself
+    blank = unread
+    if key and column.list_type is None:
+        parses = pc.fill_null(
+            _parseable(pc.utf8_trim_whitespace(sent), column.read_type), fill_value=True
+        )
+        blank = pc.and_(unread, pc.invert(parses))
+    return pc.if_else(blank, pa.scalar(None, sent.type), sent)
 
 
 def _windowed(
@@ -1128,6 +1153,9 @@ def _parsed(
     return convert(pc.if_else(failed, _NO_TEXT, text)), failed
 
 
+_DOUBLE_DIGITS: Final = 309
+"""The most digits of the integer part of a finite double (about 1.8e308)."""
+
 _LONG_INTEGER: Final = r"^[+-]?[0-9]{16,}$"
 """An integer's text with enough digits that a double may not hold it exactly (past 2**53)."""
 
@@ -1147,23 +1175,26 @@ def _rounded_integers(text: pa.Array) -> pa.Array | None:
     """
     long = pc.fill_null(pc.match_substring_regex(text, _LONG_INTEGER), fill_value=False)
     candidates = pc.indices_nonzero(long).to_pylist()
-    rounded = [row for row in candidates if _rounds(int(text[row].as_py()))]
+    rounded = [row for row in candidates if _rounds_text(text[row].as_py())]
     if not rounded:
         return None
     marked = set(rounded)
     return pa.array([row in marked for row in range(len(text))])
 
 
-def _rounds(value: int) -> bool:
-    """Tell whether a double holds an integer only rounded, or not at all.
+def _rounds_text(text: str) -> bool:
+    """Tell whether a double holds an integer's text only rounded, or not at all.
 
     Args:
-        value: The integer.
+        text: An integer's text, with at least 16 digits.
 
     Returns:
         True when its nearest double differs from it (Python compares the two exactly), or it
-        is beyond every finite double.
+        has more digits than any finite double (309), which Python would not even read.
     """
+    if len(text.lstrip("+-")) > _DOUBLE_DIGITS:
+        return True
+    value = int(text)
     try:
         return float(value) != value
     except OverflowError:

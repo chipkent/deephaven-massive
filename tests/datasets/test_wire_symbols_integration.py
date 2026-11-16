@@ -57,6 +57,7 @@ _ROOTS: Final = ("BRK", "BF", "KIM", "BAC")
 _TICKER_LIST: Final = "/v3/reference/tickers"
 _DAY_FILE: Final = "us_stocks_sip/day_aggs_v1"
 _CONSENSUS: Final = "/benzinga/v1/consensus-ratings/{ticker}"
+_GROUPED: Final = "/v2/aggs/grouped/locale/us/market/stocks/{date}"
 
 
 def _spelled(rows: Sequence[Mapping[str, Any]], key: str) -> list[str]:
@@ -135,10 +136,11 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
     Reads Massive's ticker list for the four tickers (one request, reference data), so the
     evidence shows the list's own spelling of each; then each ticker's previous day bar through
     the library (four requests, `/v2/aggs/ticker/{ticker}/prev`), and the grouped daily bars of
-    the most recent Monday (one request), kept to rows whose ticker starts with one of the four
-    roots, so a row Massive writes as `BRK/B` or `KIM-L` is listed beside `BRK.B`. Records the
-    raw `ticker` or `T` spellings, every published `Symbol`, and the text of every row withheld
-    for a symbol the library cannot read.
+    the most recent Monday through the library and raw (two requests), kept to rows whose
+    ticker starts with one of the four roots, so a row Massive writes as `BRK/B` or `KIM-L` is
+    listed beside `BRK.B`. Records the raw `ticker` or `T` spellings, every published `Symbol`,
+    the text of every row withheld for a symbol the library cannot read, and the tickers with
+    no published grouped row.
 
     Reading it: every published `Symbol` canonical and no row withheld means REST writes the
     ticker list's spelling, which the library reads back; a withheld row names the raw text to
@@ -165,6 +167,13 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
     rows = [row for row in table_rows(grouped) if str(row.get("Symbol")).startswith(_ROOTS)]
     evidence(f"grouped daily bars of {recent_monday}: {len(rows)} rows of the four roots")
     problems.extend(_check(rows, withheld, evidence))
+    raw = live_rest.get(
+        source(Transport.REST, _GROUPED), {"date": recent_monday.isoformat()}, {}, bucket="stocks"
+    ).rows
+    evidence(f"raw grouped daily spellings of the four roots: {_spelled(raw, 'T')}")
+    missing = sorted(set(_TICKERS) - {row.get("Symbol") for row in rows})
+    evidence(f"tickers with no published grouped row: {missing}")
+    problems.extend(f"no published grouped row for {ticker}" for ticker in missing)
     assert listed, "Massive's ticker list holds none of the four tickers"
     assert not problems, f"REST rows the library cannot read back: {problems}"
 

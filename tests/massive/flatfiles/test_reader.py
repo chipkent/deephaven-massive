@@ -1182,3 +1182,29 @@ def test_an_integer_a_double_would_round_is_marked_and_one_it_holds_reads(
     mark = marks[RowFault.UNCONVERTIBLE_VALUES]
     assert (mark.rows, mark.fields) == ((0, 3), ("Price", "Price"))
     assert mark.reasons[0] == "price holds '9007199254740993', which is not double"
+
+
+def test_an_integer_too_long_for_python_to_read_is_marked_not_raised(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Python refuses to read an integer of more than 4,300 digits; a double holds none of them.
+    row = ",,4,1,1," + "9" * 5000 + ",1,1741012200000000000,10,1,AAPL,,\n"
+    with opened(KEY, TRADE_HEADER + row) as file:
+        [(batch, _, marks)] = list(file.batches(plan()))
+    assert batch["Price"].to_pylist() == [None]
+    assert marks[RowFault.UNCONVERTIBLE_VALUES].rows == (0,)
+
+
+def test_a_key_marked_row_keeps_its_readable_keys(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A futures row whose time is unreadable keeps its session date, so a session window can
+    # still judge it.
+    text = "ticker,timestamp,report_sequence,session_end_date\nESH5,x,1,2025-03-04\n"
+    required = frozenset({"ticker", "timestamp", "session_end_date"})
+    futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp", required=required)
+    with opened(FUTURES_KEY, text) as file:
+        [(batch, _, marks)] = list(file.batches(futures))
+    assert batch["SessionEndDate"].to_pylist() == [date(2025, 3, 4)]
+    assert batch["Timestamp"].to_pylist() == [None]
+    assert marks[RowFault.UNREADABLE_KEYS].fields == ("Timestamp",)
