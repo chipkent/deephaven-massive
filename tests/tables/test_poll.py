@@ -1097,7 +1097,8 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
-    start(massive_session, script=script, pollers=pollers, clock=clock)
+    # Held to the end: a collected table stops its poller before the check can reach it.
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
     checked: list[poll.Poller] = []
 
     def broken(self: poll.Poller) -> None:
@@ -1109,6 +1110,7 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
         pollers.check_running()
     assert checked == [poller_of(pollers)]
     assert any("checking a poll()'s running cycle failed" in m for m in caplog.messages)
+    del table
 
 
 def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
