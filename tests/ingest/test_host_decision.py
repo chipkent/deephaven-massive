@@ -8,8 +8,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _log_limits
-from deephaven_massive._config import BUSINESS_HOST, DELAYED_HOST, REALTIME_HOST
-from deephaven_massive._datasets.column_reference import page_url
+from deephaven_massive._config import DELAYED_HOST, FMV_HOST, REALTIME_HOST
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
 from deephaven_massive._ingest.host_decision import (
     FUTURES_PROBE_CONTRACTS,
@@ -20,15 +19,11 @@ from deephaven_massive._ingest.host_decision import (
     real_time_note,
     recency_of,
     refused_snapshot,
-    require_real_time,
     unlabelled,
 )
-from deephaven_massive._ingest.recency_labels import DelayedDataError
 from deephaven_massive._massive import Transport, source
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES as ADMIN
-from deephaven_massive.namespaces._options import TRADES as OPTION_TRADES
-from deephaven_massive.namespaces._stocks import FMV as STOCK_FMV
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
 LOGGER = "deephaven_massive._ingest.host_decision"
@@ -85,13 +80,13 @@ def test_every_probe_is_a_generated_path_with_its_parameters() -> None:
 
 def test_recency_follows_the_host() -> None:
     assert recency_of(REALTIME_HOST) is Recency.REALTIME
-    assert recency_of(BUSINESS_HOST) is Recency.REALTIME
+    assert recency_of(FMV_HOST) is Recency.REALTIME
     assert recency_of(DELAYED_HOST) is Recency.DELAYED
     assert recency_of("delayed.example.com") is Recency.DELAYED
     assert recency_of("fullmarket-business.massive.com") is Recency.UNKNOWN
 
 
-def test_fmv_is_always_the_business_host() -> None:
+def test_fmv_is_always_its_documented_host() -> None:
     fetch = Snapshot()
     pinned = {AssetClass.STOCKS: "fullmarket.massive.com"}
     decision = decide(
@@ -101,73 +96,24 @@ def test_fmv_is_always_the_business_host() -> None:
         delayed_subscriptions=frozenset(),
         fetch=fetch,
     )
-    assert (decision.host, decision.recency) == (BUSINESS_HOST, Recency.REALTIME)
-    assert decision.evidence == "FMV is Business-only; fixed host (docs)"
+    assert (decision.host, decision.recency) == (FMV_HOST, Recency.REALTIME)
+    assert decision.evidence == "FMV channel's documented host"
     assert fetch.probes == []  # no request, and the pin does not apply to FMV
 
 
-def test_fmv_of_a_delayed_subscription_is_refused_by_the_real_time_check() -> None:
-    # The FMV host is fixed whatever the setting; the refusal is the stream's own check.
-    delayed = frozenset({Subscription.STOCKS})
+def test_fmv_of_a_delayed_subscription_streams_from_its_documented_host() -> None:
+    # The listing moves the class's other streams to the delayed feed and never applies to FMV:
+    # the stream opens on the FMV host, and Massive answers whether it serves the key there.
     fetch = Snapshot()
-
-    def resolve() -> HostDecision:
-        return decide(
-            AssetClass.STOCKS, FMV, websocket_hosts={}, delayed_subscriptions=delayed, fetch=fetch
-        )
-
-    assert resolve().host == BUSINESS_HOST
-    with pytest.raises(ValueError, match="streams only in real time") as info:
-        require_real_time(STOCK_FMV, resolve, delayed_subscriptions=delayed)
-    assert "lists dm.Subscription.STOCKS" in str(info.value)
-    assert fetch.probes == []
-
-
-def test_a_stream_that_is_not_real_time_only_gets_the_decision_unchanged() -> None:
-    def refused() -> HostDecision:
-        raise DelayedDataError("options streams would be delayed")
-
-    with pytest.raises(DelayedDataError, match="options streams would be delayed"):
-        require_real_time(OPTION_TRADES, refused, delayed_subscriptions=frozenset())
-    delayed = HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
-    chosen = require_real_time(
-        OPTION_TRADES, lambda: delayed, delayed_subscriptions=frozenset({Subscription.OPTIONS})
+    decision = decide(
+        AssetClass.STOCKS,
+        FMV,
+        websocket_hosts={},
+        delayed_subscriptions=frozenset({Subscription.STOCKS}),
+        fetch=fetch,
     )
-    assert chosen is delayed
-
-
-def test_a_real_time_only_stream_streams_from_the_real_time_feed() -> None:
-    real_time = HostDecision(REALTIME_HOST, Recency.REALTIME, "last_trade.timeframe=REAL-TIME")
-    chosen = require_real_time(ADMIN, lambda: real_time, delayed_subscriptions=frozenset())
-    assert chosen is real_time
-
-
-def test_a_real_time_only_stream_of_a_delayed_subscription_is_refused() -> None:
-    delayed = HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
-    with pytest.raises(ValueError, match=r"options\.admin_messages streams only in real time") as e:
-        require_real_time(
-            ADMIN, lambda: delayed, delayed_subscriptions=frozenset({Subscription.OPTIONS})
-        )
-    assert "MassiveConfig.delayed_subscriptions lists dm.Subscription.OPTIONS" in str(e.value)
-
-
-def test_a_real_time_only_stream_of_a_delayed_plan_names_where_its_plans_are(
-    snapshot: Callable[[str], Snapshot],
-) -> None:
-    # Massive labels the key's options data delayed: the plan cannot include the dataset, so
-    # the error says where its plans are listed, not how to read the delayed feed.
-    fetch = snapshot("stocks_delayed.json")  # the unified snapshot, as the options probe reads
-    with pytest.raises(dm.EntitlementError) as e:
-        require_real_time(
-            ADMIN, lambda: run(AssetClass.OPTIONS, fetch), delayed_subscriptions=frozenset()
-        )
-    text = str(e.value)
-    assert not isinstance(e.value, DelayedDataError)
-    assert isinstance(e.value.__cause__, DelayedDataError)
-    assert "options.admin_messages streams only in real time" in text
-    assert "its plan does not include it" in text
-    assert text.endswith(f"on the plans listed at {page_url(ADMIN)}")
-    assert "delayed_subscriptions" not in text
+    assert (decision.host, decision.recency) == (FMV_HOST, Recency.REALTIME)
+    assert fetch.probes == []
 
 
 def test_the_real_time_note_names_the_dataset_page() -> None:
@@ -199,7 +145,7 @@ def test_forex_and_crypto_have_one_real_time_host(asset_class: AssetClass) -> No
     fetch = Snapshot()
     decision = run(asset_class, fetch)
     assert (decision.host, decision.recency) == (REALTIME_HOST, Recency.REALTIME)
-    assert decision.evidence == "single documented host; Starter is real-time"
+    assert decision.evidence == "single documented host"
     assert fetch.probes == []
 
 

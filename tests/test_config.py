@@ -1263,7 +1263,7 @@ def test_the_example_file_sets_every_setting_to_its_example_value(tmp_path: Path
 def test_the_example_file_comments_each_setting_and_marks_its_defaults() -> None:
     text = _config._example_file()
     assert text.startswith(
-        "# Plans that stream 15 minutes late: Stocks Starter and Options Developer.\n"
+        "# Subscriptions whose data Massive serves you delayed, 15 minutes late.\n"
         "delayed_subscriptions: [options, stocks]\n\n"
     )
     assert "\nmax_outage: 600\n" in text

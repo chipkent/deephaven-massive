@@ -441,7 +441,7 @@ class DatasetSpec:
             no reference endpoint may set it, and never with `serves_current_data`.
         refused_alternative: The dataset to suggest when Massive refuses this dataset's REST
             requests (HTTP 403), such as `"stocks.snapshots"` for `stocks.last_trade`: one
-            that serves the same data and that more plans include. None, the default,
+            that serves the same data. None, the default,
             suggests nothing.
         names_symbols: True, the default, for a dataset whose call takes symbols or whose rows
             each name an instrument. False for a stream whose rows name none, such as the
@@ -451,13 +451,12 @@ class DatasetSpec:
             other transport, not bars, may set it False, and then no source declares a `symbol`
             key; every source of such a dataset in a kind declares its `time` key (the
             `declared keys` gate).
-        real_time_only: True for a stream Massive serves only in real time, with no delayed
+        real_time_only: True for a stream Massive documents only in real time, with no delayed
             feed: fair market value, and the options admin messages, whose page documents only
-            the real-time feed. Its stream verbs refuse delayed data at the call rather than open
-            a stream Massive would refuse (`host_decision.require_real_time`): `ValueError` when
-            `MassiveConfig.delayed_subscriptions` lists the subscription, `EntitlementError`
-            when Massive labels the plan's data delayed. False, the default,
-            otherwise. Only a dataset with channels may set it.
+            the real-time feed. Its streams open like any other, and when Massive refuses one,
+            the error adds the documented feed and the dataset's page
+            (`host_decision.real_time_note`). False, the default, otherwise. Only a dataset with
+            channels may set it.
     """
 
     name: str

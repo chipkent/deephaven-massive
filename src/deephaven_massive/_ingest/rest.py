@@ -1543,7 +1543,7 @@ class RestReader:
             The public error, with the wire error's status and request id, such as
             `EntitlementError("stocks.last_trade: the Stocks subscription of your plan does not
             include this data; Massive answered HTTP 403 from GET ...; try
-            m.stocks.snapshots(...), which carries the same values and is in more plans")`.
+            m.stocks.snapshots(...), which carries the same values")`.
         """
         public = self.public_error(error)
         if type(public) is not EntitlementError:
@@ -1553,10 +1553,7 @@ class RestReader:
         )
         message = f"{spec.name}: {holder} does not include this data; Massive answered {public}"
         if spec.refused_alternative is not None:
-            message += (
-                f"; try m.{spec.refused_alternative}(...), which carries the same values and is "
-                "in more plans"
-            )
+            message += f"; try m.{spec.refused_alternative}(...), which carries the same values"
         return EntitlementError(
             message, status=public.status, request_id=public.request_id, source=public.source
         )
