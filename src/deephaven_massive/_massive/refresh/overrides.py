@@ -1948,6 +1948,15 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
             "of 2026-11-12 found them equal whenever the two carried one quote (1794443156000 "
             "for AUD/USD).",
         ),
+        ("/options/v1/admin-messages", "id"): Spelling(
+            long_name="message_id",
+            source="options/AD `i`",
+            reason="The REST admin messages' `id` and the admin-message stream's `i` are one "
+            'field: both pages describe it as "The unique identifier for this admin message, '
+            'composed of the SIP timestamp and the sequence number", a string, with the same '
+            "sample value. The stream's `i` is already `MessageId`, so the REST field takes it.",
+            whole_key=True,
+        ),
         ("/options/v1/admin-messages", "timestamp"): Spelling(
             long_name="sip_timestamp",
             source="/v3/trades/{optionsTicker} `sip_timestamp`",

@@ -1474,7 +1474,7 @@
    ],
    "fields": [
     {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
-    {"column": "Id", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "id"},
+    {"column": "MessageId", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "id"},
     {"column": "Message", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "message"},
     {"column": "Retransmission", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "retransmission"},
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},

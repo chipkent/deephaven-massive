@@ -12,8 +12,8 @@ vendor source are not listed here; they are recorded below so nobody re-adds the
   documentation index.
 - `/benzinga/v1/news`: sunset, replaced by `/benzinga/v2/news`.
 - `/vX/reference/financials`: sunset, replaced by `/stocks/financials/v1/*`.
-- `/options/vX/open-interest`: removed from the OpenAPI specification on 2026-11-16, when
-  Massive documented `/options/v1/open-interest`.
+- `/options/vX/open-interest`: absent from the OpenAPI specification of the 2026-11-16
+  snapshot, which documents `/options/v1/open-interest`.
 - WebSocket `/futures/{venue}`: not documented; the futures WebSocket pages list `/futures` only.
 
 Every generated source must be read by a dataset; the coverage test in
