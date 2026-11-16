@@ -160,7 +160,7 @@ delayed_subscriptions: [options, stocks]
 # Subscriptions on the free Basic plan, held to five requests a minute.
 rest_basic_subscriptions: [currencies, futures]
 
-# Seconds a live table rides out an outage before it fails; 0 fails at once.
+# Seconds a live table waits out an outage before it fails; 0 fails at once.
 max_outage: 600
 
 # Seconds between the batches of streamed rows added to live tables.
@@ -288,16 +288,15 @@ longer ones. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
 - A `poll()` table counts the time its polls keep failing or stop arriving.
-- A `fetch()` or `history()` of a list of symbols without `wait=True` counts the
-  time it waits out Massive's rate limits.
-- A watchlist's `fetch()` or `history()` counts, for each symbol, the time its
-  reads keep failing with a temporary error. Then `m.symbol_reads()` shows that
-  symbol `FAILED`.
+- A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
+  failing with a temporary error. Then `m.symbol_reads()` shows that symbol
+  `FAILED`. Delete its row and add it back to read it again.
+- Any other `fetch()` or `history()` without `wait=True` counts the time it waits
+  out Massive's rate limits.
 
 While a stream, a `poll()` table, or a watchlist waits, its `m.streams()` row shows
-why in `Error`. `m.rate_limits()` shows a rate-limit wait. A failed table stays
-failed, so call the method again for a new one. To read a failed watchlist symbol
-again, delete its row and add it back. See
+why in `Error`. A failed table stays failed, so call the method again for a new one.
+See
 [Live table messages](troubleshooting.md#live-table-messages).
 
 #### flush_interval
