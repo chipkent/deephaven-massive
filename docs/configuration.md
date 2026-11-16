@@ -107,11 +107,18 @@ in `m.streams()`.
 
 A row of Massive's data the library can't read whole is never published, whatever the setting:
 the setting of its cause (`unreadable_keys`, `unreadable_symbols`, or `unconvertible_values`)
-decides only whether the table fails and how loudly the log reports the row. When a REST page
-or a flat file holds rows of your symbols inside your call's window and the library can read
-none of them whole, the call fails whatever the setting, even after other pages or files were
-read, since Massive's format has most likely changed. Rows outside the window count neither
-way.
+decides only whether the table fails and how loudly the log reports the row.
+
+Whatever the setting, a table fails when every row it would receive is withheld, since
+Massive's format has most likely changed. Rows outside the call's symbols or window count
+neither way:
+
+| Read or stream | Fails when |
+|---|---|
+| A REST read | A page holds rows inside the window and none can be read whole, even after other pages were read. |
+| A flat-file read | A file holds rows inside the window and none can be read whole, even after other files were read. |
+| A `dm.ALL` stream | 100 rows in a row of its channel are withheld, with none published. |
+| A stream of named symbols | 100 rows in a row of one of its symbols are withheld, with none of that symbol published. Or 100 rows in a row whose symbol the library can't read are withheld, with none published: an unreadable symbol is a library defect, and those rows could have been any stream's. |
 
 Under `raise`:
 
