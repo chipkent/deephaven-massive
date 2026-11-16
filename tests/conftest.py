@@ -2238,18 +2238,20 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
 def skip_if_not_entitled(
     table_rows: Callable[[Table], list[dict[str, Any]]],
 ) -> Callable[[MassiveSession, str], None]:
-    """Return a function that skips a stream or poll test whose stream was refused.
+    """Return a function that skips a live-table test whose table or symbol was refused.
 
-    A refused stream does not raise: its row in `m.streams()` turns `FAILED` with the refusal
-    as its `Error`. Call this after recording the evidence.
+    A refusal that comes after a table opens does not raise: a stream's or poll's row in
+    `m.streams()` turns `FAILED` with the refusal as its `Error`, and so does a watchlist
+    symbol's row in `m.symbol_reads()`, while the rest of its table goes on. Call this after
+    recording the evidence, and in any loop that waits for a table to fill.
 
     Returns:
         A function `(session, plan)`: it skips the test, naming the plan, when one of the
-        session's streams failed with a refusal.
+        session's streams or watchlist symbols failed with a refusal.
     """
 
     def check(session: MassiveSession, plan: str) -> None:
-        for row in table_rows(session.streams()):
+        for row in [*table_rows(session.streams()), *table_rows(session.symbol_reads())]:
             if row["State"] == "FAILED" and is_entitlement_text(row["Error"]):
                 pytest.skip(not_entitled_reason(plan, row["Error"]))
 
