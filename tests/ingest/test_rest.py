@@ -72,8 +72,14 @@ from deephaven_massive._tables import poll
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
-from deephaven_massive._tables.transports import HostDecision, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import (
+    HostDecision,
+    SymbolFailure,
+    SymbolOutcome,
+    SymbolRows,
+)
 from deephaven_massive.namespaces import _futures as futures_ns
 from deephaven_massive.namespaces import _options as options_ns
 from deephaven_massive.namespaces import _reference as reference
@@ -2292,16 +2298,94 @@ def window_trade(offset: int, price: object) -> dict[str, object]:
         ),
     ],
 )
-def test_a_page_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
+def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, page: list[dict[str, object]]
 ) -> None:
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
     with pytest.raises(
         RowDataError,
         match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
-        r"and window on a page from GET /v3/trades/\{stockTicker\} whole",
+        r"and window from GET /v3/trades/\{stockTicker\} whole",
     ):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+
+
+def serve_pages(fake_rest: FakeRestServer, pages: Sequence[list[dict[str, object]]]) -> None:
+    # Serve AAPL's trades as the given pages, each pointing to the next.
+    first = TRADES_PATH.format(stockTicker="AAPL")
+    for index, rows in enumerate(pages):
+        target = first if index == 0 else f"{first}?cursor={index}"
+        last = index == len(pages) - 1
+        following = None if last else f"{fake_rest.url}{first}?cursor={index + 1}"
+        fake_rest.reply(target, Reply(envelope(rows, next_url=following)))
+
+
+@pytest.mark.parametrize("bad", [0, 10], ids=["first-page", "last-page"])
+def test_a_page_whose_rows_are_all_unreadable_beside_pages_read_whole_fails_nothing(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    bad: int,
+) -> None:
+    # The read is judged across its pages: ten pages read whole and one of an unreadable row
+    # give the ten rows, and the one row is withheld and reported.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    pages = [[window_trade(index + 1, float(index))] for index in range(11)]
+    pages[bad] = [window_trade(bad + 1, "x")]
+    serve_pages(fake_rest, pages)
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [r["Price"] for r in out] == [float(i) for i in range(11) if i != bad]
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+    ]
+
+
+def test_a_read_of_many_pages_whose_rows_are_all_unreadable_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    serve_pages(fake_rest, [[window_trade(index + 1, "x")] for index in range(11)])
+    with pytest.raises(RowDataError, match=r"could read none of the 11 rows of the read's"):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+
+
+def read_aapl_and_msft_by_symbol(
+    session: dm.MassiveSession, fake_rest: FakeRestServer, *, msft_price: object
+) -> Mapping[str, SymbolOutcome]:
+    # Read AAPL, whose only row is withheld, and MSFT, by symbol, as a followed table does.
+    aapl = TRADES_PATH.format(stockTicker="AAPL")
+    fake_rest.reply(aapl, Reply(envelope([window_trade(1, "x")])))
+    msft = TRADES_PATH.format(stockTicker="MSFT")
+    fake_rest.reply(msft, Reply(envelope([window_trade(1, msft_price)])))
+    day = date(2025, 3, 3)
+    asked = Request(start=day, end=day, on_error=session._core.policy)
+    window = history_window(TRADES, asked, start=day, end=day, classes=())
+    transport = session._core.rest_transport()
+    return transport.history_by_symbol(TRADES, asked, window, symbols=["AAPL", "MSFT"], call=1)
+
+
+def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=1.0)
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolRows)
+    assert isinstance(msft, SymbolRows)
+    assert aapl.table.size == 0
+    assert msft.table.size == 1
+
+
+def test_a_read_by_symbol_whose_rows_are_all_unreadable_fails_each_symbol_alone(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Each symbol fails, as a failed request fails its own, so a followed table goes on.
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price="y")
+    for symbol in ("AAPL", "MSFT"):
+        failed = out[symbol]
+        assert isinstance(failed, SymbolFailure)
+        assert isinstance(failed.error, RowDataError)
+        assert "could read none of the 2 rows of the read's symbols" in str(failed.error)
 
 
 def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
@@ -2811,6 +2895,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
@@ -2910,6 +2995,7 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
     assert "has no data" not in caplog.text  # the symbol is not dropped as missing
     assert (
@@ -2986,6 +3072,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(fake_rest.get_queries()) <= 2

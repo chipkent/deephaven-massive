@@ -55,7 +55,7 @@ reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the tabl
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
 (`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
-page of which the library could read no row whole, a withheld row of a cause the policy sets to
+read of which the library could read no row whole, a withheld row of a cause the policy sets to
 `RAISE`, or a row that, in any mode, has a null poll key, which would merge unrelated rows; one
 row the library cannot read whole is withheld and reported, and the table goes on),
 `SymbolRowError` (a symbol table's row that is not Massive's ticker, under
