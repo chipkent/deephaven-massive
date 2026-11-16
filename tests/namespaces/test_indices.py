@@ -845,7 +845,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
                 "Symbol": "I:SPX",
                 "Date": "2025-06-02",
                 "TimestampStart": 1748894399000 * MS,
-                # A one-second bar ends a second after its start, whatever its `e` says.
+                # A one-second bar ends at Massive's `e`, here a second after its start.
                 "TimestampEnd": 1748894400000 * MS,
                 "Open": 5935.5,
                 "Close": 5935.94,

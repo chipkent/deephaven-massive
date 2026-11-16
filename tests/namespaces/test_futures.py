@@ -1133,8 +1133,7 @@ def test_one_frame_lands_in_blink(
     else:
         assert (row["Open"], row["Close"], row["Volume"]) == (6994.5, 6995.0, 91.0)
         assert row["DollarVolume"] == 1353.1
-        # The end is the start plus the bar's length; for a one-second bar, the later of that
-        # and Massive's `e`, which agree here.
+        # The end is Massive's `e`, which here is the start plus the bar's length.
         length = 1_000 if frame["ev"] == "A" else 60_000
         assert row["TimestampEnd"] == at_ms(frame["s"] + length)
     ws_session.session.release(live)

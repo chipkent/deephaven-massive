@@ -231,7 +231,7 @@ def test_quotes_schema() -> None:
 
 
 def test_bars_schema() -> None:
-    # The stream's window end `e` is the declared end key: `TimestampEnd`, recomputed.
+    # The stream's window end `e` is the declared end key: `TimestampEnd`, as sent.
     assert columns(crypto.BARS) == [
         ("Symbol", "String"),
         ("Date", "String"),
