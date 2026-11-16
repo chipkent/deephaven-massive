@@ -20,6 +20,11 @@ and decides what the call returns when they cannot serve all of it:
   skips instead is named in the table's description.
 - A futures read by dates whose files held rows of other sessions warns that the range's
   first or last session may be incomplete, and says so on the table.
+- The call is one read: its files and its REST reads count their rows in one `ReadTally`,
+  checked once after the last of them, so the call fails only when the library could read
+  none of the rows of its symbols and window whole, wherever they came from. When S3 refuses
+  the files and REST serves the whole call, the rows of files read before the refusal are
+  discarded, and so is their count.
 - A read by symbol (`read_history_by_symbol`, for a table that follows a live symbol table)
   follows the same rules, but reads the days the files lack from REST symbol by symbol
   (`RestTransport.history_by_symbol`), so one symbol's REST failure fails only that symbol. A
@@ -61,6 +66,7 @@ from deephaven_massive._log_limits import LoggedKeys, bounded_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure
 
 if TYPE_CHECKING:
@@ -96,6 +102,7 @@ class FlatFileScan(Protocol):
         call: int,
         infer_holidays: bool,
         logged: LoggedKeys,
+        tally: ReadTally,
         stop: threading.Event | None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -108,6 +115,7 @@ class FlatFileScan(Protocol):
             call: The call id.
             infer_holidays: True to take a missing weekday file for a holiday.
             logged: The facts the call has logged, each logged once per call.
+            tally: The call's count of its rows and of those withheld, which the files add to.
             stop: A read's stop token, or None.
 
         Returns:
@@ -160,8 +168,12 @@ def read_history(
             Massive usually publishes ..., but the time varies. Retry later, ..."`; or if the
             days at the range's end have no file and none follows them, a week or more before
             today (`FlatFileRead.absent`): `"<dataset>: no flat file exists for <dates>, ..."`.
+        RowDataError: If the library could read none of the rows of the call's symbols and
+            window whole, across its files and REST reads (`ReadTally.check`), whatever its
+            policy.
     """
     problem = rest_history_problem(spec, request)
+    tally = ReadTally()
     read = _scan(
         spec,
         request,
@@ -171,23 +183,31 @@ def read_history(
         dates=dates,
         call=call,
         logged=LoggedKeys(),  # a one-time call reads once, so the read keeps what it logged
+        tally=tally,
         stop=stop,
         problem=problem,
         forced=forced,
     )
     if read is None:
-        rows = core.rest_transport().history(spec, request, window, call=call, stop=stop)
+        tally = ReadTally()  # the files read before the refusal are discarded
+        rest = core.rest_transport()
+        rows = rest.history(spec, request, window, call=call, tally=tally, stop=stop)
+        tally.check(spec.name)
         return rows, "Read from REST: AUTO chose flat files, which S3 refused.", None
     _check_published(spec, read, problem=problem, forced=forced)
     lacks = _files_lack_note(spec, read)
     if not read.unread:
+        tally.check(spec.name)
         with entered(core.exec_ctx):
             return merge([read.empty, *(part for _, part in read.parts)]), None, lacks
-    rest = _rest_days(spec, request, window, core=core, days=read.unread, call=call, stop=stop)
+    filled = _rest_days(
+        spec, request, window, core=core, days=read.unread, call=call, tally=tally, stop=stop
+    )
+    tally.check(spec.name)
     with entered(core.exec_ctx):
         # The files' days and REST's tile (the files are trimmed to their own days), so
         # sorting by the time column puts every row in time order across the sources.
-        merged = merge([read.empty, *(part for _, part in read.parts), *rest])
+        merged = merge([read.empty, *(part for _, part in read.parts), *filled])
         table = merged.sort(time_column(spec.times))
     days = ", ".join(day.isoformat() for day in read.unread)
     missing = bounded_list(day.isoformat() for day in read.unread)
@@ -207,6 +227,7 @@ def _scan(
     dates: Sequence[date],
     call: int,
     logged: LoggedKeys,
+    tally: ReadTally,
     stop: threading.Event | None,
     problem: str | None,
     forced: bool,
@@ -227,6 +248,7 @@ def _scan(
         dates: The partition dates of the files the window needs.
         call: The call id.
         logged: The facts the call has logged (`FlatFileHistory.history`).
+        tally: The call's count of its rows and of those withheld, which the files add to.
         stop: A read's stop token, or None.
         problem: Why REST cannot serve the request (`rest_history_problem`), or None.
         forced: True for `source=FLAT_FILES`.
@@ -251,6 +273,7 @@ def _scan(
             call=call,
             infer_holidays=infer,
             logged=logged,
+            tally=tally,
             stop=stop,
         )
     except (EntitlementError, AuthenticationError) as error:
@@ -437,6 +460,7 @@ def _rest_days(
     core: SessionCore,
     days: Sequence[date],
     call: int,
+    tally: ReadTally,
     stop: threading.Event | None,
 ) -> list[Table]:
     """Read the days the flat files could not serve from REST (`_rest_day_reads`).
@@ -448,6 +472,8 @@ def _rest_days(
         core: The session's core.
         days: The days (for futures, sessions), oldest first.
         call: The call id.
+        tally: The call's count of its rows and of those withheld, which every REST read adds
+            to; the caller checks it.
         stop: A background read's stop token, or None for a blocking read.
 
     Returns:
@@ -459,11 +485,11 @@ def _rest_days(
     tables = []
     for one, one_window, keep in reads:
         if keep is None:
-            tables.append(rest.history(spec, one, one_window, call=call, stop=stop))
+            tables.append(rest.history(spec, one, one_window, call=call, tally=tally, stop=stop))
             continue
         # `days` limits an all-symbol read of bars to one grouped-daily request per missing
         # day instead of one per day of the range.
-        rows = rest.history(spec, one, one_window, call=call, stop=stop, days=days)
+        rows = rest.history(spec, one, one_window, call=call, tally=tally, stop=stop, days=days)
         with entered(core.exec_ctx):
             tables.append(rows.where_in(keep, "Date"))
     return tables
@@ -514,20 +540,17 @@ def read_history_by_symbol(
         Each symbol, in the order given, with its outcome.
 
     Errors are those of `symbol_reads.symbol_outcomes`, and the `AuthenticationError` of
-    `RestTransport.history_by_symbol`.
+    `RestTransport.history_by_symbol`. When the library could read none of the rows of the
+    read's symbols and window whole, across its files and REST reads, each symbol the read gave
+    rows fails with that `RowDataError` (`ReadTally.judge`).
     """
     ordered = tuple(dict.fromkeys(symbols))
     flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
-    schema = core.dataset_schema(spec)
     if window.empty:
-        with entered(core.exec_ctx):
-            nothing = dataset_table(schema.arrow_schema().empty_table(), schema.date_columns)
-        empty = dict.fromkeys(ordered, nothing)
-        return symbol_outcomes(
-            core, spec, symbols=ordered, tables=empty, failures={}, call=call, source=flat
-        )
+        return _no_rows(core, spec, symbols=ordered, call=call, source=flat)
     asked = replace(request, symbols=tuple(sorted(ordered)))
     problem = rest_history_problem(spec, asked)
+    tally = ReadTally()
     try:
         read = _scan(
             spec,
@@ -538,6 +561,7 @@ def read_history_by_symbol(
             dates=dates,
             call=call,
             logged=logged,
+            tally=tally,
             stop=stop,
             problem=problem,
             forced=forced,
@@ -549,11 +573,12 @@ def read_history_by_symbol(
         return symbol_outcomes(
             core, spec, symbols=ordered, tables={}, failures=shared, call=call, source=flat
         )
-    rest = core.rest_transport()
     if read is None:
-        return dict(
-            rest.history_by_symbol(spec, asked, window, symbols=ordered, call=call, stop=stop)
+        tally = ReadTally()  # the files read before the refusal are discarded
+        outcomes = core.rest_transport().history_by_symbol(
+            spec, asked, window, symbols=ordered, call=call, tally=tally, stop=stop
         )
+        return tally.judge(spec.name, outcomes)
     lacks = _files_lack_note(spec, read)
     if lacks is not None:
         logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
@@ -564,13 +589,22 @@ def read_history_by_symbol(
     flat = refused_source(flat, read.refused)
     tables = split_by_symbol(core, spec, files_rows, symbols=ordered, source=flat)
     if not read.unread:
-        return symbol_outcomes(
+        outcomes = symbol_outcomes(
             core, spec, symbols=ordered, tables=tables, failures={}, call=call, source=flat
         )
+        return tally.judge(spec.name, outcomes)
     merged, failures = _rest_days_by_symbol(
-        spec, asked, window, core=core, tables=tables, days=read.unread, call=call, stop=stop
+        spec,
+        asked,
+        window,
+        core=core,
+        tables=tables,
+        days=read.unread,
+        call=call,
+        tally=tally,
+        stop=stop,
     )
-    return symbol_outcomes(
+    outcomes = symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -578,6 +612,31 @@ def read_history_by_symbol(
         failures=failures,
         call=call,
         source=f"{flat} and REST",
+    )
+    return tally.judge(spec.name, outcomes)
+
+
+def _no_rows(
+    core: SessionCore, spec: DatasetSpec, *, symbols: Sequence[str], call: int, source: str
+) -> dict[str, SymbolOutcome]:
+    """Give each symbol of a read whose window is empty no rows, with no request.
+
+    Args:
+        core: The session's core.
+        spec: The dataset.
+        symbols: The symbols, in order.
+        call: The call id.
+        source: Where the rows would have come from, for the outcomes.
+
+    Returns:
+        Each symbol with an empty table of the dataset's columns.
+    """
+    schema = core.dataset_schema(spec)
+    with entered(core.exec_ctx):
+        nothing = dataset_table(schema.arrow_schema().empty_table(), schema.date_columns)
+    empty = dict.fromkeys(symbols, nothing)
+    return symbol_outcomes(
+        core, spec, symbols=symbols, tables=empty, failures={}, call=call, source=source
     )
 
 
@@ -590,6 +649,7 @@ def _rest_days_by_symbol(
     tables: Mapping[str, Table],
     days: Sequence[date],
     call: int,
+    tally: ReadTally,
     stop: threading.Event | None,
 ) -> tuple[dict[str, Table], dict[str, MassiveError]]:
     """Read the days the flat files lack from REST for each symbol, and merge each symbol's rows.
@@ -605,6 +665,8 @@ def _rest_days_by_symbol(
         tables: Each symbol's rows from the files.
         days: The days the files lack, oldest first.
         call: The call id.
+        tally: The call's count of its rows and of those withheld, which every REST read adds
+            to; the caller judges it.
         stop: A read's stop token, or None.
 
     Returns:
@@ -620,7 +682,9 @@ def _rest_days_by_symbol(
         reads = _rest_day_reads(spec, request, window, days=days)
     for one, one_window, keep in reads:
         left = [symbol for symbol in tables if symbol not in failures]
-        outcomes = rest.history_by_symbol(spec, one, one_window, symbols=left, call=call, stop=stop)
+        outcomes = rest.history_by_symbol(
+            spec, one, one_window, symbols=left, call=call, tally=tally, stop=stop
+        )
         _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
     with entered(core.exec_ctx):
         # The files' days and REST's tile, so sorting by the time column puts every row of a

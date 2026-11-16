@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._errors import MassiveError
     from deephaven_massive._log_limits import LoggedKeys
+    from deephaven_massive._tables.read_tally import ReadTally
 
 __all__ = [
     "FlatFileRead",
@@ -165,11 +166,15 @@ class SymbolRows:
         skipped: Why the read sent no request for the symbol and gave it no rows: a crypto
             pair whose currencies, as Massive's crypto ticker list gives them, don't make up its
             ticker. `m.symbol_reads()` shows it in `Error`. None when the symbol was read.
+        no_data: True when Massive has no data for the symbol (HTTP 404 on its first
+            request), so its empty rows stand even when the rest of its read fails because
+            the library could read none of its rows whole (`ReadTally.judge`).
     """
 
     table: Table
     source: str | None = None
     skipped: str | None = None
+    no_data: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +419,7 @@ class RestTransport(Protocol):
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
         days: Sequence[date] | None = None,
     ) -> Table:
@@ -425,6 +431,11 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+            tally: The whole `history()` call's count of its rows and of those withheld
+                (`ReadTally`), which every page adds to; this read never checks it, since it
+                may be one part of a call that also reads flat files. The caller checks it
+                after the call's last part, and fails the call when the library could read
+                none of its rows whole.
             stop: A background read's stop token, as `fetch` takes it.
             days: For `dm.ALL`, read one request per day, the only days of the window to
                 request (the days the flat files lack); None for every day of the window.
@@ -469,6 +480,7 @@ class RestTransport(Protocol):
         *,
         symbols: Sequence[str],
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
         """Read REST `history` for each symbol over `window` and return each one's outcome.
@@ -486,6 +498,8 @@ class RestTransport(Protocol):
             window: The call's window (`history_window`, built for the call's instant).
             symbols: The canonical symbols to read; a repeated one is read once.
             call: The verb call's id, as `fetch_by_symbol` takes it.
+            tally: The whole read's count of its rows and of those withheld, as `history`
+                takes it; the caller judges it after the read's last part (`ReadTally.judge`).
             stop: A read's stop token, as `fetch_by_symbol` takes it.
 
         Returns:
@@ -645,6 +659,7 @@ class FlatFileTransport(Protocol):
         call: int,
         infer_holidays: bool,
         logged: LoggedKeys,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
@@ -665,6 +680,8 @@ class FlatFileTransport(Protocol):
                 every refusal.
             logged: The facts the call has logged (`LoggedKeys`): each refused venue is
                 logged once per call, and the call drops the record when it ends.
+            tally: The whole `history()` call's count of its rows and of those withheld, as
+                `RestTransport.history` takes it.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.

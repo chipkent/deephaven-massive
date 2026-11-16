@@ -117,19 +117,12 @@ or range are ignored for this rule:
 | Read or stream | Fails when the library can read none of |
 |---|---|
 | A `fetch()` or `history()` from REST | The rows of all its pages. |
-| A `history()` from flat files | The rows of all its files. |
+| A `history()` from flat files | The rows of all its files, and of the REST pages of any days REST fills. |
 | A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
 | A `poll()` table | The rows of one cycle's read. |
 | A `dm.ALL` stream | 100 consecutive rows of its channel. |
 | A stream of named symbols | 100 consecutive rows of one of its symbols. |
 | A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
-
-Two reads are still judged in parts
-([#704](https://github.com/chipkent/deephaven-massive/issues/704)). An `AUTO` `history()` that
-fills days from REST judges its files and each REST read apart: one read per filled day, or
-one for all the filled days of bars a day or longer. So a REST read whose rows are all
-unreadable fails the call. And a `fetch()` or `poll()` with a value table judges each value's
-read apart, so one value whose rows are all unreadable fails the call or the table.
 
 Under `raise`:
 

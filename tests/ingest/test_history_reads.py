@@ -96,6 +96,7 @@ class _Rest:
         window: HistoryWindow,
         *,
         call: int,
+        tally: object,
         stop: object = None,
         days: tuple[date, ...] | None = None,
     ) -> Table:
@@ -111,6 +112,7 @@ class _Rest:
         *,
         symbols: Sequence[str],
         call: int,
+        tally: object,
         stop: object = None,
     ) -> dict[str, SymbolOutcome]:
         # A row a symbol on the read's first and last day; a symbol in `failing` fails.

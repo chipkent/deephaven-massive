@@ -205,7 +205,6 @@ from deephaven_massive._massive import (
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
@@ -239,6 +238,7 @@ if TYPE_CHECKING:
     from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._log_limits import BoundedLog, LoggedKeys
     from deephaven_massive._massive import FlatFile, FlatFileClient, RowMarks
+    from deephaven_massive._tables.read_tally import ReadTally
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -543,9 +543,9 @@ class _Transform:
         seen: What the read's futures files showed of other sessions' rows, for the
             sessions the read may have left incomplete (`FlatFileRead.uncertain`); its own
             per call, shared by the call's reader threads.
-        tally: The read's count of its rows of the read's symbols and window, and of those
-            withheld, across its files (`ReadTally`); its own per call, shared by the call's
-            reader threads.
+        tally: The `history()` call's count of its rows of the call's symbols and window, and
+            of those withheld, across its files and any REST reads (`ReadTally`), shared by the
+            call's reader threads; the call checks it after its last part.
     """
 
     dataset: str
@@ -561,9 +561,9 @@ class _Transform:
     time_name: str
     symbols: WireSymbols
     policy: ResolvedPolicy
+    tally: ReadTally
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
-    tally: ReadTally = field(default_factory=ReadTally)
 
     @classmethod
     def build(
@@ -575,6 +575,7 @@ class _Transform:
         request: Request,
         window: HistoryWindow,
         warnings: BoundedLog,
+        tally: ReadTally,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -597,6 +598,7 @@ class _Transform:
                 `HistoryWindow.sessions`, by each row's own session.
             warnings: The session's once-per-session warnings, which the time rule logs to
                 (`row_times.time_rule`): that of a daily summary, and its bars' stamp rule.
+            tally: The whole `history()` call's count of its rows and of those withheld.
 
         Returns:
             The transform.
@@ -654,6 +656,7 @@ class _Transform:
             symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
             policy=request.on_error,
             bars=window.bars,
+            tally=tally,
         )
 
     def apply(
@@ -910,6 +913,7 @@ class FlatFileHistory:
         call: int,
         infer_holidays: bool,
         logged: LoggedKeys,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, and the days they lack.
@@ -940,6 +944,9 @@ class FlatFileHistory:
                 and to raise every refusal, for the query to read the call from REST.
             logged: The facts the call has logged (`LoggedKeys`): the refused venues, each
                 logged once per call even when a followed table reads the files again.
+            tally: The whole `history()` call's count of its rows and of those withheld, which
+                each file adds to and the caller checks after the call's last part
+                (`ReadTally.check`), since REST may read the days the files lack.
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`);
                 None when only the session's close should stop the reads.
 
@@ -960,8 +967,7 @@ class FlatFileHistory:
         s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
         part-way on its first read and on each of its three rereads, a file is not the
         expected gzip CSV (for example, it lacks the symbol or time header), or the session is
-        closed during the call. `RowDataError` when the library could read none of the rows of
-        the read's symbols and window whole, across all its files. Errors that come from S3
+        closed during the call. Errors that come from S3
         carry its `x-amz-request-id` as `request_id`. An extra or missing documented header, a
         value that does not parse, and a withheld row are not errors: they log a WARNING once
         per header, and per dataset for withheld rows, each session.
@@ -974,6 +980,7 @@ class FlatFileHistory:
             request=request,
             window=window,
             warnings=self._core.warnings,
+            tally=tally,
         )
         tiled = not infer_holidays and _tiles(spec, request, window)
         keys = _keys(prefix, request.venues, dates)
@@ -1152,9 +1159,6 @@ class FlatFileHistory:
             MassiveError: If `stop` was set: the read was cancelled.
             EntitlementError: If `refusals` is set and S3 refused every venue of the call
                 (`RefusedVenues.every_venue_refused`).
-            RowDataError: If the library could read none of the rows of the read's symbols
-                and window whole, across all its files (`ReadTally.check`), whatever its
-                policy.
         """
         cancel = Cancel(*(() if stop is None else (stop,)))
         workers = min(self._core.config.max_concurrency, len(keys))
@@ -1243,7 +1247,6 @@ class FlatFileHistory:
                 days=unread,
                 exec_ctx=self._core.exec_ctx,
             )
-        transform.tally.check(spec.name, source=f"the flat files of {transform.prefix}")
         refused = () if refusals is None else refusals.venues()
         return FlatFileRead(
             tuple(kept),
@@ -1666,7 +1669,7 @@ class FlatFileHistory:
                 cause, at the first block with a withheld row of that cause. A file whose
                 rows are all withheld never fails the read on its own: once the file is read,
                 its rows of the read's symbols and window, and those withheld, are added to
-                the read's tally (`_Transform.tally`), which `_read` checks.
+                the call's tally (`_Transform.tally`), which the call checks.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
@@ -1703,7 +1706,7 @@ class FlatFileHistory:
         every = merged(parts)
         if every.groups:
             self._report_withheld(transform, every, where=file.location)
-        transform.tally.add(asked, every)
+        transform.tally.add(asked, every, source=f"the flat files of {transform.prefix}")
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
             _log_malformed(transform.dataset, file, setting)
