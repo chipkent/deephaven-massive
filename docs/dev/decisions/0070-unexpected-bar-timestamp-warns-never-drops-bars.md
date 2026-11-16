@@ -18,11 +18,12 @@ cut at UTC midnight. Is it refused, moved, or served?
 ## Ruling
 
 A bar stamped at a time Massive does not document for that source, such as a crypto day bar at
-04:00 UTC where Massive documents 00:00, keeps Massive's timestamp, gets a null `Date`, and is
-never moved to a guessed day or dropped; a documented stamp is placed by decision 56. The log
-says so once per distinct offset. The owner ruled on 2026-10-30 that bars are served and never
-excluded; the record names no place. The null `Date` was added on 2026-11-02 without owner words
-(PR #514), and a crypto day summary not in UTC is served the same way (decision 77).
+04:00 UTC where Massive documents 00:00, keeps Massive's timestamp, gets a null `Date`, ends one
+period after its stamp, and is never moved to a guessed day or dropped; a documented stamp is
+placed by decision 56. The log says so once per distinct offset. The owner ruled on 2026-10-30
+that bars are served and never excluded; the record names no place. The null `Date` was added on
+2026-11-02 without owner words (PR #514), and a crypto day summary not in UTC is served the same
+way (decision 77).
 
 ## Reason
 

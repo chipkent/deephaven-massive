@@ -24,7 +24,7 @@ untrusted authority is fixed with `SSL_CERT_FILE`. Every other TLS failure is re
 dropped connection and reported as `NETWORK` when the retries run out. One rule covers REST,
 WebSocket, and flat files. Asked on 2026-11-15 whether to fix the name-mismatch bug and keep
 this rule on all three transports, the owner chose the recommendation and asked for a clean,
-obvious design; recorded in PR #673. This absorbs decision 39.
+obvious design; recorded in PR #673. This replaces decision 39's TLS rule.
 
 ## Reason
 
