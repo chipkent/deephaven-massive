@@ -486,6 +486,7 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     wait_acked: WaitAcked,
     market_status: Callable[[str], str],
     stream_report: Callable[[dm.MassiveSession], list[str]],
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether `C.EUR-USD` and `CA.EUR-USD` are acknowledged and deliver frames.
@@ -495,7 +496,8 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     market is open it also waits up to 60 s for quotes and asserts they arrived with `Symbol`
     `C:EURUSD`; when it says closed the test skips after the acknowledgement. The session's
     diagnostics are recorded before the release. Passing confirms the dash spelling; a refusal
-    in the stream's error means topics must use another spelling.
+    in the stream's error means topics must use another spelling. A stream Massive refuses the
+    key skips, quoting Massive.
     """
     quotes = live_session.forex.quotes(_PAIR).append_only()
     minute_bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE)
@@ -508,6 +510,7 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     bar_rows = wait_rows(live_session, bars, deadline) if quote_rows else []
     for line in stream_report(live_session):
         evidence(line)
+    skip_if_not_entitled(live_session)
     live_session.release(quotes)
     live_session.release(bars)
     evidence(f"C quotes received: {len(quote_rows)}; first: {quote_rows[:1]}")
