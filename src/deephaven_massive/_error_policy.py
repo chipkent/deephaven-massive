@@ -43,7 +43,14 @@ class ErrorPolicy:
     - `dm.OnError.LOG` skips it, keeps going, and logs a warning.
     - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
 
-    A symbol the library can't read logs an error instead of a warning.
+    A row of Massive's data the library can't read whole is never published, whatever the
+    setting: its cause's setting decides only whether the table fails and how loudly the log
+    reports it. When the library can read none of the rows of your symbols inside your call's
+    window whole, across all the pages or files the call read, the call fails whatever the
+    setting, since Massive's format has most likely changed. Rows outside the window count
+    neither way. A live stream judges runs of rows instead, and a few reads are still judged in
+    parts: https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error
+    lists each.
 
     Set a session's policy with `dm.MassiveConfig(on_error=...)`. Set one call's policy with any
     dataset method's `on_error=` argument. Each cause takes the first setting it finds: the
@@ -77,15 +84,13 @@ class ErrorPolicy:
             This setting covers only tables. A symbol you pass in code must be Massive's exact
             ticker, or the call raises `ValueError`. A table whose every row is bad raises
             `ValueError` too, whatever this setting says.
-        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the
-            library can't read as Massive's ticker. Defaults to `LOG`.
+        unreadable_symbols: Decides whether a row of Massive's data whose symbol the library
+            can't read as Massive's ticker fails the table; the row is left out either way.
+            Defaults to `LOG`.
 
-            Set `dm.OnError.RAISE` when a table must fail rather than keep such a row. By
-            default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
-            column. Such a symbol is a library bug. To report it, see
+            Set `dm.OnError.RAISE` to fail the table at the first such row. Such a symbol is a
+            library bug. To report it, see
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
-            Only the session's setting decides the column. Under `dm.OnError.RAISE` in
-            `MassiveConfig`, no table has a `RawSymbol` column, whatever a call sets.
 
             A listed crypto pair is unreadable too when its ticker isn't its two currencies
             written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows. A
@@ -102,6 +107,34 @@ class ErrorPolicy:
             This setting also covers a watchlist symbol a `poll()` can't request with your
             arguments. For example, an indicator poll with `adjusted=False` can't request a
             crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
+        unreadable_keys: Decides whether a row of Massive's data whose key the library can't
+            read fails the table; the row is left out either way. Defaults to `LOG`.
+
+            A key can't be read when it is one of these:
+
+            - the row's symbol, its time, or another column its dataset needs, missing or of
+              the wrong type;
+            - a time of 0, or one outside 1990 to 2100.
+
+            A symbol that is present but isn't Massive's ticker is `unreadable_symbols`. Set
+            `dm.OnError.RAISE` to fail the table at the first such row. Such a row is a sign
+            that Massive's format changed.
+        unconvertible_values: Decides whether a row of Massive's data holding a value the
+            library can't read as its column's type fails the table; the row is left out
+            either way. Defaults to `LOG`.
+
+            A value the library can't read is one of these:
+
+            - a value of another type, or a whole number that a `double` column would round;
+            - a time outside 1990 to 2100 in any column but the row's own time;
+            - the start of a bar of a day or longer stamped at a time Massive isn't known to
+              use.
+
+            In those other columns a time of 0 is a null, as Massive means it, and the row is
+            kept.
+
+            Set `dm.OnError.RAISE` when a table must fail rather than leave out a row with a
+            value it can't read.
         malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
             readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
             Defaults to `LOG`.
@@ -150,6 +183,8 @@ class ErrorPolicy:
     noncanonical_symbols: OnError | None
     unreadable_symbols: OnError | None
     unavailable_symbols: OnError | None
+    unreadable_keys: OnError | None
+    unconvertible_values: OnError | None
     malformed_rows: OnError | None
     refused_venues: OnError | None
 
@@ -161,6 +196,8 @@ class ErrorPolicy:
         noncanonical_symbols: OnError | None = None,
         unreadable_symbols: OnError | None = None,
         unavailable_symbols: OnError | None = None,
+        unreadable_keys: OnError | None = None,
+        unconvertible_values: OnError | None = None,
         malformed_rows: OnError | None = None,
         refused_venues: OnError | None = None,
     ) -> None:
@@ -172,6 +209,8 @@ class ErrorPolicy:
             noncanonical_symbols: A watchlist row that isn't Massive's exact ticker.
             unreadable_symbols: A symbol in Massive's data that the library can't read.
             unavailable_symbols: A symbol Massive has no data for.
+            unreadable_keys: A row of Massive's data whose key the library can't read.
+            unconvertible_values: A row of Massive's data with a value the library can't read.
             malformed_rows: A flat-file line that isn't a readable row.
             refused_venues: A futures exchange the call names whose flat files Massive
                 refuses.
@@ -184,6 +223,8 @@ class ErrorPolicy:
             "noncanonical_symbols": noncanonical_symbols,
             "unreadable_symbols": unreadable_symbols,
             "unavailable_symbols": unavailable_symbols,
+            "unreadable_keys": unreadable_keys,
+            "unconvertible_values": unconvertible_values,
             "malformed_rows": malformed_rows,
             "refused_venues": refused_venues,
         }
@@ -225,6 +266,8 @@ class ResolvedPolicy:
     noncanonical_symbols: OnError
     unreadable_symbols: OnError
     unavailable_symbols: OnError
+    unreadable_keys: OnError
+    unconvertible_values: OnError
     malformed_rows: OnError
     refused_venues: OnError
 
@@ -267,6 +310,14 @@ def resolve_policy(call: ErrorPolicy | None, session: ErrorPolicy) -> ResolvedPo
         ),
         unavailable_symbols=_first(
             given.unavailable_symbols, session.unavailable_symbols, default.unavailable_symbols
+        ),
+        unreadable_keys=_first(
+            given.unreadable_keys, session.unreadable_keys, default.unreadable_keys
+        ),
+        unconvertible_values=_first(
+            given.unconvertible_values,
+            session.unconvertible_values,
+            default.unconvertible_values,
         ),
         malformed_rows=_first(given.malformed_rows, session.malformed_rows, default.malformed_rows),
         refused_venues=_first(given.refused_venues, session.refused_venues, default.refused_venues),

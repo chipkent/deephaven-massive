@@ -1,19 +1,19 @@
 """The recency labels Massive puts on REST responses, and the refusal a delayed one causes.
 
 Massive says whether a REST response's data is real-time or delayed in two places: the
-envelope's `status`, `DELAYED` on a delayed plan's response, and the `timeframe` field of a
+envelope's `status`, `DELAYED` on a response of delayed data, and the `timeframe` field of a
 snapshot or "last" row and of its nested `last_trade`, `last_quote`, and `last_minute`
 objects, `DELAYED` or `REAL-TIME`. `read_labels` reads both, in that order, into one
 `RecencyLabels`; `underlying_asset.timeframe` is never read, since Massive's option-chain
 sample shows the underlying delayed beside a real-time contract.
 
 Two callers use them. The WebSocket host decision (`host_decision.py`) reads its snapshot's
-labels to tell whether a subscription's plan is delayed, and the REST transport (`rest.py`)
-reads every page of a `fetch()` or `poll()` of a subscription's current data, so neither
-serves delayed data to a user who did not ask for it in `MassiveConfig.delayed_subscriptions`.
-`delayed_refusal` builds the `DelayedDataError` both raise, with the evidence and the exact
-configuration that asks for the delayed data. Pure functions: nothing here logs, waits, or
-calls Deephaven.
+labels to tell whether Massive serves a subscription's data delayed, and the REST transport
+(`rest.py`) reads every page of a `fetch()` or `poll()` of a subscription's current data, so
+neither serves delayed data to a user who did not ask for it in
+`MassiveConfig.delayed_subscriptions`. `delayed_refusal` builds the `DelayedDataError` both
+raise, with the evidence and the exact configuration that asks for the delayed data. Pure
+functions: nothing here logs, waits, or calls Deephaven.
 """
 
 from __future__ import annotations
@@ -122,9 +122,9 @@ def shows_real_time(evidence: str) -> bool:
     """Return whether a host decision's evidence is a snapshot label that says real-time.
 
     The host decision keeps `RecencyLabels.real_time` as its evidence when the snapshot labels
-    the class's data real-time, which proves the key's plan is real-time. Any other evidence
-    (no label, an undocumented label, a pinned host, the configuration) proves nothing, so a
-    refusal's message keeps suggesting the delayed feed for it.
+    the class's data real-time, which shows Massive serves the key that class in real time. Any
+    other evidence (no label, an undocumented label, a pinned host, the configuration) proves
+    nothing, so a refusal's message keeps suggesting the delayed feed for it.
 
     Args:
         evidence: The decision's evidence, such as `"last_trade.timeframe=REAL-TIME"`.
@@ -138,12 +138,9 @@ def shows_real_time(evidence: str) -> bool:
 class DelayedDataError(EntitlementError):
     """Massive labels a subscription's data delayed, and the session did not ask for delayed data.
 
-    Internal, raised as the public `EntitlementError` it is: its own class lets a caller tell
-    this refusal from Massive's other refusals, as the stream of a real-time-only dataset does
-    (`host_decision.require_real_time`), whose plan then does not include it at all.
-
-    Its source is `ErrorSource.USER`: the session's settings refuse the data, and listing the
-    subscription in `MassiveConfig.delayed_subscriptions` lets it through.
+    Internal, raised as the public `EntitlementError` it is. Its source is `ErrorSource.USER`:
+    the session's settings refuse the data, and listing the subscription in
+    `MassiveConfig.delayed_subscriptions` lets it through.
     """
 
     default_source = ErrorSource.USER
@@ -160,7 +157,7 @@ def delayed_refusal(
             `"stocks.snapshots data"`.
         evidence: The label that shows it (`RecencyLabels.delayed`).
         streams: True for a stream, whose fix is Massive's delayed feed; False for a REST
-            read, whose fix accepts the plan's delayed data and also moves the subscription's
+            read, whose fix accepts Massive's delayed data and also moves the subscription's
             streams to the delayed feed.
 
     Returns:

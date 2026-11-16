@@ -368,8 +368,8 @@ def test_a_bars_start_is_described_as_the_window_start(
         "Every other stamp, as each source sends it (quoted next), is moved there. From REST"
         in (described)
     )
-    # A stamp Massive is not known to use is kept, said before the sources' own stamps.
-    assert "keeps that stamp, has a null `Date`, and ends one period after it" in described
+    # A bar at a stamp Massive is not known to use is withheld, said before the sources' stamps.
+    assert "Massive is not known to use is withheld, with a WARNING" in described
 
 
 def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:

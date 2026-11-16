@@ -5,8 +5,8 @@ without end, and some lists can hold thousands of items. The helpers here keep t
 from flooding the log:
 
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
-  unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a
-  WebSocket bar whose end from Massive is not its start plus its length.
+  unit the FMV magnitude rule detected, a WebSocket bar whose end from Massive is not its start
+  plus its length.
 - `LoggedKeys` holds the facts one owner has logged, such as one `history()` call: a record
   naming several facts logs only the new ones, and the keys go when the owner drops it.
 - `BoundedLog` logs a record at its level the first time each value is seen, for at most a

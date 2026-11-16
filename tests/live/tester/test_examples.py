@@ -525,7 +525,7 @@ def test_run_example_tells_a_refusal_from_a_failure_under_the_console_lock(
         "import deephaven_massive as dm\n"
         "raise dm.EntitlementError('delayed', source=dm.ErrorSource.USER)\n"
     )
-    built = "import deephaven_massive as dm\nraise dm.EntitlementError('real time only')\n"
+    built = "import deephaven_massive as dm\nraise dm.EntitlementError('not entitled')\n"
     refused = _write(tmp_path, "01_a.py", code)
     failed = _write(tmp_path, "02_b.py", "print('before')\n1 / 0\n")
     delayed = _write(tmp_path, "03_c.py", unlisted)
@@ -538,7 +538,7 @@ def test_run_example_tells_a_refusal_from_a_failure_under_the_console_lock(
     # The library's own refusal, with no status of Massive's, is a finding, not Massive's.
     outcome, _ = examples.run_example(library, namespace)
     assert outcome.status == examples.FAILED
-    assert outcome.error.startswith("EntitlementError: real time only\nTraceback")
+    assert outcome.error.startswith("EntitlementError: not entitled\nTraceback")
     outcome, printed = examples.run_example(failed, namespace)
     assert outcome.status == examples.FAILED
     assert outcome.error.startswith("ZeroDivisionError: division by zero\nTraceback")

@@ -43,7 +43,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `composite_ticker`: "The stock ticker symbol of the ETF that holds these constituent securities." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AssetClass` | String | The broad category of asset type, such as Equity, Corporate Bond, Municipal Bond, etc. |
 | `ConstituentName` | String | The full company or security name of the constituent holding. |
 | `ConstituentRank` | long | The rank of this constituent within the ETF for a given effective_date, ordered by weight (descending), market_value (descending), and constituent_ticker (ascending). A rank of 1 indicates the largest holding. |
@@ -72,7 +71,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `composite_ticker` |
-| `RawSymbol` | `composite_ticker` |
 | `AssetClass` | `asset_class` |
 | `ConstituentName` | `constituent_name` |
 | `ConstituentRank` | `constituent_rank` |

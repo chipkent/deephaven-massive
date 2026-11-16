@@ -110,6 +110,7 @@ __all__ = [
     "ALL",
     "AS_WRITTEN",
     "CANONICAL_GRAMMARS",
+    "CLASS_NOUNS",
     "LOGGED_VALUES",
     "UNDERLYING_CLASSES",
     "AllSymbols",
@@ -244,9 +245,10 @@ joined to the next by one `-`, `:`, or space, as Massive writes them (`GCQ6-GCZ6
 Massive documents no grammar for combos, so the shape is checked and the forms are not listed:
 a ticker Massive writes always round-trips, while surrounding or doubled whitespace, lower case,
 an empty part, and another class's prefix (`X:BTC-USD`) are refused."""
-_INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
-"""A canonical index ticker: `I:` and letters and digits, as Massive's WebSocket specification
-writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
+_INDEX: Final = re.compile(r"^I:[A-Z0-9]+(?:\.[A-Z0-9]+)*$")
+"""A canonical index ticker: `I:` and upper-case letters and digits, with dotted parts allowed.
+Massive's WebSocket specification allows lower case (`^(I:[a-zA-Z0-9]+)$`), but a lower-case
+index ticker is refused as not canonical, as lower case is in the other classes."""
 _FOREX: Final = re.compile(r"^C:[A-Z]{3}[A-Z]{3}$")
 """A canonical forex ticker: `C:` and two three-letter ISO 4217 codes."""
 _CRYPTO: Final = re.compile(r"^X:[A-Z0-9]{4,}$")
@@ -279,7 +281,7 @@ _CLASS_NAMES: Final[dict[AssetClass, str]] = {
     AssetClass.CRYPTO: "crypto",
 }
 """The singular noun of each class, as the per-class converters are named."""
-_CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
+CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
 """The noun of each class as messages write it before "ticker" (`a futures ticker`)."""
 
 
@@ -482,7 +484,7 @@ def _class_noun_with_article(asset_class: AssetClass) -> str:
         For example `"a stock"` or `"an index"`.
     """
     article = "an" if asset_class in _VOWEL_CLASSES else "a"
-    return f"{article} {_CLASS_NOUNS[asset_class]}"
+    return f"{article} {CLASS_NOUNS[asset_class]}"
 
 
 def _refuse_surrounding_whitespace(text: str) -> None:
@@ -522,7 +524,6 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
 
 _SEPARATORS: Final = frozenset("-/ +=^#$*%@!~")
 """Characters other stock conventions use as separators and Massive never does."""
-_CONVENTIONS: Final = ", ".join(f"dm.SymbolConvention.{c.name}" for c in SymbolConvention)
 
 
 def _convert_stock(text: str) -> str:
@@ -535,9 +536,10 @@ def _convert_stock(text: str) -> str:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
-        ValueError: Always. Separators of another convention (`-`, `/`, a space) name the
-            conventions that convert them; all lower-case text says that case matters and
-            names the upper-case ticker to use if that is the one meant. It is only offered,
+        ValueError: Always. Separators of another convention (`-`, `/`, a space) lead with
+            the fix, Yahoo's convention, and name the others; all lower-case text says that
+            case matters and names the upper-case ticker to use if that is the one meant. It
+            is only offered,
             never converted to: Massive's tickers are case-sensitive, so `kimpl` may mean
             `KIMpL`.
     """
@@ -545,10 +547,9 @@ def _convert_stock(text: str) -> str:
     _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker: it uses another convention's separators. "
-            "Name the convention it comes from: dm.canonical_symbol(text, dm.AssetClass.STOCKS, "
-            f"convention=...) with one of {_CONVENTIONS}, or in a query string "
-            "dm.canonical_symbol_stock_yahoo, _nasdaq, or _cms"
+            f"{text!r} is not a Massive stock ticker; if it is Yahoo's spelling, pass "
+            "convention=dm.SymbolConvention.YAHOO to dm.canonical_symbol or "
+            "dm.canonicalize_symbols (NASDAQ and CMS are the others)"
         )
     if text == text.lower() != text.upper():
         raise ValueError(
@@ -572,8 +573,9 @@ def _convert_option(text: str) -> str:
         `O:` and the OCC symbol, upper case.
 
     Raises:
-        ValueError: If the text is no OCC symbol with a real expiry date (an underlying such
-            as `AAPL` is named as one), or names another class.
+        ValueError: If the text is no OCC symbol with a real expiry date: an OCC-shaped
+            symbol whose date does not exist is refused for its date, and an underlying such
+            as `AAPL` is named as one; or if it names another class.
     """
     _refuse_other_prefix(AssetClass.OPTIONS, text)
     body = text.upper().removeprefix("O:")
@@ -583,6 +585,12 @@ def _convert_option(text: str) -> str:
     symbol = f"O:{body}"
     if _occ_ok(symbol):
         return symbol
+    shaped = _OCC.fullmatch(symbol)
+    if shaped is not None:
+        raise ValueError(
+            f"{text!r} has the OCC shape, but its expiry {shaped['expiry']} (YYMMDD) is not a "
+            "real date"
+        )
     if _STOCK.fullmatch(text) is not None:
         raise ValueError(
             f"{text!r} is an underlying, not an OCC option symbol such as 'O:AAPL250117C00150000'"
@@ -681,10 +689,17 @@ def _convert_index(text: str) -> str:
         `I:` and the root, such as `I:SPX`.
 
     Raises:
-        ValueError: If the root is not an index ticker, or the text names another class.
+        ValueError: If the root is not an index ticker, or the text names another class. A
+            root with a lower-case letter names the upper-case ticker to use, if that is the
+            one meant; it is only offered, never converted to.
     """
     _refuse_other_prefix(AssetClass.INDICES, text)
     symbol = text if text.startswith("I:") else f"I:{text}"
+    if symbol != symbol.upper() and _INDEX.fullmatch(symbol.upper()) is not None:
+        raise ValueError(
+            f"{text!r} is not a Massive index ticker: index tickers are upper case; use "
+            f"{symbol.upper()!r} if that is the ticker you mean"
+        )
     if _INDEX.fullmatch(symbol) is None:
         raise ValueError(f"{text!r} is not a Massive index ticker such as 'I:SPX'")
     return symbol
@@ -865,10 +880,20 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
 
     Raises:
         ValueError: If the text is not one of the convention's plain, class, or preferred
-            spellings: a Yahoo ticker with a dot is named a foreign listing, and every other
-            refusal says which suffixes the library does not convert.
+            spellings. Surrounding whitespace names the stripped text, empty text says it is
+            empty, all lower-case text names the upper-case form, a Yahoo ticker
+            with a dot is named a foreign listing, and every other refusal says which
+            suffixes the library does not convert.
     """
+    _refuse_surrounding_whitespace(text)
+    if not text.strip():
+        raise ValueError(f"{text!r} is {'only whitespace' if text else 'empty'}, not a ticker")
     _refuse_other_prefix(AssetClass.STOCKS, text)
+    if text == text.lower() != text.upper():
+        raise ValueError(
+            f"{text!r} is not a {convention.name} ticker: the {convention.name} convention "
+            f"writes tickers in upper case; use {text.upper()!r} if that is the ticker you mean"
+        )
     if convention is SymbolConvention.YAHOO and "." in text:
         raise ValueError(
             f"{text!r} is a Yahoo ticker of a listing outside the US (Yahoo's dot names the "
@@ -1583,7 +1608,7 @@ def check_symbol(
     if other not in {resolved, AssetClass.STOCKS} and CANONICAL_GRAMMARS[other](text):
         raise ValueError(
             f"{text!r} is {_class_noun_with_article(other)} ticker; this dataset takes "
-            f"{_CLASS_NOUNS[resolved]} tickers"
+            f"{CLASS_NOUNS[resolved]} tickers"
         )
     try:
         fixed = _CONVERTERS[resolved](text)

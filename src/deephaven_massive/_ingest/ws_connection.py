@@ -57,16 +57,14 @@ import itertools
 import logging
 import threading
 import time
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive import _massive
-from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
+from deephaven_massive._config import DELAYED_PREFIX, FMV_HOST, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.trading_hours import in_trading_hours
-from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
     NEW_SESSION,
@@ -121,7 +119,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import RowMark, RowMarks, Source, Status
+    from deephaven_massive._massive import RowMarks, Source, Status
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
@@ -342,8 +340,8 @@ class ConnectionStream:
         static: True for `dm.ALL` and a symbol list, False for a reactive symbol table, whose
             topics the options cap may defer.
         refusal_note: What the error of a refused subscription adds for this stream: for a
-            real-time-only dataset, where its plans are listed (`host_decision.real_time_note`);
-            `""` for any other.
+            real-time-only dataset, its documented feed and its page
+            (`host_decision.real_time_note`); `""` for any other.
     """
 
     stream_id: int
@@ -899,10 +897,9 @@ class Connection:
     ) -> None:
         """Hand one channel's rows to the flush thread, and record the frame's drift.
 
-        A row whose key could not be read (marked `RowFault.UNREADABLE_KEYS`) is dropped here
-        and fails no stream: it is counted in the drift (`DriftReport.dropped_rows`, with the
-        first such row's reason), which the flush thread logs and counts for each dataset. A
-        row marked for another fault is handed on with its null.
+        Every row goes to the flush thread with the client's marks, which withholds each row
+        the library cannot read whole (`ChannelPlan.convert`). A row whose key could not be
+        read counts in the window's traffic as dropped, not as data heard.
 
         Args:
             channel: The channel.
@@ -919,19 +916,13 @@ class Connection:
             self._episodes.data_since_open = True
             self._check_recovered()
         unread = marks.get(RowFault.UNREADABLE_KEYS)
-        if unread is not None:
-            taken = set(unread.rows)
-            rows = [row for index, row in enumerate(rows) if index not in taken]
-            reason = f"dropped {unread.reasons[0]}"
-            drift = drift.merge(DriftReport(dropped_rows=len(unread.rows), dropped_reason=reason))
-        self._traffic.received(
-            channel, len(rows), 0 if unread is None else len(unread.rows), now=now
-        )
-        if rows:
-            self.flusher.rows(channel, rows, generation=generation)
-            self._arm_backlog_row()  # the row write below may be throttled
-        if drift.fields_drifted or drift.dropped_rows:
-            self._record_drift(channel, drift, dropped=self._dropped_symbols(unread))
+        dropped = 0 if unread is None else len(unread.rows)
+        self._traffic.received(channel, len(rows) - dropped, dropped, now=now)
+        # A channel's data in a frame holds at least one row.
+        self.flusher.rows(channel, rows, marks, generation=generation)
+        self._arm_backlog_row()  # the row write below may be throttled
+        if drift.fields_drifted:
+            self._record_drift(channel, drift)
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -1283,7 +1274,7 @@ class Connection:
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
-        A real-time-only dataset's streams add where its plans are listed
+        A real-time-only dataset's streams add its documented feed and its page
         (`ConnectionStream.refusal_note`), and only theirs.
 
         Args:
@@ -1306,7 +1297,10 @@ class Connection:
             self.flusher.fail(ids, EntitlementError(f"{text}; {note}" if note else text))
 
     def _refusal_hint(self, refused: set[str]) -> str:
-        """Return what a refusal's message says to do, by the connection's feed.
+        """Return what a refusal's message says to do, by the connection's feed and its evidence.
+
+        Each hint quotes what the host decision saw and names the setting that changes the
+        outcome; none says what a plan includes, which is Massive's to answer.
 
         Args:
             refused: The refused topics.
@@ -1314,103 +1308,83 @@ class Connection:
         Returns:
             On a pinned host, that `MassiveConfig.websocket_hosts` chooses it; on the delayed
             feed, that the subscription is listed in `delayed_subscriptions` and that removing it
-            uses the real-time feed; on the real-time feed of a key whose snapshot showed
-            real-time data, that its plan or an add-on may not include the data (such a key has
-            nothing to gain from the delayed feed); on the real-time feed of a key whose snapshot
-            carried no label (a
-            base Business key's), that `websocket_hosts` pins the host the plan serves it on, or
-            the delayed feed if its data is delayed; on the real-time feed of a key whose snapshot
-            Massive refused (a Basic key's), that the plan has no live data on either feed and
-            that REST reads it instead; on the real-time feed otherwise, how to use
-            Massive's delayed feed instead; for fair-market-value topics, that they need a Business
-            plan; on another host, that `websocket_hosts` chooses it; and for index values, that
-            they may need `business.massive.com`.
+            uses the real-time feed; on the real-time feed of a key whose snapshot Massive
+            labelled real-time, the label, and that the key's plan may not include the data;
+            on the real-time feed of a key whose snapshot carried no label, that
+            `websocket_hosts` pins another host, or the delayed feed if Massive serves the
+            data delayed; on the real-time feed of a key whose snapshot Massive refused, that
+            refusal, and that REST reads the data instead; on the real-time feed otherwise, how
+            to use Massive's delayed feed instead; for fair-market-value topics, the one host
+            Massive documents for them, which `websocket_hosts` never changes; on another
+            host, that `websocket_hosts` chooses it; and for index values, the one host Massive
+            documents for them.
         """
         subscription = subscription_of(self.asset_class)
-        if self.decision.evidence == "websocket_hosts":
+        evidence = self.decision.evidence
+        if evidence == "websocket_hosts":
             hint = (
                 f"MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] pins this "
-                "host; the plan may not include this data here"
+                "host; the key's plan may not include this data there"
             )
         elif self.decision.host.startswith(DELAYED_PREFIX):
             hint = (
                 f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}, "
-                f"so its streams use Massive's delayed feed; whether Massive serves it to "
-                f"every plan is unverified; to use the real-time feed, remove "
+                f"so its streams use Massive's delayed feed; to use the real-time feed, remove "
                 f"dm.Subscription.{subscription.name} from delayed_subscriptions"
             )
-        elif self.decision.host == REALTIME_HOST and shows_real_time(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and shows_real_time(evidence):
             hint = (
-                f"the {subscription} subscription's plan is real-time "
-                f"({self.decision.evidence}) but may not include this data; it may need a "
-                "higher plan or an add-on"
+                f"the {subscription} snapshot is real-time ({evidence}), but the key's plan may "
+                "not include this data"
             )
-        elif self.decision.host == REALTIME_HOST and unlabelled(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and unlabelled(evidence):
+            pin = f'{{dm.AssetClass.{self.asset_class.name}: "<host>"}}'
             hint = (
-                f"the {subscription} snapshot carried no recency label, as a Business plan's "
-                "without the trades and quotes expansion does, so the plan may serve this data "
-                "on another host: pin it with MassiveConfig(websocket_hosts="
-                f'{{dm.AssetClass.{self.asset_class.name}: "<host>"}}); '
-                f"if the plan's data is delayed instead, use Massive's delayed {subscription} "
-                f"feed: {delayed_fix(subscription)}"
+                f"the {subscription} snapshot carried no recency label, so the library used the "
+                "real-time host; if Massive serves this data on another host, pin it with "
+                f"MassiveConfig(websocket_hosts={pin}); "
+                f"if Massive serves your {subscription} data delayed, use its delayed feed: "
+                f"{delayed_fix(subscription)}"
             )
-        elif self.decision.host == REALTIME_HOST and refused_snapshot(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and refused_snapshot(evidence):
             hint = (
-                f"Massive also refused the {subscription} snapshot, as it does on the free "
-                f"Basic plan, which includes no live (WebSocket) {subscription} data on either "
-                "feed; read the data with fetch(), poll(), or history() instead"
+                f"Massive also refused the {subscription} snapshot ({evidence}), so the key's "
+                f"plan may include no live (WebSocket) {subscription} data; read it with "
+                "fetch(), poll(), or history() instead"
             )
         elif self.decision.host == REALTIME_HOST:
             hint = (
-                f"the {subscription} subscription's plan may not include this data in real "
-                f"time; if its data is delayed, use Massive's delayed {subscription} feed: "
+                "the key's plan may not include this data in real time; if Massive serves your "
+                f"{subscription} data delayed, use its delayed feed: "
                 f"{delayed_fix(subscription)}"
             )
         elif any(channel_of(t) == _FMV_CHANNEL for t in refused):
             hint = (
-                "fair-market-value (FMV) data needs a Business plan of the "
-                f"{subscription} subscription; MassiveConfig.websocket_hosts never applies to it"
+                f"fair-market-value (FMV) data streams only from {FMV_HOST}, the one host "
+                "Massive documents for it; MassiveConfig.websocket_hosts never applies to FMV"
             )
         else:
             hint = (
-                f"the {subscription} subscription's plan may not include this data on this "
+                "the key's plan may not include this data on this "
                 f"host; MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] chooses "
                 "the host"
             )
         if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
-            hint += " (index values may need business.massive.com)"
+            hint += " (Massive documents index values only on business.massive.com)"
         return hint
 
-    def _record_drift(
-        self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
-    ) -> None:
+    def _record_drift(self, channel: str, drift: DriftReport) -> None:
         """Add a frame's drift to the connection's row and hand it to the flush thread.
 
         Args:
             channel: The channel.
             drift: Its drift in the frame.
-            dropped: How many of the frame's dropped rows each canonical symbol had.
         """
         text = self._drift_seen.record(self.key, channel, drift)
         if text is not None:
             self._drift = text
             self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
-
-    def _dropped_symbols(self, unread: RowMark | None) -> dict[str, int]:
-        """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
-
-        Args:
-            unread: The frame's rows whose key could not be read, or None for none.
-
-        Returns:
-            Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
-            not text, or a spelling the library cannot read is left out (the dataset's own run
-            still counts it).
-        """
-        sent = () if unread is None else unread.symbols
-        found = (canonical_from_wire(self.asset_class, symbol) for symbol in sent if symbol)
-        return dict(Counter(symbol for symbol in found if symbol is not None))
+        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
 
     # --- loop thread: outages and notes --------------------------------------------------------
 

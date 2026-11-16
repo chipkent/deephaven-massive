@@ -36,7 +36,6 @@ from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
-    from contextlib import AbstractContextManager
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -73,7 +72,6 @@ LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
-SkipIfRealTimeOnlyRefused: TypeAlias = "Callable[[], AbstractContextManager[None]]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -824,51 +822,40 @@ _ADMIN_WAIT = 60.0
 @pytest.mark.verifies("82")
 @pytest.mark.timeout(150)
 def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
-    live_config: dm.MassiveConfig,
+    live_session: dm.MassiveSession,
     *,
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
     skip_if_not_entitled: SkipIfNotEntitled,
-    skip_if_real_time_only_refused: SkipIfRealTimeOnlyRefused,
     evidence: Evidence,
 ) -> None:
     """Whether Massive acknowledges `AD.*` on the real-time options feed, and what rows carry.
 
     Streams `m.options.admin_messages()`, which subscribes every exchange (`AD.*`) on
     `socket.massive.com`, and records the connection, the stream, and up to five rows: each
-    one's exchange, sequence number, SIP timestamp, and text as OPRA sent it. Massive serves
-    the admin messages only in real time, so the session leaves options out of
-    `delayed_subscriptions` (and any delayed host pin of options), as a user streaming them
-    would. Passes when Massive acknowledged the topic, which it does whether or not the market
-    is open, the stream still runs, and every row that arrived has its `Timestamp` and
-    `Message`. Messages come only with FLEX activity or an exchange's notice, so no row is
-    required. Massive's refusal skips the test, quoting Massive, and so does the library's
-    refusal at the call when Massive labels the key's options data delayed, quoting the
-    library; the refusal test checks what either refusal says.
+    one's exchange, sequence number, SIP timestamp, and text as OPRA sent it. Passes when
+    Massive acknowledged the topic, which it does whether or not the market is open, the
+    stream still runs, and every row that arrived has its `Timestamp` and `Message`. Messages
+    come only with FLEX activity or an exchange's notice, so no row is required. Massive's
+    refusal skips the test, quoting Massive; the refusal test checks what it says.
     """
-    listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
-    session = dm.MassiveSession(with_delayed(live_config, listed))
-    try:
-        with skip_if_real_time_only_refused():
-            table = session.options.admin_messages().append_only()
-        acked = wait_acked(session, 1, time.monotonic() + _ADMIN_WAIT)
-        deadline = time.monotonic() + _ADMIN_WAIT
-        pause = threading.Event()  # never set; only paces the wait for a row
-        while acked and not table_rows(table) and time.monotonic() < deadline:
-            pause.wait(1.0)
-        rows = table_rows(table)
-        for line in stream_report(session):
-            evidence(line)
-        states = [
-            r["State"]
-            for r in table_rows(session.streams())
-            if r["Dataset"] == "options.admin_messages"
-        ]
-        skip_if_not_entitled(session)
-        session.release(table)
-    finally:
-        session.close()
+    table = live_session.options.admin_messages().append_only()
+    acked = wait_acked(live_session, 1, time.monotonic() + _ADMIN_WAIT)
+    deadline = time.monotonic() + _ADMIN_WAIT
+    pause = threading.Event()  # never set; only paces the wait for a row
+    while acked and not table_rows(table) and time.monotonic() < deadline:
+        pause.wait(1.0)
+    rows = table_rows(table)
+    for line in stream_report(live_session):
+        evidence(line)
+    states = [
+        r["State"]
+        for r in table_rows(live_session.streams())
+        if r["Dataset"] == "options.admin_messages"
+    ]
+    skip_if_not_entitled(live_session)
+    live_session.release(table)
     evidence(f"AD.* acknowledged topics {acked}; stream {states}; rows received: {len(rows)}")
     for row in rows[:5]:
         evidence(
@@ -897,12 +884,12 @@ def test_a_refusal_of_the_admin_messages_links_the_datasets_plans(
     """What a refusal of the admin messages says, and whether it links the dataset's page.
 
     Streams `m.options.admin_messages()` from a session whose `delayed_subscriptions` leaves
-    options out (and any delayed host pin of options), as the dataset requires. When Massive
-    labels the key's options data delayed, the call raises `dm.EntitlementError`; when
-    Massive refuses `AD.*`, the stream's row
-    turns `FAILED` with Massive's refusal. Passes when one of the two happens and its message
-    ends with the link to the dataset's page. Skips when Massive serves the admin messages,
-    which the real-time test checks.
+    options out (and any delayed host pin of options). When Massive labels the key's options
+    data delayed, the call raises the delayed-data `dm.EntitlementError` every options stream
+    gets, naming `delayed_subscriptions`; when Massive refuses `AD.*`, the stream's row turns
+    `FAILED` with Massive's refusal. Passes when one of the two happens and Massive's refusal
+    ends with the link to the dataset's page of plans. Skips when Massive serves the admin
+    messages, which the real-time test checks.
     """
     listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
     session = dm.MassiveSession(with_delayed(live_config, listed))
@@ -935,7 +922,11 @@ def test_a_refusal_of_the_admin_messages_links_the_datasets_plans(
     if outcome == "RUNNING":
         pytest.skip("Massive served the admin messages; the real-time test covers them")
     assert outcome in {"refused at the call", "FAILED"}, f"the admin messages stream is {outcome}"
-    assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
+    if outcome == "refused at the call":
+        assert "would be delayed" in message, "the call's refusal is not the delayed-data error"
+        assert "delayed_subscriptions" in message
+    else:
+        assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
 
 
 _GAMMA_CONTRACTS = 5

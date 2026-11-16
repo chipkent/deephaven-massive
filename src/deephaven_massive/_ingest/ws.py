@@ -16,12 +16,11 @@ everything else belongs here:
   `EntitlementError`; nothing tears down the connection, and no connection moves to another
   host. A refusal that names no topic applies to the whole step in flight.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
-  them. A row whose key cannot be read is dropped and counted, and fails no stream; a value
-  that does not fit is null. A connection logs one WARNING per outage, and one when it goes
-  silent during its
-  market's trading hours (`NO_FRAMES_WARNING`), each with its recovery at INFO. Drift is
-  recorded on the connection's `SchemaDrift` here and handed to the flush thread for the
-  streams' rows.
+  them. A row the library cannot read whole is withheld, counted, and reported, and fails only
+  a stream whose policy is `RAISE` for its cause. A connection logs one WARNING per outage,
+  and one when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each
+  with its recovery at INFO. Drift is recorded on the connection's `SchemaDrift` here and
+  handed to the flush thread for the streams' rows.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
@@ -85,7 +84,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
+from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, Recency
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -101,7 +100,7 @@ from deephaven_massive._errors import (
     required,
     unmatched_form,
 )
-from deephaven_massive._ingest.host_decision import real_time_note, require_real_time
+from deephaven_massive._ingest.host_decision import real_time_note
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -430,9 +429,8 @@ class WsConnections:
         Static options symbols that would put more than `OPTIONS_CAP` explicit topics on the
         `/options` connection (counting every session's topics on it) raise the `ValueError`
         of `_check_cap`, and a closed session the `MassiveError` of `_check_open`; host
-        resolution raises the `AuthenticationError` or `MassiveError` of `resolve_host`, and
-        for a real-time-only stream the `ValueError` or `EntitlementError` of
-        `require_real_time`. A crypto stream of a symbol list opens with no topic, and its
+        resolution raises the `AuthenticationError`, `EntitlementError`, or `MassiveError` of
+        `resolve_host`. A crypto stream of a symbol list opens with no topic, and its
         pairs go to the `symbol changes` worker once it is attached (`_change_pairs`), as a
         symbol table's rows do, so nothing about a pair is decided at the call.
         """
@@ -443,11 +441,17 @@ class WsConnections:
         pairs = _pairs_to_split(asset_class, request.symbol_key())
         symbols = () if pairs else request.symbol_key()  # subscribed once split
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
-        decision = require_real_time(
-            spec,
-            functools.partial(self._resolve, asset_class, spec.channel_family),
-            delayed_subscriptions=core.config.delayed_subscriptions,
-        )
+        decision = self._resolve(asset_class, spec.channel_family)
+        if spec.real_time_only and decision.recency is not Recency.REALTIME:
+            # Massive's answer decides: the library refuses nothing it might serve.
+            logger.info(
+                "%s stream %d: Massive documents it only on the real-time feed; subscribing on "
+                "%s (%s), so Massive's answer decides whether it streams",
+                spec.name,
+                stream_id,
+                decision.host,
+                decision.evidence,
+            )
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
             # Started before the schedule wait, so a failure or interrupt during that wait
@@ -565,7 +569,7 @@ class WsConnections:
         with self._lock:
             plan = self._plans.get((spec, channel))
         if plan is None:
-            built = ChannelPlan.build(core.catalog, spec, channel, raw_symbol=core.raw_symbol)
+            built = ChannelPlan.build(core.catalog, spec, channel)
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
         return plan

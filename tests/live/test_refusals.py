@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING
 
 import pytest
 
 from deephaven_massive import Subscription
 from deephaven_massive._errors import EntitlementError, ErrorSource
-from deephaven_massive._ingest.host_decision import require_real_time
-from deephaven_massive._ingest.recency_labels import DelayedDataError, delayed_refusal
+from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._massive import WireEntitlementError
-from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 from tests._live import refusals
-
-if TYPE_CHECKING:
-    from deephaven_massive._tables.transports import HostDecision
 
 _TIMEFRAME = (
     "Your plan doesn't include this data timeframe. Please upgrade your plan at "
@@ -73,27 +67,12 @@ def test_a_timeframe_refusal_line_names_the_earliest_day_asked() -> None:
     assert refusals.refusal_line(undated) == str(undated)
 
 
-def test_the_librarys_refusal_of_a_real_time_only_stream_is_matched() -> None:
-    """The phrase is the library's own message, as it refuses the admin messages."""
-
-    def delayed() -> HostDecision:
-        raise DelayedDataError("options data is delayed")
-
-    with pytest.raises(EntitlementError) as raised:
-        require_real_time(ADMIN_MESSAGES, delayed, delayed_subscriptions=frozenset())
-    assert raised.value.status is None
-    assert refusals.is_real_time_only_refusal(raised.value)
-    massive = EntitlementError(str(raised.value), status=403)
-    assert not refusals.is_real_time_only_refusal(massive)
-    assert not refusals.is_real_time_only_refusal(ValueError(str(raised.value)))
-
-
 @pytest.mark.parametrize(
     ("error", "massive"),
     [
         (WireEntitlementError("AccessDenied on us_stocks_sip/x.csv.gz", status=403), True),
         (EntitlementError("HTTP 403: not entitled", status=403), True),
-        (EntitlementError("streams only in real time"), False),
+        (EntitlementError("not entitled"), False),
         (EntitlementError("not entitled", status=403, source=ErrorSource.LIBRARY), False),
         (EntitlementError("delayed", status=403, source=ErrorSource.USER), False),
         (ValueError("HTTP 403: not entitled"), False),

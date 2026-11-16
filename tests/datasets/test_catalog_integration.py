@@ -56,11 +56,9 @@ from deephaven_massive._massive import RestClient, Transport, WireEntitlementErr
 from deephaven_massive._session import CATALOG
 from deephaven_massive.queries import FetchQuery, HistoryQuery, NoSymbolStreamQuery, StreamQuery
 from tests._live import streams
-from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from contextlib import AbstractContextManager
     from datetime import date
     from typing import TypeAlias
 
@@ -76,7 +74,6 @@ TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
-SkipIfRealTimeOnlyRefused: TypeAlias = "Callable[[], AbstractContextManager[None]]"
 RowsDue: TypeAlias = "Callable[[str, str], tuple[str, bool]]"
 
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -751,7 +748,6 @@ def test_every_dataset_and_verb_returns_its_columns(
     wait_rows: WaitRows,
     rows_due: RowsDue,
     skip_if_not_entitled: SkipIfNotEntitled,
-    skip_if_real_time_only_refused: SkipIfRealTimeOnlyRefused,
     record_property: Callable[[str, object], None],
     caplog: pytest.LogCaptureFixture,
     evidence: Evidence,
@@ -768,41 +764,29 @@ def test_every_dataset_and_verb_returns_its_columns(
     `delayed_subscriptions` sent no row. Massive's refusal is a skip that quotes it, and so is
     a history the request cannot be served without S3 credentials; anything else fails.
     Every library WARNING and every `SchemaDrift` the case saw is recorded, and counted in the
-    coverage. A stream Massive serves only in real time opens a session of its own with its
-    subscription left out of `delayed_subscriptions` (and any delayed host pin of its class),
-    as a user streaming it would; the library's refusal of it at the call, when Massive labels
-    the key's data of its subscription delayed, skips, quoting the library.
+    coverage.
     """
     spec = CATALOG.by_name[name]
     record_property("refused", _refused_group(spec, verb))  # read only when Massive refuses
     subscription = _subscription(spec)
     listed = live_config.delayed_subscriptions
-    own: dm.MassiveSession | None = None
-    if verb == "stream" and spec.real_time_only and subscription is not None:
-        listed = listed - {dm.Subscription(subscription)}
-        own = dm.MassiveSession(with_delayed(live_config, listed))
-    try:
-        with skip_if_real_time_only_refused():
-            _run_case(
-                own or live_session,
-                name,
-                verb,
-                delayed=subscription is not None and dm.Subscription(subscription) in listed,
-                live_rest=live_rest,
-                previous_trading_day=previous_trading_day,
-                front_contract=front_contract,
-                table_rows=table_rows,
-                wait_acked=wait_acked,
-                wait_rows=wait_rows,
-                rows_due=rows_due,
-                skip_if_not_entitled=skip_if_not_entitled,
-                record_property=record_property,
-                caplog=caplog,
-                evidence=evidence,
-            )
-    finally:
-        if own is not None:
-            own.close()
+    _run_case(
+        live_session,
+        name,
+        verb,
+        delayed=subscription is not None and dm.Subscription(subscription) in listed,
+        live_rest=live_rest,
+        previous_trading_day=previous_trading_day,
+        front_contract=front_contract,
+        table_rows=table_rows,
+        wait_acked=wait_acked,
+        wait_rows=wait_rows,
+        rows_due=rows_due,
+        skip_if_not_entitled=skip_if_not_entitled,
+        record_property=record_property,
+        caplog=caplog,
+        evidence=evidence,
+    )
 
 
 def _run_case(

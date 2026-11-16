@@ -510,12 +510,10 @@ def _attribute(
     """Give one request's rows to the symbols it names.
 
     A request of one symbol gives that symbol all its rows. A request of several gives each its
-    rows by their `Symbol`. A row whose `Symbol` is null, such as a row that lists none of the
-    request's tickers (`RestReader._listed` logs its WARNING), keeps that null and goes with
-    the first symbol the request names, as a static read keeps it: it leaves a followed result
-    when that symbol does. A row whose `Symbol` names another symbol (or any row of a request
-    that names no symbol) belongs to no symbol and is left out, with one WARNING per dataset
-    and path a session.
+    rows by their `Symbol` (a row that lists none of the request's tickers never reaches here:
+    `RestReader._listed` leaves it out). A row whose `Symbol` names another symbol (or any row
+    of a request that names no symbol) belongs to no symbol and is left out, with one WARNING
+    per dataset and path a session.
 
     Args:
         reader: The reader, whose session remembers the warnings already given.
@@ -533,20 +531,6 @@ def _attribute(
         mine = rows.filter(pc.equal(rows[_SYMBOL], symbol))
         pieces[symbol].append(mine)
         kept += mine.num_rows
-    if own:
-        unnamed = rows.filter(pc.is_null(rows[_SYMBOL]))
-        if unnamed.num_rows:
-            pieces[own[0]].append(unnamed)
-            kept += unnamed.num_rows
-            logger.debug(
-                "%s: %d rows Massive returned from %s for %s have a null Symbol; they are "
-                "kept with %s",
-                spec.name,
-                unnamed.num_rows,
-                template,
-                bounded_list(own),
-                own[0],
-            )
     left = rows.num_rows - kept
     if not left:
         return

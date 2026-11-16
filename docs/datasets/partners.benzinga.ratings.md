@@ -43,7 +43,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The stock symbol of the company being rated." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `AdjustedPriceTarget` | double | The current price target adjusted for stock splits and dividends. |
 | `Analyst` | String | The name of the individual analyst who issued the rating. |
 | `BenzingaAnalystId` | String | The identifier used by Benzinga for this analyst. |
@@ -78,7 +77,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AdjustedPriceTarget` | `adjusted_price_target` |
 | `Analyst` | `analyst` |
 | `BenzingaAnalystId` | `benzinga_analyst_id` |

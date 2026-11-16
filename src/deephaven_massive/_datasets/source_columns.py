@@ -17,7 +17,8 @@ owns that step:
 - `kind_position`, a source's place in its kind's group, which orders the merge.
 - `widen`, the cast of one decoded column to its dataset column's Arrow type by the lattice
   joins (`WireType.common_type`), which every transport applies alike, through a
-  `RoundedFields` per payload, which reports a whole number the cast rounded as drift.
+  `RoundedFields` per payload, which reports the rows whose whole number the cast rounded,
+  for the transport to withhold, and the field as drift.
 
 The merge of a kind's renamed sources into one schema is `schema.dataset_schema`. Everything
 here reads the committed generated files only: no I/O, threads, or Deephaven calls, and no
@@ -34,10 +35,10 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.row_times import DATE, END, TIMESTAMP, time_column
 from deephaven_massive._datasets.timestamps import TimeUnit, time_unit
-from deephaven_massive._massive import DriftReport, DriftSample, WireType
+from deephaven_massive._massive import DriftReport, DriftSample, RowFault, WireType
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
     from deephaven_massive._massive import Field, Source
@@ -258,7 +259,7 @@ def required_fields(spec: DatasetSpec, source: Source) -> tuple[Field, ...]:
     )
 
 
-def widen(values: pa.Array, target: pa.DataType) -> tuple[pa.Array, int | None]:
+def widen(values: pa.Array, target: pa.DataType) -> tuple[pa.Array, pa.Array | None]:
     """Widen one source column to its dataset column's Arrow type, by the lattice joins.
 
     A source joins its kind with its own wire type, which the merged column may widen
@@ -270,16 +271,16 @@ def widen(values: pa.Array, target: pa.DataType) -> tuple[pa.Array, int | None]:
     A `long` beyond 2**53 in a `double` column takes the nearest `double`, as the lattice join
     means it to, rather than failing the whole column. That rounding changes a value Massive
     sent, so it is detected: the cast is cast back and compared with the original, and the
-    first value that differs is returned for the caller to report as schema drift
-    (`DriftReport.rounded`). The values are never changed further.
+    rows whose value differs are returned for the caller to withhold and report. The values
+    are never changed further.
 
     Args:
         values: The column as decoded, in its wire type's Arrow type.
         target: The dataset column's Arrow type (`ColumnType.arrow_type`).
 
     Returns:
-        The column in `target`; and the first whole number the cast to a `double` rounded,
-        as Massive sent it, or None when no value changed (always None for any other cast).
+        The column in `target`; and the mask of the rows whose whole number the cast to a
+        `double` rounded, or None when no value changed (always None for any other cast).
     """
     if pa.types.is_list(target) and not pa.types.is_list(values.type):
         offsets = pa.array(range(len(values) + 1), pa.int32())
@@ -295,35 +296,40 @@ def widen(values: pa.Array, target: pa.DataType) -> tuple[pa.Array, int | None]:
     changed = pc.fill_null(pc.or_(pc.not_equal(back, values), beyond), fill_value=False)
     if not pc.any(changed).as_py():
         return widened, None
-    return widened, int(pc.filter(values, changed)[0].as_py())
+    return widened, changed
 
 
 class RoundedFields:
-    """Widens one payload's columns and remembers the fields whose cast rounded a value.
+    """Widens one payload's columns and remembers the rows whose cast rounded a value.
 
     Each transport converts a payload (a REST page, a WebSocket flush, a flat-file block)
-    column by column with one of these, then merges `drift()` into the payload's drift, so a
-    whole number beyond 2**53 that a `double` column holds only rounded is reported like any
+    column by column with one of these, marks the rows of `failures()` so they are withheld
+    (a whole number beyond 2**53 that a `double` column holds only rounded is not Massive's
+    value), and merges `drift()` into the payload's drift, so the field is reported like any
     other schema drift: a WARNING once per field, and an entry in the stream's `SchemaDrift`.
-    The values are served as the cast left them. Created per payload on the converting
-    thread; not shared, so it takes no lock.
+    Created per payload on the converting thread; not shared, so it takes no lock.
 
     Example:
         ::
 
             rounded = RoundedFields()
-            column = rounded.widen(pa.array([2**53 + 1]), pa.float64(), wire_key="s")
+            column = rounded.widen(pa.array([2**53 + 1]), pa.float64(), wire_key="s", column="S")
             assert rounded.drift().rounded == frozenset({"s"})
+            [(_, rows, name, _)] = rounded.failures()
+            assert (rows.to_pylist(), name) == ([True], "S")
     """
 
-    __slots__ = ("_samples",)
+    __slots__ = ("_found", "_samples")
 
     def __init__(self) -> None:
         """Start with no field rounded."""
         self._samples: dict[str, DriftSample] = {}
+        self._found: list[tuple[pa.Array, str, pa.Array]] = []
 
-    def widen(self, values: pa.Array, target: pa.DataType, *, wire_key: str | None) -> pa.Array:
-        """Widen one column (`widen`) and note its field when the cast rounded a value.
+    def widen(
+        self, values: pa.Array, target: pa.DataType, *, wire_key: str | None, column: str
+    ) -> pa.Array:
+        """Widen one column (`widen`) and note its rows when the cast rounded a value.
 
         Args:
             values: The column as decoded.
@@ -331,14 +337,40 @@ class RoundedFields:
             wire_key: The wire key of the field behind the column, for the drift; None for a
                 column no field fills (a key from the request, a derived column), which a
                 cast never rounds.
+            column: The dataset column, for the rows' marks.
 
         Returns:
             The column in `target`.
         """
         widened, changed = widen(values, target)
-        if changed is not None and wire_key is not None and wire_key not in self._samples:
-            self._samples[wire_key] = DriftSample(None, str(changed))
+        if changed is not None:
+            self._found.append((changed, column, values))
+            if wire_key is not None and wire_key not in self._samples:
+                first = int(pc.filter(values, changed)[0].as_py())
+                self._samples[wire_key] = DriftSample(None, str(first))
         return widened
+
+    def failures(self) -> list[tuple[RowFault, pa.Array, str, Callable[[int], str]]]:
+        """Return the rows each widened column rounded, to mark `unconvertible_values`.
+
+        Returns:
+            Per column that rounded a value: the fault, the mask of its rows, the column, and
+            each row's reason (the value, and that its `double` column would round it).
+        """
+
+        def reason_of(column: str, values: pa.Array) -> Callable[[int], str]:
+            def reason(row: int) -> str:
+                return (
+                    f"{column} holds {values[row].as_py()}, a whole number its double column "
+                    "would round"
+                )
+
+            return reason
+
+        return [
+            (RowFault.UNCONVERTIBLE_VALUES, rows, column, reason_of(column, values))
+            for rows, column, values in self._found
+        ]
 
     def drift(self) -> DriftReport:
         """Return the payload's rounding drift.

@@ -4,12 +4,11 @@ A live test sends its requests whatever the key holds, and when Massive refuses 
 skips and quotes Massive. `refusal_line` words the quote, from the error's own message (the
 wire errors name the status, the request, and Massive's text) and its status. A refusal of a
 request reaching beyond the history the key keeps (`is_timeframe_refusal`) also names the
-earliest day the request asked for (`refused_request`), so a reader can judge it. The library's
-own refusal of a stream Massive serves only in real time, on a key whose data Massive labels
-delayed, carries no status (`is_real_time_only_refusal`), so it is not Massive's refusal
-(`is_massive_refusal`). Nor is the library's refusal of delayed data the owner's settings do
-not list (`is_not_listed_text`), which a background read reports only as text. A stream's,
-a poll's, or a followed read's refusal is likewise only text (`is_entitlement_text`).
+earliest day the request asked for (`refused_request`), so a reader can judge it. An error
+the library built with no status is not Massive's refusal (`is_massive_refusal`). Nor is the
+library's refusal of delayed data the owner's settings do not list (`is_not_listed_text`),
+which a background read reports only as text. A stream's, a poll's, or a followed read's
+refusal is likewise only text (`is_entitlement_text`).
 
 `tests/conftest.py` calls these from its hook and fixtures, and the live run's and tester's
 example runners from their verdicts. Every function here is pure.
@@ -32,11 +31,6 @@ if TYPE_CHECKING:
 
 TIMEFRAME_PHRASE: Final = "doesn't include this data timeframe"
 """The phrase of Massive's refusal of a request beyond the key's history, in lower case."""
-
-REAL_TIME_ONLY_PHRASE: Final = "streams only in real time, and Massive labels this key's"
-"""The library's words when it refuses a stream Massive serves only in real time (fair market
-value, the options admin messages) because Massive labels the key's data of its subscription
-delayed, before the stream opens (`host_decision.require_real_time`)."""
 
 NOT_LISTED_PHRASE: Final = "is not in MassiveConfig.delayed_subscriptions"
 """The library's words when the owner's settings refuse delayed data: Massive labels a
@@ -77,7 +71,7 @@ def is_massive_refusal(error: BaseException) -> bool:
         True for the wire's `WireEntitlementError` (an HTTP 403, a `NOT_AUTHORIZED` envelope,
         an S3 403), or an `EntitlementError` whose `source` is `ErrorSource.MASSIVE` and that
         carries Massive's `status`; False for any other error, the library's own refusals
-        included, such as a real-time-only stream's, which carries no status.
+        included.
     """
     if isinstance(error, WireEntitlementError):
         return True
@@ -85,27 +79,6 @@ def is_massive_refusal(error: BaseException) -> bool:
         isinstance(error, EntitlementError)
         and error.source is ErrorSource.MASSIVE
         and error.status is not None
-    )
-
-
-def is_real_time_only_refusal(error: BaseException) -> bool:
-    """Return whether an error is the library's refusal of a real-time-only stream.
-
-    The library raises it as the stream opens, with no status, when Massive labels the key's
-    data of the stream's subscription delayed: Massive has no delayed feed of the dataset, so
-    the plan does not include it.
-
-    Args:
-        error: The error the stream's verb raised.
-
-    Returns:
-        True for an `EntitlementError` with no status whose message holds
-        `REAL_TIME_ONLY_PHRASE`.
-    """
-    return (
-        isinstance(error, EntitlementError)
-        and error.status is None
-        and REAL_TIME_ONLY_PHRASE in str(error)
     )
 
 
