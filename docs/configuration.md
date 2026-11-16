@@ -151,10 +151,10 @@ sets every cause at once.
 
 ### Every setting in one file
 
-This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account with Stocks Starter, Options Developer, and Indices Business, and the free Basic plan of Currencies and Futures:
+This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account whose stocks and options data Massive serves delayed, whose index values Massive serves on business.massive.com, and whose Currencies and Futures subscriptions are on the free Basic plan:
 
 ```yaml
-# Plans that stream 15 minutes late: Stocks Starter and Options Developer.
+# Subscriptions whose data Massive serves you delayed, 15 minutes late.
 delayed_subscriptions: [options, stocks]
 
 # Subscriptions on the free Basic plan, held to five requests a minute.
@@ -227,7 +227,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
-| `delayed_subscriptions` | Lists the subscriptions whose plan gets Massive's delayed data, as Stocks Starter and Developer do, so their streams and snapshots work. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
+| `delayed_subscriptions` | Lists the subscriptions whose data Massive serves you delayed, so their streams use Massive's delayed feed and their snapshots accept its `DELAYED` label. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
 | `rest_basic_subscriptions` | Lists the subscriptions on Massive's free Basic plan, so their requests keep to Basic's five a minute from the start. | A list of any of `stocks`, `options`, `indices`, `currencies`, or `futures`, such as `[options]`, or `[]` for none | `[]` |
 | `max_outage` | Sets how many seconds a stream or `poll()` table may stay cut off from Massive before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
@@ -264,9 +264,9 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 
 #### delayed_subscriptions
 
-List each subscription on a Starter or Developer plan of stocks, options, or futures,
-or on Indices Starter. Those plans stream data 15 minutes late, or 10 for futures.
-Leave out Advanced and Business plans, which are real-time. Never list
+Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
+minutes late, or 10 for futures. Fair market value (FMV) streams always use
+`business.massive.com`, the one host Massive documents for them. Never list
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
@@ -460,8 +460,9 @@ raises `EntitlementError`.
 
 #### websocket_hosts
 
-Set `indices` to `business.massive.com` to stream index values on a real-time Indices
-plan. Massive's documentation lists no other host for them, delayed or real-time. Set
+Set `indices` to `business.massive.com` to stream index values when Massive serves
+your index values there. Massive's documentation lists no other host for them,
+delayed or real-time. Set
 nothing else unless Massive tells you to.
 
 Without an entry, a subscription listed in `delayed_subscriptions` streams from

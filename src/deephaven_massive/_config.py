@@ -71,10 +71,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
-    "BUSINESS_HOST",
     "CONFIG_FILE_VARIABLE",
     "DELAYED_HOST",
     "DELAYED_PREFIX",
+    "FMV_HOST",
     "MIN_RECONNECT_BACKOFF",
     "NO_ACK_RESEND",
     "REALTIME_HOST",
@@ -117,8 +117,9 @@ REALTIME_HOST: Final = "socket.massive.com"
 DELAYED_HOST: Final = "delayed.massive.com"
 """Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures."""
 
-BUSINESS_HOST: Final = "business.massive.com"
-"""The WebSocket host of the Business plans' fair-market-value (FMV) channels, real-time only."""
+FMV_HOST: Final = "business.massive.com"
+"""The one WebSocket host Massive documents for the fair-market-value (FMV) channels
+(`vendor/massive/websocket/<class>/fair-market-value.md`), real-time only."""
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
@@ -217,13 +218,13 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
-        delayed_subscriptions: Lists the subscriptions whose plan gets Massive's delayed data, as
-            Stocks Starter and Developer do, so their streams and snapshots work. Defaults to an
-            empty set.
+        delayed_subscriptions: Lists the subscriptions whose data Massive serves you delayed, so
+            their streams use Massive's delayed feed and their snapshots accept its `DELAYED`
+            label. Defaults to an empty set.
 
-            List each subscription on a Starter or Developer plan of stocks, options, or futures,
-            or on Indices Starter. Those plans stream data 15 minutes late, or 10 for futures.
-            Leave out Advanced and Business plans, which are real-time. Never list
+            Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
+            minutes late, or 10 for futures. Fair market value (FMV) streams always use
+            `business.massive.com`, the one host Massive documents for them. Never list
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
@@ -247,8 +248,9 @@ class MassiveConfig:
             the library picks, such as `business.massive.com` for index values. Defaults to an empty
             mapping.
 
-            Set `indices` to `business.massive.com` to stream index values on a real-time Indices
-            plan. Massive's documentation lists no other host for them, delayed or real-time. Set
+            Set `indices` to `business.massive.com` to stream index values when Massive serves
+            your index values there. Massive's documentation lists no other host for them,
+            delayed or real-time. Set
             nothing else unless Massive tells you to.
 
             Without an entry, a subscription listed in `delayed_subscriptions` streams from
@@ -1502,15 +1504,16 @@ class _Example(NamedTuple):
 
 _EXAMPLE_ACCOUNT: Final = (
     "This file sets every setting, and a line marked `# the default` can be left out. Its "
-    "other values suit an account with Stocks Starter, Options Developer, and Indices Business, "
-    "and the free Basic plan of Currencies and Futures:"
+    "other values suit an account whose stocks and options data Massive serves delayed, whose "
+    "index values Massive serves on business.massive.com, and whose Currencies and Futures "
+    "subscriptions are on the free Basic plan:"
 )
 """The sentence before the example settings file: the account its values agree with."""
 
 _EXAMPLE: Final[Mapping[str, _Example]] = {
     "delayed_subscriptions": _Example(
         frozenset({Subscription.STOCKS, Subscription.OPTIONS}),
-        "Plans that stream 15 minutes late: Stocks Starter and Options Developer.",
+        "Subscriptions whose data Massive serves you delayed, 15 minutes late.",
     ),
     "rest_basic_subscriptions": _Example(
         frozenset({Subscription.CURRENCIES, Subscription.FUTURES}),
@@ -1544,7 +1547,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         "What each kind of problem does: raise, log, or ignore.",
     ),
     "websocket_hosts": _Example(
-        {AssetClass.INDICES: BUSINESS_HOST},
+        {AssetClass.INDICES: "business.massive.com"},
         "The WebSocket host per asset class: index values stream only from business.massive.com.",
     ),
     "subscription_confirmation_timeout": _Example(
@@ -1792,7 +1795,7 @@ def _value_forms() -> dict[str, str]:
     }
     for asset_class in AssetClass:
         subscription = subscription_of(asset_class)
-        example = BUSINESS_HOST if asset_class is AssetClass.INDICES else REALTIME_HOST
+        example = "business.massive.com" if asset_class is AssetClass.INDICES else REALTIME_HOST
         rule = (
             "never a `delayed.` host"
             if subscription is Subscription.CURRENCIES

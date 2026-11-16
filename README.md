@@ -346,6 +346,11 @@ the text you started with.
 `stocks.where("isNull(Symbol)")` lists such rows. To fail instead of nulling a row, pass
 `on_error=dm.OnError.RAISE`.
 
+One call converts one asset class. For a list that mixes stocks with indices, currencies, or
+crypto, convert each class's rows in a call of its own. Pick the convention by where the
+tickers came from, not where the stock trades: `NASDAQ` reads Nasdaq Trader's symbol files, so
+it converts `BRK-B` to the preferred `BRKpB`.
+
 Next, settings for the paid plans.
 
 <a id="what-your-plan-allows"></a>
