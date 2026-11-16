@@ -136,7 +136,9 @@ def invalid_row_message(
         dataset of one class the remedy is `dm.canonicalize_symbols`, which by default nulls
         the rows it cannot convert and, with `on_error=dm.OnError.RAISE`, fails on them, so a
         caller who chose to fail on a bad row keeps failing; for a dataset that spans classes,
-        whose rows may mix them, it is `dm.canonical_symbol` per row with each row's class.
+        whose rows may mix them, it is `dm.canonical_symbol` per row with each row's class. For
+        stocks the remedy names `convention=`, since under the default, Massive's own spelling,
+        no ticker with another source's separators converts.
     """
     reason = ""
     try:
@@ -149,10 +151,15 @@ def invalid_row_message(
             "class, since this dataset's rows may mix classes"
         )
     else:
+        convention = (
+            ", convention=dm.SymbolConvention.YAHOO), or with the convention the tickers come from"
+            if asset_class is AssetClass.STOCKS
+            else ")"
+        )
         remedy = (
             f"pass the table through dm.canonicalize_symbols(table, "
-            f"dm.AssetClass.{asset_class.name}), which converts what it can and nulls the rest, "
-            "or, given on_error=dm.OnError.RAISE, fails on the rest"
+            f"dm.AssetClass.{asset_class.name}{convention}, which converts what it can and "
+            "nulls the rest, or, given on_error=dm.OnError.RAISE, fails on the rest"
         )
     message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
     if as_written or _converts(asset_class, symbol):

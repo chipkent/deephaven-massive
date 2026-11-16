@@ -142,7 +142,9 @@ def _read_symbol_table(
     Raises:
         ValueError: If the table has rows and none of them is Massive's ticker, so the result
             would follow nothing (`LOG` and `IGNORE`), or, for a static verb, if the table
-            holds no symbol at all, as an empty symbol list does.
+            holds no symbol at all, as an empty symbol list does; a table with rows, all
+            null, is named as such, since `dm.canonicalize_symbols` nulls what it cannot
+            convert.
 
     Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names
     `dm.canonicalize_symbols`.
@@ -150,12 +152,19 @@ def _read_symbol_table(
     rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, symbols.table, stream_id=None)
+        has_rows = symbols.table.size > 0
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
             f"would follow nothing: {skipped_rows_text(rows.skipped)}"
         )
     if not rows.symbols and not live:
+        if has_rows:
+            raise ValueError(
+                f"{query}: every row's {rule.column} is null; a table from "
+                "dm.canonicalize_symbols nulls the rows it cannot convert, and its log names "
+                "each value"
+            )
         raise ValueError(f"{query}: the symbol table holds no symbols")
     return rows.symbols
 

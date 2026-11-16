@@ -617,8 +617,8 @@ converted = dm.canonicalize_symbols(
 ```
 
 You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line, then a line
-that starts `ValueError: 'BRK-B' is not a Massive stock ticker: it uses another convention's
-separators`, then `None`: with `on_error=dm.OnError.LOG` the converter returns `None` for a
+that starts `ValueError: 'BRK-B' is not a Massive stock ticker; if it is Yahoo's spelling`,
+then `None`: with `on_error=dm.OnError.LOG` the converter returns `None` for a
 value it cannot convert and logs it once, as `dm.canonicalize_symbols` does by default.
 `converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no convention could
 convert. The debug log records a `WARNING` for each.
