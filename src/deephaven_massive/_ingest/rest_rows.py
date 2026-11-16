@@ -51,6 +51,7 @@ from deephaven_massive._datasets.wire_symbols import (
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, DriftSample, to_batch
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.withheld import without_unread_keys
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -195,10 +196,11 @@ class RowConverter:
         for part, required in ((good, self.required), (flagged, self.required_on_error)):
             if not part:
                 continue
-            batch, decoded = to_batch(part, self.rest_path, required=required)
+            decoded_rows, decoded, marks = to_batch(part, self.rest_path, required=required)
+            batch, unread = without_unread_keys(decoded_rows, marks)
             batch, checked = self._apply(batch, symbol)
             batches.append(batch)
-            drift = drift.merge(decoded).merge(checked)
+            drift = drift.merge(decoded).merge(unread).merge(checked)
         if rows and not any(batch.num_rows for batch in batches):
             raise RowDataError(
                 f"{self.dataset}: every row of a page of {len(rows)} was dropped, so Massive's "

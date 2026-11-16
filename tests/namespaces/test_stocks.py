@@ -724,7 +724,8 @@ def test_fixtures_decode_with_their_declared_keys_and_no_drift(
         client.close()
     spec = next(s for s in TREE_DATASETS if (R, path) in s.sources)
     required = [key.column for _, key in spec.keys_for(R, path).declared() if not key.from_request]
-    batch, drift = to_batch(page.rows, rest_path, required=required)
+    batch, drift, marks = to_batch(page.rows, rest_path, required=required)
+    assert marks == {}  # every row read whole
     assert batch.num_rows >= 1
     assert (drift.extra, drift.missing) == (EXTRA_IN_EXAMPLE.get(path, frozenset()), frozenset())
 
