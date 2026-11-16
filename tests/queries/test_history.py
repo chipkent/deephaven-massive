@@ -23,10 +23,11 @@ from deephaven_massive._enums import (
     NotBars,
     Timespan,
 )
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
-from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries import HistoryQuery, StreamHistoryQuery, _history
 from tests._fakes.queries import (
     BARS_SPEC,
     FF,
@@ -856,3 +857,8 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
     assert any("AAPL" in m for m in caplog.messages)  # the 404's WARNING is in the log only
     rest_session.release(result)
     follows(rest_session)
+
+
+def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
+        _history._symbol_classes(object())  # type: ignore[arg-type]  # the point: refused at run time

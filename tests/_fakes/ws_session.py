@@ -29,7 +29,7 @@ from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import NOT_LISTED
 from deephaven_massive._tables.transports import HostDecision, Unsplit
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries import StreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -380,7 +380,7 @@ class WsSession:
         session: dm.MassiveSession | None = None,
         *,
         on_error: dm.ErrorPolicy | None = None,
-    ) -> SymbolStreamQuery:
+    ) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
 
         Args:
@@ -393,9 +393,7 @@ class WsSession:
             The query.
         """
         core = (session or self.session)._core
-        return build_query(
-            core, spec, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
-        )
+        return build_query(core, spec, query_type=StreamQuery, symbols=symbols, on_error=on_error)
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.

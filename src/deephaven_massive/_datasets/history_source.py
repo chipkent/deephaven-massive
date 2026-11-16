@@ -77,9 +77,14 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_on_or_before,
 )
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
-from deephaven_massive._datasets.symbols import AllSymbols
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
-from deephaven_massive._errors import BrokenGuaranteeError, library_bug, required
+from deephaven_massive._errors import (
+    BrokenGuaranteeError,
+    library_bug,
+    required,
+    unmatched_form,
+)
 from deephaven_massive._massive import ParamKind, Transport, source
 
 if TYPE_CHECKING:
@@ -89,6 +94,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._log_limits import BoundedLog
 
 __all__ = [
@@ -587,18 +593,17 @@ def choose_source(
         )
     if rest is not None:
         return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
-    threshold = config.flat_file_symbol_threshold
-    many = not isinstance(request.symbols, tuple) or len(request.symbols) >= threshold
     if flat:
         return SourceChoice(
             HistorySource.REST,
             f"flat files cannot serve it: {'; '.join(flat)}",
             Alternative.UNAVAILABLE,
         )
-    if not isinstance(request.symbols, tuple):
+    count = _listed_count(request.symbols)
+    if count is None:
         return SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
-    count = len(request.symbols)
-    if many:
+    threshold = config.flat_file_symbol_threshold
+    if count >= threshold:
         reason = f"{count} symbols >= flat_file_symbol_threshold {threshold}"
         return SourceChoice(HistorySource.FLAT_FILES, reason, Alternative.AVAILABLE)
     return SourceChoice(
@@ -606,6 +611,32 @@ def choose_source(
         f"{count} symbols < flat_file_symbol_threshold {threshold}",
         Alternative.AVAILABLE,
     )
+
+
+def _listed_count(symbols: NormalizedSymbols | None) -> int | None:
+    """Count the symbols a `history()` call lists, for the flat-file threshold.
+
+    Args:
+        symbols: The request's static symbols.
+
+    Returns:
+        The length of a symbol list; None for `dm.ALL` and for a dataset without instruments,
+        which read every symbol.
+
+    Raises:
+        BrokenGuaranteeError: For a symbol table, which `history()` reads into a list before it
+            chooses a source, or a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            return len(symbols)
+        case AllSymbols() | None:
+            return None
+        case SymbolTable():
+            problem = "the history source choice got a symbol table, which history() reads first"
+            raise BrokenGuaranteeError(library_bug(problem))
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("the history source choice", symbols))
 
 
 def warn_unfilled(

@@ -252,7 +252,7 @@ def _public_callables() -> list[tuple[str, object]]:
         for name in (
             "FetchQuery",
             "StreamQuery",
-            "SymbolStreamQuery",
+            "NoSymbolStreamQuery",
             "HistoryQuery",
             "StreamHistoryQuery",
         )

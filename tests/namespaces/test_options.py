@@ -40,10 +40,10 @@ from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
+    NoSymbolStreamQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
-    SymbolStreamQuery,
 )
 from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
@@ -193,8 +193,8 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.QUOTES, StreamHistoryQuery),
         (options.BARS, StreamHistoryQuery),
         (options.PREVIOUS_DAY_BAR, FetchQuery),
-        (options.FMV, SymbolStreamQuery),
-        (options.ADMIN_MESSAGES, StreamQuery),
+        (options.FMV, StreamQuery),
+        (options.ADMIN_MESSAGES, NoSymbolStreamQuery),
         (options.CHAIN, FetchQuery),
         (options.SNAPSHOTS, FetchQuery),
         (options.CONTRACTS, FetchQuery),
@@ -391,7 +391,7 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
     for factory, cls in (
         (m.options.trades, StreamHistoryQuery),
         (m.options.quotes, StreamHistoryQuery),
-        (m.options.fmv, SymbolStreamQuery),
+        (m.options.fmv, StreamQuery),
     ):
         q = factory(["O:AAPL250117P00150000", "O:AAPL250117C00150000"])
         assert type(q) is cls
@@ -1406,7 +1406,7 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     massive_session: dm.MassiveSession,
 ) -> None:
     query = massive_session.options.admin_messages()
-    assert type(query) is StreamQuery
+    assert type(query) is NoSymbolStreamQuery
     assert query._request.symbols is None
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):

@@ -13,6 +13,7 @@ from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
 from deephaven_massive._tables.transports import Unsplit
@@ -547,3 +548,8 @@ def test_a_split_with_an_outcome_no_case_names_is_refused() -> None:
             symbols=("X:DOTUSD",),
             split=lambda _: None,  # type: ignore[arg-type,return-value]  # the point: refused
         )
+
+
+def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="paths has no rule for a value of type object"):
+        rest_requests.fetch_paths(MOVERS, object())  # type: ignore[arg-type]  # the point: refused at run time

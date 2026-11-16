@@ -16,7 +16,7 @@ from deephaven_massive.queries import (
     HistoryQuery,
     Query,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 from deephaven_massive.queries._choice import (
     bar_stream_verbs,
@@ -88,7 +88,7 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
     ("changes", "expected"),
     [
         ({**_FETCH}, FetchQuery),
-        ({**_CHANNELS}, SymbolStreamQuery),
+        ({**_CHANNELS}, StreamQuery),
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),

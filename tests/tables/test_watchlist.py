@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import jpy
 import pytest
-from deephaven import dtypes, empty_table, new_table, time_table, update_graph
+from deephaven import dtypes, empty_table, merge, new_table, time_table, update_graph
 from deephaven.column import datetime_col, int_col, string_col
 from deephaven.stream import blink_to_append_only
 
@@ -561,7 +561,39 @@ def test_watched_rows_keeps_a_blink_table_blink_and_counts_a_repeated_symbol_onc
     release_scope(dh_exec_ctx, scope)
 
 
-def stamped(symbol: str, price: int, *, at: int | None = None, exchange: int = 1) -> Table:
+@pytest.fixture(params=["converted", "empty input-table row"])
+def watchlist_with_a_null_row(
+    request: pytest.FixtureRequest, dh_input_table: Callable[..., InputTable]
+) -> Table:
+    # A watchlist holding `A` and a null row, made the two ways a user makes one.
+    if request.param == "converted":  # `brk-b` does not convert, so its row gets a null symbol
+        listed = new_table([string_col("Symbol", ["A", "brk-b"])])
+        return dm.canonicalize_symbols(listed, dm.AssetClass.STOCKS, on_error=OnError.IGNORE)
+    watchlist = dh_input_table({"Symbol": dtypes.string})
+    watchlist.add(new_table([string_col("Symbol", ["A", None])]))
+    return watchlist
+
+
+def test_watched_rows_keeps_no_null_symbol_row_for_a_null_watchlist_row(
+    dh_exec_ctx: ExecutionContext, watchlist_with_a_null_row: Table
+) -> None:
+    # A join matches a null to a null; a data row whose symbol the library could not read
+    # (a null `Symbol`) must stay out of `last_by()` all the same.
+    watchlist = watchlist_with_a_null_row
+    pins: list[LivenessScope] = []
+    scope = new_scope()
+    with scope.open():
+        blink, publisher = blink_publisher(
+            "watched", PRICES, on_shutdown=lambda: None, release_later=pins.append
+        )
+        latest = watched_rows(blink, watchlist).last_by("Symbol")
+    # One add, so both rows reach the result in one update cycle.
+    publisher.add(new_table([string_col("Symbol", ["A", None]), int_col("Price", [1, 2])]))
+    wait_for(lambda: [tuple(r) for r in latest.iter_tuple()] == [("A", 1)])
+    release_scope(dh_exec_ctx, scope)
+
+
+def stamped(symbol: str | None, price: int, *, at: int | None = None, exchange: int = 1) -> Table:
     # One row as the library stamps it: received `at` (epoch nanoseconds), by default now.
     return new_table(
         [
@@ -738,6 +770,20 @@ def test_latest_rows_since_added_by_symbol_and_exchange_shows_only_rows_since_th
     watchlist.add(new_table([string_col("Symbol", ["A"])]))
     latest.publisher.add(stamped("A", 5, exchange=2))
     wait_for(lambda: shown() == [(2, 5)])
+    latest.release(dh_exec_ctx)
+
+
+def test_latest_rows_since_added_shows_no_null_symbol_row_for_a_null_watchlist_row(
+    dh_exec_ctx: ExecutionContext,
+    dh_to_pylist: Callable[[Table], list[dict[str, object]]],
+    watchlist_with_a_null_row: Table,
+) -> None:
+    # A join matches a null to a null; a data row whose symbol the library could not read
+    # (a null `Symbol`) must stay hidden all the same.
+    latest = latest_of(watchlist_with_a_null_row)
+    # One add, so both rows reach the result in one update cycle.
+    latest.publisher.add(merge([stamped("A", 1), stamped(None, 2)]))
+    wait_for(lambda: [r["Symbol"] for r in dh_to_pylist(latest.kept)] == ["A"])
     latest.release(dh_exec_ctx)
 
 

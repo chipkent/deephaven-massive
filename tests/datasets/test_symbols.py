@@ -27,6 +27,7 @@ from deephaven_massive._datasets.symbols import (
     forex_codes,
     is_canonical,
     is_forex_currency,
+    is_futures_contract,
     option_roots,
     refusal,
     strict_converter,
@@ -66,6 +67,9 @@ CANONICAL = [
     (FUT, "6CH5"),
     (FUT, "0NGH39"),
     (FUT, "ESZ25"),  # a year is never rewritten (and ESZ25 is not ESZ5)
+    (FUT, "0AF704"),  # daily contracts: three digits after the month code, as Massive lists
+    (FUT, "0AX627"),
+    (FUT, "GCBX602"),
     (FUT, "10YN6-10YQ6"),  # spreads, as Massive's CBOT, COMEX, NYMEX, and CME files write them
     (FUT, "GCQ6-GCZ6"),
     (FUT, "BOB 02-01 U6"),
@@ -107,6 +111,7 @@ NOT_CANONICAL = [
     (FUT, " ESZ5"),
     (FUT, "ESZ5\n"),
     (FUT, "X:ESZ5"),
+    (FUT, "0AF7041"),  # four digits after the month code
     (IDX, "SPX"),
     (IDX, "i:SPX"),
     (IDX, "I:"),
@@ -175,6 +180,16 @@ def test_every_futures_ticker_massive_writes_round_trips(
     for text in every:
         assert canonical_from_wire(FUT, text) == text
         assert dm.canonical_symbol(text, FUT) == text
+
+
+@pytest.mark.parametrize("text", ["0AF704", "0AF729", "0AX602", "0AX627", "GCBX602"])
+def test_a_daily_futures_contract_massive_lists_is_a_single_contract(text: str) -> None:
+    # Massive's active contracts list writes these daily singles with three digits after the
+    # month code; each is a contract, so the calendar looks it up, and no combo.
+    assert is_futures_contract(text)
+    assert dm.canonical_symbol_future(text) == text
+    with pytest.raises(ValueError, match=r"is a single futures contract, not a combo"):
+        dm.canonical_symbol_future_spread(text)
 
 
 @pytest.mark.parametrize(
@@ -252,6 +267,7 @@ CONVERSIONS = [
     (dm.canonical_symbol_crypto, "BTC-DAI", "X:BTCDAI"),
     (dm.canonical_symbol_crypto, "BTC-PYUSD", "X:BTCPYUSD"),
     (dm.canonical_symbol_future, "ESZ5", "ESZ5"),
+    (dm.canonical_symbol_future, "0AF704", "0AF704"),
     (dm.canonical_symbol_future_spread, "10YN6-10YQ6", "10YN6-10YQ6"),
     (dm.canonical_symbol_future_spread, "TEX 07-05 U6", "TEX 07-05 U6"),
     (dm.canonical_symbol_future_spread, "CL:BF Z6-H7-M7", "CL:BF Z6-H7-M7"),

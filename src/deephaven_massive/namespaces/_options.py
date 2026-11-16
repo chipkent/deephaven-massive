@@ -74,9 +74,9 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
+    NoSymbolStreamQuery,
     StreamHistoryQuery,
     StreamQuery,
-    SymbolStreamQuery,
 )
 
 if TYPE_CHECKING:
@@ -671,9 +671,7 @@ class OptionsNamespace(Namespace):
         )
 
     @raises_through(build_query)
-    def fmv(
-        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
-    ) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
         Each row holds a contract's fair market value and when Massive computed it. It streams only
@@ -701,11 +699,11 @@ class OptionsNamespace(Namespace):
                 fair = m.options.fmv(contract).last_by()
         """
         return build_query(
-            self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+            self._core, FMV, query_type=StreamQuery, symbols=symbols, on_error=on_error
         )
 
     @raises_through(check_policy)
-    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
+    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> NoSymbolStreamQuery:
         """OPRA's administrative messages, including FLEX trade notices, streamed in real time.
 
         Each row holds one message from one exchange: the text exactly as OPRA sends it in
@@ -731,7 +729,9 @@ class OptionsNamespace(Namespace):
                 notices = m.options.admin_messages().append_only()
                 flex = notices.where("Message.contains(`FLEX`)")  # as in the CFLEX sample
         """
-        return build_query(self._core, ADMIN_MESSAGES, query_type=StreamQuery, on_error=on_error)
+        return build_query(
+            self._core, ADMIN_MESSAGES, query_type=NoSymbolStreamQuery, on_error=on_error
+        )
 
     @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)
     def chain(

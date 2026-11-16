@@ -58,7 +58,7 @@ from deephaven_massive.namespaces._stock_financials import StocksFinancialsNames
 from deephaven_massive.queries import (
     FetchQuery,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 
 if TYPE_CHECKING:
@@ -678,9 +678,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         )
 
     @raises_through(build_query)
-    def luld(
-        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
-    ) -> SymbolStreamQuery:
+    def luld(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
         Each row holds one band update from the SIP, with its upper and lower price limits. The
@@ -708,13 +706,13 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 bands = m.stocks.luld(dm.ALL).last_by()
         """
         return build_query(
-            self._core, LULD, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+            self._core, LULD, query_type=StreamQuery, symbols=symbols, on_error=on_error
         )
 
     @raises_through(build_query)
     def imbalances(
         self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
-    ) -> SymbolStreamQuery:
+    ) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
         Each row holds one imbalance message, with the auction's type and time and the imbalance
@@ -742,13 +740,11 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 closing = m.stocks.imbalances(["AAPL", "MSFT"]).append_only()
         """
         return build_query(
-            self._core, IMBALANCES, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+            self._core, IMBALANCES, query_type=StreamQuery, symbols=symbols, on_error=on_error
         )
 
     @raises_through(build_query)
-    def fmv(
-        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
-    ) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row holds one fair market value and the time Massive computed it. It streams only on a
@@ -776,7 +772,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
                 fair = m.stocks.fmv(["AAPL"]).last_by()
         """
         return build_query(
-            self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols, on_error=on_error
+            self._core, FMV, query_type=StreamQuery, symbols=symbols, on_error=on_error
         )
 
     @raises_through(build_query, require_bool)

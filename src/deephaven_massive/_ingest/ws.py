@@ -90,6 +90,7 @@ from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
+    BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
     SessionClosedError,
@@ -98,6 +99,7 @@ from deephaven_massive._errors import (
     failure_text,
     library_bug,
     required,
+    unmatched_form,
 )
 from deephaven_massive._ingest.host_decision import real_time_note, require_real_time
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
@@ -264,6 +266,9 @@ def _pairs_to_split(asset_class: AssetClass, symbols: NormalizedSymbols) -> froz
     Returns:
         The pairs of a crypto symbol list; none for another class, `dm.ALL` (a wildcard needs
         no split), or a symbol table.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     match asset_class:
         case AssetClass.CRYPTO:
@@ -278,11 +283,13 @@ def _pairs_to_split(asset_class: AssetClass, symbols: NormalizedSymbols) -> froz
             return frozenset()  # a topic takes the symbol itself, or a forex pair's fixed halves
         case _:
             assert_never(asset_class)  # a new class decides here whether its topics need a split
-    if isinstance(symbols, tuple):
-        return frozenset(symbols)
-    if isinstance(symbols, AllSymbols | SymbolTable):
-        return frozenset()
-    assert_never(symbols)  # a new form of symbols needs its pairs decided here
+    match symbols:
+        case tuple():
+            return frozenset(symbols)
+        case AllSymbols() | SymbolTable():
+            return frozenset()
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("a stream's crypto pairs to split", symbols))
 
 
 # The connection groups of the process, by sharing key (`ConnectionGroup.attach`). Its lock is
@@ -1011,6 +1018,7 @@ class WsConnections:
         Raises:
             MassiveError: The lookup's own error, when its source is `ErrorSource.LIBRARY`: a
                 defect, which fails the stream.
+            BrokenGuaranteeError: For an outcome of a lookup with no rule here.
         """
         split: set[str] = set()
         unsplit: dict[str, Unsplit] = {}
@@ -1027,14 +1035,15 @@ class WsConnections:
                 if error.source is ErrorSource.LIBRARY:
                     raise  # a defect is never retried or shown as a waiting pair
                 return split, unsplit, pending[index:], error
-            if isinstance(found, Unsplit):
-                unsplit[symbol] = found
-            elif isinstance(found, tuple):
-                with self._lock:
-                    self.group.pairs[symbol] = found
-                split.add(symbol)
-            else:
-                assert_never(found)  # a new outcome of a lookup is decided here
+            match found:
+                case Unsplit():
+                    unsplit[symbol] = found
+                case tuple():
+                    with self._lock:
+                        self.group.pairs[symbol] = found
+                    split.add(symbol)
+                case _:
+                    raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
         return split, unsplit, [], None
 
     def _no_data(
