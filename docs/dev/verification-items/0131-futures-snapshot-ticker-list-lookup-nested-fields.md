@@ -1,16 +1,17 @@
-# 131. What a futures snapshot lookup by ticker list costs, and whether nested fields work
+# 131. How fast is a futures snapshot lookup by ticker list, and do nested fields work?
 
 Date: 2026-11-16
 
 Status: open
 
-Unknown: how long `/futures/v1/snapshot?ticker.any_of=` takes for 1, 100, and 500 tickers,
-whether a URL of 500 tickers is accepted, and whether Massive honors the nested
-`fields=details.ticker,details.product_code` its docs describe, which the OpenAPI spec the
-library is built from does not list.
+The snapshot names each ticker's product in its row, so one request could find the products of a
+batch of tickers. Its time at 1, 100, and 500 tickers, whether a 500-ticker URL is accepted, and
+whether Massive honors `fields=details.ticker,details.product_code` are unmeasured. Massive's
+docs describe that parameter, and the OpenAPI spec the library is built from does not list it.
+If the lookup is fast, the calendar can use it first, in batches of the largest size Massive
+accepts. If `fields` works, the calendar asks for those two fields only; if not, it reads whole
+rows. Until it is read, the calendar does not read the snapshot.
 
-Meanwhile the calendar does not read the snapshot.
-
-Settled by `tests/ingest/test_futures_calendar_integration.py::test_snapshot_lookup_by_ticker_list`, which times each size with and
-without `fields`, five runs each in turn, and records the rows, bytes, and keys each returns,
-or Massive's refusal.
+Read by `tests/ingest/test_futures_calendar_integration.py::test_snapshot_lookup_by_ticker_list`, on a key with futures data. It times each
+size with and without `fields`, five runs each in turn, and records the rows, tickers, bytes,
+and keys each returns, or Massive's refusal.
