@@ -623,8 +623,8 @@ class Recency(StrEnum):
 class ChannelFamily(StrEnum):
     """Which group of channels a WebSocket connection carries (internal).
 
-    `FMV` (fair market value) streams only from `business.massive.com`, the one host Massive
-    documents for it; every other channel is in the `TICK` family, whose host follows
+    `FMV` (fair market value) streams only from the one host its page documents
+    (`business.massive.com` today); every other channel is in the `TICK` family, whose host follows
     `MassiveConfig.delayed_subscriptions`, `MassiveConfig.websocket_hosts`, and Massive's recency
     label.
     """

@@ -1543,7 +1543,8 @@ def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
         notices = session.session.options.admin_messages().blink()
     assert any(
         "options.admin_messages stream" in r.getMessage()
-        and "only on the real-time feed; subscribing on delayed.test" in r.getMessage()
+        and "Massive documents it only on socket.massive.com; subscribing on delayed.test"
+        in r.getMessage()
         for r in caplog.records
     )
     session.wait(lambda s: any(status.kind is _massive.StatusKind.REFUSED for status in s.statuses))
@@ -1553,6 +1554,7 @@ def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
     assert row["State"] == "FAILED"
     assert "delayed.test/options refused the subscription to AD.*" in row["Error"]
     assert "MassiveConfig.delayed_subscriptions lists dm.Subscription.OPTIONS" in row["Error"]
+    assert "(Massive documents the options AD channel only on socket.massive.com)" in row["Error"]
     assert row["Error"].endswith(
         "options.admin_messages streams only in real time, on the plans listed at "
         + page_url(options.ADMIN_MESSAGES)

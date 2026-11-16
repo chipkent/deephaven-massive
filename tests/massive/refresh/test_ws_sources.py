@@ -22,7 +22,15 @@ from deephaven_massive._massive.refresh.hand_input import HandInput
 from deephaven_massive._massive.refresh.snapshot import DIRECTORY, Snapshot
 from deephaven_massive._massive.refresh.ws_sources import WsCoverage, channel_key, generate_ws
 from deephaven_massive._massive.spec.convert import convert_field
-from deephaven_massive._massive.spec.types import Conversion, Source, Transport, WireType, WireUnit
+from deephaven_massive._massive.spec.types import (
+    Conversion,
+    Feed,
+    FeedHost,
+    Source,
+    Transport,
+    WireType,
+    WireUnit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -158,6 +166,7 @@ def _channel(
 
 def _feed(cluster: str, channel: str) -> str:
     return (
+        "## Connection\n\n| Feed | URL |\n| --- | --- |\n"
         f"| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
         f"The channel prefix for this feed is `{channel}`.\n"
     )
@@ -431,6 +440,63 @@ def test_gate_docs_a_page_that_names_no_feed_or_two() -> None:
     }
     snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE})}, pages=pages)
     assert _problems(snapshot) == [("docs", "", "stocks/notes.md"), ("docs", "", "stocks/two.md")]
+
+
+_CONNECTION = "## Connection\n\n| Feed | URL |\n| --- | --- |\n"
+
+
+def _feed_on(*rows: str, channel: str = "T") -> str:
+    return _CONNECTION + "".join(rows) + f"\nThe channel prefix for this feed is `{channel}`.\n"
+
+
+def test_a_channel_carries_the_hosts_its_page_lists_sorted_by_feed() -> None:
+    page = _feed_on(
+        "| Real-Time | `wss://socket.massive.com/stocks` |\n",
+        "| Delayed | `wss://delayed.massive.com/stocks` |\n",
+    )
+    snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE})}, pages={"stocks/t.md": page})
+    (channel,), coverage = generate_ws(snapshot, _EMPTY)
+    expected = (
+        FeedHost(feed=Feed.DELAYED, host="delayed.massive.com"),
+        FeedHost(feed=Feed.REAL_TIME, host="socket.massive.com"),
+    )
+    assert channel.hosts == expected
+    assert coverage.hosts == {"stocks/T": expected}
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        ("| Night | `wss://night.massive.com/stocks` |\n",),
+        (
+            "| Delayed | `wss://delayed.massive.com/stocks` |\n",
+            "| Delayed | `wss://other.massive.com/stocks` |\n",
+        ),
+    ],
+    ids=["unknown feed", "a feed twice"],
+)
+def test_gate_docs_a_page_whose_feeds_cannot_be_read(rows: tuple[str, ...]) -> None:
+    pages = {"stocks/t.md": _feed_on(*rows)}
+    snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE})}, pages=pages)
+    assert _problems(snapshot) == [("docs", "", "stocks/t.md")]
+
+
+def test_gate_docs_two_pages_of_one_channel_that_list_other_hosts() -> None:
+    pages = {
+        "stocks/t.md": _feed_on("| Real-Time | `wss://socket.massive.com/stocks` |\n"),
+        "stocks/u.md": _feed_on("| Business | `wss://business.massive.com/stocks` |\n"),
+    }
+    snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE})}, pages=pages)
+    assert _problems(snapshot) == [("docs", "stocks/T", "stocks/u.md")]
+
+
+def test_two_pages_of_one_channel_that_agree_pass() -> None:
+    page = _feed_on("| Real-Time | `wss://socket.massive.com/stocks` |\n")
+    pages = {"stocks/t.md": page, "stocks/u.md": page}
+    snapshot = _snapshot({"/stocks/T": _channel({"price": _PRICE})}, pages=pages)
+    (channel,), coverage = generate_ws(snapshot, _EMPTY)
+    assert channel.only_host == "socket.massive.com"
+    assert coverage.pages["stocks/T"] == ("stocks/t.md", "stocks/u.md")
 
 
 def test_a_snapshot_without_a_websocket_specification_generates_nothing() -> None:

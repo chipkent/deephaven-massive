@@ -249,7 +249,6 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
-    real_time_only=True,
 )
 
 ADMIN_MESSAGES: Final = DatasetSpec(
@@ -263,7 +262,6 @@ ADMIN_MESSAGES: Final = DatasetSpec(
     # contract outside its free text, which the library never parses.
     names_symbols=False,
     # Massive's page documents only the real-time feed for the channel.
-    real_time_only=True,
 )
 
 _SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")

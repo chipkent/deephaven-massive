@@ -15,7 +15,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, generate, lexicon, overrides, render
+from deephaven_massive._massive import spec
+from deephaven_massive._massive.refresh import (
+    docs,
+    exclusions,
+    generate,
+    lexicon,
+    overrides,
+    render,
+)
 from deephaven_massive._massive.refresh import snapshot as snapshot_module
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
@@ -61,6 +69,22 @@ def test_the_generated_files_match_the_snapshot_byte_for_byte(tmp_path: Path) ->
     assert written == [tmp_path / path.name for path in _COMMITTED]
     for committed in _COMMITTED:
         assert (tmp_path / committed.name).read_bytes() == committed.read_bytes(), committed.name
+
+
+def test_each_channel_carries_the_hosts_its_vendored_page_lists(real: generate.Generated) -> None:
+    # The hosts the library streams from are Massive's: a page that moves a host and a
+    # generated file that was not refreshed differ here, as well as in the parity test above.
+    pages = Snapshot.load().websocket_pages
+    for channel in real.ws:
+        listed = {
+            (row.label, row.host)
+            for name in real.ws_coverage.pages[channel.key]
+            for row in docs.connections(pages[name])
+        }
+        assert listed == {(h.feed.value, h.host) for h in channel.hosts}, channel.key
+        assert channel.hosts, channel.key
+    committed = {c.key: c.hosts for c in spec.sources(Transport.WS).values()}
+    assert committed == {c.key: c.hosts for c in real.ws}
 
 
 def test_no_link_syntax_survives_in_the_descriptions() -> None:
@@ -403,7 +427,11 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         "## Columns\n\n| Column | Type | Description |\n|---|---|---|\n"
         "| `price` | number | The price. |\n\n## Example Data\n\n| price |\n| --- |\n"
     )
-    feed = "`wss://socket.massive.com/stocks`\nThe channel prefix for this feed is `1`.\n"
+    feed = (
+        "## Connection\n\n| Feed | URL |\n| --- | --- |\n"
+        "| Real-Time | `wss://socket.massive.com/stocks` |\n\n"
+        "The channel prefix for this feed is `1`.\n"
+    )
     snapshot = Snapshot(
         openapi={"paths": {}},
         llms="",

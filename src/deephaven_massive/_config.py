@@ -74,7 +74,6 @@ __all__ = [
     "CONFIG_FILE_VARIABLE",
     "DELAYED_HOST",
     "DELAYED_PREFIX",
-    "FMV_HOST",
     "MIN_RECONNECT_BACKOFF",
     "NO_ACK_RESEND",
     "REALTIME_HOST",
@@ -112,14 +111,16 @@ round awaits its answer for `subscription_confirmation_timeout`, which must ther
 """
 
 REALTIME_HOST: Final = "socket.massive.com"
-"""Massive's real-time WebSocket feed, and the one documented host of forex and crypto."""
+"""Massive's real-time WebSocket feed, and the one documented host of forex and crypto.
+
+The host every channel's page lists as its `Real-Time` feed, which a test checks against the
+generated channels."""
 
 DELAYED_HOST: Final = "delayed.massive.com"
-"""Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures."""
+"""Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures.
 
-FMV_HOST: Final = "business.massive.com"
-"""The one WebSocket host Massive documents for the fair-market-value (FMV) channels
-(`vendor/massive/websocket/<class>/fair-market-value.md`), real-time only."""
+The host every channel's page lists as its `Delayed` feed, which a test checks against the
+generated channels."""
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"

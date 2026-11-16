@@ -229,7 +229,6 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "stocks/FMV"): ticker_key("FmvLastUpdated")},
-    real_time_only=True,
 )
 
 # --- Snapshots and daily summaries -------------------------------------------------------------

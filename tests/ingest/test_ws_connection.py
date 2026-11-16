@@ -22,6 +22,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.feeds import channel_only_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
@@ -534,20 +535,52 @@ def test_one_acknowledgement_frame_rewrites_the_row_once(
     ws_session.session.release(result)
 
 
-def test_an_index_value_refusal_names_their_documented_host(ws_session: WsSession) -> None:
+@pytest.mark.parametrize(
+    ("asset_class", "topics", "channel"),
+    [
+        (AssetClass.INDICES, ("V.I:SPX", "A.I:SPX"), "V"),
+        (AssetClass.OPTIONS, ("AD.*",), "AD"),
+    ],
+    ids=["index values", "admin messages"],
+)
+def test_a_refusal_names_the_one_host_a_channel_s_page_documents(
+    ws_session: WsSession, *, asset_class: AssetClass, topics: tuple[str, ...], channel: str
+) -> None:
+    # Index values are documented only on the Business feed and the admin messages only on the
+    # real-time feed: a connection on another host names that host for the channel alone.
     connection = ws_connection.Connection(
         ws_session.connections.group,
         exec_ctx=ws_session.session._core.exec_ctx,
-        url="wss://socket.test/indices",
-        asset_class=AssetClass.INDICES,
+        url=f"wss://delayed.test/{asset_class.value}",
+        asset_class=asset_class,
         family=ChannelFamily.TICK,
-        decision=REALTIME,
+        decision=HostDecision("delayed.test", Recency.DELAYED, "delayed_subscriptions"),
         sessions=None,
     )
-    connection._refused(("V.I:SPX",), "not authorized")
+    connection._refused(topics, "not authorized")
     assert connection._last_error is not None
-    assert "(Massive documents index values only on business.massive.com)" in connection._last_error
-    assert "websocket_hosts[AssetClass.INDICES]" in connection._last_error
+    only = channel_only_host(asset_class, channel)
+    assert connection._last_error.endswith(
+        f" (Massive documents the {asset_class.value} {channel} channel only on {only})"
+    )
+    assert connection._last_error.count("Massive documents") == 1  # not for the A channel
+    connection.close()
+    assert connection.join(TIMEOUT)
+
+
+def test_a_refusal_on_the_one_documented_host_adds_no_host(ws_session: WsSession) -> None:
+    connection = ws_connection.Connection(
+        ws_session.connections.group,
+        exec_ctx=ws_session.session._core.exec_ctx,
+        url="wss://socket.test/options",
+        asset_class=AssetClass.OPTIONS,
+        family=ChannelFamily.TICK,
+        decision=HostDecision(REALTIME_HOST, Recency.REALTIME, "real-time"),
+        sessions=None,
+    )
+    connection._refused(("AD.*",), "not authorized")
+    assert connection._last_error is not None
+    assert "Massive documents" not in connection._last_error
     connection.close()
     assert connection.join(TIMEOUT)
 

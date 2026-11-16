@@ -1,14 +1,15 @@
 """Which WebSocket host serves an asset class and channel family: the user's choice, checked.
 
-Massive serves each WebSocket cluster (`/stocks`, `/options`, ...) from several hosts:
-`socket.massive.com`, the real-time feed; `delayed.massive.com`, the delayed feed (15 minutes
-behind, 10 for futures); and `business.massive.com`, the one host Massive documents for the
-fair-market-value (FMV) channels. The user chooses the feed per subscription with
-`MassiveConfig.delayed_subscriptions`, and the choice is deterministic: a stream never moves
-between feeds. This module decides the host once per (asset class, channel family), before the
-first connection, and never by opening a connection to try:
+Massive serves each WebSocket cluster (`/stocks`, `/options`, ...) from several hosts, which
+each channel's page lists (`_datasets.feeds`): `socket.massive.com`, the real-time feed;
+`delayed.massive.com`, the delayed feed (15 minutes behind, 10 for futures); and, for the
+fair-market-value (FMV) channels, the one host their pages list, `business.massive.com` today.
+The user chooses the feed per subscription with `MassiveConfig.delayed_subscriptions`, and the
+choice is deterministic: a stream never moves between feeds. This module decides the host once
+per (asset class, channel family), before the first connection, and never by opening a
+connection to try:
 
-- the FMV family is always `business.massive.com`;
+- the FMV family always uses the one host its class's FMV page lists (`feeds.fmv_host`);
 - a TICK host pinned in `MassiveConfig.websocket_hosts` is used as is (the configuration has checked
   it against `delayed_subscriptions`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
@@ -21,15 +22,15 @@ first connection, and never by opening a connection to try:
   nothing is guessed: a refused snapshot, an undocumented label, or no label at all streams
   from the real-time host, and a refusal from Massive fails the refused streams.
 
-A dataset Massive documents only in real time (`DatasetSpec.real_time_only`: fair market value,
-the options admin messages) gets its family's decision like any other stream: the FMV family's
-host is fixed, and the admin messages follow their class's feed. Whether Massive serves it there
-is Massive's answer, so a refused subscription fails the stream with Massive's text, and the
-library never refuses it first.
+A dataset whose pages document one host (fair market value, the options admin messages, the
+limit-up-limit-down bands; `feeds.dataset_hosts`) gets its family's decision like any other
+stream: the FMV family's host is its page's, and the others follow their class's feed. Whether
+Massive serves it there is Massive's answer, so a refused subscription fails the stream with
+Massive's text and the documented host (`refusal_note`), and the library never refuses it first.
 
-Recency follows the host (`recency_of`): the real-time and FMV hosts serve real-time
-data, the delayed host delayed data, and any other pinned host `UNKNOWN`, which is never shown
-as real-time.
+Recency follows the feed Massive's pages give the host (`recency_of`): a `Real-Time` or
+`Business` host is shown real-time, a `Delayed` host delayed, and any other pinned host
+`UNKNOWN`, which is never shown as real-time.
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
@@ -45,8 +46,9 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._config import DELAYED_HOST, DELAYED_PREFIX, FMV_HOST, REALTIME_HOST
+from deephaven_massive._config import DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
 from deephaven_massive._datasets.column_reference import page_url
+from deephaven_massive._datasets.feeds import dataset_hosts, fmv_host, host_feed
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -61,6 +63,7 @@ from deephaven_massive._ingest.recency_labels import (
     read_labels,
 )
 from deephaven_massive._ingest.rest_rows import is_error_row
+from deephaven_massive._massive import Feed
 from deephaven_massive._tables.transports import HostDecision
 
 if TYPE_CHECKING:
@@ -70,13 +73,15 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = [
+    "FEED_RECENCY",
     "FUTURES_PROBE_CONTRACTS",
+    "ONE_FEED_NOTES",
     "SNAPSHOT_PROBES",
     "SnapshotAnswer",
     "SnapshotProbe",
     "decide",
-    "real_time_note",
     "recency_of",
+    "refusal_note",
     "refused_snapshot",
     "unlabelled",
 ]
@@ -179,6 +184,16 @@ def refused_snapshot(evidence: str) -> bool:
     )
 
 
+FEED_RECENCY: Final[Mapping[Feed, Recency]] = {
+    Feed.REAL_TIME: Recency.REALTIME,
+    Feed.DELAYED: Recency.DELAYED,
+    # The fair-market-value channels' feed, which Massive's FMV pages document only in real
+    # time. A host pinned to it for another channel is shown real-time too.
+    Feed.BUSINESS: Recency.REALTIME,
+}
+"""The recency a host's data is shown with, by the feed Massive's pages give the host."""
+
+
 def recency_of(host: str) -> Recency:
     """Return the recency of a WebSocket host's data.
 
@@ -186,12 +201,13 @@ def recency_of(host: str) -> Recency:
         host: The hostname.
 
     Returns:
-        `REALTIME` for the real-time and FMV hosts, `DELAYED` for a delayed feed (a host
-        whose name starts with `delayed.`), and `UNKNOWN` for any other (a pinned host the
-        library does not know).
+        The recency of the feed Massive's pages give the host (`FEED_RECENCY`); for a host
+        no page lists, `DELAYED` for a delayed feed (a name that starts with `delayed.`) and
+        `UNKNOWN` for any other (a pinned host the library does not know).
     """
-    if host in (REALTIME_HOST, FMV_HOST):
-        return Recency.REALTIME
+    feed = host_feed(host)
+    if feed is not None:
+        return FEED_RECENCY[feed]
     if host.startswith(DELAYED_PREFIX):
         return Recency.DELAYED
     return Recency.UNKNOWN
@@ -290,7 +306,8 @@ def decide(
 ) -> HostDecision:
     """Decide the WebSocket host of an asset class and channel family.
 
-    The rules, in order: the FMV family is `business.massive.com`, whatever the settings; a TICK
+    The rules, in order: the FMV family uses the host its class's FMV page lists, whatever the
+    settings; a TICK
     host pinned in
     `websocket_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
     uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
@@ -326,7 +343,9 @@ def decide(
     subscription = subscription_of(asset_class)
     listed = subscription in delayed_subscriptions
     if family is ChannelFamily.FMV:
-        return HostDecision(FMV_HOST, Recency.REALTIME, "FMV channel's documented host")
+        return HostDecision(
+            fmv_host(asset_class), Recency.REALTIME, "FMV channel's documented host"
+        )
     pinned = websocket_hosts.get(asset_class)
     if pinned is not None:
         return HostDecision(pinned, recency_of(pinned), "websocket_hosts")
@@ -378,18 +397,36 @@ def _from_snapshot(
     return _from_labels(asset_class, subscription=subscription, labels=labels)
 
 
-def real_time_note(spec: DatasetSpec) -> str:
-    """Say that a dataset streams only in real time, and where its plans are listed.
+ONE_FEED_NOTES: Final[Mapping[Feed, str]] = {
+    Feed.REAL_TIME: "{name} streams only in real time, on the plans listed at {page}",
+    Feed.DELAYED: "Massive documents {name} only on its Delayed feed, {host}; its plans are "
+    "listed at {page}",
+    Feed.BUSINESS: "Massive documents {name} only on its Business feed, {host}; its plans are "
+    "listed at {page}",
+}
+"""What a refusal of a dataset documented on one feed adds, by that feed."""
 
-    Massive's refusal of a real-time-only stream's subscription adds it, so the user learns that
-    the dataset's documented feed is the real-time one, and finds on its generated page what
-    Massive's documentation says about it.
+
+def refusal_note(spec: DatasetSpec) -> str:
+    """Say where Massive documents a dataset served on one feed, and where its plans are listed.
+
+    Massive's refusal of such a stream's subscription adds it, so the user learns the one feed
+    Massive's pages document for the dataset, and finds on its generated page what Massive's
+    documentation says about its plans. Only a dataset whose pages document the real-time
+    feed alone is said to stream only in real time: a page that lists another feed alone says
+    where the channel is served, not how recent its data is.
 
     Args:
-        spec: A real-time-only dataset.
+        spec: A WebSocket dataset.
 
     Returns:
         For example `"options.admin_messages streams only in real time, on the plans listed at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"`.
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"`,
+        or `"Massive documents stocks.fmv only on its Business feed, business.massive.com; its
+        plans are listed at ..."`; `""` for a dataset whose pages document several hosts.
     """
-    return f"{spec.name} streams only in real time, on the plans listed at {page_url(spec)}"
+    hosts = dataset_hosts(spec)
+    if len(hosts) != 1:
+        return ""
+    (only,) = hosts
+    return ONE_FEED_NOTES[only.feed].format(name=spec.name, host=only.host, page=page_url(spec))

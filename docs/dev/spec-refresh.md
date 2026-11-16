@@ -33,6 +33,11 @@ gate, and what to do when a refresh adds something new.
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
 
+Each WebSocket channel in `ws.json` also carries the hosts its page's "Connection" table
+lists, one per feed (`Real-Time`, `Delayed`, `Business`). The library streams from those
+hosts and names them in its errors, so a host Massive moves arrives with the next refresh, and
+a feed label the refresh does not know stops it.
+
 A schema is fixed before data arrives, merged at run time from the generated files and never
 inferred from data: a live table needs its full column set before its first row, the first
 message may omit optional fields, and two sessions must agree on a shape. Each dataset page

@@ -83,8 +83,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, assert_never
 
+from deephaven_massive._datasets.feeds import dataset_hosts
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -100,7 +101,7 @@ from deephaven_massive._errors import (
     required,
     unmatched_form,
 )
-from deephaven_massive._ingest.host_decision import real_time_note
+from deephaven_massive._ingest.host_decision import refusal_note
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -442,13 +443,15 @@ class WsConnections:
         symbols = () if pairs else request.symbol_key()  # subscribed once split
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = self._resolve(asset_class, spec.channel_family)
-        if spec.real_time_only and decision.recency is not Recency.REALTIME:
+        documented = dataset_hosts(spec)
+        if len(documented) == 1 and documented[0].host != decision.host:
             # Massive's answer decides: the library refuses nothing it might serve.
             logger.info(
-                "%s stream %d: Massive documents it only on the real-time feed; subscribing on "
-                "%s (%s), so Massive's answer decides whether it streams",
+                "%s stream %d: Massive documents it only on %s; subscribing on %s (%s), so "
+                "Massive's answer decides whether it streams",
                 spec.name,
                 stream_id,
+                documented[0].host,
                 decision.host,
                 decision.evidence,
             )
@@ -494,7 +497,7 @@ class WsConnections:
                 wanted,
                 topics,
                 static,
-                refusal_note=real_time_note(spec) if spec.real_time_only else "",
+                refusal_note=refusal_note(spec),
             )
             if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
                 with self._lock:

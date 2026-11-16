@@ -42,4 +42,4 @@ when this was decided.
 
 ## Rule
 
-`src/deephaven_massive/_datasets/catalog.py`, "real_time_only".
+`src/deephaven_massive/_ingest/host_decision.py`, "the library never refuses it first".

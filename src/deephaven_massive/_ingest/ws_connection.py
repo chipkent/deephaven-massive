@@ -63,7 +63,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive import _massive
-from deephaven_massive._config import DELAYED_PREFIX, FMV_HOST, REALTIME_HOST, delayed_fix
+from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
+from deephaven_massive._datasets.feeds import FMV_CHANNEL, channel_only_host
 from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
@@ -184,9 +185,6 @@ CONNECTION_SETTINGS: Final = (
 one value of each, so only sessions whose values are all equal share connections
 (`ConnectionGroup`). `rest_base_url` is one because the group's futures schedule calendar reads
 through any of its sessions' REST clients, which must all read the same API."""
-
-_FMV_CHANNEL: Final = "FMV"
-"""The fair-market-value channel, every class's one channel of the FMV family."""
 
 _group_numbers: Final = itertools.count(1)
 """Numbers the connection groups of the process, for their threads' names."""
@@ -340,8 +338,8 @@ class ConnectionStream:
         static: True for `dm.ALL` and a symbol list, False for a reactive symbol table, whose
             topics the options cap may defer.
         refusal_note: What the error of a refused subscription adds for this stream: for a
-            real-time-only dataset, its documented feed and its page
-            (`host_decision.real_time_note`); `""` for any other.
+            dataset Massive documents on one feed, that feed and its page
+            (`host_decision.refusal_note`); `""` for any other.
     """
 
     stream_id: int
@@ -1274,7 +1272,7 @@ class Connection:
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
-        A real-time-only dataset's streams add its documented feed and its page
+        The streams of a dataset Massive documents on one feed add that feed and its page
         (`ConnectionStream.refusal_note`), and only theirs.
 
         Args:
@@ -1316,8 +1314,8 @@ class Connection:
             refusal, and that REST reads the data instead; on the real-time feed otherwise, how
             to use Massive's delayed feed instead; for fair-market-value topics, the one host
             Massive documents for them, which `websocket_hosts` never changes; on another
-            host, that `websocket_hosts` chooses it; and for index values, the one host Massive
-            documents for them.
+            host, that `websocket_hosts` chooses it. Then, for each refused channel whose page
+            documents one host other than this connection's (index values, say), that host.
         """
         subscription = subscription_of(self.asset_class)
         evidence = self.decision.evidence
@@ -1358,10 +1356,10 @@ class Connection:
                 f"{subscription} data delayed, use its delayed feed: "
                 f"{delayed_fix(subscription)}"
             )
-        elif any(channel_of(t) == _FMV_CHANNEL for t in refused):
+        elif any(channel_of(t) == FMV_CHANNEL for t in refused):
             hint = (
-                f"fair-market-value (FMV) data streams only from {FMV_HOST}, the one host "
-                "Massive documents for it; MassiveConfig.websocket_hosts never applies to FMV"
+                f"fair-market-value (FMV) data streams only from {self.decision.host}, the one "
+                "host Massive documents for it; MassiveConfig.websocket_hosts never applies to FMV"
             )
         else:
             hint = (
@@ -1369,8 +1367,13 @@ class Connection:
                 f"host; MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] chooses "
                 "the host"
             )
-        if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
-            hint += " (Massive documents index values only on business.massive.com)"
+        for channel in sorted({channel_of(t) for t in refused}):
+            only = channel_only_host(self.asset_class, channel)
+            if only is not None and only != self.decision.host:
+                hint += (
+                    f" (Massive documents the {self.asset_class.value} {channel} channel only on "
+                    f"{only})"
+                )
         return hint
 
     def _record_drift(self, channel: str, drift: DriftReport) -> None:

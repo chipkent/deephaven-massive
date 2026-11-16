@@ -451,12 +451,6 @@ class DatasetSpec:
             other transport, not bars, may set it False, and then no source declares a `symbol`
             key; every source of such a dataset in a kind declares its `time` key (the
             `declared keys` gate).
-        real_time_only: True for a stream Massive documents only in real time, with no delayed
-            feed: fair market value, and the options admin messages, whose page documents only
-            the real-time feed. Its streams open like any other, and when Massive refuses one,
-            the error adds the documented feed and the dataset's page
-            (`host_decision.real_time_note`). False, the default, otherwise. Only a dataset with
-            channels may set it.
     """
 
     name: str
@@ -493,7 +487,6 @@ class DatasetSpec:
     latest_is_current: bool = False
     refused_alternative: str | None = None
     names_symbols: bool = True
-    real_time_only: bool = False
 
     def __post_init__(self) -> None:
         """Check the spec's internal consistency; nothing here reads the generated files.
@@ -520,7 +513,7 @@ class DatasetSpec:
                 channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
                 dataset without a fetch path, or whose fetch path is a reference endpoint, sets
                 `serves_current_data` or `latest_is_current`, or a dataset sets both; a
-                dataset without channels sets `real_time_only`; a dataset whose rows name no
+                dataset whose rows name no
                 symbol is not a stream alone (`_check_symbol_free`); or
                 the transports match no query class (see the
                 class docstring and `_check_verbs`).
@@ -581,8 +574,8 @@ class DatasetSpec:
 
         Raises:
             ValueError: If a dataset without a fetch path, or whose fetch path is a reference
-                endpoint, sets `serves_current_data` or `latest_is_current`; a dataset sets
-                both; or a dataset without channels sets `real_time_only`.
+                endpoint, sets `serves_current_data` or `latest_is_current`; or a dataset sets
+                both.
         """
         if (self.serves_current_data or self.latest_is_current) and (
             self.fetch_path is None or REFERENCE_PATH.match(self.fetch_path)
@@ -597,8 +590,6 @@ class DatasetSpec:
                 f"{self.name}: a dataset serves current data or computes its latest value from "
                 "it, not both"
             )
-        if self.real_time_only and not self.channels:
-            raise ValueError(f"{self.name}: only a stream (with channels) can be real-time only")
 
     def _check_summary(self) -> None:
         """Check that the summary is one sentence: one line of text that ends in a period.

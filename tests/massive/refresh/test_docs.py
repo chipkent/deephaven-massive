@@ -146,6 +146,8 @@ def test_a_page_with_two_endpoints_is_rejected() -> None:
 
 _FEED = """### Trades
 
+## Connection
+
 | Feed | URL |
 | --- | --- |
 | Delayed | `wss://delayed.massive.com/stocks` |
@@ -175,6 +177,34 @@ def test_a_page_without_a_channel_prefix_has_no_feed() -> None:
 def test_an_ambiguous_feed_is_rejected(page: str) -> None:
     with pytest.raises(docs.DocsError, match="one channel and one cluster"):
         docs.feed(page)
+
+
+def test_connections_reads_each_feed_and_its_url() -> None:
+    assert docs.connections(_FEED) == [
+        docs.DocConnection(label="Delayed", host="delayed.massive.com", cluster="stocks"),
+        docs.DocConnection(label="Real-Time", host="socket.massive.com", cluster="stocks"),
+    ]
+
+
+def test_a_page_without_a_connection_table_has_no_connections() -> None:
+    assert docs.connections("# Overview\n\nSome prose.\n") == []
+
+
+@pytest.mark.parametrize(
+    ("page", "message"),
+    [
+        (_FEED + "\n## Connection\n\n| Feed | URL |\n| --- | --- |\n", "2 Connection tables"),
+        (
+            _FEED.replace("| Real-Time | `wss://socket.massive.com/stocks` |", "| Real-Time | x |"),
+            "unreadable Connection row",
+        ),
+        ("## Connection\n\n| Feed | URL |\n| Real-Time | y |\n", "unreadable Connection header"),
+    ],
+    ids=["two tables", "a row without a URL", "no separator"],
+)
+def test_an_unreadable_connection_table_is_rejected(page: str, message: str) -> None:
+    with pytest.raises(docs.DocsError, match=message):
+        docs.connections(page)
 
 
 # Flat-file pages.
