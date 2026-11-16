@@ -702,6 +702,8 @@ on_error:
   noncanonical_symbols: raise
   unreadable_symbols: raise
   unavailable_symbols: raise
+  unreadable_keys: raise
+  unconvertible_values: raise
   malformed_rows: log
   refused_venues: raise
 ```

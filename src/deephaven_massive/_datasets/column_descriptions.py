@@ -12,7 +12,7 @@ Each column of a dataset schema carries one description, chosen for the dataset 
    the wire key and quoted field description behind each source.
 
 A dataset's note on a column follows its description. The derived columns no source carries,
-`OPTION_ROOT` and `RAW_SYMBOL`, take the library's own sentences (`DERIVED_SENTENCES`), and
+`OPTION_ROOT`, take the library's own sentences (`DERIVED_SENTENCES`), and
 `OptionRoot` on a dataset of options and other rows ends with `OTHER_ROWS`. A column of nested
 values kept as JSON text ends with `JSON_TEXT_NOTE`; `with_sentence` adds each closing sentence.
 
@@ -48,7 +48,6 @@ __all__ = [
     "KEY_SENTENCES",
     "OPTION_ROOT",
     "OTHER_ROWS",
-    "RAW_SYMBOL",
     "SYMBOL",
     "TRANSPORT_LABELS",
     "TRANSPORT_ORDER",
@@ -86,24 +85,12 @@ goes on to name the wire key or request parameter behind it on each transport.""
 OPTION_ROOT: Final = "OptionRoot"
 """The derived column of every options dataset with a `Symbol`: the OCC root of the symbol."""
 
-RAW_SYMBOL: Final = "RawSymbol"
-"""The derived column of a dataset that reads its symbol from rows, in a session whose
-`unreadable_symbols` is `LOG` (the default) or `IGNORE`: the text of a symbol the library could
-not read."""
-
 DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     OPTION_ROOT: (
         "The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its "
         "last 15 characters (expiry, type, and strike), such as `SPXW` for "
         "`O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract "
         "keeps its own root, such as `AAPL1`."
-    ),
-    RAW_SYMBOL: (
-        "The symbol exactly as Massive sent it, on a row whose symbol the library can't read. "
-        "That row's `Symbol` is null. Null on every other row. "
-        "When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is "
-        "`dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the "
-        "call's own `on_error` keeps it."
     ),
 }
 """The library's description of each derived column."""
@@ -160,9 +147,8 @@ _FINISHED_ROWS: Final = (
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 
 _KEPT_STAMP: Final = (
-    "A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps "
-    "that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which "
-    "day it covers is not known."
+    "A bar of a day or longer stamped at a time or on a day Massive is not known to use is "
+    "withheld, with a WARNING, since which day it covers is not known."
 )
 """What happens to a bar whose stamp the library does not expect, said on `TimestampStart`."""
 

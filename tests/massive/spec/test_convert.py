@@ -46,7 +46,11 @@ def test_a_double_takes_any_number_but_not_a_bool() -> None:
     assert convert(WireType.DOUBLE, 3) == 3.0
     assert type(convert(WireType.DOUBLE, 3)) is float
     assert convert(WireType.DOUBLE, 2.5) == 2.5
-    for value in (False, "2.5", 10**400, [1.0]):
+    # Every integer a double holds exactly converts, however large; one it would round does not.
+    assert convert(WireType.DOUBLE, 2**53) == 2.0**53
+    assert convert(WireType.DOUBLE, 2**60) == 2.0**60
+    assert convert(WireType.DOUBLE, -(2**53)) == -(2.0**53)
+    for value in (False, "2.5", 10**400, [1.0], 2**53 + 1, -(2**60) - 1):
         _refused(WireType.DOUBLE, value)
 
 

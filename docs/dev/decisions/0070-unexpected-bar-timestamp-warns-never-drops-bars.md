@@ -2,7 +2,7 @@
 
 Date: 2026-10-30
 
-Status: accepted
+Status: partly superseded: a bar at an unexpected stamp kept with a null `Date`, by [112](0112-data-table-holds-only-rows-read-whole-unreadable-rows-withheld.md)
 
 ## Question
 

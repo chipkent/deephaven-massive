@@ -49,7 +49,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `details.ticker`: "The ticker symbol for the asset. From the `details` object: The details for this contract." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). |
 | `TodaysChange` | double | The value of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
 | `TodaysChangePerc` | double | The percent of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
@@ -107,7 +106,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `details.ticker` |
 | `OptionRoot` | `details.ticker` |
-| `RawSymbol` | `details.ticker` |
 | `BreakEvenPrice` | `break_even_price` |
 | `TodaysChange` | `day.change` |
 | `TodaysChangePerc` | `day.change_percent` |

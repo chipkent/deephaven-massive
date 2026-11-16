@@ -565,7 +565,7 @@ def test_a_connection_skips_a_session_that_is_gone(
     monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     ws_session.on_loop(connection, connection._write_row)
     drift = _massive.DriftReport(extra=frozenset({"zz"}))
-    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift, dropped={}))
+    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift))
     assert written == []
     monkeypatch.undo()
     assert ws_session.on_loop(
@@ -1110,22 +1110,6 @@ def test_buffered_rows_are_shown_until_they_are_published(
 _URL = "wss://socket.test/stocks"
 
 
-def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSession) -> None:
-    result = ws_session.query(TRADES, ["AAPL"]).blink()
-    ws_session.subscribed("T.AAPL")
-    connection = ws_session.connection()
-    symbols = ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
-    unread = _massive.RowMark(
-        rows=tuple(range(len(symbols))),
-        fields=("SipTimestamp",) * len(symbols),
-        reasons=("no t",) * len(symbols),
-        symbols=symbols,
-    )
-    assert connection._dropped_symbols(unread) == {"BRK.A": 2, "MSFT": 1}
-    assert connection._dropped_symbols(None) == {}
-    del result
-
-
 def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     ws_session: WsSession, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1148,9 +1132,10 @@ def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     [dropped] = [m for m in caplog.messages if m.startswith("cannot place a T row for AAPL")]
     assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
-    # The odd rows failed no stream: stream 1 got both rows it could read.
+    # The odd rows failed no stream: stream 1 got the one row read whole; the row with a bad
+    # price was withheld, and the timeless one counts as dropped traffic.
     assert summary.startswith(
-        f"{_URL}: last 60 s: 1 data batches, rows T=2, 1 dropped; rows per stream 1 [1=2], "
+        f"{_URL}: last 60 s: 1 data batches, rows T=2, 1 dropped; rows per stream 1 [1=1], "
         "streams with no rows 1 [2]; 2 of 2 topics acknowledged 2 [T.AAPL, T.MSFT], added 2 "
         "[T.AAPL, T.MSFT], removed 0 [], 0 pending, 0 with no acknowledgement; last data T "
     )

@@ -41,7 +41,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. | REST, flat files, WebSocket |
 | `Price` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). | REST, flat files, WebSocket |
 | `Size` | double | The size of a trade (also known as volume). | REST, flat files, WebSocket |
 | `Conditions` | long[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket |
@@ -61,7 +60,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | request | `ticker` | `pair` |
 | `Date` |  |  |  |
 | `Timestamp` | `participant_timestamp` | `participant_timestamp` | `t` |
-| `RawSymbol` | request | `ticker` | `pair` |
 | `Price` | `price` | `price` | `p` |
 | `Size` | `size` | `size` | `s` |
 | `Conditions` | `conditions` | `conditions` | `c` |

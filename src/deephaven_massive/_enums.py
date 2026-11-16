@@ -486,8 +486,8 @@ class OnError(StrEnum):
       under `noncanonical_symbols` is the exception: it fails the whole result.
     - `LOG`: skip the value and keep going. Each distinct value is logged once, up to a fixed
       number of values: at WARNING, or at ERROR for a library defect to report. A stream or `poll()`
-      table names each value it skips in its `Error` in `m.streams()`. Under
-      `unreadable_symbols` a bad row of Massive's data is kept, with the text in `RawSymbol`.
+      table names each value it skips in its `Error` in `m.streams()`. A row of Massive's data
+      the library can't read whole is never published, under any setting.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Each cause has its own setting in `dm.ErrorPolicy`, set for the session

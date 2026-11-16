@@ -206,7 +206,7 @@ def test_stock_ticker_spellings_the_library_cannot_read(
 
     Reads one page of stock tickers of each type `WARRANT`, `UNIT`, `RIGHT`, and `PFD`, and
     one page of three partner datasets, and records every ticker `dm.canonical_symbol_stock`
-    refuses: a row with such a ticker gets a null `Symbol` and keeps the text in `RawSymbol`.
+    refuses: a row with such a ticker is withheld from the table and reported.
     Passes when the grammar reads every ticker of the four types; another spelling must join
     the grammar or be left to the handling of unknown symbols. The partner pages are evidence
     only, since they also hold tickers of other markets (ETF Global's currency instruments,

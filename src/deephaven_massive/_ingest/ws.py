@@ -16,12 +16,11 @@ everything else belongs here:
   `EntitlementError`; nothing tears down the connection, and no connection moves to another
   host. A refusal that names no topic applies to the whole step in flight.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
-  them. A row whose key cannot be read is dropped and counted, and fails no stream; a value
-  that does not fit is null. A connection logs one WARNING per outage, and one when it goes
-  silent during its
-  market's trading hours (`NO_FRAMES_WARNING`), each with its recovery at INFO. Drift is
-  recorded on the connection's `SchemaDrift` here and handed to the flush thread for the
-  streams' rows.
+  them. A row the library cannot read whole is withheld, counted, and reported, and fails only
+  a stream whose policy is `RAISE` for its cause. A connection logs one WARNING per outage,
+  and one when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each
+  with its recovery at INFO. Drift is recorded on the connection's `SchemaDrift` here and
+  handed to the flush thread for the streams' rows.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
@@ -570,7 +569,7 @@ class WsConnections:
         with self._lock:
             plan = self._plans.get((spec, channel))
         if plan is None:
-            built = ChannelPlan.build(core.catalog, spec, channel, raw_symbol=core.raw_symbol)
+            built = ChannelPlan.build(core.catalog, spec, channel)
             with self._lock:
                 plan = self._plans.setdefault((spec, channel), built)
         return plan

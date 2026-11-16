@@ -695,6 +695,8 @@ def test_the_error_policy_example_matches_its_settings_file(
         noncanonical_symbols=dm.OnError.RAISE,
         unreadable_symbols=dm.OnError.RAISE,
         unavailable_symbols=dm.OnError.RAISE,
+        unreadable_keys=dm.OnError.RAISE,
+        unconvertible_values=dm.OnError.RAISE,
         malformed_rows=dm.OnError.LOG,
         refused_venues=dm.OnError.RAISE,
     )
