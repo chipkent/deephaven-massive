@@ -89,7 +89,7 @@ from deephaven_massive._massive.spec.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Generator, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from concurrent.futures import Executor, Future
     from types import TracebackType
 
@@ -685,9 +685,7 @@ class FlatFile:
                 sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
-                self._mark_unfit(
-                    sent, failed, column, keyed=keyed, symbols=symbols, marker=marker, odd=odd
-                )
+                self._mark_unfit(sent, failed, column, symbols=symbols, marker=marker, odd=odd)
             arrays.append(values)
         rows = pa.RecordBatch.from_arrays(arrays, names=[c.column for c in plan.columns])
         return rows, DriftReport(unconvertible=frozenset(odd), samples=odd), marker.marks()
@@ -698,28 +696,24 @@ class FlatFile:
         failed: pa.Array,
         column: ReadColumn,
         *,
-        keyed: Collection[int],
         symbols: pa.Array,
         marker: RowMarker,
         odd: dict[str, DriftSample],
     ) -> None:
         """Mark the rows whose text of one header does not parse, and record the header's drift.
 
-        A row whose key cannot be read keeps that fault and adds no drift; a row an earlier
-        header marked keeps its first such header.
+        A row whose key cannot be read has no text here (`_converted`), so it keeps that fault
+        and adds no drift; a row an earlier header marked keeps its first such header.
 
         Args:
             sent: The header's text in each kept row.
             failed: Where it does not parse.
             column: The header's column.
-            keyed: The rows whose key cannot be read.
             symbols: Each kept row's symbol text.
             marker: Receives the marks.
             odd: Receives the header and its first such text.
         """
         for row in pc.indices_nonzero(failed).to_pylist():
-            if row in keyed:
-                continue
             text = sent[row].as_py()[:_SAMPLE_LIMIT]
             marker.mark(
                 RowFault.UNCONVERTIBLE_VALUES,
