@@ -113,6 +113,7 @@ def test_minute_bars_of_an_unlabelled_key_stream_from_the_real_time_host(
     *,
     live_config: dm.MassiveConfig,
     recency_label: RecencyLabel,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: Report,
@@ -153,6 +154,7 @@ def test_minute_bars_of_an_unlabelled_key_stream_from_the_real_time_host(
     hosts = {str(r["Host"]) for r in table_rows(live_session.connections())}
     for line in stream_report(live_session):
         evidence(line)
+    skip_if_not_entitled(live_session)
     live_session.release(table)
     evidence(f"AM.AAPL hosts {sorted(hosts)}; acknowledged topics {acked}")
     assert hosts, "the session opened no connection"
