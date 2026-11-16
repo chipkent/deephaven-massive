@@ -28,9 +28,10 @@ decides which requests share one, how long each read waits, and what the user is
   its thread holds the Deephaven update graph's lock, as a console command does, since every
   table of the process stops updating meanwhile; that read's give-up error then advises leaving
   out `wait=True` (`console_advice`). A read no caller waits for, which feeds a live table (a
-  background `fetch()` or `history()`, a watchlist's reads, a stream's lookups), waits out
-  `MassiveConfig.max_outage`, the time any live table may stay cut off from Massive. A read
-  that gives up fails alone; the bucket keeps pausing and probing for every other read.
+  background `fetch()` or `history()`, a watchlist's reads after the call, a stream's lookups),
+  waits out `MassiveConfig.max_outage`, the time any live table may stay cut off from Massive,
+  and its give-up error says so (`BACKGROUND_ADVICE`). A read that gives up fails alone; the
+  bucket keeps pausing and probing for every other read.
 - **Refusal notices.** `RateLimitNotices` is the REST client's refusal hook: the first 429 of
   each subscription in a session logs one INFO line that says what happened and what to do.
   Requests pause and resume by themselves, so the refusal alone is nothing to act on; a read
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Patience, RequestGovernor, WireError
 
 __all__ = [
+    "BACKGROUND_ADVICE",
     "BUCKETS",
     "CONSOLE_PATIENCE",
     "GOVERNORS",
@@ -112,6 +114,9 @@ the per-minute limit paces them as it does a subscription."""
 READ_PATIENCE: Final = 600.0
 """Seconds a read its caller waits for waits out its bucket's pauses before it fails with status
 429."""
+
+BACKGROUND_ADVICE: Final = "raise MassiveConfig.max_outage to let a background read wait longer"
+"""The remedy a background read's give-up error ends with (`Patience.advice`)."""
 
 CONSOLE_PATIENCE: Final = 90.0
 """Seconds a read waits out pauses while its thread holds the update graph's lock: every table
@@ -206,7 +211,9 @@ def read_patience(exec_ctx: ExecutionContext, *, max_outage: float, background: 
     """
     if holds_update_graph_lock(exec_ctx):
         return _massive.Patience(CONSOLE_PATIENCE, advice=console_advice(max_outage))
-    return _massive.Patience(max_outage if background else READ_PATIENCE)
+    if background:
+        return _massive.Patience(max_outage, advice=BACKGROUND_ADVICE)
+    return _massive.Patience(READ_PATIENCE)
 
 
 def bucket_of(subscription: Subscription | None) -> str:

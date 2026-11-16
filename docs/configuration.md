@@ -225,7 +225,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 |---|---|---|---|
 | `delayed_subscriptions` | Lists the subscriptions whose data Massive serves you delayed, so their streams use Massive's delayed feed and their snapshots accept its `DELAYED` label. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
 | `rest_basic_subscriptions` | Lists the subscriptions on Massive's free Basic plan, so their requests keep to Basic's five a minute from the start. | A list of any of `stocks`, `options`, `indices`, `currencies`, or `futures`, such as `[options]`, or `[]` for none | `[]` |
-| `max_outage` | Sets how many seconds a live table may stay cut off from Massive before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
+| `max_outage` | Sets how many seconds a live table waits out an outage or Massive's rate limits before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
 | `max_concurrency` | Sets how many REST requests the session runs at a time, and separately how many flat files it reads at a time. | A positive whole number, such as `4` | `8` |
@@ -283,19 +283,20 @@ limit is shared by every session in this server that uses your key.
 
 #### max_outage
 
-Raise it to ride out longer outages, or set `0` to fail at the first one. Each kind
-of table counts its own time:
+Set `0` to fail at the first outage. Set a larger value to keep tables through
+longer ones. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
 - A `poll()` table counts the time its polls keep failing or stop arriving.
 - A `fetch()` or `history()` without `wait=True` counts the time it waits out
   Massive's rate limits.
-- A `fetch()` or `history()` of a watchlist counts, for each symbol, the time its
-  reads keep failing. Only that symbol fails, and `m.symbol_reads()` shows it
-  `FAILED`.
+- A watchlist's `fetch()` or `history()` counts, for each symbol, the time its
+  reads keep failing with a temporary error. Then `m.symbol_reads()` shows that
+  symbol `FAILED`.
 
-Until the limit passes, the table's `m.streams()` row shows the problem in `Error`.
-A failed table stays failed, so call the method again for a new one. See
+While a table waits, its `m.streams()` row shows why in `Error`. `m.rate_limits()`
+shows a rate-limit wait. A failed table stays failed, so call the method again for
+a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
 
 #### flush_interval

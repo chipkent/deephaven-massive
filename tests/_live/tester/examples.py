@@ -84,8 +84,8 @@ TABLE_ROWS: Final = 1000
 """How many rows of each table an example made are saved."""
 
 DOWNLOAD_TIMEOUT: Final = 900.0
-"""Seconds to wait for background downloads before the next example runs anyway: their 10
-minutes of rate-limit pauses, and some time to read."""
+"""Seconds to wait for background downloads before the next example runs anyway: their
+rate-limit pauses, at most `MassiveConfig.max_outage`, and time to read."""
 
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""

@@ -34,9 +34,9 @@ diagnostics show. It owns:
 `DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 2, 8,
 and 30 seconds after the first, second, and third failure (`RETRY_DELAYS`), then every
 `RETRY_EVERY`, until it has failed for `MassiveConfig.max_outage`: a failure that lands that long or
-longer after the first one of its run makes it `FAILED`, with an error that names the limit
-(`_outage_failure`), as a `poll()` table fails after its cycles have failed that long. Any other
-failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
+longer after its run began (`_failed` says when) makes it `FAILED`, with an error that names the
+limit (`_outage_failure`), as a `poll()` table fails after its cycles have failed that long.
+Any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
 an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
 under `Reread.NEVER` its download is kept, so a re-add shows the
 earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
@@ -152,6 +152,9 @@ _FOLLOWING: Final = frozenset(
 
 _ENDED: Final = frozenset({SymbolReadState.FAILED, SymbolReadState.REMOVED, SymbolReadState.CLOSED})
 """The states a stop leaves as they are; every other becomes `STOPPED`."""
+
+_RATE_LIMITED: Final = 429
+"""The status of a read that gave up on rate-limit pauses: one cut off from Massive throughout."""
 
 _CAUSES_SHOWN: Final = 3
 """The most causes one `Error` part of `m.streams()` names."""
@@ -404,9 +407,9 @@ class _Symbol:
         reading: The generation a read in flight was started for, or None.
         waiting: Whether it waits for a read slot (its result's queue).
         attempts: Reads begun since it was last added with a read queued.
-        failing_since: When the run of failures it is in began (monotonic seconds): the
-            start of its first failed read since it was last added or last got rows; None
-            outside one.
+        failing_since: When the run of failures it is in began (monotonic seconds), as
+            `FollowCoordinator._failed` counts it; set from its first failure since it was
+            last added or last got rows, and None before one.
         due: When its next read is due (monotonic seconds), while `RETRYING`.
         next_attempt_at: The same instant, epoch nanoseconds.
         added_at: When its row last entered the table, epoch nanoseconds.
@@ -1240,10 +1243,12 @@ class FollowCoordinator:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
         A failure that may pass retries on `RETRY_DELAYS`, then every `RETRY_EVERY`, until one
-        lands `MassiveConfig.max_outage` seconds or more after the run began: when the first
-        read that failed began, since a read may itself wait out rate-limit pauses up to that
-        limit before it fails. That failure is final, and its error names the limit
-        (`_outage_failure`). Any other failure is final at once.
+        lands `MassiveConfig.max_outage` seconds or more after the run began. A run begins when
+        its first failure lands, or, for a read that gave up on rate-limit pauses (HTTP 429,
+        which the client raises only once the read's patience is spent), when that read began:
+        it waited on Massive's limits the whole time, up to `max_outage` itself. That failure
+        is final, and its error names the limit (`_outage_failure`). Any other failure is final
+        at once.
 
         Args:
             result: The result's state.
@@ -1255,7 +1260,7 @@ class FollowCoordinator:
         error = outcome.error
         now = CLOCK.monotonic()
         if symbol.failing_since is None:
-            symbol.failing_since = now - seconds
+            symbol.failing_since = now - seconds if error.status == _RATE_LIMITED else now
         failing_for = now - symbol.failing_since
         limit = result.read.core.config.max_outage
         symbol.cause = _cause(error)

@@ -2860,8 +2860,8 @@ class RestEndpoints:
         one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
         """
         reader = self._reader(
-            # Each cycle keeps the patience of a waited read: the poll's own watch fails a
-            # cycle that has received nothing for max_outage (`Poller.check_running`).
+            # Each cycle keeps the patience of a waited read: the poll's own watch fails the
+            # table once a cycle has received nothing for max_outage (`Poller.check_running`).
             "poll",
             request.on_error,
             background=False,

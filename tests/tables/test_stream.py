@@ -2218,7 +2218,8 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     assert (flusher.backlog, flusher._backlog_bytes) == (0, 0)
     failures = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
     (failure,) = failures
-    assert "4 rows (about 0 MB) waited to be published" in failure
+    # The two dropped frames held a row each.
+    assert "4 rows (about 0 MB) waited to be published, and 2 more would pass" in failure
     assert "MB the library keeps for one connection" in failure
     assert "call the method again for a new live table" in failure
     after, shown = make_sink(core, ("AAPL",), plan, stream_id=3)

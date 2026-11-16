@@ -61,7 +61,9 @@ key could not be read, and adds it to each receiving stream's `SchemaDrift`
 published between them, the dataset's streams on the channel fail, since Massive's format has
 most likely changed and the streams would otherwise stay empty without an error. A reactive
 stream's watchlist that fails queues the stream's failure on its session's reaper
-(`StreamSink.fail_later`), since the listener reports it on an update-graph thread.
+(`StreamSink.fail_later`), since the listener reports it on an update-graph thread. Rows that
+wait for a flush past `row_memory.HELD_BYTES_LIMIT` fail every stream of the connection
+(`Flusher`).
 
 **Threads and locks.** The flush thread creates only static tables, enters the execution
 context of the session that created its connection through its own wrapper (sessions share a
@@ -1009,8 +1011,8 @@ class StreamSink:
 
 _Frame: TypeAlias = "tuple[int, int, list[tuple[object, ...]], RowMarks, int]"
 """One frame's rows of one channel, with the instant it arrived (epoch nanoseconds), the
-generation of the socket it arrived on, and the client's marks of the rows it could not read
-whole."""
+generation of the socket it arrived on, the client's marks of the rows it could not read
+whole, and the rows' memory as `row_memory.frame_bytes` estimates it."""
 
 
 class _Routes:
@@ -1180,6 +1182,23 @@ class _StreamProblems:
     payload: int
 
 
+@dataclass(slots=True)
+class _Overflow:
+    """The rows a connection dropped past `HELD_BYTES_LIMIT`, until a flush fails its streams.
+
+    Attributes:
+        since: When the first dropped frame arrived, epoch nanoseconds.
+        rows: The rows buffered then.
+        held: Their memory, as `row_memory.frame_bytes` estimates it.
+        dropped: The rows dropped since, the first frame's included.
+    """
+
+    since: int
+    rows: int
+    held: int
+    dropped: int
+
+
 def _do_nothing() -> None:
     """Do nothing: the default `on_new_generation` of a `Flusher`."""
 
@@ -1311,9 +1330,9 @@ class Flusher:
         self._backlog = 0
         self._backlog_bytes = 0
         self._backlog_warned = False
-        # Once a frame would take the backlog past `HELD_BYTES_LIMIT`: when it arrived, and the
-        # backlog's rows and bytes then; frames are dropped until a flush takes it.
-        self._overflow: tuple[int, int, int] | None = None
+        # Once a frame would take the backlog past `HELD_BYTES_LIMIT`: frames are dropped, and
+        # counted here, until a flush takes it.
+        self._overflow: _Overflow | None = None
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     @property
@@ -1362,8 +1381,9 @@ class Flusher:
         ever routed to are dropped. The rows count in the backlog until a flush takes them; a
         backlog that passes `BACKLOG_WARNING_ROWS` is logged at WARNING (see that constant for
         when it is logged again). A frame whose memory would take the backlog's past
-        `HELD_BYTES_LIMIT` is dropped, logged at WARNING, and so is every frame after it until
-        the next flush, which fails the connection's streams (the class docstring says why).
+        `HELD_BYTES_LIMIT` is dropped and logged at WARNING, and every frame after it is
+        dropped and counted until the next flush, which fails the connection's streams (the
+        class docstring says why).
 
         Args:
             channel: The channel.
@@ -1379,10 +1399,13 @@ class Flusher:
         nbytes = frame_bytes(rows)
         arrived = time.time_ns()
         with self._backlog_lock:  # counted before the put, so a flush never counts below zero
-            dropping = self._overflow is not None
+            overflow = self._overflow
+            dropping = overflow is not None
             overflowing = not dropping and self._backlog_bytes + nbytes > HELD_BYTES_LIMIT
+            if overflow is not None:
+                overflow.dropped += len(rows)
             if overflowing:
-                self._overflow = (arrived, self._backlog, self._backlog_bytes)
+                self._overflow = _Overflow(arrived, self._backlog, self._backlog_bytes, len(rows))
             if not dropping and not overflowing:
                 self._backlog += len(rows)
                 self._backlog_bytes += nbytes
@@ -1390,14 +1413,7 @@ class Flusher:
             held = self._backlog_bytes
             warn = backlog > BACKLOG_WARNING_ROWS and not self._backlog_warned
             self._backlog_warned |= warn
-        if dropping:
-            logger.debug(
-                "%s: %d rows of %s dropped: past the memory limit, waiting for the next flush "
-                "to fail the streams",
-                self._thread.name,
-                len(rows),
-                channel,
-            )
+        if dropping:  # counted in the overflow, which the next flush logs once
             return
         if overflowing:
             logger.warning(
@@ -1635,7 +1651,7 @@ class Flusher:
         since each belongs to a stream it fails, so the backlog falls before frames are let in
         again; then it takes the overflow under the backlog lock, which lets frames be buffered
         again, and only then reads the routes. So every stream routed while frames were
-        dropped fails, and a stream routed later missed nothing.
+        dropped fails, and a stream routed after the routes are read missed nothing.
         """
         with self._backlog_lock:
             overflow = self._overflow  # only this thread clears it
@@ -1645,23 +1661,23 @@ class Flusher:
         self._drained(sum(len(f[2]) for f in frames), sum(f[4] for f in frames))
         with self._backlog_lock:
             self._overflow = None
-        since, rows, held = overflow
         sinks = self.routes.sinks()
         logger.debug(
-            "%s: rows were dropped from %s, past the memory limit; %d buffered rows discarded, "
+            "%s: %d rows dropped from %s, past the memory limit; %d buffered rows discarded, "
             "failing %d streams",
             self._thread.name,
-            utc_text(since / 1e9),
+            overflow.dropped,
+            utc_text(overflow.since / 1e9),
             sum(len(f[2]) for f in frames),
             len(sinks),
         )
         error = MassiveError(
-            f"{self._thread.name}: {rows} rows (about {held // 2**20} MB) waited to be "
-            f"published, and more would pass the {HELD_BYTES_LIMIT // 2**20} MB the library "
-            "keeps for one connection: Deephaven's update graph fell behind the stream, or "
-            "stopped, as it does while a console command runs. The rows from "
-            f"{utc_text(since / 1e9)} on are missing, so this table stopped; call the method "
-            "again for a new live table",
+            f"{self._thread.name}: {overflow.rows} rows (about {overflow.held // 2**20} MB) "
+            f"waited to be published, and {overflow.dropped} more would pass the "
+            f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection: Deephaven's "
+            "update graph fell behind the stream, or stopped, as it does while a console "
+            f"command runs. The rows from {utc_text(overflow.since / 1e9)} on are missing, so "
+            "this table stopped; call the method again for a new live table",
             source=ErrorSource.USER,
             is_retryable=True,
         )

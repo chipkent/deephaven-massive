@@ -758,30 +758,50 @@ def test_the_first_read_s_failures_retry_or_fail(
     massive_session.release(result)
 
 
-def test_a_run_of_failures_counts_from_the_start_of_its_first_failed_read(
+def test_a_read_that_gave_up_on_rate_limits_starts_its_run_when_it_began(
     watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
-    # A read that waited out 300 s of rate-limit pauses before it failed has already failed for
-    # max_outage: the symbol fails at once, not 300 s later. A read 1 s shorter retries.
+    # A read that waited out 300 s of rate-limit pauses before it gave up (HTTP 429) was cut
+    # off from Massive all that time: the symbol fails at once. One 1 s shorter retries.
     first = FirstRead(
-        {"AAPL": refused(429, "too many requests"), "MSFT": refused(429, "too many requests")},
+        {"AAPL": refused(429, "too many requests")},
         began_at=int(clock.time() * 1e9),
         seconds=300.0,
     )
     script = Script(massive_session)
-    result = follow(massive_session, watchlist("AAPL", "MSFT"), script, first=first)
+    result = follow(massive_session, watchlist("AAPL"), script, first=first)
     failed = wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
     assert (failed.attempts, script.reads_of("AAPL")) == (1, 0)
     assert failed.error is not None
     assert failed.error.startswith("AAPL has failed for 300 s, as long as")
     massive_session.release(result)
     shorter = FirstRead(
-        {"AAPL": refused(429, "too many requests")},
+        {"MSFT": refused(429, "too many requests")},
         began_at=int(clock.time() * 1e9),
         seconds=299.0,
     )
-    result = follow(massive_session, watchlist("AAPL"), Script(massive_session), first=shorter)
-    until(lambda: any(r.state is SymbolReadState.RETRYING for r in reads(massive_session).values()))
+    result = follow(massive_session, watchlist("MSFT"), Script(massive_session), first=shorter)
+    wait_state(massive_session, "MSFT", SymbolReadState.RETRYING)
+    massive_session.release(result)
+
+
+def test_any_other_failure_starts_its_run_when_it_lands(
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
+) -> None:
+    # A long read that ends in one server error has failed once, not for its whole length:
+    # the symbol retries, and its run counts from that failure.
+    first = FirstRead(
+        {"AAPL": refused(503, "unavailable")},
+        began_at=int(clock.time() * 1e9),
+        seconds=360.0,
+    )
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "unavailable")]
+    result = follow(massive_session, watchlist("AAPL"), script, first=first)
+    retrying = wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    assert retrying.attempts == 1
+    delays = run_out_retries(massive_session, script, clock=clock, name="AAPL", earlier=-1)
+    assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
     massive_session.release(result)
 
 

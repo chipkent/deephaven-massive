@@ -15,6 +15,7 @@ from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
+    BACKGROUND_ADVICE,
     BUCKETS,
     CONSOLE_PATIENCE,
     LEARN_ONLY,
@@ -500,7 +501,10 @@ def test_a_waited_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_t
 
 def test_a_read_no_caller_waits_for_waits_out_max_outage(dh_exec_ctx: ExecutionContext) -> None:
     patience = read_patience(dh_exec_ctx, max_outage=300.0, background=True)
-    assert (patience.seconds, patience.advice) == (300.0, "")
+    assert (patience.seconds, patience.advice) == (300.0, BACKGROUND_ADVICE)
+    assert BACKGROUND_ADVICE == (
+        "raise MassiveConfig.max_outage to let a background read wait longer"
+    )
     assert read_patience(dh_exec_ctx, max_outage=0.0, background=True).seconds == 0.0
 
 
