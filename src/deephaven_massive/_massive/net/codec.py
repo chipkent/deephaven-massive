@@ -14,11 +14,11 @@ Deep nesting is bounded on both paths, so a hostile or broken body can never exh
 calling thread's C stack: orjson rejects depth beyond 1024 itself, and the standard-library
 path counts the depth before decoding and rejects anything deeper than `MAX_DEPTH` (512).
 
-Two other differences remain, neither reachable from a well-formed Massive payload. An
-integer above the unsigned 64-bit range decodes as an exact `int` on the standard-library path
-and as a `float` under orjson; either way it fails the `long` check of the decoder that reads
-it. A string escape naming a lone UTF-16 surrogate is rejected by orjson
-and decoded by the standard library.
+orjson decodes an integer above the unsigned 64-bit range as a rounded `float`, which a `double`
+field would take as Massive's value, so a document holding a run of 20 digits or more is decoded
+by the standard library, which keeps the exact `int` for the decoder to judge. One other
+difference remains, not reachable from a well-formed Massive payload: a string escape naming a
+lone UTF-16 surrogate is rejected by orjson and decoded by the standard library.
 
 Only decoding lives here. Encoding (the few small WebSocket control frames) uses the standard
 library's `json.dumps`, which returns `str`; orjson's `dumps` returns `bytes`, which
@@ -33,9 +33,10 @@ import importlib
 import json
 import logging
 import math
+import re
 from array import array
 from itertools import accumulate
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -134,6 +135,12 @@ def _too_deep(data: bytes | bytearray) -> bool:
     return max(accumulate(array("b", outside.translate(_STEPS))), default=0) > MAX_DEPTH
 
 
+_LONG_BYTES: Final = re.compile(rb"[0-9]{20}")
+"""Twenty digits in a row: an integer token past the unsigned 64-bit range starts this way."""
+_LONG_DIGITS: Final = re.compile(r"[0-9]{20}")
+"""The same, in text."""
+
+
 def loads(data: bytes | bytearray | str) -> object:
     """Decode one JSON document strictly.
 
@@ -161,7 +168,7 @@ def loads(data: bytes | bytearray | str) -> object:
         ValueError: On the standard-library path, if the document nests deeper than
             `MAX_DEPTH`. The other failures above come from the backend itself.
     """
-    if _orjson is not None:
+    if _orjson is not None and not _has_long_integer(data):
         value: object = _orjson.loads(data)
         return value
     if isinstance(data, (bytes, bytearray)):
@@ -175,3 +182,16 @@ def loads(data: bytes | bytearray | str) -> object:
     if too_deep:
         raise ValueError(f"JSON nests deeper than {MAX_DEPTH} arrays and objects")
     return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+
+
+def _has_long_integer(data: bytes | bytearray | str) -> bool:
+    """Tell whether a document holds a run of 20 digits, which orjson could round.
+
+    Args:
+        data: The document.
+
+    Returns:
+        True when some run of 20 digits or more is in it, a number's or a string's.
+    """
+    found = _LONG_DIGITS.search(data) if isinstance(data, str) else _LONG_BYTES.search(data)
+    return found is not None

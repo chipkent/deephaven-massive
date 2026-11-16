@@ -127,15 +127,22 @@ def test_in_window_keeps_a_marked_row_it_cannot_place() -> None:
     times = pa.record_batch({"Timestamp": pa.array([5, 50, None, None, 60], pa.int64())})
     rows = with_marks(times, {KEYS: one_mark(2, 4)}, sent=None)
     inside = pa.array([True, False, None, None, False])
-    kept = in_window(rows, inside, keys=("Timestamp",))
+    kept = in_window(rows, (("Timestamp", inside),))
     assert kept.to_pylist() == [True, False, True, False, False]
 
 
-def test_in_window_judges_a_row_unplaceable_by_any_of_its_keys() -> None:
-    keys = pa.record_batch({"Timestamp": [5, 5], "Date": [None, "2025-03-03"]})
-    rows = with_marks(keys, {VALUES: one_mark(0, 1)}, sent=None)
-    kept = in_window(rows, pa.array([None, False]), keys=("Timestamp", "Date"))
-    assert kept.to_pylist() == [True, False]
+def test_in_window_judges_each_bound_on_its_own() -> None:
+    # Row 0's null session keeps it through the session bound, and its time is inside; row 1's
+    # null session would too, but its time lies outside the time bound, so it goes; row 2 lies
+    # outside the session bound.
+    keys = pa.record_batch(
+        {"Timestamp": [5, 50, 5], "Date": pa.array([None, None, "2025-03-04"], pa.string())}
+    )
+    rows = with_marks(keys, {VALUES: one_mark(0, 1, 2)}, sent=None)
+    sessions = pa.array([None, None, False])
+    times = pa.array([True, False, True])
+    kept = in_window(rows, (("Date", sessions), ("Timestamp", times)))
+    assert kept.to_pylist() == [True, False, False]
 
 
 # --- withhold_rows and Withheld ----------------------------------------------------------------

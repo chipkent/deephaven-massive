@@ -2257,7 +2257,14 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
         )
 
     with caplog.at_level(logging.ERROR, stream.__name__):
-        flusher._report_events([(sink, (event(sink.stream_id),)) for sink in (gone, failing, live)])
+        flusher._report_events(
+            [
+                stream._StreamProblems(
+                    sink, (event(sink.stream_id),), DriftReport(dropped_rows=1), None, "here"
+                )
+                for sink in (gone, failing, live)
+            ]
+        )
     assert [e.stream_id for e in seen] == [3]
     assert [r.getMessage().split(". ")[0] for r in caplog.records] == [
         f"{flusher._thread.name}: could not report the withheld rows of stream 2"
@@ -2279,3 +2286,55 @@ def test_a_named_stream_never_fails_for_another_symbol_s_withheld_rows(
     flusher.rows("T", frame(odd), {}, generation=1)
     flusher.flush()
     assert (aapl.failed, msft.failed) == (False, True)
+
+
+def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
+    massive_session: dm.MassiveSession, flusher: Flusher
+) -> None:
+    # Such a row could have been any stream's, so a run of them with nothing published fails
+    # the named streams too: otherwise they would wait, empty, with no error.
+    core = massive_session._core
+    aapl, _ = make_sink(core, ("AAPL",), stream_id=1, policy=resolve_policy(None, dm.ErrorPolicy()))
+    flusher.routes.add("T", aapl)
+    half = stream.DROPPED_RUN_LIMIT // 2
+    nameless = frame([trade("AAPL", Ticker=None)] * half)
+    flusher.rows("T", nameless, unread_keys(*range(half)), generation=1)
+    flusher.flush()
+    states = [aapl.failed]
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # a published row resets it
+    flusher.flush()
+    for _ in range(2):
+        flusher.rows("T", nameless, unread_keys(*range(half)), generation=1)
+        flusher.flush()
+    states.append(aapl.failed)
+    assert states == [False, True]
+    assert flusher._unrouted == {}
+
+
+def test_each_stream_records_only_its_own_withheld_rows_under_any_policy(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An AAPL row is withheld: the AAPL stream's SchemaDrift counts it, the MSFT stream's does
+    # not, and under IGNORE no WARNING is logged.
+    core = massive_session._core
+    quiet = resolve_policy(dm.ErrorPolicy(unreadable_keys=OnError.IGNORE), dm.ErrorPolicy())
+    aapl, _ = make_sink(core, ("AAPL",), stream_id=1, policy=quiet)
+    msft, _ = make_sink(core, ("MSFT",), stream_id=2, policy=quiet)
+    flusher.routes.add("T", aapl)
+    flusher.routes.add("T", msft)
+    recorded: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        core,
+        "record_stream_drift",
+        lambda stream_id, _transport, drift: recorded.append((stream_id, drift.dropped_rows)),
+    )
+    rows = [trade("AAPL", SipTimestamp=5), trade("AAPL"), trade("MSFT")]
+    with caplog.at_level(logging.WARNING):
+        flusher.rows("T", frame(rows), {}, generation=1)
+        flusher.flush()
+    assert recorded == [(1, 1)]
+    assert not [r for r in caplog.records if "withheld" in r.getMessage()]

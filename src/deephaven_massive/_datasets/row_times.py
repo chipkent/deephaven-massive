@@ -1032,16 +1032,18 @@ class StampRule:
     weekdays: frozenset[int] = frozenset()
     months: frozenset[int] = frozenset()
 
-    def stamp(self, label: str, rows: _Rows, *, source: str) -> tuple[_Rows, pa.Array]:
+    def stamp(
+        self, label: str, rows: _Rows, *, source: str, warn: bool = True
+    ) -> tuple[_Rows, pa.Array]:
         """Stamp a batch of bars at 00:00 of their days (`day_starts`), and find the odd stamps.
 
         A stamp at another time of day than 00:00 or one of `known`, or on a day `weekdays`
         or `months` rules out, cannot be placed: its row is returned for the caller to
-        withhold, and logs one WARNING per form of stamp per session through `warnings`
-        (`_warn`). The WARNING names the dataset, the source, the symbol and the stamp, and
-        the stamps expected; says the row is withheld; and asks for the stamp to be reported
-        at `ISSUES_URL`. Each batch with such a stamp logs one DEBUG line with how many rows
-        had one.
+        withhold, and, unless `warn` is False, logs one WARNING per form of stamp per session
+        through `warnings` (`_warn`). The WARNING names the dataset, the source, the symbol
+        and the stamp, and the stamps expected; says the row is withheld; and asks for the
+        stamp to be reported at `ISSUES_URL`. Each batch with such a stamp logs one DEBUG line
+        with how many rows had one.
 
         Args:
             label: The dataset, for the WARNING, such as `"stocks.bars"`.
@@ -1049,6 +1051,8 @@ class StampRule:
                 holds Massive's stamps.
             source: Where the bars came from, for the WARNING: a REST path template or a
                 flat-file prefix.
+            warn: False when the read's `unconvertible_values` is `IGNORE`, whose rows the log
+                names only at DEBUG.
 
         Returns:
             The rows, their known stamps at the start of their days, nulls and odd stamps as
@@ -1074,7 +1078,7 @@ class StampRule:
                 symbols[first].as_py(),
                 epoch_instant(ns[first].as_py()).isoformat(),
             )
-            for value in pc.unique(pc.filter(ns, odd)).to_pylist():
+            for value in pc.unique(pc.filter(ns, odd)).to_pylist() if warn else ():
                 row = pc.index(ns, value).as_py()
                 self._warn(label, epoch_instant(value), symbols[row].as_py(), source=source)
         return _set(rows, START, starts), odd

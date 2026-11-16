@@ -220,3 +220,22 @@ def test_orjson_decodes_a_valid_document_as_the_standard_library_does(
 ) -> None:
     monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
     assert codec.loads(VALID) == VALID_DECODED == json.loads(VALID)
+
+
+def test_a_document_with_an_integer_orjson_would_round_is_decoded_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # orjson reads an integer past the unsigned 64-bit range as a rounded float, which a double
+    # field would take as Massive's value; such a document goes to the standard library.
+    calls: list[object] = []
+
+    def fake_loads(data: object) -> object:
+        calls.append(data)
+        return {"p": 1.8446744073709552e19}
+
+    monkeypatch.setattr(codec, "_orjson", types.SimpleNamespace(loads=fake_loads))
+    for data in (b'{"p": 18446744073709551617}', '{"p": 18446744073709551617}'):
+        assert codec.loads(data) == {"p": 18446744073709551617}
+    assert calls == []
+    assert codec.loads(b'{"p": 9007199254740993}') == {"p": 1.8446744073709552e19}
+    assert calls == [b'{"p": 9007199254740993}']

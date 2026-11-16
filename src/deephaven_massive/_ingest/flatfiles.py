@@ -750,7 +750,9 @@ class _Transform:
         stamps = self.times.stamps
         if stamps is None:
             return rows
-        stamped, odd = stamps.stamp(self.dataset, rows, source=f"the flat files {self.prefix}")
+        warn = logs_withheld({RowFault.UNCONVERTIBLE_VALUES: 1}, self.policy)
+        source = f"the flat files {self.prefix}"
+        stamped, odd = stamps.stamp(self.dataset, rows, source=source, warn=warn)
         starts = rows[START]
 
         def reason(row: int) -> str:
@@ -793,7 +795,7 @@ class _Transform:
         first = pa.scalar(self.sessions.first, pa.date32())
         last = pa.scalar(self.sessions.last, pa.date32())
         inside = pc.and_(pc.greater_equal(sessions, first), pc.less_equal(sessions, last))
-        return batch.filter(in_window(batch, inside, keys=(DATE,)))
+        return batch.filter(in_window(batch, ((DATE, inside),)))
 
     def _column(
         self,
@@ -1674,7 +1676,7 @@ class FlatFileHistory:
                 served += rows.num_rows
                 asked += withheld.rows.num_rows + withheld.total
                 found = found.merge(drift).merge(odd)
-                parts.extend(self._checked(withheld, transform, where=file.location))
+                parts.extend(self._checked(withheld, transform, where=file.location, before=parts))
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1737,16 +1739,23 @@ class FlatFileHistory:
         )
 
     def _checked(
-        self, withheld: Withheld, transform: _Transform, *, where: str
+        self,
+        withheld: Withheld,
+        transform: _Transform,
+        *,
+        where: str,
+        before: Sequence[Withheld],
     ) -> tuple[Withheld, ...]:
         """Fail a read on a block's withheld rows of a cause its policy sets to `RAISE`.
 
-        The block's problem events reach the session first, so the failure loses no record.
+        The file's problem events so far, this block's included, reach the session first, so
+        the failure loses no record.
 
         Args:
             withheld: The block's withheld rows.
             transform: The read's block transform, for its dataset and policy.
             where: The file's location, for the message.
+            before: The withheld rows of the file's earlier blocks.
 
         Returns:
             The block's withheld rows without its published ones, which the file keeps until it
@@ -1765,7 +1774,7 @@ class FlatFileHistory:
         )
         if failure is not None:
             self._core.problems(
-                withheld.events(
+                merged((*before, withheld)).events(
                     dataset=transform.dataset,
                     transport=Transport.FLAT_FILES,
                     where=where,

@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from deephaven.table import Table
@@ -18,12 +18,15 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
+from deephaven_massive._massive import RestPath, RowFault, Transport, source, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _indicators as indicators
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven_massive._tables.problem_events import ProblemEvent
 
 OWNER = "namespaces/indicators"
 R = Transport.REST
@@ -384,6 +387,7 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_wa
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     timespan: dm.Timespan,
     moment: datetime,
@@ -394,9 +398,19 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_wa
         {"timestamp": int(moment.timestamp() * 1000), "value": 1.0},
         {"timestamp": int(known.timestamp() * 1000), "value": 2.0},
     ]
-    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": values})))
-    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch(wait=True))
+    page = Reply(envelope({"values": values}))
+    fake_rest.reply("/v1/indicators/sma/AAPL", page, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    sma = rest_session.indicators.sma
+    out = dh_to_pylist(sma("AAPL", 20, timespan=timespan).fetch(wait=True))
     assert [r["Value"] for r in out] == [2.0]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "TimestampStart", 1)
+    ]
+    strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+    with pytest.raises(dm.MassiveError, match=r"\(1 under unconvertible_values\)"):
+        sma("AAPL", 20, timespan=timespan, on_error=strict).fetch(wait=True)
     [warning] = stamp_warnings(caplog)  # the known stamp gives none
     assert warning.startswith(
         "indicators.sma: an indicator value of AAPL from /v1/indicators/sma/{stockTicker} is "

@@ -298,9 +298,9 @@ def _listed_rows(
     each row every one of them its list holds, the row repeated once per such ticker, in the
     order of its list; a row that lists none of them is left out, as a row outside a
     `history()` window is: it belongs to none of the request's symbols, so it is neither
-    published nor reported as a problem. A row already marked, whose list may not have been
-    read, stays once with a null `Symbol`, to be withheld. A request that named none leaves
-    `Symbol` null, the column's documented meaning.
+    published nor reported as a problem. A marked row whose list is null, which may be a list
+    the decoder could not read, stays once with a null `Symbol`, to be withheld. A request
+    that named none leaves `Symbol` null, the column's documented meaning.
 
     Args:
         batch: One page's rows in the dataset's schema, with a null `Symbol` and the mark
@@ -324,8 +324,8 @@ def _listed_rows(
         marked = batch.column(FAULT).is_valid().to_pylist()
         for index, listed in enumerate(batch.column(column).to_pylist()):
             hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
-            if not hits and marked[index]:
-                hits = [None]  # its list may not have been read: it stays to be withheld
+            if listed is None and marked[index]:
+                hits = [None]  # its list could not be read: it stays to be withheld
             rows.extend([index] * len(hits))
             symbols.extend(hits)
         taken = batch.take(pa.array(rows, pa.int64()))
@@ -349,7 +349,12 @@ def _cut(text: str) -> str:
 
 
 def _stamped(
-    stamps: StampRule, label: str, batch: pa.RecordBatch, *, source: str
+    stamps: StampRule,
+    label: str,
+    batch: pa.RecordBatch,
+    *,
+    source: str,
+    policy: ResolvedPolicy,
 ) -> pa.RecordBatch:
     """Stamp a page's bars at 00:00 of their days, marking a bar at an odd stamp.
 
@@ -358,12 +363,15 @@ def _stamped(
         label: The dataset, for the stamp's WARNING.
         batch: The page's rows, with the mark columns.
         source: The path template, for the WARNING.
+        policy: The read's policy: under `unconvertible_values=IGNORE` an odd stamp logs no
+            WARNING (`StampRule.stamp`).
 
     Returns:
         The rows, known stamps moved, and each bar at a stamp Massive is not known to use
         marked `unconvertible_values` on `TimestampStart`, to be withheld.
     """
-    stamped, odd = stamps.stamp(label, batch, source=source)
+    warn = logs_withheld({RowFault.UNCONVERTIBLE_VALUES: 1}, policy)
+    stamped, odd = stamps.stamp(label, batch, source=source, warn=warn)
     sent = batch.column(START)
 
     def reason(row: int) -> str:
@@ -1085,7 +1093,10 @@ class RestReader:
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
-                    batches = [_stamped(stamps, spec.name, b, source=template) for b in batches]
+                    batches = [
+                        _stamped(stamps, spec.name, b, source=template, policy=self.policy)
+                        for b in batches
+                    ]
                 kept.extend(
                     self._page_rows(
                         spec,
