@@ -2187,6 +2187,48 @@ def test_an_unread_pair_list_is_an_outage_the_stream_rides_out_from_every_source
     ws_session.session.release(result)
 
 
+@pytest.mark.parametrize("first", ["static", "code"])
+def test_a_pair_in_code_waits_for_an_unread_list_in_a_stream_a_static_table_shares(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+    *,
+    first: str,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A static table and a list in code with the same pairs share one stream. Whichever opens
+    # it, a pair the unread list left unsplit waits in it and subscribes once the list reads,
+    # so the other call's table never lacks the pair for good.
+    ws_session = make_ws_session()
+    quick_retries(ws_session)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
+        "HTTP 503: busy", status=503, is_retryable=True
+    )
+    second = "code" if first == "static" else "static"
+    results = [
+        ws_session.query(
+            CRYPTO,
+            crypto_watchlist(
+                ["X:BTCUSD", "X:DOTUSD"], source=source, dh_input_table=dh_input_table
+            ),
+        ).append_only()
+        for source in (first, second)
+    ]
+    ws_session.subscribed("XT.BTC-USD")
+    # One stream row: the second call shares the first call's stream, and the pair waits in it.
+    wait_for(
+        lambda: (stream_error(ws_session, dh_to_pylist) or "").startswith(
+            "crypto pairs 1 [X:DOTUSD] wait for Massive's crypto ticker list"
+        )
+    )
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    ws_session.subscribed("XT.DOT-USD")
+    wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
+    for result in results:
+        ws_session.session.release(result)
+
+
 def test_an_unread_pair_list_fails_the_stream_after_max_outage(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
