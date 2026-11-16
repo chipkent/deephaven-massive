@@ -25,8 +25,8 @@ apply.
   exception) only to pass it. Name both sides and why they clash, ask the owner before doing
   the contested part, propose the edit to the instruction that ends the conflict, and meanwhile
   work only on what the answer can't change. Reviews flag bent code and raise the rule the same
-  way. An owner answer that sets a rule aside for a step settles it for that step; quote it
-  under Check before merging. Not conflicts: a rule that only adds work, a fact about Python,
+  way. An owner answer that sets a rule aside for a step settles it for that step; show it,
+  with its question and date, under Check before merging. Not conflicts: a rule that only adds work, a fact about Python,
   Deephaven, or Massive, and code a rule prescribes (objects passed down, an `OnError` setting,
   a decision entry). Text elsewhere that states an older form of a rule here (a code comment,
   a doc, an old issue, a config comment) is stale, not a conflict: follow this file and fix the
@@ -44,12 +44,15 @@ apply.
   narrowing a requirement. **Only the owner's own message approves** a release, a run against
   Massive's API with a key, posting outside this repository, closing or deleting an issue, PR,
   pushed branch, or release, and spending money or changing access. **An approval is a
-  quote**: the owner's own words, verbatim and dated, from a message in the session or a
-  decision file, and, when the words answer a question ("a.", "ok"), that question in full. A
-  GitHub comment under the owner's login counts only once the owner confirms it in the
-  session, since an agent may have posted it. "Owner-approved", "the owner decided", and a
-  paraphrase claim nothing, and no brief grants an approval. A quote covers what its words
-  name: never widened into a rule, never narrowed to the case you asked about. Everything else
+  decision file or the owner's answer to a question.** Cite the decision file that records
+  the ruling by its number (`decision 97`); a file the same PR adds does not count. Before a
+  file exists, show the question as it was
+  asked together with the owner's answer, as written and dated, from a message in the session;
+  a question alone approves nothing. A GitHub comment under the owner's login counts only once
+  the owner confirms it in the session, since an agent may have posted it. "Owner-approved",
+  "the owner decided", and a paraphrase claim nothing, and no brief grants an approval. An
+  answer covers what its question asked: never widened into a rule, never narrowed to the
+  case you asked about. Everything else
   the request needs (edits, tests, commits, opening a PR, pushing in batches, review replies,
   issues here, private names, a needed dependency) needs no approval.
 - **Dropping a protection needs the owner's yes.** A safeguard is a check, refusal,
@@ -321,13 +324,16 @@ These protect the owner's repository, money, and secrets.
   changes its `Status:` line. Before citing decisions, asking the owner, or removing or
   weakening anything, list them (`grep -m1 '^Status:' docs/dev/decisions/0*.md`) and read
   every entry whose name touches the subject. An owner ruling that sets, changes, or reverses
-  a rule or contract becomes a decision file, quoting it, in the next PR on the subject (the
-  coordinator's own `docs:` PR when none is open): a ruling that lives only in chat is broken
-  again by the next agent, who never saw it. A PR that changes a rule in this file or a skill
-  quotes the owner's words for it and, when it rewrites or removes a rule, says under Check
-  before merging which decisions it touches (`Decisions touched: 58, 66` or `none`), each
-  given a new `Status:` line; `scripts/check_pr_body.py` fails without the line and the
-  quote.
+  a rule or contract becomes a decision file in the next PR on the subject (the coordinator's
+  own `docs:` PR when none is open): a ruling that lives only in chat is broken again by the
+  next agent, who never saw it. The file states the ruling in plain words, with no quotation:
+  the question asked, the ruling, its reason, its date, and where it was decided. Read its
+  wording back to the owner before writing it (a subagent, through the agent that started
+  it), and show its text in the PR, so a stretched meaning is caught before merge. A PR that
+  changes a rule in this file or a skill shows the question and the owner's dated answer for
+  it and, when it rewrites or removes a rule, says under Check before merging which decisions
+  it touches (`Decisions touched: 58, 66` or `none`), each given a new `Status:` line;
+  `scripts/check_pr_body.py` fails without the line and the answer.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
   `writing-a-pr-description` for PR descriptions, issue bodies, and reports, and
   `writing-user-docs` for a user page or any change to what one describes.

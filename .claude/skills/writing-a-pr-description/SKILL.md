@@ -24,8 +24,12 @@ From the diff, the issue, and your notes, collect what the reader needs:
 - under Check before merging: whether the change breaks code written to the last release and,
   if so, the next version; each new dependency or raised floor; each new check entry; and
   each approval the PR relies on (a suppression, a public change, a dropped protection, a
-  reversed decision, a rule edit), as the owner's words quoted with their date (`AGENTS.md`,
-  an approval is a quote; an import after a Deephaven server start needs none). A question
+  reversed decision, a rule edit), as the decision that records it (`decision 97`) or, before
+  one exists, the question with the owner's dated answer (`AGENTS.md`, an approval is a
+  decision file or the owner's answer; an import after a Deephaven server start needs none).
+  A rule edit always shows the question with the owner's dated answer, since a decision
+  citation alone does not approve one, and a decision the PR itself adds approves nothing.
+  A PR that adds a decision file shows the file's text, so the owner reads the wording. A question
   for the owner is not a fact for the description: it goes to the owner first, and the PR
   waits for the answer (`pre-push-review` §4).
 

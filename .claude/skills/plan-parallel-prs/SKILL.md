@@ -63,8 +63,8 @@ reason features land slowly. A planned merge order limits it; stacking does not 
   share files; the second to land merges `main` if it conflicts.
 - When a PR renames a public name, tell every open agent the new name; the second PR to land
   merges `main` and reruns its tests, because a text merge cannot catch a semantic conflict.
-  A ruling the owner gives while PRs are open goes, quoted, to every agent whose PR touches
-  its subject, the same day.
+  A ruling the owner gives while PRs are open goes, as the question and the owner's dated
+  answer, to every agent whose PR touches its subject, the same day.
   A brief that asks for a repository-wide grep to prove an old name is gone excludes
   `docs/dev/decisions/` and `docs/dev/verification-items/`: their entries are never rewritten,
   so past ones keep the old name.
@@ -90,7 +90,7 @@ sixteen at once overloaded the machine until nothing merged. Read-only agents do
 Prioritize what blocks the current goal.
 
 Before briefing, record each ruling the owner gave you on the subject as a decision file
-(`AGENTS.md`, Workflow): the brief quotes it, the file keeps it for every later agent.
+(`AGENTS.md`, Workflow): the brief cites it, the file keeps it for every later agent.
 
 Each agent reads `AGENTS.md` and the project skills on its own, so a brief does not restate them.
 A brief is the agent's request, so it carries the owner's intent, not your summary of it. It
@@ -110,16 +110,18 @@ says only what the agent cannot know:
   before code; a choice the two can't settle, or a point the brief leaves ambiguous, comes
   back to you as a question with options and a recommendation, never built on a guess;
 - each protection the work may drop (a check, refusal, validation, test, setting, or guard
-  against a mistake that stays possible), with the owner's yes to that removal quoted, or the
+  against a mistake that stays possible), with the owner's yes to that removal and its
+  question, or the
   instruction to ask before removing it: a brief's reading of a rule approves no removal;
 - that review findings which add work go under Follow-ups with an issue, never into the diff;
 - the base branch (`origin/main`, or the branch below it in its stack) and the stack's PR
   numbers, bottom to top;
 - the reserved decision or verification-item numbers, or "none";
 - the files other agents are changing at the same time, and any rename in flight;
-- every other owner decision it must follow, quoted verbatim with where the owner said it
-  and, for a short answer ("a.", "ok"), the question it answered in full (a brief relays
-  decisions; it never grants an approval `AGENTS.md` reserves for the owner's own message),
+- every other owner decision it must follow, as its decision number or, before a file
+  records it, the question and the owner's answer as written, with its date and where (a
+  brief relays decisions; it never grants an approval `AGENTS.md` reserves for the owner's
+  own message),
   and anything only this task has learned;
 - any conflict you see between the request and a rule or an issue's text, named as a question
   for the owner, never settled in the brief;
@@ -147,15 +149,16 @@ says only what the agent cannot know:
    its issue is in `closingIssuesReferences`, any separate review left no blocker unfixed,
    and you have checked its description and diff yourself:
    - `uv run python scripts/check_pr_body.py --pr <n>` passes;
-   - every approval the description quotes is in the owner's messages to you or a decision
-     file (a quote you cannot find is a blocker, whoever wrote the body), and its
+   - every approval the description claims is a decision file or an answer in the owner's
+     messages to you, to the question shown (one you cannot find is a blocker, whoever wrote
+     the body); a decision file it adds says no more than that answer; and its
      `Decisions touched:` line is right (grep the decisions for the subject);
    - each entry under Decisions that removes, reverses, or changes something public names
-     the rule or quoted ruling that made it the agent's to take;
+     the rule or ruling that made it the agent's to take;
    - its file list and diff (`gh pr diff <n> --name-only`, then `gh pr diff <n>`), read
      against the owner's request and the owner's rulings on its subject, recorded or not:
      every changed file serves the request, nothing it needs is missing, and nothing it
-     removes or reverses lacks the owner's quoted yes, except what `AGENTS.md` exempts (a
+     removes or reverses lacks the owner's yes, except what `AGENTS.md` exempts (a
      guard deleted with the code it guarded, or replaced by one that catches the same
      mistake or more, with the description saying what replaced it).
    A large diff the request causes (a generator fix that regenerates every page) is

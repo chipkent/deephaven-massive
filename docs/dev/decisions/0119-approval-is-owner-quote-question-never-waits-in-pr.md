@@ -2,7 +2,7 @@
 
 Date: 2026-11-15
 
-Status: accepted
+Status: partly superseded: the owner's verbatim words as the form of an approval by [120](0120-decision-record-states-owner-ruling-no-quotation.md)
 
 An approval of anything `AGENTS.md` reserves for the owner exists only as the owner's own words, verbatim and dated, from a message in the session or a decision file, together with the question those words answered when they are short. An author's claim ("owner-approved", "the owner decided"), a paraphrase, a brief, and a comment an agent posted under the owner's GitHub login claim nothing. A quote covers what its words name: it is never widened into a rule nor narrowed to the case asked. An owner ruling that sets, changes, or reverses a rule becomes a decision file in the next pull request on the subject, so the next agent finds it; a pull request that rewrites a rule in `AGENTS.md` says which decisions it touches.
 

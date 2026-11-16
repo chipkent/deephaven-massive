@@ -71,8 +71,9 @@ jobs:
 
   pr-body:
     # The description meets the approval rules of AGENTS.md: no item that asks the owner
-    # anything, no approval claimed without the owner's dated quote, and a rule change with its
-    # record (scripts/check_pr_body.py). The diff and the file list come from the API, read-only.
+    # anything, no approval claimed without its decision or the question and the owner's
+    # dated answer, and a rule change with its record (scripts/check_pr_body.py).
+    # The diff and the file list come from the API, read-only.
     # A retargeted PR (changes.base) has a new diff, so it is rechecked like an edited body.
     if: >-
       github.event.action != 'edited'
@@ -116,7 +117,7 @@ jobs:
         with:
           header: pr-body-lint-error
           message: |
-            The pull request description breaks the project's approval rules (`AGENTS.md`, an approval is a quote; `docs/dev/pull-requests.md`). A question for the owner goes to the owner directly, and the pull request opens after the answer; an approval is the owner's words, quoted with their date. Edit the description with `gh pr edit <number> --body-file .git-pr-body.md`, and the check runs again.
+            The pull request description breaks the project's approval rules (`AGENTS.md`, an approval is a decision file or the owner's answer to a question; `docs/dev/pull-requests.md`). A question for the owner goes to the owner directly, and the pull request opens after the answer; an approval cites its decision or shows the question with the owner's dated answer. Edit the description with `gh pr edit <number> --body-file .git-pr-body.md`, and the check runs again.
 
             ${{ steps.lint_pr_body.outputs.error_message }}
 

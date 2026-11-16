@@ -27,8 +27,12 @@ Date: YYYY-MM-DD
 
 Status: <status>
 
-<body: the decision and its reason, in whole sentences>
+<body: the question asked, the owner's ruling, its reason, and where it was decided>
 ```
+
+The body states the ruling in plain words, in whole sentences, with no quotation: a quotation
+read later without its question is stretched or misread. Read the wording back to the owner
+before writing the file, and show its text in the pull request (decision 120).
 
 `Status:` is one of:
 

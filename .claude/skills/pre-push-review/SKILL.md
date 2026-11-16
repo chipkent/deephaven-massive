@@ -52,7 +52,8 @@ look for:
 
 - **A protection dropped**: a check, refusal, validation, test, setting, or guard that is
   gone, loosened, or no longer reached while the mistake it caught is still possible. Each one
-  needs the owner's yes to that removal, quoted in the description: a message that names the
+  needs the owner's yes to that removal, shown in the description with its question and date:
+  a message that names the
   guard, after seeing what it caught (`AGENTS.md`, Dropping a protection needs the owner's
   yes). A rule the author read as allowing it, a broad ruling, or an approved design that never
   mentioned the guard is not that yes. Not a finding: a test deleted with the code it tested,
@@ -198,10 +199,11 @@ call, the work is not ready for a PR or for CI: ask the owner directly with
 `writing-to-the-owner` (a subagent asks through its coordinator), build nothing that depends
 on the answer, take off the branch anything already built that does, and open or push the PR
 after the answer. A description, a review reply, or an issue is never where a question waits
-for the owner. Check before merging lists only what the owner has settled, quoted, and the
-notices `writing-a-pr-description` names. `scripts/check_pr_body.py` fails, locally and in
-CI, on an item that asks the owner anything and on an approval claimed without the owner's
-dated quote; run it before `gh pr create` or `gh pr edit`.
+for the owner. Check before merging lists only what the owner has settled, each with its
+decision or its question and the owner's dated answer, and the notices
+`writing-a-pr-description` names. `scripts/check_pr_body.py` fails, locally and in CI, on an
+item that asks the owner anything and on an approval claimed without its decision or the
+question and dated answer; run it before `gh pr create` or `gh pr edit`.
 
 ## 5. Review threads
 
