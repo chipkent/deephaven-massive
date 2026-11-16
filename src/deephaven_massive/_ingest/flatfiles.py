@@ -1674,7 +1674,7 @@ class FlatFileHistory:
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
         served = asked = 0
-        parts: list[Withheld] = []
+        every = Withheld(pa.table({}))
         setting = transform.policy.malformed_rows
         with entered(self._core.exec_ctx):
             for read, drift, marks in batches:
@@ -1684,7 +1684,7 @@ class FlatFileHistory:
                 served += rows.num_rows
                 asked += withheld.rows.num_rows + withheld.total
                 found = found.merge(drift).merge(odd)
-                parts.extend(self._checked(withheld, transform, where=file.location, before=parts))
+                every = self._checked(withheld, transform, where=file.location, before=every)
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1700,7 +1700,6 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
-        every = merged(parts)
         if every.groups:
             self._report_withheld(transform, every, where=file.location)
         transform.tally.add(asked, every)
@@ -1747,9 +1746,9 @@ class FlatFileHistory:
         transform: _Transform,
         *,
         where: str,
-        before: Sequence[Withheld],
-    ) -> tuple[Withheld, ...]:
-        """Fail a read on a block's withheld rows of a cause its policy sets to `RAISE`.
+        before: Withheld,
+    ) -> Withheld:
+        """Add a block's withheld rows to its file's, or fail the read on a `RAISE` cause.
 
         The file's problem events so far, this block's included, reach the session first, so
         the failure loses no record.
@@ -1758,17 +1757,17 @@ class FlatFileHistory:
             withheld: The block's withheld rows.
             transform: The read's block transform, for its dataset and policy.
             where: The file's location, for the message.
-            before: The withheld rows of the file's earlier blocks.
+            before: The withheld rows of the file's earlier blocks, as one (`withheld.merged`).
 
         Returns:
-            The block's withheld rows without its published ones, which the file keeps until it
-            reports them, so it never holds a block's rows; none for a block read whole.
+            The file's withheld rows so far, this block's added, with no published row: one
+            group per fault, symbol, and field, so it never grows with the file's blocks.
 
         Raises:
             RowDataError: If a cause of a withheld row is `RAISE` (`withheld.failure_of`).
         """
         if not withheld.groups:
-            return ()
+            return before
         failure = failure_of(
             withheld.counts(),
             transform.policy,
@@ -1777,7 +1776,7 @@ class FlatFileHistory:
         )
         if failure is not None:
             self._core.problems(
-                merged((*before, withheld)).events(
+                merged((before, withheld)).events(
                     dataset=transform.dataset,
                     transport=Transport.FLAT_FILES,
                     where=where,
@@ -1785,7 +1784,7 @@ class FlatFileHistory:
                 )
             )
             raise RowDataError(f"{failure} (in {where})")
-        return (merged((withheld,)),)
+        return merged((before, withheld))
 
 
 def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
