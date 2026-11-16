@@ -223,8 +223,8 @@ class FuturesVenue(StrEnum):
 
     A futures dataset's `venues` argument takes a set of members. Left out, a read takes every
     exchange the plan allows and skips each one Massive refuses with a warning; the
-    `refused_venues` argument says what happens when Massive refuses an exchange the call
-    names. Both apply only to flat files: streams cover every exchange.
+    `refused_venues` cause of `dm.ErrorPolicy` says what happens when Massive refuses an
+    exchange the call names. Both apply only to flat files: streams cover every exchange.
 
     Example:
         ::
@@ -490,18 +490,12 @@ class OnError(StrEnum):
       `unreadable_symbols` a bad row of Massive's data is kept, with the text in `RawSymbol`.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
-    Each cause has its own setting, documented where it is taken:
-
-    - `MassiveConfig.noncanonical_symbols`: a table's row that isn't Massive's exact ticker.
-    - `MassiveConfig.unavailable_symbols`: a symbol Massive has no data for.
-    - `MassiveConfig.unreadable_symbols`: a symbol in Massive's data the library can't read.
-    - `MassiveConfig.malformed_rows`: a flat-file line that isn't a readable row.
-    - `MassiveConfig.refused_venues`, and the `refused_venues` argument of the futures `trades`,
-      `quotes`, and `bars`: a futures exchange the call names whose flat files Massive refuses.
-      The default is `RAISE`; every other setting's is `LOG`.
-    - The `on_error` argument of `canonicalize_symbols` (default `LOG`), and of
-      `canonical_symbol` and the per-class converters (default `RAISE`, where `LOG` and
-      `IGNORE` return None): a value that doesn't convert.
+    Each cause has its own setting in `dm.ErrorPolicy`, set for the session
+    (`MassiveConfig.on_error`) or for one call (a dataset method's `on_error=`); its docstring
+    lists the causes. The symbol converters take a member directly: the `on_error` argument of
+    `canonicalize_symbols` (default `LOG`), and of `canonical_symbol` and the per-class
+    converters (default `RAISE`, where `LOG` and `IGNORE` return None), for a value that
+    doesn't convert.
 
     Example:
         ::
@@ -509,7 +503,9 @@ class OnError(StrEnum):
             import deephaven_massive as dm
 
             assert dm.OnError("log") is dm.OnError.LOG
-            strict = dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)
+            strict = dm.MassiveConfig(
+                on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+            )
     """
 
     RAISE = "raise"

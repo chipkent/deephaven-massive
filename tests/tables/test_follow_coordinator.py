@@ -186,7 +186,7 @@ def follow(
         call=core.next_stream_id(),
         query="m.test.trades(<table>)",
         symbol_table=table,
-        rule=SymbolRowRule.of(SPEC, core.config.noncanonical_symbols),
+        rule=SymbolRowRule.of(SPEC, core.policy.noncanonical_symbols),
         reread=reread,
         plan=plan,
         note="Follows a test.",
@@ -1279,7 +1279,7 @@ def test_two_bad_rows_fail_the_table_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = dataclasses.replace(
-        massive_session._core.config, noncanonical_symbols=dm.OnError.RAISE
+        massive_session._core.config, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
     )
     monkeypatch.setattr(massive_session._core, "config", config)
     wl = watchlist("AAPL")

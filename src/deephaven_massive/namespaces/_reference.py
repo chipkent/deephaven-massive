@@ -28,6 +28,7 @@ from deephaven_massive._enums import (
     TickerType,
     _require_enum,
 )
+from deephaven_massive._error_policy import ErrorPolicy, check_policy
 from deephaven_massive._errors import raises_through
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
@@ -300,6 +301,7 @@ class ReferenceNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Tickers of stocks, OTC securities, indices, forex, and crypto, with listing details.
 
@@ -323,6 +325,8 @@ class ReferenceNamespace(Namespace):
             order: The direction of `sort`.
             limit: Per ticker when tickers are named, else in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -367,10 +371,17 @@ class ReferenceNamespace(Namespace):
             arguments={"type": "ticker_type", "date": "as_of"},
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(build_query, day_argument)
-    def ticker_details(self, symbols: SymbolsLike, *, as_of: DateLike | None = None) -> FetchQuery:
+    def ticker_details(
+        self,
+        symbols: SymbolsLike,
+        *,
+        as_of: DateLike | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
         """One ticker's company and listing details: address, branding, shares, and more.
 
         Each row holds one ticker's company details. A ticker Massive doesn't know gets no row, and
@@ -380,6 +391,8 @@ class ReferenceNamespace(Namespace):
             symbols: Tickers of any asset class. `dm.ALL` is refused; `tickers()` lists every
                 ticker.
             as_of: The day the details are as of. Leave it out for the latest.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -407,11 +420,16 @@ class ReferenceNamespace(Namespace):
                 "date": None if as_of is None else day_argument(TICKER_DETAILS, as_of, "as_of")
             },
             arguments={"date": "as_of"},
+            on_error=on_error,
         )
 
     @raises_through(build_query, _require_enum, _asset_class)
     def ticker_types(
-        self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
+        self,
+        *,
+        asset_class: AssetClass | None = None,
+        locale: Locale | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The ticker type codes Massive uses, such as `CS` for common stock, with their names.
 
@@ -422,6 +440,8 @@ class ReferenceNamespace(Namespace):
             asset_class: The asset class whose types to list. Leave it out for every class. Massive
                 lists no futures types.
             locale: The locale whose types to list. Leave it out for both.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -441,11 +461,17 @@ class ReferenceNamespace(Namespace):
             "asset_class": _asset_class(self._core, TICKER_TYPES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return build_query(self._core, TICKER_TYPES, query_type=FetchQuery, params=params)
+        return build_query(
+            self._core, TICKER_TYPES, query_type=FetchQuery, params=params, on_error=on_error
+        )
 
     @raises_through(build_query, _event_types)
     def ticker_events(
-        self, symbols: SymbolsLike, *, types: Sequence[str] | None = None
+        self,
+        symbols: SymbolsLike,
+        *,
+        types: Sequence[str] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The timeline of a ticker's events, such as ticker changes, one row per event.
 
@@ -456,6 +482,8 @@ class ReferenceNamespace(Namespace):
             symbols: Tickers of any asset class, CUSIPs, or Composite FIGIs. `dm.ALL` is refused.
             types: The event types to include, such as `["ticker_change"]`. One `str` is one type.
                 Leave it out for every type.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -480,16 +508,21 @@ class ReferenceNamespace(Namespace):
             symbols=symbols,
             all_alternative="pass a list of symbols",
             params={"types": _event_types(types)},
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def related_companies(self, symbols: SymbolsLike) -> FetchQuery:
+    def related_companies(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The companies Massive relates to a ticker, from news and returns data, one row each.
 
         `Symbol` is the related company, and `Underlying` is the ticker you asked about.
 
         Args:
             symbols: The tickers to find related companies of. `dm.ALL` is refused.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -512,6 +545,7 @@ class ReferenceNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative="pass a list of symbols",
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params)
@@ -525,6 +559,7 @@ class ReferenceNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """News articles about tickers, with their publishers and sentiment insights.
 
@@ -542,6 +577,8 @@ class ReferenceNamespace(Namespace):
             order: Each ticker's direction of `sort`, newest first by default.
             limit: Articles per ticker, or in total without `symbols`.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -572,11 +609,16 @@ class ReferenceNamespace(Namespace):
             params=list_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(build_query, _require_enum, _asset_class)
     def exchanges(
-        self, *, asset_class: AssetClass | None = None, locale: Locale | None = None
+        self,
+        *,
+        asset_class: AssetClass | None = None,
+        locale: Locale | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The exchanges, trade reporting facilities, and SIPs Massive knows, with their codes.
 
@@ -587,6 +629,8 @@ class ReferenceNamespace(Namespace):
             asset_class: The asset class whose exchanges to list. Leave it out for every class.
                 Massive lists no index exchanges.
             locale: The locale whose exchanges to list. Leave it out for both.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -606,7 +650,9 @@ class ReferenceNamespace(Namespace):
             "asset_class": _asset_class(self._core, EXCHANGES, asset_class),
             "locale": None if locale is None else _require_enum(locale, Locale, "locale"),
         }
-        return build_query(self._core, EXCHANGES, query_type=FetchQuery, params=params)
+        return build_query(
+            self._core, EXCHANGES, query_type=FetchQuery, params=params, on_error=on_error
+        )
 
     @raises_through(build_query, list_params, _require_enum, _asset_class)
     def conditions(
@@ -620,6 +666,7 @@ class ReferenceNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The trade and quote condition codes, with what each means and how it updates bars.
 
@@ -638,6 +685,8 @@ class ReferenceNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -675,17 +724,26 @@ class ReferenceNamespace(Namespace):
             arguments={"id": "condition_id"},
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
-    def market_status(self) -> FetchQuery:
+    @raises_through(check_policy)
+    def market_status(self, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """Whether the markets are open now, by exchange, currency market, and index group.
 
         The table has one row, with a column for each exchange, currency market, and index group. A
         `poll()` table keeps the latest status in that row.
 
+        Args:
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_status.md.
+
+        Raises:
+            TypeError: If `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -696,17 +754,26 @@ class ReferenceNamespace(Namespace):
             self._core,
             MARKET_STATUS,
             query_type=FetchQuery,
+            on_error=on_error,
         )
 
-    def market_holidays(self) -> FetchQuery:
+    @raises_through(check_policy)
+    def market_holidays(self, *, on_error: ErrorPolicy | None = None) -> FetchQuery:
         """The upcoming market holidays and early closes, one row per exchange and day.
 
         Each row holds the holiday's name and the exchange's status that day, with its open and
         close times on an early close.
 
+        Args:
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.market_holidays.md.
+
+        Raises:
+            TypeError: If `on_error` isn't a `dm.ErrorPolicy`.
 
         Example:
             ::
@@ -717,4 +784,5 @@ class ReferenceNamespace(Namespace):
             self._core,
             MARKET_HOLIDAYS,
             query_type=FetchQuery,
+            on_error=on_error,
         )

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import AssetClass, ChannelFamily
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
     from tests._fakes.ws import FakeMassiveServer
 
@@ -130,6 +131,8 @@ class WsSession:
             REST transport's `crypto_pair` would read it: its `(base, quote)`, why it has no
             split, or an exception to raise. A ticker missing from it is not listed. Change it
             under `cond`, or before the stream that looks the ticker up.
+        pair_policies: Each crypto lookup's ticker and the stream policy it was given, in
+            order; appended under `cond`.
     """
 
     def __init__(
@@ -143,9 +146,7 @@ class WsSession:
         subscription_confirmation_timeout: float = _DEFAULTS.subscription_confirmation_timeout,
         connection_taken: dm.ConnectionTaken = _DEFAULTS.connection_taken,
         max_outage: float = _DEFAULTS.max_outage,
-        noncanonical_symbols: dm.OnError = _DEFAULTS.noncanonical_symbols,
-        unavailable_symbols: dm.OnError = _DEFAULTS.unavailable_symbols,
-        unreadable_symbols: dm.OnError = _DEFAULTS.unreadable_symbols,
+        on_error: dm.ErrorPolicy = _DEFAULTS.on_error,
         delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
     ) -> None:
         """Open the session; nothing connects until a stream verb runs.
@@ -160,9 +161,7 @@ class WsSession:
             subscription_confirmation_timeout: As `MassiveConfig` takes it.
             connection_taken: As `MassiveConfig` takes it.
             max_outage: As `MassiveConfig` takes it.
-            noncanonical_symbols: As `MassiveConfig` takes it.
-            unavailable_symbols: As `MassiveConfig` takes it.
-            unreadable_symbols: As `MassiveConfig` takes it.
+            on_error: As `MassiveConfig` takes it.
             delayed_subscriptions: As `MassiveConfig` takes it.
         """
         self.server = server
@@ -179,6 +178,7 @@ class WsSession:
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
         self.pair_answers: dict[str, tuple[str, str] | Unsplit | Exception] = dict(PAIRS)
+        self.pair_policies: list[tuple[str, ResolvedPolicy]] = []
         self.config = dataclasses.replace(
             _DEFAULTS,
             flush_interval=flush_interval,
@@ -186,9 +186,7 @@ class WsSession:
             subscription_confirmation_timeout=subscription_confirmation_timeout,
             connection_taken=connection_taken,
             max_outage=max_outage,
-            noncanonical_symbols=noncanonical_symbols,
-            unavailable_symbols=unavailable_symbols,
-            unreadable_symbols=unreadable_symbols,
+            on_error=on_error,
             delayed_subscriptions=delayed_subscriptions,
         )
         self.session = dm.MassiveSession(self.config)
@@ -264,8 +262,10 @@ class WsSession:
             self.cond.notify_all()
             return list(self.rows.get(template, []))
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
+    def _crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.
+
+        Each lookup's ticker and policy go to `pair_policies`.
 
         Returns:
             The ticker's answer in `pair_answers`, or `NOT_LISTED` when it has none.
@@ -275,6 +275,7 @@ class WsSession:
         """
         with self.cond:
             self._journal.append(("crypto_pair", symbol, threading.current_thread().name))
+            self.pair_policies.append((symbol, policy))
             answer = self.pair_answers.get(symbol, NOT_LISTED)
         if isinstance(answer, Exception):
             raise answer
@@ -373,7 +374,12 @@ class WsSession:
             )
 
     def query(
-        self, spec: DatasetSpec, symbols: SymbolsLike, session: dm.MassiveSession | None = None
+        self,
+        spec: DatasetSpec,
+        symbols: SymbolsLike,
+        session: dm.MassiveSession | None = None,
+        *,
+        on_error: dm.ErrorPolicy | None = None,
     ) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
 
@@ -381,12 +387,13 @@ class WsSession:
             spec: The dataset.
             symbols: Its symbols.
             session: The session to build it on; None for this wrapper's own.
+            on_error: The call's policy, as a dataset method takes it.
 
         Returns:
             The query.
         """
         core = (session or self.session)._core
-        return build_query(core, spec, query_type=StreamQuery, symbols=symbols)
+        return build_query(core, spec, query_type=StreamQuery, symbols=symbols, on_error=on_error)
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.

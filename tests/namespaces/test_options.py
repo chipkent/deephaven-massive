@@ -1408,7 +1408,7 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     assert query._request.symbols is None
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
-        massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg]  # the refusal
+        massive_session.options.admin_messages(dm.ALL)  # type: ignore[call-arg, arg-type]  # the refusal
     assert not hasattr(query, "last_by")
     assert not hasattr(query, "fetch")
 

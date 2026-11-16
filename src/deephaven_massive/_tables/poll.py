@@ -45,7 +45,7 @@ table, and `SchemaDrift` from each page's drift.
 **Symbols left out.** By default one symbol never fails a whole table. A symbol of a reactive
 table that routes to a path lacking a parameter the poll sends (`adjusted=False` on a crypto
 indicator), and a symbol Massive answers with HTTP 404, follow
-`MassiveConfig.unavailable_symbols`: under `LOG`, the default, and `IGNORE` they have no rows in
+`ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE` they have no rows in
 the cycle (a `REPLACE` table drops their rows), and every good cycle lists them, with the
 reason, in the row's `Error` (`NotePart.LEFT_OUT`, `CycleRows.left_out`), clearing the list once
 none is left out, so the table never loses rows without saying why; the REST reader logs each
@@ -217,7 +217,7 @@ their place. Hidden like `LIVE_COLUMN`, and dropped from the result."""
 class SymbolRowError(PermanentError):
     """A row of a `poll()` table's reactive symbol table that is not Massive's exact ticker.
 
-    Raised only under `MassiveConfig.noncanonical_symbols=OnError.RAISE` (under `LOG` and
+    Raised only under `noncanonical_symbols=RAISE` (under `LOG` and
     `IGNORE` the row is skipped and listed in the row's `Error`), or for a symbol table that
     has failed. The table fails with it, since every later cycle would read the same row; its
     message names `dm.canonicalize_symbols`, which converts such a table. The table is the
@@ -650,12 +650,12 @@ class Poller:
         self._key_names = key_columns(spec, self._schema)
         self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
-        self._rule = SymbolRowRule.of(spec, core.config.noncanonical_symbols)
+        self._rule = SymbolRowRule.of(spec, request.on_error.noncanonical_symbols)
         self._value_rule = (
             None
             if request.value_table is None
             else SymbolRowRule.for_values(
-                spec, request.value_table, core.config.noncanonical_symbols
+                spec, request.value_table, request.on_error.noncanonical_symbols
             )
         )
         self._interval = interval.total_seconds()
@@ -955,7 +955,7 @@ class Poller:
         """Return the cycle's symbols, reading a reactive table once.
 
         A row of a reactive table that is not Massive's exact ticker follows the session's
-        `MassiveConfig.noncanonical_symbols` (`read_symbols`): under `RAISE` it fails the table;
+        `ErrorPolicy.noncanonical_symbols` (`read_symbols`): under `RAISE` it fails the table;
         under `LOG` and `IGNORE` it is skipped, and returned so the cycle can list it.
 
         Returns:
@@ -980,7 +980,7 @@ class Poller:
         """Return the values a value table holds now, read once for the cycle.
 
         A row that is not a value the dataset takes (an underlying that is not a stock or index
-        ticker) follows `MassiveConfig.noncanonical_symbols`, as a symbol table's row does.
+        ticker) follows `ErrorPolicy.noncanonical_symbols`, as a symbol table's row does.
 
         Returns:
             None and no skipped value for a request without a value table; else the table's

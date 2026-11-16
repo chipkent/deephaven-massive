@@ -353,7 +353,9 @@ def test_history_rejects_a_symbol_table_without_symbols(
 def test_an_empty_window_has_the_session_columns(unreadable: dm.OnError) -> None:
     # The empty result of a window no row fits in has the session's columns, with RawSymbol
     # exactly when the session keeps unreadable rows, as every other result of it does.
-    config = dm.MassiveConfig(api_key="test-key", unreadable_symbols=unreadable)
+    config = dm.MassiveConfig(
+        api_key="test-key", on_error=dm.ErrorPolicy(unreadable_symbols=unreadable)
+    )
     with dm.MassiveSession(config) as session:
         q = trades(session)
         empty = q._empty_rows()
@@ -865,3 +867,50 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
 def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
     with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
         _history._symbol_classes(object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+RAISES = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+"""A call's policy that fails on a symbol-table row that is not Massive's ticker."""
+
+
+@pytest.mark.parametrize("refreshing", [False, True], ids=["static", "refreshing"])
+def test_history_refuses_a_bad_row_when_the_call_raises_and_the_session_logs(
+    refreshing: bool,
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    # The `dm.ErrorPolicy` docstring's example: the session skips such a row, this call fails.
+    rows = ["AAPL", "msft"]
+    watchlist = live(*rows) if refreshing else new_table([string_col("Symbol", rows)])
+    q = massive_session.stocks.trades(
+        watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    )
+    with pytest.raises(ValueError, match=r"^stocks\.trades: a symbol table holds 'msft'"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
+    assert (rest.calls, rest.by_symbol) == ([], [])
+
+
+def test_history_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
+    *, massive_session: dm.MassiveSession, rest: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    strict(massive_session, monkeypatch)
+    watchlist = new_table([string_col("Symbol", ["AAPL", "msft"])])
+    q = massive_session.stocks.trades(
+        watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.LOG)
+    )
+    q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
+    assert rest.calls[0][2].symbols == ("AAPL",)
+
+
+def test_a_followed_history_fails_on_a_late_bad_row_when_the_call_raises_and_the_session_logs(
+    *, live: Callable[..., InputTable], massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    watchlist = live("AAPL")
+    q = massive_session.stocks.trades(watchlist, on_error=RAISES)
+    result = q.history("2025-03-03", "2025-03-03", wait=True)
+    watchlist.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: bool(result.j_table.isFailed()))
+    assert [symbols for symbols, _, _ in rest.by_symbol] == [("AAPL",)]
+    follows(massive_session)

@@ -8,7 +8,7 @@ ticker, as `symbols=` must (`check_symbol` in `_datasets/symbols.py`): the libra
 a watchlist, so what the table says is what the stream subscribes and what `last_by()` matches. A
 null row is ignored.
 A row that is not canonical is never subscribed or requested; what else it does follows the
-session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
+call's `noncanonical_symbols` setting, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
   later fails the result, with a message that names the row and `canonicalize_symbols`.
@@ -240,7 +240,7 @@ class SymbolRowRule:
         asset_class: The class whose grammar the rows must follow, or `ClassFromPrefix.ANY`
             for a dataset that spans classes (each symbol's prefix selects its class).
         as_written: True for a dataset whose symbols are kept as Massive writes them.
-        noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+        noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
         underlying: True when each value must be a stock or index ticker, the underlying of
@@ -260,7 +260,7 @@ class SymbolRowRule:
 
         Args:
             spec: The dataset.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
 
         Returns:
             The rule.
@@ -282,7 +282,7 @@ class SymbolRowRule:
         Args:
             spec: The dataset.
             values: The table and the argument it stands for.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
 
         Returns:
             The rule, reading the table's `values.column`.
@@ -397,7 +397,7 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     Under `LOG` and `IGNORE` each skipped value is logged once (`SymbolRowRule.skip`).
 
     Args:
-        rule: The dataset's rule: its grammar and the session's `noncanonical_symbols`.
+        rule: The dataset's rule: its grammar and the call's `noncanonical_symbols`.
         table: The user's table with the rule's column (`Symbol`, or `ProductCode`).
         stream_id: The stream or `poll()` table the read is for, named in a skipped row's
             record; None for a verb's read before any stream exists.
@@ -507,7 +507,7 @@ class SymbolWatch:
         that should own the view and the listener, and outside every library lock.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's grammar and the call's `noncanonical_symbols`.
             table: The user's refreshing table with the rule's column (`Symbol`, or
                 `ProductCode`).
             on_change: Receives each change of the set of symbols; see the class documentation.
@@ -586,7 +586,7 @@ class _SymbolCounter(TableListener):
         """Start with no value counted.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's grammar and the call's `noncanonical_symbols`.
             on_change: Receives each change of the set of symbols.
             stream_id: The stream that follows the table, named in the log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.

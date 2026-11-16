@@ -85,7 +85,7 @@ whose key (its ticker, its time, or for futures its session) is empty, does not 
 fails the routine cannot be placed, so it is dropped and counted (`DriftRegistry` logs one
 WARNING per dataset with the running count). A malformed line, one that is not UTF-8 text or
 does not split into the header's fields (too few or too many, or a quote that does not close),
-follows `MassiveConfig.malformed_rows`: under `LOG`, the default, it is skipped and each file
+follows `ErrorPolicy.malformed_rows`: under `LOG`, the default, it is skipped and each file
 that had one logs one WARNING with the count and the first one's row number, never its text;
 under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with `RowDataError`. A file
 that lacks a key header fails the call with `MassiveError`, and so does a file whose every row
@@ -94,9 +94,9 @@ the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
 the placeholder `{venue}`, `venues` (all four when the call left it out) picks the venues read,
-and HTTP 403 on any venue raises `EntitlementError` naming the venue, `venues=`, and
-`refused_venues=`. When no other source can serve the call and `Request.refused_venues` is `LOG`
-or `IGNORE` (always `LOG` when the call left `venues` out), a refused venue is skipped
+and HTTP 403 on any venue raises `EntitlementError` naming the venue, `venues=`, and the
+`refused_venues` cause. When no other source can serve the call and `Request.refused_venues` is
+`LOG` or `IGNORE` (always `LOG` when the call left `venues` out), a refused venue is skipped
 instead, every file of it over the whole range, and the read names it
 (`_ingest/refused_venues.py`); a call whose every venue is refused still raises. A 403 that
 rejects the S3 credentials themselves raises `AuthenticationError` for every class.
@@ -161,10 +161,12 @@ from deephaven_massive._datasets.timestamps import (
 )
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
+    log_unreadable,
     unreadable_symbol_message,
     wire_spellings,
 )
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     NEW_SESSION,
     READ_STOPPED,
@@ -216,6 +218,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.source_columns import SourceColumn
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._log_limits import BoundedLog, LoggedKeys
     from deephaven_massive._massive import FlatFile, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
@@ -512,8 +515,10 @@ class _Transform:
         warnings: The session's once-per-session warnings, for a futures file that holds
             rows of sessions other than its own.
         prefix: The prefix the files come from, for messages.
-        symbols: How the files' tickers become canonical (`WireSymbols`), and what a spelling
-            the library cannot read does.
+        symbols: How the files' tickers become canonical (`WireSymbols`).
+        policy: The call's resolved policy (`Request.on_error`): what a ticker spelling the
+            library cannot read, and a malformed line, do.
+        raw_symbol: Whether the schema has `RawSymbol`, which the session decides.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
@@ -535,6 +540,8 @@ class _Transform:
     times: TimeRule
     time_name: str
     symbols: WireSymbols
+    policy: ResolvedPolicy
+    raw_symbol: bool
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
 
@@ -547,7 +554,7 @@ class _Transform:
         prefix: str,
         request: Request,
         window: HistoryWindow,
-        unreadable_symbols: OnError,
+        raw_symbol: bool,
         warnings: BoundedLog,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
@@ -569,15 +576,15 @@ class _Transform:
             window: The call's window: rows are kept inside `HistoryWindow.times` (for bars,
                 the starts of the bars that fit wholly); futures named by date keep the rows of
                 `HistoryWindow.sessions`, by each row's own session.
-            unreadable_symbols: The session's setting for a ticker spelling the library cannot
-                read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
+            raw_symbol: Whether the schema has the `RawSymbol` column
+                (`SessionCore.raw_symbol`).
             warnings: The session's once-per-session warnings, which the time rule logs to
                 (`row_times.time_rule`): that of a daily summary, and its bars' stamp rule.
 
         Returns:
             The transform.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
+        schema = catalog.dataset_schema(spec, raw_symbol=raw_symbol)
         # A flat-file dataset always has a class: `DatasetSpec` refuses `ClassFromPrefix.ANY`
         # with flat files.
         file_class = spec.single_class
@@ -626,11 +633,31 @@ class _Transform:
             prefix=prefix,
             times=time_rule(spec, request, asset_class=file_class, warnings=warnings),
             time_name=time_name,
-            symbols=WireSymbols(
-                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
-            ),
+            symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
+            policy=request.on_error,
+            raw_symbol=raw_symbol,
             bars=window.bars,
         )
+
+    def _unreadable(self, spellings: tuple[str, ...]) -> None:
+        """Apply the call's `unreadable_symbols` to a block's unreadable ticker spellings.
+
+        Args:
+            spellings: The distinct spellings, sorted; empty for a clean block.
+
+        Raises:
+            MassiveError: Under `RAISE`, for any spelling (`unreadable_symbol_message`); under
+                `LOG` and `IGNORE` each is logged once instead (`log_unreadable`).
+        """
+        if not spellings:
+            return
+        setting = self.policy.unreadable_symbols
+        if effect_of(setting).fails:
+            raise MassiveError(
+                unreadable_symbol_message(self.dataset, spellings),
+                source=ErrorSource.LIBRARY,  # a spelling the library cannot read
+            )
+        log_unreadable(self.dataset, spellings, setting, raw_symbol=self.raw_symbol)
 
     def apply(
         self, batch: pa.RecordBatch, *, received: int, key: _Key
@@ -667,9 +694,9 @@ class _Transform:
 
         Raises:
             MassiveError: If a row's ticker is a spelling the library cannot read and the
-                session's `unreadable_symbols` is `RAISE`
+                call's `unreadable_symbols` is `RAISE`
                 (`wire_symbols.unreadable_symbol_message`); under `LOG` and `IGNORE` the row
-                keeps a null `Symbol` and the text in `RawSymbol`.
+                keeps a null `Symbol`, and the text in `RawSymbol` where the schema has it.
         """
         if self.session_header is not None:
             batch = self._own_sessions(batch, key)
@@ -685,11 +712,7 @@ class _Transform:
                 values = raw
             elif name == "Symbol":
                 read = self.symbols.read(batch["Symbol"], {})
-                if read.unreadable and not self.symbols.keeps:
-                    raise MassiveError(
-                        unreadable_symbol_message(self.dataset, read.unreadable),
-                        source=ErrorSource.LIBRARY,  # a spelling the library cannot read
-                    )
+                self._unreadable(read.unreadable)
                 values, raw = read.symbols, read.raw
             else:
                 values = self._column(batch, column, odd=odd, rounded=rounded)
@@ -879,7 +902,7 @@ class FlatFileHistory:
 
         Errors, all raised on the calling thread: `AuthenticationError` when S3 rejects the S3
         credentials; `EntitlementError` when S3 answers HTTP 403 for a file otherwise, naming
-        the venue and the `venues=` and `refused_venues=` parameters for futures, unless the
+        the venue, `venues=`, and the `refused_venues` cause for futures, unless the
         venue is skipped (`refused_venues.RefusedVenues`, when `infer_holidays` is set and
         `Request.refused_venues` is `LOG` or `IGNORE`); `MassiveError` when the S3 client
         cannot be created, the bucket is unreachable, answers
@@ -902,7 +925,7 @@ class FlatFileHistory:
             prefix=prefix,
             request=request,
             window=window,
-            unreadable_symbols=self._core.config.unreadable_symbols,
+            raw_symbol=self._core.raw_symbol,
             warnings=self._core.warnings,
         )
         tiled = not infer_holidays and _tiles(spec, request, window)
@@ -1561,7 +1584,7 @@ class FlatFileHistory:
         flat files show each extra, missing, or unconvertible header, and counts the rows
         dropped for a key. A read that a dropped connection ends reports nothing, so a file
         read again is counted once. A file with malformed lines (not UTF-8 text, or not the
-        header's fields) follows `MassiveConfig.malformed_rows` (`_log_malformed`): under `LOG`, it
+        header's fields) follows the call's `malformed_rows` (`_log_malformed`): under `LOG`, it
         logs one WARNING with their count and the first one's row number and fault
         (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
         one DEBUG line with the rows after each step: read, of the requested symbols, kept by
@@ -1590,7 +1613,7 @@ class FlatFileHistory:
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
         served = 0
-        setting = self._core.config.malformed_rows
+        setting = transform.policy.malformed_rows
         with entered(self._core.exec_ctx):
             for batch, drift in batches:
                 if file.malformed_lines and effect_of(setting).fails:
@@ -1639,7 +1662,7 @@ def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
     Args:
         dataset: The dataset read, such as `stocks.trades`.
         file: The file, with at least one malformed line.
-        setting: The session's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
+        setting: The call's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
     """
     logger.log(
         effect_of(setting).level,  # never RAISE here: that read failed at the line
@@ -1667,9 +1690,8 @@ def _malformed_message(dataset: str, file: FlatFile) -> str:
     """
     return (
         f"{dataset}: {file.location} holds a malformed line, the first: "
-        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, pass "
-        "MassiveConfig(malformed_rows=dm.OnError.LOG), or write 'malformed_rows: log' in the "
-        "settings file"
+        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, "
+        f"{policy_hint('malformed_rows', OnError.LOG)}"
     )
 
 
@@ -1725,7 +1747,7 @@ def _public(error: WireError, key: _Key) -> MassiveError:
     """Return the public error for a wire error of one file, with the user's remedy.
 
     A rejected credential names the settings to check; a refusal names the plan and, for a
-    futures file, the venue and the `venues=` and `refused_venues=` parameters; a 404 (a missing
+    futures file, the venue, `venues=`, and the `refused_venues` cause; a 404 (a missing
     bucket, since a missing file is no error) names the bucket and endpoint settings. Every
     other wire error becomes its public counterpart through `_errors.from_wire`. Each keeps the
     wire error's status and request id.
@@ -1754,8 +1776,8 @@ def _public(error: WireError, key: _Key) -> MassiveError:
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
             "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes, "
-            "or leave venues out or pass refused_venues=dm.OnError.LOG to skip the venues S3 "
-            "refuses",
+            "or leave venues out; to skip the venues S3 refuses, "
+            f"{policy_hint('refused_venues', OnError.LOG)}",
             status=error.status,
             request_id=error.request_id,
         )

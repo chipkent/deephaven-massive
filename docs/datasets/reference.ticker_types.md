@@ -7,7 +7,7 @@ The ticker type codes Massive uses, such as `CS` for common stock, with their na
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.ticker_types(*, asset_class=None, locale=None)
+m.reference.ticker_types(*, asset_class=None, locale=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -18,10 +18,13 @@ m.reference.ticker_types(*, asset_class=None, locale=None)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
 | `asset_class` | The asset class whose types to list. Leave it out for every class. Massive lists no futures types. |
 | `locale` | The locale whose types to list. Leave it out for both. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
