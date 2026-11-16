@@ -333,12 +333,17 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
 def test_history_rejects_a_symbol_table_without_symbols(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
-    for content in ([], [None]):
+    every_row_null = (
+        r"^m\.stocks\.trades\(\): every row's Symbol is null; a table from "
+        r"dm\.canonicalize_symbols nulls the rows it cannot convert, and its log names each value$"
+    )
+    for content, message in (
+        ([], r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"),
+        ([None, None], every_row_null),
+    ):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
-            with pytest.raises(
-                ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
-            ):
+            with pytest.raises(ValueError, match=message):
                 q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []

@@ -154,12 +154,13 @@ def test_a_static_symbol_table_is_a_fixed_symbol_list(
 def test_a_static_symbol_table_without_symbols_opens_no_stream(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
 ) -> None:
-    for content in ([], [None]):
+    for content, message in (
+        ([], r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"),
+        ([None], r"^m\.stocks\.trades\(\): every row's Symbol is null; a table from"),
+    ):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         call = getattr(q, verb)
-        with pytest.raises(
-            ValueError, match=r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"
-        ):
+        with pytest.raises(ValueError, match=message):
             call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
 

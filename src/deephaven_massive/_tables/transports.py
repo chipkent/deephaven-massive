@@ -528,14 +528,11 @@ class StreamTransport(Protocol):
 
         Raises:
             ValueError: If explicit options contracts would put more than 1,000 topics on the
-                session's `/options` connection, or the stream is real-time only (fair market
-                value, `DatasetSpec.real_time_only`) and `MassiveConfig.delayed_subscriptions`
-                lists its subscription.
+                session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides the
                 WebSocket host.
             EntitlementError: If Massive labels the subscription's snapshot delayed and the
-                subscription is not in `MassiveConfig.delayed_subscriptions`, or the stream is
-                real-time only.
+                subscription is not in `MassiveConfig.delayed_subscriptions`.
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
         """

@@ -76,7 +76,7 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (CRY, "BTC--USD", None),
         (IDX, "I:SPX", "I:SPX"),
         (IDX, "SPX", "I:SPX"),  # the endpoint's class adds the prefix
-        (IDX, "spx", "I:spx"),  # never re-cased
+        (IDX, "spx", None),  # case is never folded, and lower case is no index ticker
         (IDX, "S P X", None),
         (FUT, "BOB 02-01 U6", "BOB 02-01 U6"),
         (FUT, "ZZ:NEW COMBO Z6", "ZZ:NEW COMBO Z6"),  # a row keeps a form not seen yet

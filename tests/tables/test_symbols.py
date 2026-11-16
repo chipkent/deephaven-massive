@@ -59,10 +59,24 @@ def test_canonicalize_a_static_table_with_a_convention(dh_exec_ctx: object) -> N
     assert values(result) == ["BRK.B", "BACpL", "AAPL"]
 
 
+def test_a_convention_names_case_whitespace_and_emptiness_per_row(dh_exec_ctx: object) -> None:
+    table = new_table([string_col("Symbol", ["brk-b", "BRK-B ", ""])])
+    with pytest.raises(ValueError, match=r"^3 value\(s\) of Symbol are not stock") as raised:
+        dm.canonicalize_symbols(
+            table, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
+        )
+    assert str(raised.value).startswith(
+        "3 value(s) of Symbol are not stock tickers: '' is empty, not a ticker; "
+        "'BRK-B ' has surrounding whitespace; write 'BRK-B'; "
+        "'brk-b' is not a YAHOO ticker: the YAHOO convention writes tickers in upper case; "
+        "use 'BRK-B' if that is the ticker you mean. "
+    )
+
+
 def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["BRK-B", "b1", "b2", "b3", "b4", "b5", "b6"])])
     with pytest.raises(
-        ValueError, match=r"^7 value\(s\) of Symbol are not stocks symbols: "
+        ValueError, match=r"^7 value\(s\) of Symbol are not stock tickers: "
     ) as raised:
         dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
     message = str(raised.value)
