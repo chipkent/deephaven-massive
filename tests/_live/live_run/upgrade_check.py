@@ -11,15 +11,17 @@ longer limited:
    line from its standard input, which the parent writes when the person presses Enter.
 3. A's row is recorded and A is closed. Once a minute, a fresh session that declares nothing
    sends six one-request calls (`ANSWERED_CALLS`), until Massive answers all six without an
-   HTTP 429; then, 65 seconds later, session B, which declares nothing, sends ten one-request
-   calls, recording each one's send and answer times and B's rows.
+   HTTP 429 and within one minute (`ANSWERED_WITHIN`), so calls the library paced by a limit it
+   still holds do not count; then, 65 seconds later, session B, which declares nothing, sends
+   ten one-request calls, recording each one's send and answer times and B's rows.
 4. One round whose ten calls are all answered within 30 seconds with no refusal passes. A
    refusal (Massive still limits) closes B and repeats the round a minute later; the whole
    wait after Enter is limited to 15 minutes.
 
 The verdicts: `passed`; `failed: library paced` (no refusal, but a call waited more than 30 s);
 `failed: Massive refused a round of ten` (the 15 minutes ended on refused rounds); and
-`failed: Massive kept limiting for 15 minutes` (Massive never answered six calls in a minute),
+`failed: Massive kept limiting for 15 minutes` (six calls were never answered within a minute
+without a refusal),
 which records a rehearsal, not the check's result. Everything goes to `upgrade-check.json` in
 the attempt's folder. It judges by timings and Massive's answers, never by states seen in a
 refreshing table.
@@ -60,6 +62,11 @@ CALLS: Final[dict[str, Callable[[MassiveSession], object]]] = {
 ANSWERED_CALLS: Final = 6
 """The calls Massive must answer in a minute, none refused with an HTTP 429, before the upgrade
 counts as taken; session A's learned limit (`Record.row_before`) shows how many it allowed."""
+
+ANSWERED_WITHIN: Final = 60.0
+"""The seconds `ANSWERED_CALLS` calls may take in all to count as answered in a minute: calls
+the library spread over minutes, by a learned limit a fresh session may still share, would pass
+without a 429 though Massive still limits."""
 
 ROUND_CALLS: Final = 10
 ANSWER_LIMIT: Final = 30.0
@@ -103,7 +110,8 @@ class Record:
         subscription: The subscription upgraded.
         learned_calls: How many calls session A made before its limit read `LEARNED`.
         row_before: A's rate-limit row after Enter.
-        answered: Each minute's `ANSWERED_CALLS` calls, until Massive answered them all.
+        answered: Each minute's `ANSWERED_CALLS` calls, until Massive answered them all within
+            a minute.
         rounds: Each round of session B: its calls (send time, seconds, error) and its row.
         verdict: `passed`, or the failure.
     """
@@ -185,8 +193,8 @@ def round_of_calls(
 
     Returns:
         The round: its calls (`sent`, `seconds`, `error`), B's row, the HTTP 429 replies
-        (`refusals`), whether Massive refused a request (`refused`), and whether every call
-        was answered within 30 s (`fast`).
+        (`refusals`), whether Massive refused a request (`refused`), whether every call was
+        answered within 30 s (`fast`), and the seconds all its calls took (`seconds`).
     """
     calls: list[dict[str, Any]] = []
     statuses: list[int | None] = []
@@ -207,7 +215,15 @@ def round_of_calls(
         set_reply_capture(None)
     refusals = statuses.count(TOO_MANY_REQUESTS)
     fast = all(c["seconds"] <= ANSWER_LIMIT for c in calls)
-    return {"calls": calls, "row": row, "refusals": refusals, "refused": refusals > 0, "fast": fast}
+    seconds = round(sum(c["seconds"] for c in calls), 3)
+    return {
+        "calls": calls,
+        "row": row,
+        "refusals": refusals,
+        "refused": refusals > 0,
+        "fast": fast,
+        "seconds": seconds,
+    }
 
 
 def run_upgrade_check(
@@ -242,7 +258,7 @@ def run_upgrade_check(
         if not upgraded:
             seen = round_of_calls(open_session, subscription, waits, count=ANSWERED_CALLS)
             record.answered.append(seen)
-            if seen["refused"]:
+            if seen["refused"] or seen["seconds"] > ANSWERED_WITHIN:
                 waits.sleep(60.0)
                 continue
             upgraded = True

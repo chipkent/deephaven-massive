@@ -4,7 +4,9 @@ A live test sends its requests whatever the key holds, and when Massive refuses 
 skips and quotes Massive. `refusal_line` words the quote, from the error's own message (the
 wire errors name the status, the request, and Massive's text) and its status. A refusal of a
 request reaching beyond the history the key keeps (`is_timeframe_refusal`) also names the
-earliest day the request asked for (`refused_request`), so a reader can judge it.
+earliest day the request asked for (`refused_request`), so a reader can judge it. The library's
+own refusal of a stream Massive serves only in real time, on a key whose data Massive labels
+delayed, carries no status (`is_real_time_only_refusal`).
 
 `tests/conftest.py` calls these from its hook and fixtures. Every function here is pure.
 """
@@ -16,6 +18,7 @@ import urllib.parse
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
+from deephaven_massive import EntitlementError
 from tests._live.classes import class_of_path
 
 if TYPE_CHECKING:
@@ -24,6 +27,11 @@ if TYPE_CHECKING:
 
 TIMEFRAME_PHRASE: Final = "doesn't include this data timeframe"
 """The phrase of Massive's refusal of a request beyond the key's history, in lower case."""
+
+REAL_TIME_ONLY_PHRASE: Final = "streams only in real time, and Massive labels this key's"
+"""The library's words when it refuses a stream Massive serves only in real time (fair market
+value, the options admin messages) because Massive labels the key's data of its subscription
+delayed, before the stream opens (`host_decision.require_real_time`)."""
 
 _REQUEST_TARGET: Final = re.compile(r" from GET (\S+) on ")
 """Where a wire error's message names the request's target (path and query)."""
@@ -47,6 +55,27 @@ def is_timeframe_refusal(error: BaseException) -> bool:
         True for a refusal of the request's timeframe.
     """
     return TIMEFRAME_PHRASE in str(error).lower().replace("\u2019", "'")
+
+
+def is_real_time_only_refusal(error: BaseException) -> bool:
+    """Return whether an error is the library's refusal of a real-time-only stream.
+
+    The library raises it as the stream opens, with no status, when Massive labels the key's
+    data of the stream's subscription delayed: Massive has no delayed feed of the dataset, so
+    the plan does not include it.
+
+    Args:
+        error: The error the stream's verb raised.
+
+    Returns:
+        True for an `EntitlementError` with no status whose message holds
+        `REAL_TIME_ONLY_PHRASE`.
+    """
+    return (
+        isinstance(error, EntitlementError)
+        and error.status is None
+        and REAL_TIME_ONLY_PHRASE in str(error)
+    )
 
 
 def refused_request(error: BaseException) -> tuple[str | None, date | None]:

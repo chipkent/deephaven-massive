@@ -25,6 +25,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
+import deephaven_massive as dm
 from tests._fakes.rest import Reply, envelope
 from tests._live.live_run import stream_capture
 from tests._live.live_run.stream_capture import Clock, Recorder, Stream
@@ -686,13 +687,18 @@ def test_a_class_whose_stream_failed_is_named_with_its_error() -> None:
 def _verdict(
     *,
     failures: tuple[str, ...] = (),
+    opened: tuple[str, ...] = (),
+    streams: int = 1,
     gaps: timedelta = timedelta(),
     rows: int = 1,
     late: bool = True,
     delayed: bool = False,
 ) -> tuple[str, str]:
+    refused, broken = stream_capture.split_failures(list(failures), list(opened))
     return stream_capture._unit_verdict(
-        failures=list(failures),
+        refused=refused,
+        broken=broken,
+        streams=streams,
         contracts=True,
         gaps=gaps,
         errors=[],
@@ -717,6 +723,94 @@ def test_a_units_verdict_tells_massives_refusal_from_a_failure() -> None:
         "a stream failed: a socket broke",
     )
     assert _verdict(gaps=timedelta(minutes=2)) == ("passed", "gaps 2")
+    # A refusal as a stream opened counts as one of its streams' refusals, whatever its text.
+    assert _verdict(opened=("x: no",), failures=(refusal,), streams=2, rows=0) == (
+        "refused",
+        "refused: x: no",
+    )
+
+
+def test_a_unit_with_an_acknowledged_stream_and_no_row_fails_though_another_was_refused() -> None:
+    """Massive's refusal of some of a unit's streams does not excuse the others' silence."""
+    refusal = "the WebSocket server refused the subscription to T.AAPL; Massive said: no"
+    why = "no rows during its session's hours"
+    assert _verdict(failures=(refusal,), streams=3, rows=0) == ("failed", why)
+    assert _verdict(failures=(refusal,), streams=3, rows=0, late=False) == (
+        "passed",
+        f"a stream refused: {refusal}",
+    )
+
+
+def test_the_librarys_wording_of_a_refused_topic_marks_a_refusal_on_every_feed() -> None:
+    """The library's stored error of a refused topic starts the same on every feed.
+
+    On the delayed feed its hint names `delayed_subscriptions` and none of the other marks.
+    """
+    delayed = (
+        "the WebSocket server delayed.massive.com/stocks refused the subscription to T.AAPL; "
+        "Massive said: not authorized; MassiveConfig.delayed_subscriptions lists "
+        "dm.Subscription.STOCKS, so its streams use Massive's delayed feed"
+    )
+    assert stream_capture.is_refusal(delayed)
+    assert not stream_capture.is_refusal("the WebSocket connection to x failed: reset")
+
+
+def _raise(error: Exception) -> None:
+    raise error
+
+
+def test_massives_refusal_as_a_stream_opens_is_recorded_and_another_raises() -> None:
+    refused: dict[str, list[str]] = {}
+    with stream_capture.refusal_recorded("stocks-trades", "stocks", refused):
+        _raise(dm.EntitlementError("not\n entitled", status=403))
+    assert refused == {"stocks": ["stocks-trades: not entitled"]}
+    with (
+        pytest.raises(dm.EntitlementError, match="delayed_subscriptions"),
+        stream_capture.refusal_recorded("stocks-trades", "stocks", refused),
+    ):
+        _raise(dm.EntitlementError("delayed_subscriptions", source=dm.ErrorSource.USER))
+
+
+@pytest.mark.jvm_held
+def test_a_refused_options_chain_refuses_its_unit_and_the_others_stream(
+    make_ws_session: Callable[..., WsSession], fake_rest: FakeRestServer, tmp_path: Path
+) -> None:
+    fake_rest.reply(
+        "/v3/snapshot/options/SPY",
+        Reply({"status": "NOT_AUTHORIZED", "message": "no options"}, status=403),
+    )
+    harness = make_ws_session(rest_base_url=fake_rest.url)
+    seen, report = _reports()
+    stream_capture.run_stream_day(
+        harness.session,
+        units=["options", "indices"],
+        delayed=frozenset(),
+        folder=tmp_path,
+        until=START + timedelta(seconds=1),
+        report=report,
+        clock=_Day().clock(),
+        day_start=START,
+    )
+    [(unit, status, reason), indices] = seen
+    assert (unit, status) == ("options", "refused")
+    assert reason.startswith("refused: options chain: ")
+    assert "no options" in reason
+    assert indices == ("indices", "passed", "")
+
+
+@pytest.mark.jvm_held
+def test_a_stream_massive_refused_as_it_opened_refuses_its_unit_and_the_others_stream(
+    massive_session: MassiveSession, tmp_path: Path
+) -> None:
+    def refuse(_m: MassiveSession) -> None:
+        raise dm.EntitlementError("not entitled", status=403)
+
+    streams = [Stream("stocks-trades", "stocks", refuse), Stream("x-trades", "x", refuse)]
+    with stream_capture.held_streams(massive_session, streams, Recorder(tmp_path)) as opened:
+        assert opened == {
+            "stocks": ["stocks-trades: not entitled"],
+            "x": ["x-trades: not entitled"],
+        }
 
 
 def test_a_delayed_unit_without_a_row_skips_and_another_fails() -> None:
@@ -837,14 +931,20 @@ def test_an_options_unit_without_contracts_fails(
 
 
 @pytest.mark.jvm_held
-def test_a_throughput_stream_massive_refused_refuses_its_unit(
+@pytest.mark.parametrize(
+    ("topics", "status"), [(("XT.*", "C.*"), "refused"), (("XT.*",), "passed")]
+)
+def test_a_throughput_unit_is_refused_only_when_massive_refused_all_its_streams(
     *,
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    topics: tuple[str, ...],
+    status: str,
 ) -> None:
-    fake_ws_server.refuse["XT.*"] = "not authorized"
+    for topic in topics:
+        fake_ws_server.refuse[topic] = "not authorized"
     harness = make_ws_session()
 
     def refused() -> None:
@@ -852,7 +952,7 @@ def test_a_throughput_stream_massive_refused_refuses_its_unit(
             harness.flush()
             assert harness.session._core.diagnostics.wait_until_shown(15.0)
             states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
-            return any(r["State"] == "FAILED" for r in states)
+            return len([r for r in states if r["State"] == "FAILED"]) == len(topics)
 
         fake_ws_server.wait_for(lambda _: failed())
 
@@ -868,7 +968,7 @@ def test_a_throughput_stream_massive_refused_refuses_its_unit(
         clock=_Day(action=refused).clock(),
         window=(START, START + timedelta(seconds=40)),
     )
-    [(unit, status, reason)] = seen
+    [(unit, found, reason)] = seen
     assert steps[-2:] == ["wait", "read"]
-    assert (unit, status) == ("currencies", "refused")
+    assert (unit, found) == ("currencies", status)
     assert "not authorized" in reason

@@ -1,8 +1,8 @@
 """Live checks of Massive's WebSocket protocol through the wire client, frame by frame.
 
-Each test opens one wire `WsClient` to one cluster on `socket.massive.com` (or, for stocks the
-owner's settings list in `delayed_subscriptions`, `delayed.massive.com`), records every status
-and, where the form of a value is
+Each test opens one wire `WsClient` to one cluster on `socket.massive.com` (for stocks, on the
+host the owner's settings pin in `websocket_hosts`, or `delayed.massive.com` when they list
+stocks in `delayed_subscriptions`), records every status and, where the form of a value is
 the question, every raw frame (`evidence`), and closes the client before the next test; a probe
 of a cluster waits a few seconds after the previous one closed, so the two never overlap on the
 server. The checks whose question belongs to no asset class (the unsubscribe, the frame size,
@@ -428,12 +428,13 @@ def _stocks_target(config: MassiveConfig) -> _Target:
         config: The live configuration, with the owner's settings.
 
     Returns:
-        The stocks target: `delayed.massive.com` when the settings list stocks in
-        `delayed_subscriptions`, else `socket.massive.com`; second bars (`A`) as the busy
-        channel.
+        The stocks target: the host the settings pin for stocks (`websocket_hosts`), else
+        `delayed.massive.com` when they list stocks in `delayed_subscriptions`, else
+        `socket.massive.com`; second bars (`A`) as the busy channel.
     """
     delayed = dm.Subscription.STOCKS in config.delayed_subscriptions
-    return _Target("stocks", _DELAYED_HOST if delayed else _HOST, "AAPL", "A", "AM", "Symbol")
+    host = config.websocket_hosts.get(dm.AssetClass.STOCKS, _DELAYED_HOST if delayed else _HOST)
+    return _Target("stocks", host, "AAPL", "A", "AM", "Symbol")
 
 
 def _skip_quiet_delayed(chosen: _Target, rows: object) -> None:
@@ -461,8 +462,9 @@ def test_form_of_the_forex_quote_exchange_id(
     as `48`; the library reads either. Subscribes `C.EUR-USD`, asserts that Massive
     acknowledged it, and records the raw `C` frames and the JSON type of `x`. Quotes are
     required unless `/v1/marketstatus/now` says the forex market is closed, when the test
-    skips after the acknowledgement. Passes when the library's conversion of the `Exchange`
-    column reads every quote's `x`; any other form would fail the row.
+    skips after the acknowledgement, and Massive's refusal skips it, quoting Massive. Passes
+    when the library's conversion of the `Exchange` column reads every quote's `x`; any other
+    form would fail the row.
     """
     made = probe("forex", _FRAMES)
     made.send("subscribe", ["C.EUR-USD"])
@@ -474,6 +476,7 @@ def test_form_of_the_forex_quote_exchange_id(
         evidence(line)
     for quote in quotes[:5]:
         evidence(f"raw C: x={quote.get('x')!r} ({type(quote.get('x')).__name__}) {quote}")
+    _skip_if_refused(acked)
     assert "C.EUR-USD" in acked.acked(), f"not acknowledged: {acked.status_lines()}"
     if status == "closed":
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
@@ -489,17 +492,22 @@ def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) ->
 
     It is declared and sampled as an integer, while REST and the flat files send text, and it
     arrives as text such as `"1114020236"`; the library keeps either as text. Records the raw
-    `XT` frames of `XT.BTC-USD` and the JSON type of `i`. Passes when trades arrived and the
-    library's conversion of the `Id` column reads every trade's `i`.
+    `XT` frames of `XT.BTC-USD` and the JSON type of `i`. Massive's refusal skips the test,
+    quoting Massive. Passes when trades arrived and the library's conversion of the `Id`
+    column reads every trade's `i`.
     """
     made = probe("crypto", _FRAMES)
     made.send("subscribe", ["XT.BTC-USD"])
-    records = made.wait(lambda r: bool(r.objects("XT")), _WAIT)
+    records = made.wait(
+        lambda r: bool(r.objects("XT")) or any(_refuses_plan(s.message) for _, s in r.statuses),
+        _WAIT,
+    )
     trades = records.objects("XT")
     for line in records.status_lines():
         evidence(line)
     for trade in trades[:5]:
         evidence(f"raw XT: i={trade.get('i')!r} ({type(trade.get('i')).__name__}) {trade}")
+    _skip_if_refused(records)
     assert trades
     refused = _unconverted("crypto/XT", "Id", trades)
     assert not refused, f"crypto trade `i` values the library cannot read: {refused[:5]}"

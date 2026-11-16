@@ -500,12 +500,12 @@ def _feed_session(seen: dict[str, Any], *, delayed: bool) -> str | None:
         delayed: Whether the examples stream from the delayed feed.
 
     Returns:
-        On the real-time feed, the session of the wall clock; on the delayed feed, the
-        session of the latest minute bar's end in Example 8's and 10's tables, or None when
-        no bar has arrived.
+        On the real-time feed, the session of the wall clock when the minute was read
+        (`clock`); on the delayed feed, the session of the latest minute bar's end in Example
+        8's and 10's tables, or None when no bar has arrived.
     """
     if not delayed:
-        return streams.stock_session(datetime.now(UTC))
+        return streams.stock_session(seen["clock"])
     ends = [int(r["TimestampEnd"]) for r in (*seen["latest"], *seen["since_start"])]
     if not ends:
         return None
@@ -528,9 +528,11 @@ def _watch_minute(
         evidence: Records the counts.
 
     Returns:
-        Each table's rows, by name, and `published`, the rows the dashboard's stream published.
+        Each table's rows, by name; `published`, the rows the dashboard's stream published;
+        and `clock`, the wall clock as the tables were read.
     """
     _sleep_until(streams.minute_bar_deadline(datetime.now(UTC)))
+    clock = datetime.now(UTC)
     names = ("latest", "changes", "since_start", "spy")
     tables = (
         ran["stream-minute-bars"]["latest"],
@@ -539,6 +541,7 @@ def _watch_minute(
         ran["backfill-then-live"]["spy"],
     )
     seen: dict[str, Any] = dict(zip(names, locked_rows(*tables), strict=True))
+    seen["clock"] = clock
     seen["published"] = sum(
         int(row["RowsPublished"] or 0)
         for row in table_rows(ran["dashboard"]["m"].streams())

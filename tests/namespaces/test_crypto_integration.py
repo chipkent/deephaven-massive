@@ -32,6 +32,7 @@ from deephaven_massive._massive import RestClient, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+    from contextlib import AbstractContextManager
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -53,6 +54,7 @@ Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
+SkipIfRealTimeOnlyRefused: TypeAlias = "Callable[[], AbstractContextManager[None]]"
 CryptoReport: TypeAlias = "Callable[..., list[str]]"
 
 _PAIR = "X:BTCUSD"
@@ -573,6 +575,7 @@ def test_fmv_frames_convert_to_a_current_instant(
     wait_acked: WaitAcked,
     stream_report: Report,
     skip_if_not_entitled: SkipIfNotEntitled,
+    skip_if_real_time_only_refused: SkipIfRealTimeOnlyRefused,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
@@ -582,8 +585,10 @@ def test_fmv_frames_convert_to_a_current_instant(
     library reads each value by its magnitude and logs once which unit the column arrived
     in. Streams `X:BTCUSD`'s fair market value, asserts that Massive acknowledged the topic,
     and records the first rows, their age, and that log line; a refused stream skips, quoting
-    Massive. Massive serves the fair market value only in real time, so the session leaves
-    currencies out of `delayed_subscriptions`, as a user streaming it would. Crypto trades
+    Massive, and so does the library's refusal at the call when Massive labels the key's
+    currencies data delayed, quoting the library. Massive serves the fair market value only
+    in real time, so the session leaves currencies out of `delayed_subscriptions`, as a user
+    streaming it would. Crypto trades
     around the clock, so rows are required. Passes when the first row's instant is within a
     day of now; the logged unit settles which unit Massive sends.
     """
@@ -591,7 +596,8 @@ def test_fmv_frames_convert_to_a_current_instant(
     listed = live_config.delayed_subscriptions - {dm.Subscription.CURRENCIES}
     session = dm.MassiveSession(dataclasses.replace(live_config, delayed_subscriptions=listed))
     try:
-        table = session.crypto.fmv(_PAIR).append_only()
+        with skip_if_real_time_only_refused():
+            table = session.crypto.fmv(_PAIR).append_only()
         acked = wait_acked(session, 1, time.monotonic() + _STREAM_WAIT)
         rows = wait_rows(session, table, time.monotonic() + _STREAM_WAIT)
         for line in stream_report(session):

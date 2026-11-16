@@ -11,7 +11,6 @@ and record whether Massive refuses them too. How to run these tests is in `docs/
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -33,9 +32,11 @@ from deephaven_massive._massive import (
     source,
 )
 from tests._live import bad_values, calendar, greeks, refusals
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
+    from contextlib import AbstractContextManager
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -72,6 +73,7 @@ LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
+SkipIfRealTimeOnlyRefused: TypeAlias = "Callable[[], AbstractContextManager[None]]"
 
 _CONTRACTS = "/v3/reference/options/contracts"
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -828,6 +830,7 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     table_rows: TableRows,
     stream_report: StreamReport,
     skip_if_not_entitled: SkipIfNotEntitled,
+    skip_if_real_time_only_refused: SkipIfRealTimeOnlyRefused,
     evidence: Evidence,
 ) -> None:
     """Whether Massive acknowledges `AD.*` on the real-time options feed, and what rows carry.
@@ -836,16 +839,19 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     `socket.massive.com`, and records the connection, the stream, and up to five rows: each
     one's exchange, sequence number, SIP timestamp, and text as OPRA sent it. Massive serves
     the admin messages only in real time, so the session leaves options out of
-    `delayed_subscriptions`, as a user streaming them would. Passes when Massive acknowledged
-    the topic, which it does whether or not the market is open, the stream still runs, and
-    every row that arrived has its `Timestamp` and `Message`. Messages come only with FLEX
-    activity or an exchange's notice, so no row is required. Massive's refusal skips the test,
-    quoting Massive; the refusal test checks what the refusal says.
+    `delayed_subscriptions` (and any delayed host pin of options), as a user streaming them
+    would. Passes when Massive acknowledged the topic, which it does whether or not the market
+    is open, the stream still runs, and every row that arrived has its `Timestamp` and
+    `Message`. Messages come only with FLEX activity or an exchange's notice, so no row is
+    required. Massive's refusal skips the test, quoting Massive, and so does the library's
+    refusal at the call when Massive labels the key's options data delayed, quoting the
+    library; the refusal test checks what either refusal says.
     """
     listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
-    session = dm.MassiveSession(dataclasses.replace(live_config, delayed_subscriptions=listed))
+    session = dm.MassiveSession(with_delayed(live_config, listed))
     try:
-        table = session.options.admin_messages().append_only()
+        with skip_if_real_time_only_refused():
+            table = session.options.admin_messages().append_only()
         acked = wait_acked(session, 1, time.monotonic() + _ADMIN_WAIT)
         deadline = time.monotonic() + _ADMIN_WAIT
         pause = threading.Event()  # never set; only paces the wait for a row
@@ -891,17 +897,15 @@ def test_a_refusal_of_the_admin_messages_links_the_datasets_plans(
     """What a refusal of the admin messages says, and whether it links the dataset's page.
 
     Streams `m.options.admin_messages()` from a session whose `delayed_subscriptions` leaves
-    options out, as the dataset requires. When Massive labels the key's options data delayed,
-    the call raises `dm.EntitlementError`; when Massive refuses `AD.*`, the stream's row
+    options out (and any delayed host pin of options), as the dataset requires. When Massive
+    labels the key's options data delayed, the call raises `dm.EntitlementError`; when
+    Massive refuses `AD.*`, the stream's row
     turns `FAILED` with Massive's refusal. Passes when one of the two happens and its message
     ends with the link to the dataset's page. Skips when Massive serves the admin messages,
     which the real-time test checks.
     """
-    config = dataclasses.replace(
-        live_config,
-        delayed_subscriptions=live_config.delayed_subscriptions - {dm.Subscription.OPTIONS},
-    )
-    session = dm.MassiveSession(config)
+    listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
+    session = dm.MassiveSession(with_delayed(live_config, listed))
     try:
         try:
             table = session.options.admin_messages().append_only()

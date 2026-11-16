@@ -25,7 +25,8 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
-from tests._live import streams
+from tests._live import streams, summary
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     import asyncio
@@ -113,7 +114,8 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     A subscription listed in `MassiveConfig.delayed_subscriptions` always streams from the
     delayed feed, even for a key Massive serves real-time. First asks Massive how it labels
     the key's stocks snapshot (`recency_label`), and skips, quoting the answer, when it labels
-    it delayed: the question is about a key whose data is not. Then lists stocks as delayed,
+    it delayed: the question is about a key whose data is not, or when Massive refused the
+    snapshot. Then lists stocks as delayed (dropping any host pin of stocks to another feed),
     subscribes `T.AAPL` (trades, which flow in the extended hours too), and records the
     stream's host, acknowledgement, rows, and any error. While the stock market is closed the
     test skips after the acknowledgement. While it is open, it waits up to 45 s for a trade;
@@ -124,10 +126,11 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     Massive labels delayed, and the library's message would have to say so.
     """
     answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
     if answer.delayed:
         pytest.skip(f"Massive labels the key's stocks data delayed ({answer.text()})")
-    config = dataclasses.replace(live_config, delayed_subscriptions={dm.Subscription.STOCKS})
-    session = dm.MassiveSession(config)
+    session = dm.MassiveSession(with_delayed(live_config, {dm.Subscription.STOCKS}))
     try:
         table = session.stocks.trades("AAPL").append_only()
         acked = wait_acked(session, 1, time.monotonic() + _WAIT)

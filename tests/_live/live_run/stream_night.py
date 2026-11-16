@@ -61,9 +61,9 @@ from tests._live.live_run.stream_capture import (
     failed_streams,
     held_streams,
     index_futures,
-    is_refusal,
     record_gap,
     sample_until,
+    split_failures,
     total_gaps,
     wait_for_diagnostics,
     write_csv,
@@ -231,15 +231,17 @@ def run_stream_night(
     record_gap(folder, clock.now(), day_start=timetable.night_start(night))
     streams = night_streams(units, night=night)
     recorder = Recorder(folder)
-    with held_streams(m, streams, recorder):
+    with held_streams(m, streams, recorder) as opened:
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
         wait_for_diagnostics(m)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     summary = summarize_night(folder, streams, units=units, night=night, end=clock.now())
     gaps = total_gaps(folder)
     for unit in units:
+        refused, broken = split_failures(failures.get(NIGHT_UNITS[unit], []), opened.get(unit, []))
         status, reason = night_verdict(
-            failures=failures.get(NIGHT_UNITS[unit], []),
+            refused=refused,
+            broken=broken,
             streams=sum(s.unit == unit for s in streams),
             delayed=NIGHT_UNITS[unit] in delayed,
             gaps=gaps,
@@ -475,7 +477,8 @@ def reconnects(folder: Path) -> dict[str, int]:
 
 def night_verdict(
     *,
-    failures: list[str],
+    refused: list[str],
+    broken: list[str],
     streams: int,
     delayed: bool,
     gaps: timedelta,
@@ -486,8 +489,9 @@ def night_verdict(
     """Decide one unit's result at the end of a night.
 
     Args:
-        failures: The errors of its class's failed streams, in order.
-        streams: How many streams it held.
+        refused: Massive's refusals of its streams (`split_failures`).
+        broken: The errors of its streams that failed otherwise.
+        streams: How many streams it opened or tried to open.
         delayed: Whether the owner's settings list its subscription as delayed.
         gaps: The night's gaps.
         errors: The recorder's errors.
@@ -500,12 +504,11 @@ def night_verdict(
         hours of a delayed unit; or `("failed", why)`.
     """
     minutes = round(gaps.total_seconds() / 60)
-    broken = [f for f in failures if not is_refusal(f)]
-    if broken or (failures and len(failures) >= streams):
+    if broken or (refused and len(refused) >= streams):
         return (
             ("failed", f"a stream failed: {broken[0]}")
             if broken
-            else ("refused", REFUSED + failures[0])
+            else ("refused", REFUSED + refused[0])
         )
     if gaps > MAX_GAP:
         return "failed", f"gaps {minutes}"
@@ -525,5 +528,5 @@ def night_verdict(
             f"{w['dates']}, not {w['expected']}"
         )
     notes = [f"gaps {minutes}"] if minutes else []
-    notes += [f"a stream {REFUSED}{failures[0]}"] if failures else []
+    notes += [f"a stream {REFUSED}{refused[0]}"] if refused else []
     return "passed", "; ".join(notes)

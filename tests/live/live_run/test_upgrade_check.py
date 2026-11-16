@@ -54,14 +54,16 @@ BAR = Reply(
 class _Time:
     """The check's clock: each sleep moves it, and the governors' clock, on.
 
-    Each call takes `call_seconds`. Moving the governors' clock lets a closed session's
-    governor go idle, so the next session starts with a fresh one, as in real time.
+    Each call takes `call_seconds`, or after the first sleep `slept_call_seconds` when set.
+    Moving the governors' clock lets a closed session's governor go idle, so the next session
+    starts with a fresh one, as in real time.
     """
 
     rest: FakeClock
     at: datetime = datetime(2026, 11, 4, 15, tzinfo=UTC)
     ticks: float = 0.0
     call_seconds: float = 0.5
+    slept_call_seconds: float | None = None
     sleeps: list[float] = field(default_factory=list)
     entered: int = 0
 
@@ -74,6 +76,8 @@ class _Time:
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
+        if self.slept_call_seconds is not None:
+            self.call_seconds = self.slept_call_seconds
         self.at += timedelta(seconds=seconds)
         self.rest.advance(seconds)
 
@@ -132,12 +136,37 @@ def test_a_slow_round_without_refusals_blames_the_library(
     tmp_path: Path,
     rest_clock: FakeClock,
 ) -> None:
+    # The six calls are answered at once; session B's calls, after the fresh minute, are slow.
     fake_rest.reply(PREV, LIMITED, BAR)
-    clock = _Time(rest_clock, call_seconds=31.0)
+    clock = _Time(rest_clock, slept_call_seconds=31.0)
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
     )
     assert record.verdict == "failed: library paced"
+
+
+def test_six_calls_answered_over_more_than_a_minute_are_no_upgrade(
+    *,
+    fake_rest: FakeRestServer,
+    open_session: Callable[[], MassiveSession],
+    tmp_path: Path,
+    rest_clock: FakeClock,
+) -> None:
+    """Six calls spread over more than a minute do not show the upgrade.
+
+    Calls that a limit the library still holds paces draw no 429, though Massive may still
+    limit the subscription.
+    """
+    fake_rest.reply(PREV, LIMITED, BAR)
+    clock = _Time(rest_clock, call_seconds=11.0)  # six calls take 132 s
+    record = upgrade_check.run_upgrade_check(
+        "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
+    )
+    assert record.verdict == "failed: Massive kept limiting for 15 minutes"
+    assert record.rounds == []
+    assert record.answered
+    assert not any(a["refused"] for a in record.answered)
+    assert all(a["seconds"] > upgrade_check.ANSWERED_WITHIN for a in record.answered)
 
 
 def test_refusals_until_the_wait_ends_blame_massive(

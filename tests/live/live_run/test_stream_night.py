@@ -251,8 +251,10 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
         quiet: tuple[datetime, ...] = (),
         wrong: tuple[dict[str, object], ...] = (),
     ) -> tuple[str, str]:
+        refused, broken = stream_capture.split_failures(list(failures), [])
         return stream_night.night_verdict(
-            failures=list(failures),
+            refused=refused,
+            broken=broken,
             streams=2,
             delayed=delayed,
             gaps=gaps,
