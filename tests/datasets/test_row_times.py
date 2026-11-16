@@ -272,13 +272,25 @@ def test_an_intraday_bar_ends_its_length_after_its_start() -> None:
         TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS)
 
 
-def test_a_streamed_bar_s_own_end_is_recomputed() -> None:
+def test_a_streamed_stock_bar_keeps_massive_s_end_and_its_date_follows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
     rule = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.SECOND, 1)
-    sent = bars(["2025-03-03T14:30:00"], ends=["2025-03-03T14:31:00"])
-    assert fill(rule, sent)[END] == ["2025-03-03T14:30:01+00:00"]
+    # Massive's `e` is TimestampEnd as sent, never replaced by the start plus one second; a bar
+    # that `e` carries past New York midnight has no single date.
+    sent = bars(
+        ["2025-03-03T14:30:00", "2025-03-04T04:59:59"],
+        ends=["2025-03-03T14:31:00", "2025-03-04T05:00:30"],
+    )
+    assert fill(rule, sent) == {
+        DATE: ["2025-03-03", None],
+        START: ["2025-03-03T14:30:00+00:00", "2025-03-04T04:59:59+00:00"],
+        END: ["2025-03-03T14:31:00+00:00", "2025-03-04T05:00:30+00:00"],
+    }
 
 
-def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_one_second(
+def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_its_length(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())
@@ -301,13 +313,13 @@ def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_one_s
             "2025-03-07T15:00:03.500000+00:00",
         ]
         fill(rule, sent)
-    warned = [r for r in caplog.records if "is not its start plus one second" in r.message]
-    # Once per process, at WARNING: the bar's window is then not one second long.
+    warned = [r for r in caplog.records if "is not its start plus its length" in r.message]
+    # Once per dataset per process, at WARNING: the bar's window is then not its length.
     assert [r.levelno for r in warned] == [logging.WARNING]
     assert warned[0].message == (
-        "futures.bars: a one-second bar's end from Massive (1741359660000000000 ns) is not its "
-        "start plus one second (1741359601000000000 ns); TimestampEnd keeps Massive's e, so the "
-        "bar's window is not one second long"
+        "futures.bars: a bar's end from Massive (1741359660000000000 ns) is not its start plus "
+        "its length (1741359601000000000 ns); TimestampEnd keeps Massive's e, so the bar's "
+        "window is not its length"
     )
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()

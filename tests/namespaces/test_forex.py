@@ -883,8 +883,7 @@ def test_a_bar_frame_lands_in_blink(
     ws_session.publish(frame)
     columns = ("Symbol", "Date", "TimestampStart", "Open", "Close", "Volume", "TimestampEnd")
     (row,) = rows_when(table, bool)
-    # The end is the start plus the bar's length, whatever `e` says (60 s here for both).
-    length = 60_000 if timespan is dm.Timespan.MINUTE else 1_000
+    # The end is Massive's `e` as sent, 60 s after the start here for both channels.
     assert tuple(row[c] for c in columns) == (
         "C:EURUSD",
         "2023-11-14",  # the UTC day of the start
@@ -892,7 +891,7 @@ def test_a_bar_frame_lands_in_blink(
         1.08,
         1.09,
         20.0,
-        at_ms(1_700_000_040_000 + length),
+        at_ms(1_700_000_100_000),
     )
     assert row["TimestampInsert"] is not None
 

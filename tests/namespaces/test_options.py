@@ -1308,10 +1308,10 @@ def bar_frame(event: str) -> dict[str, object]:
             "bars-second",
             "A",
             bar_frame("A"),
-            # The end is the start plus the bar's length, not the frame's `e`.
+            # The end is the frame's `e` as sent, though it is not one second on.
             {
                 "TimestampStart": 1632419640000 * 10**6,
-                "TimestampEnd": 1632419641000 * 10**6,
+                "TimestampEnd": 1632419700000 * 10**6,
                 "Date": "2021-09-23",
                 "Close": 2.05,
             },
