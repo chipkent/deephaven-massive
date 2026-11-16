@@ -674,8 +674,13 @@ class FlatFile:
             )
         arrays = []
         odd: dict[str, DriftSample] = {}
+        # A row whose key cannot be read is converted with no text: its values are never
+        # published, and its odd text must not change how the column's other rows convert.
+        unread = pa.array([row in keyed for row in range(block.num_rows)]) if keyed else None
         for column in plan.columns:
             sent = block[column.header]
+            if unread is not None and column.read_type != pa.string():
+                sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
                 self._mark_unfit(
@@ -791,7 +796,10 @@ def _windowed(
     else:  # a time that cannot be read stays for its mark: no window can place it
         within = pc.and_(pc.greater_equal(nanos, start), pc.less(nanos, end))
         inside = pc.or_(pc.fill_null(within, fill_value=False), pc.is_null(nanos))
-    kept = pc.indices_nonzero(pc.fill_null(inside, fill_value=False)).to_pylist()
+    keep = pc.fill_null(inside, fill_value=False)
+    if not keys.reasons:  # no mark to carry: one Arrow filter
+        return block.filter(keep), {}
+    kept = pc.indices_nonzero(keep).to_pylist()
     at = {row: index for index, row in enumerate(kept)}
     keyed = {at[row]: why for row, why in keys.reasons.items() if row in at}
     return block.take(pa.array(kept, pa.int64())), keyed
@@ -1053,25 +1061,6 @@ def _read_type(plan: ReadPlan, header: str) -> pa.DataType:
         The header's `ReadColumn.read_type`.
     """
     return next(c.read_type for c in plan.columns if c.header == header)
-
-
-def _unreadable_key(header: str, sent: pa.Array, *, bad: pa.Array, read_type: pa.DataType) -> str:
-    """Return why the first row whose key header is empty or does not parse was dropped.
-
-    Args:
-        header: The key header.
-        sent: Its text in each row.
-        bad: Where its text is empty or does not parse; true somewhere.
-        read_type: The type it is read as.
-
-    Returns:
-        `"a row has no <header>"` when the first such row's field is empty, or `"<header>
-        holds '<text>', which is not <type>"`.
-    """
-    text = sent[pc.index(bad, True).as_py()].as_py()
-    if text is None:
-        return f"a row has no {header}"
-    return f"{header} holds {text[:_SAMPLE_LIMIT]!r}, which is not {read_type}"
 
 
 _TEXT_OF: Final[Mapping[pa.DataType, str]] = MappingProxyType(

@@ -561,7 +561,8 @@ def test_rest_fixtures_decode_without_drift(
     assert isinstance(path, RestPath)
     required = [field.column for field in required_fields(spec, path)]
     rows = rest_rows(json.loads(load_fixture(OWNER, name)), path)
-    batch, drift, _ = to_batch(rows, path, required=required)
+    batch, drift, marks = to_batch(rows, path, required=required)
+    assert marks == {}  # every row read whole
     assert batch.num_rows == len(rows) > 0
     assert (drift.extra, drift.missing) == (frozenset(), frozenset())
 
