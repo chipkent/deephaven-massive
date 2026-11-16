@@ -562,12 +562,12 @@ def test_a_symbol_with_no_data_keeps_its_rows_when_the_read_fails(
     assert msft.no_data
 
 
-def test_rest_day_bars_of_the_files_days_never_count_as_read(
+def test_a_rest_day_bar_of_a_files_day_counts_as_read(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Every row of the files is withheld. REST reads day bars over the whole range: Monday's
-    # bar, which the files' day already covers and the read drops, reads whole, and the missing
-    # Tuesday's is withheld. No row the call keeps was read whole, so the call fails.
+    # bar, which the call drops for the files' day, reads whole, and the missing Tuesday's is
+    # withheld. Massive sent a row of the call's window that read whole, so the call goes on.
     class Rest(_Rest):
         @override
         def history(self, spec: DatasetSpec, *_: object, tally: object, **__: object) -> Table:
@@ -582,15 +582,50 @@ def test_rest_day_bars_of_the_files_days_never_count_as_read(
     window = history_window(BARS, request, start=MONDAY, end=TUESDAY)
     empty = _rows(massive_session, [], spec=BARS)
     files = _LostFiles(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
-    with pytest.raises(RowDataError, match="could read none of the 2 rows"):
-        read_history(
-            BARS,
-            request,
-            window,
-            core=massive_session._core,
-            files=files,
-            dates=(MONDAY, TUESDAY),
-            call=1,
-            stop=None,
-            forced=False,
-        )
+    table, _, _ = read_history(
+        BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    assert table.size == 0
+
+
+def test_a_symbol_whose_file_rows_were_all_withheld_fails_with_the_read(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The files' rows were all withheld, so an empty file table is no sign of no data: AAPL,
+    # whose REST days Massive answered HTTP 404 for, fails with the read.
+    class Rest(_Rest):
+        @override
+        def history_by_symbol(
+            self, spec: DatasetSpec, *_: object, symbols: Sequence[str], tally: object, **__: object
+        ) -> dict[str, SymbolOutcome]:
+            empty = _rows(self.session, [], spec=spec)
+            return {s: SymbolRows(empty, no_data=True) for s in symbols}
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    empty = _rows(massive_session, [], MONDAY)
+    request = Request(start=MONDAY, end=TUESDAY)
+    window = history_window(TRADES, request, start=MONDAY, end=TUESDAY)
+    out = read_history_by_symbol(
+        TRADES,
+        request,
+        window,
+        core=massive_session._core,
+        files=_LostFiles(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,))),
+        symbols=["AAPL"],
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        logged=LoggedKeys(),
+        stop=None,
+        forced=False,
+    )
+    failed = out["AAPL"]
+    assert isinstance(failed, SymbolFailure)
+    assert isinstance(failed.error, RowDataError)

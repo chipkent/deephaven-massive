@@ -28,6 +28,7 @@ def test_a_read_with_one_row_read_whole_never_fails() -> None:
     tally = ReadTally()
     tally.add(3, withheld(3, "first"), source="GET /v3/trades/{stockTicker}")
     tally.add(1, withheld(0, ""), source="GET /v3/trades/{stockTicker}")
+    assert tally.rows == 4
     tally.check("stocks.trades")
 
 
@@ -94,18 +95,3 @@ def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows() -> None
     assert "none of the 1 rows" in str(failed.error)
     assert judged["MSFT"] is outcomes["MSFT"]
     assert judged["IBM"] is outcomes["IBM"]
-
-
-def test_a_filtered_part_counts_only_its_kept_rows_and_every_withheld_one() -> None:
-    part = ReadTally()
-    part.add(3, withheld(1, "first"), source="GET /v2/aggs")  # 2 read whole, 1 withheld
-    dropped = ReadTally()
-    dropped.absorb(part, kept=0)  # the caller dropped both rows read whole
-    with pytest.raises(RowDataError, match=r"none of the 1 rows .* from GET /v2/aggs whole"):
-        dropped.check("stocks.bars")
-    kept = ReadTally()
-    kept.absorb(part, kept=1)
-    kept.check("stocks.bars")
-    nothing = ReadTally()
-    nothing.absorb(ReadTally(), kept=0)
-    nothing.check("stocks.bars")

@@ -64,28 +64,11 @@ class ReadTally:
             if withheld.total and not self._first_reason:
                 self._first_reason = withheld.first_reason
 
-    def absorb(self, part: ReadTally, *, kept: int) -> None:
-        """Count a part of the read whose rows the caller filters after reading them.
-
-        A REST read of day bars for an `AUTO` `history()` covers the call's whole range, and
-        the caller keeps only the days the flat files lack, so the rows it reads whole for the
-        files' days must not count as read: only the `kept` rows do, with every row the part
-        withheld.
-
-        Args:
-            part: The part's own tally, which no other thread adds to any longer.
-            kept: The part's rows read whole that the caller keeps.
-        """
-        with part._lock:
-            withheld, first, sources = part._withheld, part._first_reason, dict(part._sources)
+    @property
+    def rows(self) -> int:
+        """How many rows of the read's symbols and window were counted so far, withheld included."""
         with self._lock:
-            self._asked += kept + withheld
-            self._withheld += withheld
-            if kept or withheld:
-                for source in sources:
-                    self._sources.setdefault(source, None)
-            if withheld and not self._first_reason:
-                self._first_reason = first
+            return self._asked
 
     def failure(self, dataset: str) -> RowDataError | None:
         """Return the read's failure if the library could read none of its rows whole.

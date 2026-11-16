@@ -488,13 +488,11 @@ def _rest_days(
             tables.append(rest.history(spec, one, one_window, call=call, tally=tally, stop=stop))
             continue
         # `days` limits an all-symbol read of bars to one grouped-daily request per missing
-        # day instead of one per day of the range. Only the kept days' rows count as read.
-        part = ReadTally()
-        rows = rest.history(spec, one, one_window, call=call, tally=part, stop=stop, days=days)
+        # day instead of one per day of the range. Every row inside the call's window counts
+        # as read, those of the files' days too: Massive sent them, and they read whole.
+        rows = rest.history(spec, one, one_window, call=call, tally=tally, stop=stop, days=days)
         with entered(core.exec_ctx):
-            kept = rows.where_in(keep, "Date")
-        tally.absorb(part, kept=kept.size)
-        tables.append(kept)
+            tables.append(rows.where_in(keep, "Date"))
     return tables
 
 
@@ -689,17 +687,17 @@ def _rest_days_by_symbol(
     rest = core.rest_transport()
     pieces = {symbol: [table] for symbol, table in tables.items()}
     failures: dict[str, MassiveError] = {}
-    no_data = {symbol for symbol, table in tables.items() if not table.size}
+    # An empty file table means no data only when the files held no row of the read at all:
+    # otherwise the symbol's rows may all have been withheld.
+    no_data = set() if tally.rows else set(tables)
     with entered(core.exec_ctx):
         reads = _rest_day_reads(spec, request, window, days=days)
     for one, one_window, keep in reads:
         left = [symbol for symbol in tables if symbol not in failures]
-        part = ReadTally()
         outcomes = rest.history_by_symbol(
-            spec, one, one_window, symbols=left, call=call, tally=part, stop=stop
+            spec, one, one_window, symbols=left, call=call, tally=tally, stop=stop
         )
-        kept = _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
-        tally.absorb(part, kept=kept)
+        _gather(core, outcomes, keep=keep, pieces=pieces, failures=failures)
         no_data &= {s for s, o in outcomes.items() if isinstance(o, SymbolRows) and o.no_data}
     with entered(core.exec_ctx):
         # The files' days and REST's tile, so sorting by the time column puts every row of a
@@ -719,7 +717,7 @@ def _gather(
     keep: Table | None,
     pieces: dict[str, list[Table]],
     failures: dict[str, MassiveError],
-) -> int:
+) -> None:
     """Add one REST day read's outcomes to each symbol's rows or failure.
 
     Args:
@@ -728,11 +726,7 @@ def _gather(
         keep: The `Date` labels of the rows to keep, or None to keep every row.
         pieces: Each symbol's tables so far, which receive the read's rows.
         failures: Each failed symbol's error, which receives the read's failures.
-
-    Returns:
-        How many of the read's rows were kept.
     """
-    kept = 0
     for symbol, outcome in outcomes.items():
         if isinstance(outcome, SymbolFailure):
             failures[symbol] = outcome.error
@@ -742,8 +736,6 @@ def _gather(
             with entered(core.exec_ctx):
                 rows = rows.where_in(keep, "Date")
         pieces[symbol].append(rows)
-        kept += rows.size
-    return kept
 
 
 def _warn_rest_served(core: SessionCore, spec: DatasetSpec, why: str) -> None:
