@@ -828,10 +828,8 @@ def _arguments(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[s
         and a table of **Argument** (linked to its rule in `ARGUMENT_RULES` on the index, when
         it has one) and **Description** (the docstring's line, then, for `sort`, the fields it
         takes (`_sort_text`) and, for `filters`, the keys it accepts), each line preceded by a
-        blank line; nothing for a method that takes no argument.
+        blank line. Every dataset method takes at least `on_error`.
     """
-    if not call.arguments:
-        return []
     described = dict(zip(call.arguments, call.descriptions, strict=False))
     lines = ["", "## Arguments", ""]
     if any(name in ARGUMENT_RULES for name in call.arguments):

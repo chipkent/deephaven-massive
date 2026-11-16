@@ -442,6 +442,7 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
         "self",
         "symbols",
         "filters",
+        "on_error",
     ]
     window: dict[str, FilterValue] = {"date_gte": "2024-10-01", "date_lt": date(2025, 1, 1)}
     q = massive_session.partners.benzinga.consensus_ratings("AAPL", filters=window)

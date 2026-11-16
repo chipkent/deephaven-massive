@@ -7,7 +7,7 @@ The timeline of a ticker's events, such as ticker changes, one row per event.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.ticker_events(symbols, *, types=None)
+m.reference.ticker_events(symbols, *, types=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Tickers of any asset class, CUSIPs, or Composite FIGIs. `dm.ALL` is refused. |
 | `types` | The event types to include, such as `["ticker_change"]`. One `str` is one type. Leave it out for every type. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

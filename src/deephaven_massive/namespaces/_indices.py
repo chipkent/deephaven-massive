@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["DATASETS", "IndicesNamespace"]
 
@@ -191,7 +192,9 @@ class IndicesNamespace(Namespace):
     _path: ClassVar[str] = "indices"
 
     @raises_through(build_query)
-    def values(self, symbols: SymbolsLike) -> StreamHistoryQuery:
+    def values(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> StreamHistoryQuery:
         """Index levels, tick by tick, as computed by the index providers.
 
         Each row holds one index's level at one instant. Massive has no REST history of index
@@ -202,13 +205,15 @@ class IndicesNamespace(Namespace):
             symbols: Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index.
                 `history()` downloads each day's whole flat file, with every index in it, however
                 few indices you pass. The file for 2026-11-09 was 2.9 GB.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md.
 
         Raises:
-            TypeError: If `symbols` has another type.
+            TypeError: If `symbols` has another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an index;
@@ -219,11 +224,18 @@ class IndicesNamespace(Namespace):
 
                 live = m.indices.values(["I:SPX", "I:VIX"]).last_by()
         """
-        return build_query(self._core, VALUES, query_type=StreamHistoryQuery, symbols=symbols)
+        return build_query(
+            self._core, VALUES, query_type=StreamHistoryQuery, symbols=symbols, on_error=on_error
+        )
 
     @raises_through(build_query)
     def bars(
-        self, symbols: SymbolsLike, timespan: Timespan, *, multiplier: int = 1
+        self,
+        symbols: SymbolsLike,
+        timespan: Timespan,
+        *,
+        multiplier: int = 1,
+        on_error: ErrorPolicy | None = None,
     ) -> StreamHistoryQuery | HistoryQuery:
         """Open, high, low, and close index levels over fixed windows of time.
 
@@ -236,6 +248,8 @@ class IndicesNamespace(Namespace):
                 `dm.ALL` from the minute and day flat files.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -264,10 +278,13 @@ class IndicesNamespace(Namespace):
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
+            on_error=on_error,
         )
 
     @raises_through(build_query)
-    def previous_day_bar(self, symbols: SymbolsLike) -> FetchQuery:
+    def previous_day_bar(
+        self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """The previous trading day's open, high, low, and close of each index.
 
         Each row holds one index's bar of the previous complete session. Its volume columns are
@@ -276,13 +293,15 @@ class IndicesNamespace(Namespace):
         Args:
             symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
                 day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.previous_day_bar.md.
 
         Raises:
-            TypeError: If `symbols` has another type.
+            TypeError: If `symbols` has another type, or `on_error` isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of an index;
@@ -303,6 +322,7 @@ class IndicesNamespace(Namespace):
                 "every ticker's bar of that day"
             ),
             timespan=Timespan.DAY,
+            on_error=on_error,
         )
 
     @raises_through(build_query, list_params)
@@ -314,6 +334,7 @@ class IndicesNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The current state of each index: its level, its session so far, and its status.
 
@@ -330,6 +351,8 @@ class IndicesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"ticker_gte": "I:N"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -337,7 +360,8 @@ class IndicesNamespace(Namespace):
 
         Raises:
             TypeError: If `symbols` has another type, `sort` isn't a `str`, `order` isn't a
-                `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping.
+                `dm.Order`, `limit` isn't an `int`, or `filters` isn't a mapping, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is None or empty;
                 - a ticker isn't Massive's exact ticker of an index;
@@ -358,10 +382,13 @@ class IndicesNamespace(Namespace):
             params=list_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(build_query, day_argument)
-    def daily_open_close(self, symbols: SymbolsLike, date: DateLike) -> FetchQuery:
+    def daily_open_close(
+        self, symbols: SymbolsLike, date: DateLike, *, on_error: ErrorPolicy | None = None
+    ) -> FetchQuery:
         """One day's opening, closing, high, and low levels of each index.
 
         Each row holds one index's levels for the day, with the window of an index day bar. It also
@@ -371,13 +398,16 @@ class IndicesNamespace(Namespace):
             symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
                 day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             date: The day, as a date. A `datetime` raises.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.daily_open_close.md.
 
         Raises:
-            TypeError: If `date` isn't a date type, or `symbols` has another type.
+            TypeError: If `date` isn't a date type, or `symbols` has another type, or `on_error`
+                isn't a `dm.ErrorPolicy`.
             ValueError: If:
                 - `symbols` is `dm.ALL`, None, or empty;
                 - a ticker isn't Massive's exact ticker of an index;
@@ -399,4 +429,5 @@ class IndicesNamespace(Namespace):
                 "every index's bar of that day"
             ),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+            on_error=on_error,
         )

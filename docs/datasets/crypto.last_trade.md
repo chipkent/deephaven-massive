@@ -7,7 +7,7 @@ The latest trade of each crypto pair.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.crypto.last_trade(symbols)
+m.crypto.last_trade(symbols, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair, use `m.crypto.snapshots(dm.ALL)`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

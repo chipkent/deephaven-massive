@@ -7,8 +7,8 @@ over a whole table, static or refreshing, before passing it as `symbols=`; that 
 which reads rows and adds a formula column, so it lives here, on the Deephaven side.
 Under `OnError.LOG`, the default, or `OnError.IGNORE`, `canonicalize_symbols` nulls the rows
 it cannot convert instead of failing, so one bad row never fails the table; `OnError.RAISE`
-fails instead. It takes its own `on_error` argument rather than a session's
-`MassiveConfig.noncanonical_symbols`, since it needs no session. Each row's verdict and the
+fails instead. It takes its own `on_error` argument, a `dm.OnError` member, rather than a
+session's `dm.ErrorPolicy`, since it needs no session. Each row's verdict and the
 effect of `on_error` on it are the scalar converters' own (`strict_converter`, `refusal`,
 `convert_under`), so a value converts, or is refused with one reason, the same way in a cell
 and in `canonical_symbol`. The tables it returns are what the symbol-table check in
@@ -90,8 +90,7 @@ def canonicalize_symbols(
     `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. Under
     `OnError.RAISE`, a current bad value raises `ValueError` here, and a bad row added later
     fails the live table, along with any dataset that follows it as a watchlist. This
-    function's `on_error` is its own: a session's `MassiveConfig.noncanonical_symbols` doesn't
-    apply to it.
+    function's `on_error` is its own: a session's `dm.ErrorPolicy` doesn't apply to it.
 
     Example:
         ::

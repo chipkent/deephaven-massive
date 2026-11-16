@@ -7,7 +7,7 @@ The moving average convergence/divergence of a ticker's bars, one row per bar.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.indicators.macd(symbols, *, short_window=12, long_window=26, signal_window=9, timespan=dm.Timespan.DAY, series_type=dm.SeriesType.CLOSE, adjusted=True, start=None, end=None, order=None, limit=None, filters=None)
+m.indicators.macd(symbols, *, short_window=12, long_window=26, signal_window=9, timespan=dm.Timespan.DAY, series_type=dm.SeriesType.CLOSE, adjusted=True, start=None, end=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -34,6 +34,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of the bars' times. The endpoints have no `sort`. |
 | [`limit`](README.md#limit) | The most rows for each symbol. |
 | [`filters`](README.md#filters) | Further endpoint parameters. Keys: none. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

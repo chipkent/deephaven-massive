@@ -54,6 +54,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._error_policy import ResolvedPolicy
 from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
 from deephaven_massive._ingest.clients import SessionClients
@@ -72,6 +73,7 @@ from tests._live.doc_examples import (
     forget,
     merged,
     run_blocks,
+    section,
     section_blocks,
     write_settings_file,
 )
@@ -132,11 +134,12 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
 _CRYPTO_PAIRS: dict[str, tuple[str, str]] = {"X:BTCUSD": ("BTC", "USD"), "X:ETHUSD": ("ETH", "USD")}
 
 
-def _crypto_pair(symbol: str) -> tuple[str, str]:
+def _crypto_pair(symbol: str, policy: ResolvedPolicy) -> tuple[str, str]:
     """Answer a crypto lookup as Massive's crypto ticker list does, for the examples' pairs.
 
     Args:
         symbol: The crypto ticker, such as `"X:BTCUSD"`.
+        policy: The stream's policy, which no example's pair needs.
 
     Returns:
         The pair's base and quote currencies.
@@ -675,6 +678,36 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     names.clear()
 
 
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_error_policy_example_matches_its_settings_file(
+    *,
+    readme_server: FakeRestServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    readme_server.reply_default(Reply(envelope([])))
+    [block] = section_blocks(README, "bad-symbols-and-rows")
+    [names] = run_blocks([block], tmp_path, "policy", console_command=console_command)
+    # Every cause raises but a malformed flat-file line; the call logs every cause.
+    strict = names["strict"]
+    assert strict == dm.ErrorPolicy(
+        noncanonical_symbols=dm.OnError.RAISE,
+        unreadable_symbols=dm.OnError.RAISE,
+        unavailable_symbols=dm.OnError.RAISE,
+        malformed_rows=dm.OnError.LOG,
+        refused_venues=dm.OnError.RAISE,
+    )
+    assert isinstance(names["week"], Table)
+    names.clear()
+    # The settings file the section prints sets the same policy.
+    [text] = _YAML.findall(section(README, "bad-symbols-and-rows"))
+    file = tmp_path / "settings.yaml"
+    file.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    assert dm.MassiveConfig.from_file(file).on_error == strict
+
+
 def test_the_settings_pages_shape_example_loads_each_form(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -702,7 +735,7 @@ def test_the_settings_pages_complete_example_sets_every_setting(
     assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == settings
     assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
     assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
-    assert config.noncanonical_symbols is dm.OnError.RAISE
+    assert config.on_error.noncanonical_symbols is dm.OnError.RAISE
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
