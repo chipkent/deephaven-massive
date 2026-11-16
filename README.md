@@ -321,12 +321,10 @@ live one as it changes.
 
 <a id="convert-symbols"></a>
 
-#### Symbols from another source: convert a table of Yahoo tickers
-
-Read the previous closes of the stocks in a table of Yahoo Finance tickers, with Stocks Basic.
-Yahoo and Massive spell some tickers differently: a share class is `BRK-B` at Yahoo and `BRK.B`
-at Massive, and a preferred is `BAC-PL` and `BACpL`. So convert the table first, and tell the
-converter the tickers are Yahoo's with `convention=`:
+To read a list from Yahoo Finance, convert it first. Yahoo spells some tickers differently:
+Yahoo's `BRK-B` is Massive's `BRK.B`, and Yahoo's `BAC-PL` is Massive's `BACpL`. Tell the
+converter whose tickers they are with `convention=`. This reads the previous closes of a table
+of Yahoo tickers, with Stocks Basic:
 
 ```python
 import deephaven_massive as dm
@@ -341,15 +339,12 @@ yahoo_closes = m.stocks.previous_day_bar(stocks).fetch()
 ```
 
 `yahoo_closes` has one row each for `AAPL`, `BRK.B`, and `BACpL`, with the previous trading
-day's bar. `stocks` keeps all four rows: `Symbol` holds Massive's ticker, and `Yahoo` the text
-you started with.
+day's bar. `stocks` keeps all four rows. `Symbol` holds Massive's ticker, and `Yahoo` holds
+the text you started with.
 
-`^GSPC` is an index, not a stock, so its `Symbol` is null, and every dataset skips the row.
-`stocks.where("isNull(Symbol)")` lists such rows, and the log names their values. To fail on
-the first one instead, pass `on_error=dm.OnError.RAISE`.
-
-A table from `read_csv` converts the same way, and a live input table converts each row as you
-add it. To convert one value in code, use `dm.canonical_symbol`.
+`^GSPC` isn't a stock ticker, so its `Symbol` is null and every dataset skips the row.
+`stocks.where("isNull(Symbol)")` lists such rows. To fail instead of nulling a row, pass
+`on_error=dm.OnError.RAISE`.
 
 Next, settings for the paid plans.
 

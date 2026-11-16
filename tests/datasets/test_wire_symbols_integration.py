@@ -2,7 +2,7 @@
 
 The library publishes every `Symbol` in Massive's canonical form (`BRK.B`, `KIMpL`), and reads a
 row's ticker back into it (`canonical_from_wire`); a spelling it cannot read leaves a null
-`Symbol`, keeps the text in `RawSymbol`, and logs one WARNING naming the text, so the owner can
+`Symbol`, keeps the text in `RawSymbol`, and logs one ERROR naming the text, so the owner can
 report it to Massive. These tests read rows of such stocks from each transport that serves
 stocks and record the raw spelling each one writes, so a transport that writes a share class or
 a preferred otherwise than its ticker list (`BRK/B`, `BRK-B`, `KIM-L`) shows up with its exact

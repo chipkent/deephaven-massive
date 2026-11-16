@@ -162,17 +162,15 @@ These protect the owner's repository, money, and secrets.
     they follow Massive's changes.
   - **Massive's answer is the error.** The library reports Massive's refusal as Massive's: its
     status, its text, and the call that caused it. It never reinterprets or guesses.
-  - **A ticker Massive has no data for gives no rows** (decision 104). It is not an error,
-    however the library learns it, so every transport and verb treats it alike under one
-    setting, `unavailable_symbols`. The library never looks a ticker up to second-guess it.
-    Users check Massive's own lists: `m.reference.tickers()`, `m.options.contracts()`, and
-    `m.futures.contracts()`.
-  - **A symbol is Massive's canonical ticker** (decision 58). In code, any other spelling
-    raises `ValueError` naming the form to write or the converter that gives it. In a table,
-    the row follows `noncanonical_symbols`. The library checks spelling itself because Massive
-    won't: it answers an unknown ticker with an empty 200 (verification item 62). The spelling
-    rules follow Massive's own ticker lists, so a listed form the library refuses is a library
-    defect.
+  - **A ticker Massive has no data for gives no rows by default** (decision 104), because that
+    is Massive's answer, not an error. `unavailable_symbols` governs an HTTP 404 and a crypto
+    pair missing from Massive's crypto ticker list. An empty 200 is no rows under any setting.
+  - **The library never sends a request only to check a ticker.** Users check Massive's lists,
+    such as `m.reference.tickers()`.
+  - **The library takes only Massive's canonical ticker as a symbol** (decisions 58 and 104),
+    because most of Massive's endpoints answer an unknown ticker with an empty 200
+    (verification item 62), so a typo looks like a quiet day. A form on Massive's ticker lists
+    that the library refuses is a library defect.
   - **The library refuses any other value only** when it is the wrong Python type, when the
     library can't express it in a request, or when sending it would return wrong data with no
     error. Each such check says which, with its evidence. Beyond ticker spelling, the library

@@ -87,7 +87,7 @@ for `[stocks]`, `dm.OnError.RAISE` for `raise`, and
 
 <a id="on-error"></a>
 
-### What `log`, `ignore`, and `raise` do
+### What log, ignore, and raise do
 
 Some settings decide what one bad symbol or row does. By default the library skips it and
 keeps going, so one problem never stops a table. Each such setting covers one cause and takes
@@ -95,9 +95,22 @@ one of three values:
 
 | Value | What it does |
 |---|---|
-| `log` | Skips the symbol or row, keeps the rest, and logs a warning naming it once. A live table also names it in its `Error` in `m.streams()`. |
-| `ignore` | Does the same with no warning: only the `DEBUG` log names it. |
-| `raise` | Fails whatever met it. A call raises the error when it meets it at the call or with `wait=True`, and a live table fails. A watchlist read by `fetch()` or `history()` marks only that symbol `FAILED` in `m.symbol_reads()`. |
+| `log` | Skips the symbol or row, keeps the rest, and logs a warning. |
+| `ignore` | Does the same, logging only at `DEBUG`. |
+| `raise` | Fails whatever met the problem. |
+
+Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
+in `m.streams()`. A library bug logs an error instead of a warning, and `unreadable_symbols`
+keeps its row, as its entry says.
+
+Under `raise`:
+
+- A problem found at the call raises at once.
+- One found while reading raises only from a call with `wait=True`.
+- A live table fails.
+- A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
+  `m.symbol_reads()` shows them `FAILED`. A bad watchlist row is the exception, as
+  `noncanonical_symbols` says.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
@@ -270,32 +283,35 @@ subscription still keeps to five requests a minute.
 
 #### noncanonical_symbols
 
-Set `raise` to catch a typo in a watchlist at once. A row you fix is read
-like a new one.
+Set `raise` to catch a typo in a watchlist at once. A bad row added
+later then fails the whole live table, even a watchlist read by `fetch()` or
+`history()`. Under the other values, a row you fix is read like a new one.
 
-A symbol you pass in code, as text or a list, is checked at the call instead: any
-other spelling raises `ValueError`, whatever this setting says. So does a table
-whose every row is bad.
+This setting covers only tables. A symbol you pass in code must be Massive's exact
+ticker, or the call raises `ValueError`. A table whose every row is bad raises
+`ValueError` too, whatever this setting says.
 
 #### unreadable_symbols
 
-Such a symbol is a library bug; to report it, see
+Set `raise` when a table must fail rather than keep such a row. By
+default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
+column. Such a symbol is a library bug. To report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
-Leave it at `log` so the row stays, with a null `Symbol` and Massive's
-text in a `RawSymbol` column. Under `raise` the table has no `RawSymbol`
-column.
+Under `raise` the table has no `RawSymbol` column.
 
-A crypto pair that Massive lists with two currencies that don't join to its ticker
-is unreadable too, and gets no rows.
+A listed crypto pair is unreadable too when its ticker isn't its two currencies
+written together. Under `log` or `ignore` it gets no rows.
 
 #### unavailable_symbols
 
 Set `raise` when a missing symbol means your list is wrong.
 
-A symbol Massive answers with no rows and no error simply has no rows. In a
-`poll()`, this setting also covers a symbol the poll can't request with the
-arguments you gave it, such as a crypto pair in an indicator poll with
-`adjusted=False`.
+A symbol Massive answers with no rows and no error has no rows, whatever this
+setting says.
+
+This setting also covers a watchlist symbol a `poll()` can't request with your
+arguments. For example, an indicator poll with `adjusted=False` can't request a
+crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
 
 #### malformed_rows
 

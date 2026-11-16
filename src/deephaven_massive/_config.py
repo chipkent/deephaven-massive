@@ -349,33 +349,36 @@ class MassiveConfig:
             pass whose value isn't Massive's exact ticker or futures product code, such as
             `SPX` for `I:SPX`. Defaults to `LOG`.
 
-            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once. A row you fix is read
-            like a new one.
+            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once. A bad row added
+            later then fails the whole live table, even a watchlist read by `fetch()` or
+            `history()`. Under the other values, a row you fix is read like a new one.
 
-            A symbol you pass in code, as text or a list, is checked at the call instead: any
-            other spelling raises `ValueError`, whatever this setting says. So does a table
-            whose every row is bad.
+            This setting covers only tables. A symbol you pass in code must be Massive's exact
+            ticker, or the call raises `ValueError`. A table whose every row is bad raises
+            `ValueError` too, whatever this setting says.
         unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the
             library can't read as Massive's ticker. Defaults to `LOG`.
 
-            Such a symbol is a library bug; to report it, see
+            Set `dm.OnError.RAISE` when a table must fail rather than keep such a row. By
+            default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
+            column. Such a symbol is a library bug. To report it, see
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
-            Leave it at `dm.OnError.LOG` so the row stays, with a null `Symbol` and Massive's
-            text in a `RawSymbol` column. Under `dm.OnError.RAISE` the table has no `RawSymbol`
-            column.
+            Under `dm.OnError.RAISE` the table has no `RawSymbol` column.
 
-            A crypto pair that Massive lists with two currencies that don't join to its ticker
-            is unreadable too, and gets no rows.
+            A listed crypto pair is unreadable too when its ticker isn't its two currencies
+            written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows.
         unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
             answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
             `LOG`.
 
             Set `dm.OnError.RAISE` when a missing symbol means your list is wrong.
 
-            A symbol Massive answers with no rows and no error simply has no rows. In a
-            `poll()`, this setting also covers a symbol the poll can't request with the
-            arguments you gave it, such as a crypto pair in an indicator poll with
-            `adjusted=False`.
+            A symbol Massive answers with no rows and no error has no rows, whatever this
+            setting says.
+
+            This setting also covers a watchlist symbol a `poll()` can't request with your
+            arguments. For example, an indicator poll with `adjusted=False` can't request a
+            crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
         malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
             readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
             Defaults to `LOG`.

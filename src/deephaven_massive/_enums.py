@@ -479,11 +479,13 @@ class OnError(StrEnum):
     One bad symbol or row never stops a table by default. The members:
 
     - `RAISE`: fail whatever met the problem. A check at the call raises, and so does a call
-      with `wait=True`. A live table fails. A watchlist read marks only that symbol `FAILED` in
-      `m.symbol_reads()` and reads the others.
-    - `LOG`: skip the value and keep going. Each distinct value is logged once, a bounded number
-      of times: at WARNING, or at ERROR for a library defect to report. A live table names the
-      value in its `Error` in `m.streams()`.
+      with `wait=True`. A live table fails. A watchlist read by `fetch()` or `history()` fails
+      only the symbols it met, and `m.symbol_reads()` shows them `FAILED`. A bad watchlist row
+      under `noncanonical_symbols` is the exception: it fails the whole result.
+    - `LOG`: skip the value and keep going. Each distinct value is logged once, up to a fixed
+      number of values: at WARNING, or at ERROR for a library defect to report. A stream or `poll()`
+      table names each value it skips in its `Error` in `m.streams()`. Under
+      `unreadable_symbols` a bad row of Massive's data is kept, with the text in `RawSymbol`.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Each cause has its own setting, documented where it is taken:
