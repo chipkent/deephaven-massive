@@ -15,6 +15,6 @@ such a combo may give no rows.
 
 Read by `tests/ingest/test_futures_calendar_integration.py::test_spaced_combo_trades_by_path_spelling`,
 on a key with futures trades, while futures trade. It reads one recently traded such combo's
-trades with its ticker spelled four ways, a combo without `:` or a space as the control (as
-the library sends it, and with its `-` escaped), and
-`history()` of the combo over the same hour, and records each read's trades.
+trades with its ticker spelled four ways, a combo without `:` or a space as the control (as the
+library sends it, and with its `-` escaped), and `history()` of the combo over the same hour,
+and records each read's trades.
