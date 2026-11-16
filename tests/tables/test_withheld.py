@@ -20,9 +20,11 @@ from deephaven_massive._tables.withheld import (
     WithheldGroup,
     failure_of,
     in_window,
+    logs_withheld,
     mark,
     mark_failures,
     marked_count,
+    merged,
     setting_of,
     with_marks,
     withhold_rows,
@@ -286,3 +288,24 @@ def test_failure_of_names_every_failing_cause() -> None:
     assert failure is not None
     assert "(1 under unreadable_keys, 3 under unconvertible_values)" in failure
     assert "dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG)" in failure
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_withheld_rows_log_above_debug_only_under_a_cause_set_to_log(setting: dm.OnError) -> None:
+    others = {fault.value: dm.OnError.IGNORE for fault in RowFault if fault is not VALUES}
+    found = policy(**others, unconvertible_values=setting)
+    assert logs_withheld({VALUES: 1}, found) is (setting is not dm.OnError.IGNORE)
+    assert not logs_withheld({KEYS: 3}, found)
+    assert not logs_withheld({}, found)
+
+
+def test_merged_parts_add_up_each_fault_symbol_and_field_in_first_order() -> None:
+    a = WithheldGroup(VALUES, "AAPL", "AAPL", "Price", 2, "first price")
+    b = WithheldGroup(KEYS, None, None, "Symbol", 1, "no ticker")
+    first = Withheld(pa.table({}), (a, b), "first price")
+    second = Withheld(
+        pa.table({}), (WithheldGroup(VALUES, "AAPL", "AAPL", "Price", 3, "later"),), "later"
+    )
+    both = merged((Withheld(pa.table({})), first, second))
+    assert both.groups == (WithheldGroup(VALUES, "AAPL", "AAPL", "Price", 5, "first price"), b)
+    assert (both.first_reason, both.total, both.rows.num_rows) == ("first price", 6, 0)

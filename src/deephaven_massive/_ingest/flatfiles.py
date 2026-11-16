@@ -210,11 +210,12 @@ from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
     Failure,
     Withheld,
-    WithheldGroup,
     failure_of,
     in_window,
+    logs_withheld,
     mark,
     mark_failures,
+    merged,
     with_marks,
     withhold_rows,
 )
@@ -1663,8 +1664,7 @@ class FlatFileHistory:
         limit = _TABLE_BLOCKS * transform.plan.block_size
         found = DriftReport()
         served = asked = 0
-        groups: list[WithheldGroup] = []
-        first = ""
+        parts: list[Withheld] = []
         setting = transform.policy.malformed_rows
         with entered(self._core.exec_ctx):
             for read, drift, marks in batches:
@@ -1674,9 +1674,7 @@ class FlatFileHistory:
                 served += rows.num_rows
                 asked += withheld.rows.num_rows + withheld.total
                 found = found.merge(drift).merge(odd)
-                _check_withheld(withheld, transform, where=file.location)
-                groups.extend(withheld.groups)
-                first = first or withheld.first_reason
+                parts.extend(self._checked(withheld, transform, where=file.location))
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1692,15 +1690,15 @@ class FlatFileHistory:
                 self._check(cancel)
             if pending:
                 tables.append(_convert(pending, transform))
-        every = Withheld(pa.table({}), tuple(groups), first)
+        every = merged(parts)
+        if every.groups:
+            self._report_withheld(transform, every, where=file.location)
         if asked and every.total == asked:
             raise RowDataError(
                 f"{transform.dataset}: the library could read none of the {asked} rows of the "
                 f"read's symbols and window in {file.location} whole, so Massive's format may "
-                f"have changed; the first: {first}"
+                f"have changed; the first: {every.first_reason}"
             )
-        if groups:
-            self._report_withheld(transform, every, where=file.location)
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
             _log_malformed(transform.dataset, file, setting)
@@ -1726,7 +1724,8 @@ class FlatFileHistory:
             where: The file's location.
         """
         dataset = transform.dataset
-        self._core.drift.report(dataset, Transport.FLAT_FILES, withheld.drift, where=where)
+        if logs_withheld(withheld.counts(), transform.policy):
+            self._core.drift.report(dataset, Transport.FLAT_FILES, withheld.drift, where=where)
         spellings = sorted(
             {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
         )
@@ -1737,26 +1736,44 @@ class FlatFileHistory:
             )
         )
 
+    def _checked(
+        self, withheld: Withheld, transform: _Transform, *, where: str
+    ) -> tuple[Withheld, ...]:
+        """Fail a read on a block's withheld rows of a cause its policy sets to `RAISE`.
 
-def _check_withheld(withheld: Withheld, transform: _Transform, *, where: str) -> None:
-    """Fail a read on a block's withheld rows of a cause its policy sets to `RAISE`.
+        The block's problem events reach the session first, so the failure loses no record.
 
-    Args:
-        withheld: The block's withheld rows.
-        transform: The read's block transform, for its dataset and policy.
-        where: The file's location, for the message.
+        Args:
+            withheld: The block's withheld rows.
+            transform: The read's block transform, for its dataset and policy.
+            where: The file's location, for the message.
 
-    Raises:
-        RowDataError: If a cause of a withheld row is `RAISE` (`withheld.failure_of`).
-    """
-    failure = failure_of(
-        withheld.counts(),
-        transform.policy,
-        dataset=transform.dataset,
-        first_reason=withheld.first_reason,
-    )
-    if failure is not None:
-        raise RowDataError(f"{failure} (in {where})")
+        Returns:
+            The block's withheld rows without its published ones, which the file keeps until it
+            reports them, so it never holds a block's rows; none for a block read whole.
+
+        Raises:
+            RowDataError: If a cause of a withheld row is `RAISE` (`withheld.failure_of`).
+        """
+        if not withheld.groups:
+            return ()
+        failure = failure_of(
+            withheld.counts(),
+            transform.policy,
+            dataset=transform.dataset,
+            first_reason=withheld.first_reason,
+        )
+        if failure is not None:
+            self._core.problems(
+                withheld.events(
+                    dataset=transform.dataset,
+                    transport=Transport.FLAT_FILES,
+                    where=where,
+                    stream_id=None,
+                )
+            )
+            raise RowDataError(f"{failure} (in {where})")
+        return (merged((withheld,)),)
 
 
 def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:

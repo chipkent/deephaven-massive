@@ -147,9 +147,8 @@ _FINISHED_ROWS: Final = (
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 
 _KEPT_STAMP: Final = (
-    "A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps "
-    "that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which "
-    "day it covers is not known."
+    "A bar of a day or longer stamped at a time or on a day Massive is not known to use is "
+    "withheld, with a WARNING, since which day it covers is not known."
 )
 """What happens to a bar whose stamp the library does not expect, said on `TimestampStart`."""
 

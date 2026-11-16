@@ -1726,9 +1726,9 @@ def test_each_stream_of_a_plan_applies_its_own_unreadable_setting(
     for sink, setting in zip(sinks, settings, strict=True):
         assert sink.failed is (setting is OnError.RAISE)
         assert sink.rows_published == (0 if sink.failed else 1)
-    going_on = [s.stream_id for s in sinks if not s.failed]
+    # Every stream's session records the row, a failed stream's too.
     assert [(e.stream_id, e.cause, e.symbol, e.rows) for e in events] == [
-        (stream_id, RowFault.UNREADABLE_SYMBOLS, "nonsense pair", 1) for stream_id in going_on
+        (sink.stream_id, RowFault.UNREADABLE_SYMBOLS, "nonsense pair", 1) for sink in sinks
     ]
     records = [r for r in caplog.records if r.name == "t" and "'nonsense pair'" in r.getMessage()]
     assert [r.levelno for r in records] == [level]

@@ -3640,8 +3640,10 @@ def test_a_stream_applies_its_own_call_s_setting_to_a_withheld_row(
     assert sorted(states.values()) == ["FAILED", "RUNNING"]
     wait_for(lambda: kept.size == 1)
     assert [r["Symbol"] for r in dh_to_pylist(kept.view("Symbol"))] == ["AAPL"]
-    (running,) = [stream_id for stream_id, state in states.items() if state == "RUNNING"]
-    assert [(e.cause, e.stream_id, e.rows) for e in events] == [(cause, running, 1)]
+    # Each stream's session records the row, the failed stream's too.
+    assert sorted((e.cause, e.stream_id, e.rows) for e in events) == [
+        (cause, stream_id, 1) for stream_id in sorted(states)
+    ]
 
 
 def test_a_crypto_stream_splits_its_pairs_under_its_call_s_policy(

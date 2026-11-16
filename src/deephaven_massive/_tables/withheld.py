@@ -19,9 +19,10 @@ flat-file reader, and a flush thread under its flush lock may all call it.
 from __future__ import annotations
 
 import functools
+import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, TypeAlias
 
@@ -44,15 +45,18 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RowMarks, Transport
 
 __all__ = [
+    "FAULT",
     "MARK_COLUMNS",
     "REASON",
     "Failure",
     "Withheld",
     "failure_of",
     "in_window",
+    "logs_withheld",
     "mark",
     "mark_failures",
     "marked_count",
+    "merged",
     "setting_of",
     "with_marks",
     "withhold_rows",
@@ -137,6 +141,8 @@ def mark(
     Returns:
         The rows, each newly marked row's fault, field, and reason set.
     """
+    if not rows.num_rows:  # pyarrow 23.0.1, the floor, crashes on an empty table here
+        return rows
     faults = rows.column(FAULT)
     new = pc.and_(pc.fill_null(failed, fill_value=False), pc.is_null(faults))
     found = pc.indices_nonzero(new).to_pylist()
@@ -446,3 +452,37 @@ def failure_of(
         f"{dataset}: Massive sent rows the library cannot read whole, which it withheld "
         f"({named}); the first: {first_reason.rstrip('.')}. To go on without such rows, {hint}"
     )
+
+
+def logs_withheld(counts: Mapping[RowFault, int], policy: ResolvedPolicy) -> bool:
+    """Tell whether withheld rows are logged above DEBUG: some cause they follow is `LOG`.
+
+    Args:
+        counts: The withheld rows by fault (`Withheld.counts`).
+        policy: The read's or the stream's policy.
+
+    Returns:
+        True when a fault with withheld rows is set to log at WARNING; False when each is
+        `IGNORE`, whose rows the log names only at DEBUG.
+    """
+    return any(effect_of(setting_of(policy, fault)).level > logging.DEBUG for fault in counts)
+
+
+def merged(parts: Sequence[Withheld]) -> Withheld:
+    """Return several payloads' withheld rows as one, such as a flat file's blocks.
+
+    Args:
+        parts: Each payload's withheld rows, in order.
+
+    Returns:
+        The groups of every part, those of one fault, symbol, and field added together, in
+        the order of their first row, with the first part's first reason; no rows.
+    """
+    found: dict[tuple[RowFault, str | None, str | None, str], WithheldGroup] = {}
+    for part in parts:
+        for group in part.groups:
+            key = (group.fault, group.symbol, group.sent, group.field)
+            seen = found.get(key)
+            found[key] = group if seen is None else replace(seen, rows=seen.rows + group.rows)
+    first = next((part.first_reason for part in parts if part.first_reason), "")
+    return Withheld(pa.table({}), tuple(found.values()), first)

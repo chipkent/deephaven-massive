@@ -199,8 +199,10 @@ from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
 from deephaven_massive._tables.withheld import (
+    FAULT,
     Withheld,
     failure_of,
+    logs_withheld,
     mark,
     withhold_rows,
 )
@@ -296,8 +298,9 @@ def _listed_rows(
     each row every one of them its list holds, the row repeated once per such ticker, in the
     order of its list; a row that lists none of them is left out, as a row outside a
     `history()` window is: it belongs to none of the request's symbols, so it is neither
-    published nor reported as a problem. A request that named none leaves `Symbol` null, the
-    column's documented meaning.
+    published nor reported as a problem. A row already marked, whose list may not have been
+    read, stays once with a null `Symbol`, to be withheld. A request that named none leaves
+    `Symbol` null, the column's documented meaning.
 
     Args:
         batch: One page's rows in the dataset's schema, with a null `Symbol` and the mark
@@ -318,8 +321,11 @@ def _listed_rows(
         wanted = set(named)
         rows: list[int] = []
         symbols = []
+        marked = batch.column(FAULT).is_valid().to_pylist()
         for index, listed in enumerate(batch.column(column).to_pylist()):
             hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
+            if not hits and marked[index]:
+                hits = [None]  # its list may not have been read: it stays to be withheld
             rows.extend([index] * len(hits))
             symbols.extend(hits)
         taken = batch.take(pa.array(rows, pa.int64()))
@@ -1273,21 +1279,23 @@ class RestReader:
         Raises:
             RowDataError: If a cause of a withheld row is `RAISE` in the read's policy.
         """
-        failure = failure_of(
-            withheld.counts(), self.policy, dataset=spec.name, first_reason=withheld.first_reason
-        )
-        if failure is not None:
-            raise RowDataError(failure)
-        self.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
-        spellings = sorted(
-            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
-        )
-        log_unreadable(spec.name, spellings, self.policy.unreadable_symbols)
         self.problems(
             withheld.events(
                 dataset=spec.name, transport=Transport.REST, where=where, stream_id=None
             )
         )
+        counts = withheld.counts()
+        failure = failure_of(
+            counts, self.policy, dataset=spec.name, first_reason=withheld.first_reason
+        )
+        if failure is not None:
+            raise RowDataError(failure)
+        if logs_withheld(counts, self.policy):
+            self.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
+        spellings = sorted(
+            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
+        )
+        log_unreadable(spec.name, spellings, self.policy.unreadable_symbols)
 
     def _listed(
         self,
