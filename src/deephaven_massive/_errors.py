@@ -30,7 +30,8 @@ Three more attributes tell code what to do about an error:
 
 `is_bug` sets the level a failure is logged at: ERROR for a bug, so that a broad `except` never
 hides one, and below ERROR otherwise (`_log_limits.log_failure`). `library_bug` and
-`user_defect` build the two kinds of bug message, `source_of` and `is_bug_of` read the source
+`user_defect` build the two kinds of bug message, `unmatched_form` builds the library's for a
+value of a form that no case of a `match` covers, `source_of` and `is_bug_of` read the source
 and the bug flag of any exception, and `failure_text` is the text a log record gives it.
 `required` and `required_instance` return a value the library's design guarantees, such as a
 dataset's REST path or the session a caller holds, and raise `BrokenGuaranteeError`, a
@@ -106,6 +107,7 @@ __all__ = [
     "required",
     "required_instance",
     "source_of",
+    "unmatched_form",
     "user_defect",
     "wire_source",
 ]
@@ -566,6 +568,23 @@ def library_bug(message: str) -> str:
     """
     stop = "" if message.endswith((".", "!", "?")) else "."
     return f"{message}{stop} {LIBRARY_BUG}"
+
+
+def unmatched_form(what: str, value: object) -> str:
+    """Return the library-defect message for a value of a form that no case of a `match` covers.
+
+    Raise it as a `BrokenGuaranteeError` from the last case, `case _:`, of a `match` with a case
+    for every form the value's type allows, such as each form of a `symbols` argument, so a
+    form added without a case of its own fails instead of taking another form's case.
+
+    Args:
+        what: What chooses by the value's form, such as `"a REST call's paths"`.
+        value: The value no case matched.
+
+    Returns:
+        `"<what> has no rule for a value of type <type>"`, followed by `LIBRARY_BUG`.
+    """
+    return library_bug(f"{what} has no rule for a value of type {type(value).__name__}")
 
 
 class BrokenGuaranteeError(MassiveError):

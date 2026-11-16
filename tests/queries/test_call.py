@@ -13,7 +13,8 @@ from deephaven.time import to_j_instant, to_j_local_date, to_j_time_zone
 import deephaven_massive as dm
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import FuturesVenue, Timespan
-from deephaven_massive.queries._call import QueryCall, _is_default, _shown
+from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive.queries._call import QueryCall, _is_default, _shown, _shown_symbols
 from tests._fakes.queries import (
     NEWS_SPEC,
     make,
@@ -105,3 +106,8 @@ def test_a_namespace_method_logs_the_input_it_refuses(
     refusals = [r for r in caplog.records if "m.stocks.trades refused" in r.getMessage()]
     assert [r.levelno for r in refusals] == [logging.DEBUG]
     assert refusals[0].getMessage().startswith("m.stocks.trades refused: TypeError: ")
+
+
+def test_shown_symbols_raise_a_library_defect_for_a_value_of_no_known_form() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="repr has no rule for a value of type object"):
+        _shown_symbols(object())

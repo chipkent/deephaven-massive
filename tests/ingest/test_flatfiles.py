@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
 from typing_extensions import override
@@ -41,7 +43,7 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
-from deephaven_massive._datasets.symbols import NormalizedSymbols
+from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import (
     AssetClass,
     FuturesVenue,
@@ -50,7 +52,7 @@ from deephaven_massive._enums import (
     OnError,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
@@ -4125,4 +4127,17 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
             infer_holidays=True,
             logged=LoggedKeys(),
             stop=stop,
+        )
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="filter has no rule for a value of type object"):
+        flatfiles._symbol_filter(AssetClass.STOCKS, object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbol_table() -> None:
+    # history() reads a symbol table into a list before it reads flat files.
+    with pytest.raises(BrokenGuaranteeError, match="got a symbol table"):
+        flatfiles._symbol_filter(
+            AssetClass.STOCKS, SymbolTable(new_table([string_col("Symbol", [])]))
         )

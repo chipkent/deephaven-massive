@@ -28,14 +28,17 @@ from deephaven_massive._datasets.history_source import (
     rest_history_problem,
     warn_unfilled,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, symbol_class
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
 from deephaven_massive._enums import (
+    AssetClass,
     HistorySource,
     Reread,
     _require_enum,
 )
 from deephaven_massive._errors import (
+    BrokenGuaranteeError,
     raises_through,
+    unmatched_form,
 )
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
@@ -55,7 +58,7 @@ from deephaven_massive.queries._query import Query, _read_symbol_table, _verb, _
 from deephaven_massive.queries._stream import StreamQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from deephaven.table import Table
 
@@ -66,6 +69,28 @@ if TYPE_CHECKING:
 __all__ = ["HistoryQuery", "StreamHistoryQuery"]
 
 logger = logging.getLogger(__name__)
+
+
+def _symbol_classes(symbols: tuple[str, ...] | AllSymbols | None) -> Iterable[AssetClass]:
+    """Give the classes of the symbols a static `history()` call lists, which set its days.
+
+    Args:
+        symbols: The call's static symbols.
+
+    Returns:
+        The class of each listed symbol (`symbol_class`); none for `dm.ALL` or a dataset
+        without instruments.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            return map(symbol_class, symbols)
+        case AllSymbols() | None:
+            return ()
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("history()'s symbol classes", symbols))
 
 
 def _window_text(first: date | datetime, last: date | datetime | None, now: datetime) -> str:
@@ -286,10 +311,9 @@ class HistoryQuery(Query):
         if isinstance(symbols, SymbolTable):
             symbols = _read_symbol_table(self._core, self._spec, symbols, query=repr(self))
         # A dataset with a path per symbol class takes its days from its symbols' class.
-        listed = symbols if isinstance(symbols, tuple) else ()
         request = replace(self._request, start=first, end=last, symbols=symbols)
         window = history_window(
-            self._spec, request, start=first, end=last, classes=map(symbol_class, listed)
+            self._spec, request, start=first, end=last, classes=_symbol_classes(symbols)
         )
         spec = self._spec
         if chosen is HistorySource.REST:
