@@ -50,7 +50,7 @@ from deephaven_massive.queries import (
     HistoryQuery,
     Query,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 from deephaven_massive.queries._choice import query_class
 
@@ -107,10 +107,10 @@ def test_the_namespace_declares_every_crypto_dataset() -> None:
     [
         (crypto.TRADES, StreamHistoryQuery),
         (crypto.LAST_TRADE, FetchQuery),
-        (crypto.QUOTES, SymbolStreamQuery),
+        (crypto.QUOTES, StreamQuery),
         (crypto.BARS, HistoryQuery),
         (crypto.PREVIOUS_DAY_BAR, FetchQuery),
-        (crypto.FMV, SymbolStreamQuery),
+        (crypto.FMV, StreamQuery),
         (crypto.SNAPSHOTS, FetchQuery),
         (crypto.MOVERS, FetchQuery),
         (crypto.DAILY_OPEN_CLOSE, FetchQuery),
@@ -319,7 +319,7 @@ def test_the_streams_and_snapshots_accept_all(
 
 @pytest.mark.parametrize(
     ("method", "expected"),
-    [("quotes", SymbolStreamQuery), ("fmv", SymbolStreamQuery), ("snapshots", FetchQuery)],
+    [("quotes", StreamQuery), ("fmv", StreamQuery), ("snapshots", FetchQuery)],
 )
 def test_the_single_class_factories(
     massive_session: dm.MassiveSession, method: str, expected: type
@@ -954,7 +954,7 @@ def test_a_documented_frame_lands_in_blink(
         query = namespace.bars(symbol, dm.Timespan.MINUTE)
     else:
         query = getattr(namespace, dataset)(symbol)
-    assert isinstance(query, SymbolStreamQuery)
+    assert isinstance(query, StreamQuery)
     blink = query.blink()
     seen, stop = landed(blink)
     ws_session.subscribed(topic)

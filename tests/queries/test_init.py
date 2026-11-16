@@ -14,8 +14,8 @@ _DEFINED = {
     "HistoryQuery": _history,
     "Query": _query,
     "StreamHistoryQuery": _history,
+    "NoSymbolStreamQuery": _stream,
     "StreamQuery": _stream,
-    "SymbolStreamQuery": _stream,
 }
 
 
@@ -45,13 +45,15 @@ def test_every_dataset_returns_an_exported_query_class() -> None:
 def test_a_dataset_method_returns_one_of_its_classes(massive_session: MassiveSession) -> None:
     query = massive_session.stocks.trades("AAPL")
     assert isinstance(query, queries.StreamHistoryQuery)
-    assert isinstance(query, queries.SymbolStreamQuery)
     assert isinstance(query, queries.StreamQuery)
+    assert not isinstance(query, queries.NoSymbolStreamQuery)
     assert isinstance(query, queries.HistoryQuery)
     assert isinstance(query, queries.Query)
 
 
-def test_a_stream_without_symbols_is_a_plain_stream_query(massive_session: MassiveSession) -> None:
+def test_a_stream_without_symbols_is_a_no_symbol_stream_query(
+    massive_session: MassiveSession,
+) -> None:
     query = massive_session.options.admin_messages()
-    assert type(query) is queries.StreamQuery
-    assert not isinstance(query, queries.SymbolStreamQuery)
+    assert type(query) is queries.NoSymbolStreamQuery
+    assert not isinstance(query, queries.StreamQuery)

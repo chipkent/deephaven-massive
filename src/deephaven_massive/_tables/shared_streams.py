@@ -36,12 +36,15 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven.dherror import DHError
 
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._errors import (
     NEW_SESSION,
+    BrokenGuaranteeError,
     MassiveError,
     SessionClosedError,
     copy_error,
     required,
+    unmatched_form,
 )
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._massive import Transport
@@ -87,11 +90,21 @@ def _shown_symbols(spec: DatasetSpec, symbols: NormalizedSymbols) -> tuple[int |
         and the log's words, the first symbols of a list (`bounded_list`) or the row's text.
         A stream whose rows name no symbol, whose key holds `ALL` only to subscribe every
         topic, shows none, as a read without symbols does: `(None, "", "none")`.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
     if not spec.names_symbols:
         return None, "", "none"
-    count, text = describe_symbols(symbols)
-    return count, text, bounded_list(symbols) if isinstance(symbols, tuple) else text
+    match symbols:
+        case tuple():
+            count, text = describe_symbols(symbols)
+            return count, text, bounded_list(symbols)
+        case AllSymbols() | SymbolTable():
+            count, text = describe_symbols(symbols)
+            return count, text, text
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("a stream's shown symbols", symbols))
 
 
 @dataclass(frozen=True, slots=True)

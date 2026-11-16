@@ -40,7 +40,7 @@ from deephaven_massive._tables.liveness import (
 )
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries import StreamQuery
 
 if TYPE_CHECKING:
     from deephaven_massive._tables.session_core import SessionCore
@@ -66,10 +66,8 @@ SPEC = DatasetSpec(
 )
 
 
-def query(session: dm.MassiveSession, symbols: list[str] | None = None) -> SymbolStreamQuery:
-    return build_query(
-        session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols or ["AAPL"]
-    )
+def query(session: dm.MassiveSession, symbols: list[str] | None = None) -> StreamQuery:
+    return build_query(session._core, SPEC, query_type=StreamQuery, symbols=symbols or ["AAPL"])
 
 
 # --- Components ------------------------------------------------------------------------------

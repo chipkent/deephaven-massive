@@ -42,7 +42,7 @@ from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 
 if TYPE_CHECKING:
@@ -429,7 +429,7 @@ class ForexNamespace(Namespace):
         )
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> StreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
         Each row holds one update of Massive's own real-time price estimate. Only Currencies
@@ -454,7 +454,7 @@ class ForexNamespace(Namespace):
 
                 fair = m.forex.fmv(["C:EURUSD", "C:USDJPY"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, FMV, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query)
     def snapshots(self, symbols: SymbolsLike) -> FetchQuery:

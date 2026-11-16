@@ -37,7 +37,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive.queries import SymbolStreamQuery
+    from deephaven_massive.queries import StreamQuery
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
     from tests._fakes.ws_session import WsSession
 
@@ -2152,7 +2152,7 @@ def test_a_crypto_stream_names_every_form_of_symbols() -> None:
     assert ws._pairs_to_split(AssetClass.CRYPTO, ("X:BTCUSD",)) == {"X:BTCUSD"}
     assert ws._pairs_to_split(AssetClass.CRYPTO, dm.ALL) == frozenset()
     assert ws._pairs_to_split(AssetClass.STOCKS, ("AAPL",)) == frozenset()
-    with pytest.raises(AssertionError):
+    with pytest.raises(BrokenGuaranteeError, match="split has no rule for a value of type list"):
         ws._pairs_to_split(
             AssetClass.CRYPTO,
             ["X:BTCUSD"],  # type: ignore[arg-type]  # the point: refused at run time
@@ -2166,7 +2166,7 @@ def test_a_crypto_stream_names_every_form_of_symbols() -> None:
 
 def test_a_lookup_with_an_outcome_no_case_names_is_refused(ws_session: WsSession) -> None:
     ws_session.pair_answers["X:QQQUSD"] = "bogus"  # type: ignore[assignment]  # the point
-    with pytest.raises(AssertionError):
+    with pytest.raises(BrokenGuaranteeError, match="lookup has no rule for a value of type str"):
         ws_session.connections._split(["X:QQQUSD"])
 
 
@@ -2918,14 +2918,14 @@ def symbol_watchlist(dh_input_table: Callable[..., InputTable]) -> InputTable:
     return watchlist
 
 
-def static_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
+def static_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
     def open_result(ws_session: WsSession, upstream: list[Table], _: InputTable | None) -> Live:
         return Live(verb(ws_session.query(TRADES, [WATCHED])), upstream)
 
     return open_result
 
 
-def watchlist_shape(verb: Callable[[SymbolStreamQuery], Table]) -> Opener:
+def watchlist_shape(verb: Callable[[StreamQuery], Table]) -> Opener:
     def open_result(
         ws_session: WsSession, upstream: list[Table], watchlist: InputTable | None
     ) -> Live:

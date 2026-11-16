@@ -34,7 +34,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import NEW_SESSION
+from deephaven_massive._errors import NEW_SESSION, BrokenGuaranteeError
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -55,7 +55,7 @@ from deephaven_massive._tables.liveness import (
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamHandle
 from deephaven_massive.namespaces._query_building import build_query
-from deephaven_massive.queries import SymbolStreamQuery
+from deephaven_massive.queries import StreamQuery
 from deephaven_massive.queries._call import QueryCall
 from deephaven_massive.queries._query import shown_as
 from tests._fakes.stream import transport_of
@@ -87,10 +87,8 @@ SPEC = DatasetSpec(
 )
 
 
-def stream_query(
-    session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)
-) -> SymbolStreamQuery:
-    return build_query(session._core, SPEC, query_type=SymbolStreamQuery, symbols=symbols)
+def stream_query(session: dm.MassiveSession, symbols: dm.SymbolsLike = ("AAPL",)) -> StreamQuery:
+    return build_query(session._core, SPEC, query_type=StreamQuery, symbols=symbols)
 
 
 def label(session: dm.MassiveSession) -> str:
@@ -1363,3 +1361,8 @@ def test_a_verb_that_races_close_never_returns_its_table(
             build=build_and_close,
         )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # failed by the close, then released
+
+
+def test_shown_symbols_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
+        _streams._shown_symbols(SPEC, object())  # type: ignore[arg-type]  # the point: refused at run time

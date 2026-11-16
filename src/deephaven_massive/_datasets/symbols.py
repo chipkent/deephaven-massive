@@ -47,8 +47,9 @@ ignores the type hints of an attribute call. An enum member passes only by attri
 
 A futures ticker is a single contract or a combo (a spread, strip, pack, or bundle, which
 Massive's contracts list returns with `type: 'combo'`). A contract is strict: a root, a month
-code, and a one- or two-digit year (`ESZ5`, `0NGH39`). A combo is any run of upper-case letters
-and digits joined by Massive's separators, `-`, `:`, or one space (`GCQ6-GCZ6`, `BOB 02-01 U6`,
+code, and one to three digits: a one- or two-digit year (`ESZ5`, `0NGH39`), or three digits as
+Massive lists daily contracts (`0AF704`). A combo is any run of upper-case letters and digits
+joined by Massive's separators, `-`, `:`, or one space (`GCQ6-GCZ6`, `BOB 02-01 U6`,
 `CL:BF Q6-U6-V6`, `1Y:SA 03M F6`): Massive documents no grammar for combos and lists more forms
 than its samples show, and every ticker Massive itself writes must round-trip, so the forms are
 not enumerated, while whitespace, lower case, and a truncated contract (`ESZ`) are refused.
@@ -230,9 +231,12 @@ AS_WRITTEN: Final = re.compile(
 whitespace, and no class prefix. How a futures row's ticker is read, so a row Massive sends is
 never lost to the grammar, and the grammar of a dataset whose symbols are a third party's global
 tickers."""
-_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$")
-"""A single futures contract: a root of upper-case letters and digits, a month code, and a one-
-or two-digit year (`ESZ5`, `6CH5`, `0NGH39`). `ESZ`, with no year, is no contract."""
+_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,3}$")
+"""A single futures contract, in the forms Massive's contracts list writes: a root of upper-case
+letters and digits, a month code, and one to three digits. Most contracts end in a one- or
+two-digit year (`ESZ5`, `6CH5`, `NGZ26`, `0NGH39`); daily contracts end in three digits
+(`0AF704`, `GCBX602`), which the library does not read as a date. `ESZ`, with no digit, and
+`ESZ5310`, with four, are no contract."""
 _FUTURES_COMBO: Final = re.compile(r"^(?![OICX]:)[A-Z0-9]+(?:[-: ][A-Z0-9]+)+$")
 """A futures combo (spread, strip, pack, or bundle): runs of upper-case letters and digits, each
 joined to the next by one `-`, `:`, or space, as Massive writes them (`GCQ6-GCZ6`,
@@ -346,8 +350,8 @@ def is_futures_contract(text: str) -> bool:
         text: The text.
 
     Returns:
-        True for a root of upper-case letters and digits, a month code, and a one- or two-digit
-        year.
+        True for a root of upper-case letters and digits, a month code, and one to three
+        digits.
     """
     return _FUTURE.fullmatch(text) is not None
 
@@ -608,7 +612,8 @@ def _convert_future(text: str) -> str:
     _refuse_surrounding_whitespace(text)
     raise ValueError(
         f"{text!r} is not a Massive futures ticker: a contract is a root of upper-case letters "
-        "and digits, a month code, and a one- or two-digit year ('ESZ5'), and a combo is runs "
+        "and digits, a month code, and one to three digits ('ESZ5', 'NGZ26', '0AF704'), and a "
+        "combo is runs "
         "of upper-case letters and digits joined by single '-', ':', or spaces ('GCQ6-GCZ6', "
         "'BOB 02-01 U6', 'CL:BF Q6-U6-V6')"
     )
@@ -1332,11 +1337,12 @@ def canonical_symbol_option(text: str | None, *, on_error: OnError = OnError.RAI
 def canonical_symbol_future(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Check a single futures contract ticker, which Massive's text is exactly: `ESZ5`.
 
-    A contract ticker is a root of upper-case letters and digits, a month code, and a one- or
-    two-digit year, taken as written: nothing is converted
-    or re-cased. A spread is refused with the function that takes it
-    (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit
-    (`ESZ5` is December 2025) unless the contract is ten or more years out (`0NGH39`), so
+    A contract ticker is a root of upper-case letters and digits, a month code, and one to
+    three digits, taken as written: nothing is converted or re-cased. Most contracts end in a
+    one- or two-digit year (`ESZ5`, `NGZ26`), and daily contracts in three digits (`0AF704`,
+    `GCBX602`). A spread is refused with the function that takes it
+    (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit for
+    most products (`ESZ5` is December 2025) and with two for some (`NGZ26`, `0NGH39`), so
     `ESZ25` is not `ESZ5`. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
@@ -1362,7 +1368,7 @@ def canonical_symbol_future(text: str | None, *, on_error: OnError = OnError.RAI
         TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
             `dm.OnError`.
         ValueError: Under `OnError.RAISE`, the default, if the text is a combo, or not a root, a
-            month code, and a year.
+            month code, and one to three digits.
     """
     return _convert_scalar(
         text, _convert_single_future, on_error=on_error, caller="canonical_symbol_future"

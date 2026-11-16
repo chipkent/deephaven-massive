@@ -254,7 +254,7 @@ class DatasetSpec:
     The transports decide the dataset's query class (`query_class` in `queries/_choice.py`).
     With S meaning the spec has channels, H that it has a history source (a history path, a
     grouped-daily path, or flat-file prefixes), and F that it has a fetch path: F alone gives
-    `FetchQuery`, S alone `SymbolStreamQuery` (`StreamQuery`, without `last_by()`, for a stream
+    `FetchQuery`, S alone `StreamQuery` (`NoSymbolStreamQuery`, without `last_by()`, for a stream
     whose rows name no symbol), H alone `HistoryQuery`, and S and H `StreamHistoryQuery`.
     A fetch path is never combined with channels or a history source, so `fetch()` always
     returns every row its endpoint returns: a REST endpoint that answers one row per symbol

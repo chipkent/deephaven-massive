@@ -59,7 +59,7 @@ from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 
 if TYPE_CHECKING:
@@ -654,7 +654,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         )
 
     @raises_through(build_query)
-    def luld(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def luld(self, symbols: SymbolsLike) -> StreamQuery:
         """Limit up-limit down price bands of US-listed stocks, as they change.
 
         Each row holds one band update from the SIP, with its upper and lower price limits. The
@@ -679,10 +679,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 bands = m.stocks.luld(dm.ALL).last_by()
         """
-        return build_query(self._core, LULD, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, LULD, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def imbalances(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def imbalances(self, symbols: SymbolsLike) -> StreamQuery:
         """Net order imbalances of US-listed stocks ahead of opening and closing auctions.
 
         Each row holds one imbalance message, with the auction's type and time and the imbalance
@@ -707,10 +707,10 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 closing = m.stocks.imbalances(["AAPL", "MSFT"]).append_only()
         """
-        return build_query(self._core, IMBALANCES, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, IMBALANCES, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query)
-    def fmv(self, symbols: SymbolsLike) -> SymbolStreamQuery:
+    def fmv(self, symbols: SymbolsLike) -> StreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
         Each row holds one fair market value and the time Massive computed it. It streams only on a
@@ -735,7 +735,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
                 fair = m.stocks.fmv(["AAPL"]).last_by()
         """
-        return build_query(self._core, FMV, query_type=SymbolStreamQuery, symbols=symbols)
+        return build_query(self._core, FMV, query_type=StreamQuery, symbols=symbols)
 
     @raises_through(build_query, require_bool)
     def snapshots(self, symbols: SymbolsLike, *, include_otc: bool = False) -> FetchQuery:

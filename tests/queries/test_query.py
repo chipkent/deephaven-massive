@@ -36,10 +36,10 @@ from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
+    NoSymbolStreamQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
-    SymbolStreamQuery,
 )
 from deephaven_massive.queries._call import QueryCall
 from deephaven_massive.queries._query import made_query, shown_as
@@ -86,12 +86,16 @@ def test_queries_are_immutable_hashable_and_typed(massive_session: dm.MassiveSes
 
 
 def test_class_hierarchy() -> None:
-    assert issubclass(StreamHistoryQuery, SymbolStreamQuery)
-    assert issubclass(SymbolStreamQuery, StreamQuery)
+    assert issubclass(StreamHistoryQuery, StreamQuery)
     assert issubclass(StreamHistoryQuery, HistoryQuery)
-    assert not hasattr(StreamQuery, "fetch")
-    assert not hasattr(StreamQuery, "poll")
-    assert not hasattr(StreamQuery, "last_by")
+    assert not issubclass(StreamQuery, NoSymbolStreamQuery)
+    assert not issubclass(NoSymbolStreamQuery, StreamQuery)
+    assert hasattr(StreamQuery, "last_by")
+    for stream in (StreamQuery, NoSymbolStreamQuery):
+        assert not hasattr(stream, "fetch")
+        assert not hasattr(stream, "poll")
+        assert not hasattr(stream, "history")
+    assert not hasattr(NoSymbolStreamQuery, "last_by")
     assert not hasattr(HistoryQuery, "fetch")
     assert not hasattr(StreamHistoryQuery, "fetch")
     assert not hasattr(FetchQuery, "history")
@@ -521,11 +525,11 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
 def verb_results(query: Query, columns: Sequence[str]) -> Iterator[tuple[str, Table]]:
     # Every result shape the query's verbs make, labelled by the call. The last column is a
     # `last_by` key that the aggregation itself would move to the front.
-    if isinstance(query, StreamQuery):
+    if isinstance(query, (StreamQuery, NoSymbolStreamQuery)):
         yield "blink()", query.blink()
         yield "append_only()", query.append_only()
         yield "ring(5)", query.ring(5)
-    if isinstance(query, SymbolStreamQuery):
+    if isinstance(query, StreamQuery):
         yield "last_by()", query.last_by()
         yield f"last_by({columns[-1]!r})", query.last_by(columns[-1])
     if isinstance(query, FetchQuery):
@@ -679,7 +683,10 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     released(s3_session, files, forced, landed)
 
 
-@pytest.mark.parametrize("cls", [Query, FetchQuery, StreamQuery, HistoryQuery, StreamHistoryQuery])
+@pytest.mark.parametrize(
+    "cls",
+    [Query, FetchQuery, StreamQuery, NoSymbolStreamQuery, HistoryQuery, StreamHistoryQuery],
+)
 def test_a_user_cannot_construct_a_query(cls: type[Query]) -> None:
     with pytest.raises(TypeError, match=r"^a query comes from a dataset method, such as "):
         cls()

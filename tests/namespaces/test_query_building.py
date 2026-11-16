@@ -795,7 +795,7 @@ class _Bad(Namespace):
 
     def trades(
         self,
-    ) -> FetchQuery:  # the trades dataset streams, so this must be a SymbolStreamQuery
+    ) -> FetchQuery:  # the trades dataset streams, so this must be a StreamQuery
         raise NotImplementedError
 
     def news(self) -> FetchQuery:  # no dataset is named options.news
@@ -864,7 +864,7 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         "snapshots: a factory with no dataset",
         "options.bars: timespan must be required, with no default",
         "options.bars: the factory must return StreamHistoryQuery | HistoryQuery",
-        "options.trades: the factory must return SymbolStreamQuery",
+        "options.trades: the factory must return StreamQuery",
         "options.minute_bars: the factory must return StreamHistoryQuery | HistoryQuery",
         "options.splits: a dataset with no factory",
     ]
@@ -1142,7 +1142,7 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
         build_query(massive_session._core, TRADES_SPEC, query_type=FetchQuery, symbols=["AAPL"])
     assert info.value.source is dm.ErrorSource.LIBRARY
     assert str(info.value).startswith(
-        "m.stocks.trades gives a SymbolStreamQuery, not the FetchQuery it declares. "
+        "m.stocks.trades gives a StreamQuery, not the FetchQuery it declares. "
     )
     # A subclass of the declared class is what the declaration promises: bars declare
     # `HistoryQuery`, and minute bars, which stream, are a `StreamHistoryQuery`.

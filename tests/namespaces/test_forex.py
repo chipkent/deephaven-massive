@@ -45,7 +45,7 @@ from deephaven_massive.queries import (
     HistoryQuery,
     Query,
     StreamHistoryQuery,
-    SymbolStreamQuery,
+    StreamQuery,
 )
 from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
@@ -122,7 +122,7 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
         (forex.LAST_QUOTE, FetchQuery),
         (forex.BARS, HistoryQuery),
         (forex.PREVIOUS_DAY_BAR, FetchQuery),
-        (forex.FMV, SymbolStreamQuery),
+        (forex.FMV, StreamQuery),
         (forex.SNAPSHOTS, FetchQuery),
         (forex.MOVERS, FetchQuery),
         (forex.CONVERSION, FetchQuery),
@@ -306,7 +306,7 @@ def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
 
 def test_fmv(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.fmv(dm.ALL)
-    assert type(query) is SymbolStreamQuery
+    assert type(query) is StreamQuery
     assert query._request == Request(symbols=dm.ALL)
 
 
