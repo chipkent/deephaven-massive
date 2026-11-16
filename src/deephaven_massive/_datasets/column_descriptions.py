@@ -101,8 +101,9 @@ DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     RAW_SYMBOL: (
         "The symbol exactly as Massive sent it, on a row whose symbol the library can't read. "
         "That row's `Symbol` is null. Null on every other row. "
-        "When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the "
-        "table instead, and the column is absent."
+        "When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is "
+        "`dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the "
+        "call's own `on_error` keeps it."
     ),
 }
 """The library's description of each derived column."""

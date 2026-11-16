@@ -11,5 +11,6 @@ stays unpredictable and the snapshot must carry the load. Until it is read, the 
 `date`.
 
 Read by `tests/ingest/test_futures_calendar_integration.py::test_contracts_lookup_cost_with_and_without_date`, on a key with futures data. It
-times 1, 100, and 500 tickers with and without `date`, five runs each in turn, page by page. A
-run cut at 5 pages says its numbers are lower bounds.
+times 1, 100, and 500 tickers with `date`, and 1 and 100 without it (500 without it failed with
+HTTP 502), five runs each in turn, page by page, recording each run and each failure as it
+completes. A run cut at 5 pages says its numbers are lower bounds.

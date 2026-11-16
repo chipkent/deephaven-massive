@@ -78,6 +78,7 @@ from typing import TYPE_CHECKING, Final, TypeVar
 from deephaven.dherror import DHError
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
@@ -129,6 +130,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.schema import Schema
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import DriftReport, Transport
     from deephaven_massive._tables.transports import (
         FlatFileTransport,
@@ -380,13 +382,32 @@ class SessionCore:
         )
         finalizer.atexit = False
 
+    @property
+    def policy(self) -> ResolvedPolicy:
+        """The session's setting of every cause: `MassiveConfig.on_error`, then the defaults.
+
+        A call's own policy is on its `Request`; this one serves what no call owns, such as the
+        session's schemas (`raw_symbol`).
+        """
+        return resolve_policy(None, self.config.on_error)
+
+    @property
+    def raw_symbol(self) -> bool:
+        """Whether the session's datasets that read their symbol from rows have `RawSymbol`.
+
+        They do when the session's `unreadable_symbols` keeps an unreadable spelling's rows
+        (`LOG`, the default, or `IGNORE`). A call's own setting never changes a schema: it
+        decides only whether such a row fails the call.
+        """
+        return not effect_of(self.policy.unreadable_symbols).fails
+
     def dataset_schema(self, spec: DatasetSpec) -> Schema:
         """Return a dataset's schema in this session: `Catalog.dataset_schema` with `RawSymbol`.
 
         Every result, `columns()` table, and transport plan of the session reads its columns
-        here, so they agree on whether the `RawSymbol` column exists: it does when the
-        session's `unreadable_symbols` is `LOG` (the default) or `IGNORE` and the dataset reads
-        its symbol from rows.
+        here, or builds them from `raw_symbol`, so they agree on whether the `RawSymbol` column
+        exists: it does when the session's `unreadable_symbols` is `LOG` (the default) or
+        `IGNORE` and the dataset reads its symbol from rows.
 
         Args:
             spec: The dataset.
@@ -394,9 +415,7 @@ class SessionCore:
         Returns:
             The cached schema. A bad dataset raises what `Catalog.dataset_schema` raises.
         """
-        return self.catalog.dataset_schema(
-            spec, raw_symbol=not effect_of(self.config.unreadable_symbols).fails
-        )
+        return self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
 
     @property
     def closed(self) -> bool:

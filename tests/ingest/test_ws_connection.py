@@ -1114,12 +1114,15 @@ def test_dropped_rows_are_counted_by_their_canonical_symbol(ws_session: WsSessio
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    error = _massive.WireError("dropped", kind=_massive.WireFailure.UNREADABLE)
-    rejects = [
-        _massive.Reject(channel="T", symbol=symbol, error=error, raw="{}")
-        for symbol in ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
-    ]
-    assert connection._dropped_symbols(rejects) == {"BRK.A": 2, "MSFT": 1}
+    symbols = ("BRK.A", "BRK.A", "MSFT", None, "not a symbol")
+    unread = _massive.RowMark(
+        rows=tuple(range(len(symbols))),
+        fields=("SipTimestamp",) * len(symbols),
+        reasons=("no t",) * len(symbols),
+        symbols=symbols,
+    )
+    assert connection._dropped_symbols(unread) == {"BRK.A": 2, "MSFT": 1}
+    assert connection._dropped_symbols(None) == {}
     del result
 
 
@@ -1142,7 +1145,7 @@ def test_the_connection_logs_drift_dropped_rows_and_a_summary(
     # Each summary starts the next window's timer.
     assert ws_session.on_loop(connection, lambda: connection._summary) is not first
     assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
-    [dropped] = [m for m in caplog.messages if m.startswith("dropped a T row for AAPL")]
+    [dropped] = [m for m in caplog.messages if m.startswith("cannot place a T row for AAPL")]
     assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
     # The odd rows failed no stream: stream 1 got both rows it could read.

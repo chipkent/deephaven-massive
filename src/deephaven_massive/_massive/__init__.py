@@ -29,7 +29,9 @@ Interface:
       (`Provenance.plans`), for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
       `DriftReport`, `DriftSample`: the value types of that description, and a drift report
-      with the first row that showed each drifted key. A `RestPath`'s parameters are
+      with the first row that showed each drifted key.
+    - `RowFault`, `RowMark`, `RowMarks`: the rows a decoder could not read whole, by fault,
+      which every decoder returns beside its batch and drift. A `RestPath`'s parameters are
       `Param`s, reached through `RestPath.params`.
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
@@ -66,8 +68,8 @@ Interface:
     - `encode_value`: the wire text of one REST parameter value, by its `ParamKind`. It is
       part of `spec` and loads no client: the REST client encodes every request with it, and
       the library's filter check calls it so a value it accepts always encodes.
-    - `WsClient`, `WsState`, `Status`, `StatusKind`, `Reject`: the client of one WebSocket
-      endpoint, its connection states, the status objects and rejected rows it reports.
+    - `WsClient`, `WsState`, `Status`, `StatusKind`: the client of one WebSocket endpoint, its
+      connection states, and the status objects it reports.
 
 Importing the package imports every client and its dependencies, and never Deephaven.
 
@@ -120,13 +122,16 @@ from deephaven_massive._massive.spec.types import (
     ParamKind,
     Provenance,
     RestPath,
+    RowFault,
+    RowMark,
+    RowMarks,
     Source,
     Transport,
     WireType,
     WireUnit,
 )
 from deephaven_massive._massive.spec.values import encode_value
-from deephaven_massive._massive.ws import Reject, Status, StatusKind, WsClient, WsState
+from deephaven_massive._massive.ws import Status, StatusKind, WsClient, WsState
 
 __all__ = [
     "RATE_WINDOW",
@@ -145,10 +150,12 @@ __all__ = [
     "Provenance",
     "ReadColumn",
     "ReadPlan",
-    "Reject",
     "RequestGovernor",
     "RestClient",
     "RestPath",
+    "RowFault",
+    "RowMark",
+    "RowMarks",
     "Source",
     "Status",
     "StatusKind",

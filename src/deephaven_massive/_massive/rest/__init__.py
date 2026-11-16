@@ -28,7 +28,7 @@ Example:
             "my-key", base_url="https://api.massive.com", max_concurrency=8, governor=governor
         )
         page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000}, bucket="stocks")
-        batch, drift = to_batch(page.rows, trades, required={"SipTimestamp"})
+        batch, drift, marks = to_batch(page.rows, trades, required={"SipTimestamp"})
         client.close()
 
     where `trades` is the `RestPath` of `/v3/trades/{stockTicker}`.

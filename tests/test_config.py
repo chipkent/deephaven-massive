@@ -127,11 +127,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.rest_base_url == "https://api.massive.com"
     assert base.s3_endpoint_url == "https://files.massive.com"
     assert base.s3_bucket == "flatfiles"
-    assert base.noncanonical_symbols is dm.OnError.LOG
-    assert base.unreadable_symbols is dm.OnError.LOG
-    assert base.unavailable_symbols is dm.OnError.LOG
-    assert base.malformed_rows is dm.OnError.LOG
-    assert base.refused_venues is dm.OnError.RAISE
+    assert base.on_error == dm.ErrorPolicy()
     assert base.connection_taken is dm.ConnectionTaken.FAIL
 
 
@@ -448,40 +444,20 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
     assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
 
 
-_ON_ERROR_SETTERS: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
-    "noncanonical_symbols": lambda c, v: dataclasses.replace(c, noncanonical_symbols=v),
-    "unreadable_symbols": lambda c, v: dataclasses.replace(c, unreadable_symbols=v),
-    "unavailable_symbols": lambda c, v: dataclasses.replace(c, unavailable_symbols=v),
-    "malformed_rows": lambda c, v: dataclasses.replace(c, malformed_rows=v),
-}
-"""Each `OnError` setting, by name, with a function that sets it on a config."""
-
-_ON_ERROR_SETTINGS = list(_ON_ERROR_SETTERS)
-
-_EVERY_ON_ERROR_SETTER: dict[str, Callable[[MassiveConfig, dm.OnError], MassiveConfig]] = {
-    **_ON_ERROR_SETTERS,
-    "refused_venues": lambda c, v: dataclasses.replace(c, refused_venues=v),
-}
-"""The `OnError` settings above and `refused_venues`, whose default is `RAISE`."""
+def test_on_error_is_a_policy(base: MassiveConfig) -> None:
+    strict = dm.ErrorPolicy(dm.OnError.RAISE)
+    assert dataclasses.replace(base, on_error=strict).on_error is strict
+    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy, not a dm\.OnError"):
+        dataclasses.replace(base, on_error=dm.OnError.RAISE)  # type: ignore[arg-type]  # the point: refused at run time
 
 
-@pytest.mark.parametrize("setting", _ON_ERROR_SETTINGS)
-def test_on_error_settings_default_to_log_and_read_no_environment(
-    monkeypatch: pytest.MonkeyPatch, setting: str
-) -> None:
-    # The settings' old environment variables are gone: a value there changes nothing.
-    monkeypatch.setenv(f"DEEPHAVEN_MASSIVE_{setting.upper()}", "raise")
-    assert getattr(MassiveConfig(api_key="k"), setting) is dm.OnError.LOG
-
-
-@pytest.mark.parametrize("setting", list(_EVERY_ON_ERROR_SETTER))
-def test_on_error_settings_are_the_enum(base: MassiveConfig, setting: str) -> None:
-    changed = _EVERY_ON_ERROR_SETTER[setting](base, dm.OnError.IGNORE)
-    assert getattr(changed, setting) is dm.OnError.IGNORE
-    with pytest.raises(
-        TypeError, match=rf"^{setting} must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"
-    ):
-        dataclasses.replace(base, **{setting: "log"})  # type: ignore[arg-type]  # the point: refused at run time
+@pytest.mark.parametrize(
+    "cause", ["noncanonical_symbols", "unreadable_symbols", "unavailable_symbols"]
+)
+def test_an_old_error_setting_is_no_field(base: MassiveConfig, cause: str) -> None:
+    # The flat settings became causes of `on_error`; the field names are gone.
+    with pytest.raises(TypeError, match=cause):
+        dataclasses.replace(base, **{cause: dm.OnError.RAISE})  # type: ignore[arg-type]  # the point: no such field
 
 
 def test_connection_taken_is_the_enum(base: MassiveConfig) -> None:
@@ -695,11 +671,12 @@ flush_interval: 0.25
 rest_base_url: https://rest.example.com
 s3_endpoint_url: "https://files.example.com"
 s3_bucket: 'bucket'
-noncanonical_symbols: raise
-unreadable_symbols: ignore
-unavailable_symbols: raise
-malformed_rows: ignore
-refused_venues: log
+on_error:
+  noncanonical_symbols: raise
+  unreadable_symbols: ignore
+  unavailable_symbols: raise
+  malformed_rows: ignore
+  refused_venues: log
 connection_taken: reconnect
 """,
     )
@@ -721,11 +698,13 @@ connection_taken: reconnect
         rest_base_url="https://rest.example.com",
         s3_endpoint_url="https://files.example.com",
         s3_bucket="bucket",
-        noncanonical_symbols=OnError.RAISE,
-        unreadable_symbols=OnError.IGNORE,
-        unavailable_symbols=OnError.RAISE,
-        malformed_rows=OnError.IGNORE,
-        refused_venues=OnError.LOG,
+        on_error=dm.ErrorPolicy(
+            noncanonical_symbols=OnError.RAISE,
+            unreadable_symbols=OnError.IGNORE,
+            unavailable_symbols=OnError.RAISE,
+            malformed_rows=OnError.IGNORE,
+            refused_venues=OnError.LOG,
+        ),
         connection_taken=dm.ConnectionTaken.RECONNECT,
     )
     config = MassiveConfig.from_file(file)
@@ -976,18 +955,37 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
     [
         # The error settings: an exact word.
         (
-            "noncanonical_symbols: Raise\n",
+            "on_error: {noncanonical_symbols: Raise}\n",
             (
-                ", line 1, column 23: noncanonical_symbols 'Raise' "
-                "is not an error setting; write one of raise, log, ignore, exactly as shown"
+                ", line 1, column 34: on_error 'Raise' is not an error setting for "
+                "noncanonical_symbols; write one of raise, log, ignore, exactly as shown"
             ),
         ),
         (
-            'unreadable_symbols: " raise"\n',
+            'on_error:\n  unreadable_symbols: " raise"\n',
             (
-                ", line 1, column 21: unreadable_symbols ' raise' "
-                "is not an error setting; write one of raise, log, ignore, exactly as shown"
+                ", line 2, column 23: on_error ' raise' is not an error setting for "
+                "unreadable_symbols; write one of raise, log, ignore, exactly as shown"
             ),
+        ),
+        (
+            "on_error: raise\n",
+            (
+                ", line 1, column 11: on_error must be a mapping of cause to raise, log, or "
+                "ignore, such as {malformed_rows: raise}"
+            ),
+        ),
+        (
+            "on_error: {malformed_row: raise}\n",
+            (
+                ", line 1, column 12: on_error has no cause 'malformed_row'; the causes are "
+                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, malformed_rows, "
+                "refused_venues"
+            ),
+        ),
+        (
+            "on_error: {malformed_rows: raise, malformed_rows: log}\n",
+            ", line 1, column 35: on_error sets 'malformed_rows' twice",
         ),
         (
             "connection_taken: Reconnect\n",
@@ -997,10 +995,10 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             ),
         ),
         (
-            "unreadable_symbols: [log]\n",
+            "on_error: {unreadable_symbols: [log]}\n",
             (
-                ", line 1, column 21: unreadable_symbols must be an "
-                "error setting (raise, log, ignore), not a list or mapping"
+                ", line 1, column 32: on_error must be an error setting for "
+                "unreadable_symbols (raise, log, ignore), not a list or mapping"
             ),
         ),
         # The subscription lists.
@@ -1259,6 +1257,9 @@ CONFIGURATION_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configur
 HOST_PATHS = [f"websocket_hosts.{asset_class.value}" for asset_class in AssetClass]
 """The full path of each `websocket_hosts` key, as the page's table names it."""
 
+CAUSE_PATHS = [f"on_error.{f.name}" for f in dataclasses.fields(dm.ErrorPolicy)]
+"""The full path of each cause of `on_error`, as the page's table names it."""
+
 
 def test_the_committed_settings_page_is_the_rendered_one() -> None:
     page = CONFIGURATION_PAGE.read_text(encoding="utf-8")
@@ -1297,7 +1298,8 @@ def test_the_table_is_one_row_per_setting_and_websocket_hosts_key_in_order() -> 
     rows = [line.split("`")[1] for line in reference.splitlines() if line.startswith("| `")]
     expected: list[str] = []
     for name in _config._EXAMPLE:
-        expected += HOST_PATHS if name == "websocket_hosts" else [name]
+        nested = {"websocket_hosts": HOST_PATHS, "on_error": CAUSE_PATHS}
+        expected += nested.get(name, [name])
     assert rows == expected
     outage = "A number of seconds, `0` or more, such as `600`"
     texts = _config._setting_texts()
@@ -1331,7 +1333,10 @@ def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
     reference = _config.settings_reference()
     details = reference[reference.index('<a id="setting-details"></a>') :]
     headings = [line[5:] for line in details.splitlines() if line.startswith("#### ")]
-    assert headings == list(_config._EXAMPLE)
+    expected = []
+    for name in _config._EXAMPLE:
+        expected += [name, *CAUSE_PATHS] if name == "on_error" else [name]
+    assert headings == expected
     # A list in the docstring stays a list, its members spelled as a file writes them.
     assert "\n- `log` skips the line, keeps the file's other rows, and logs one warning\n" in (
         details
@@ -1347,7 +1352,9 @@ def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
 @pytest.mark.usefixtures("key")
 def test_every_value_forms_example_is_accepted_by_a_settings_file(tmp_path: Path) -> None:
     forms = _config._value_forms()
-    assert set(forms) == set(_config._CONVERTERS) - {"websocket_hosts"} | set(HOST_PATHS)
+    assert set(forms) == set(_config._CONVERTERS) - {"websocket_hosts", "on_error"} | set(
+        HOST_PATHS
+    ) | set(CAUSE_PATHS)
     for name, form in forms.items():
         example = re.search(r"such as `([^`]+)`", form) or re.search(r"`([^`]+)`$", form)
         assert example is not None, form
@@ -1365,20 +1372,20 @@ def test_delayed_subscriptions_offers_only_what_it_accepts() -> None:
 
 def test_the_reference_takes_each_entry_from_the_docstring_without_its_default() -> None:
     texts = _config._setting_texts()
-    assert set(texts) == {f.name for f in dataclasses.fields(MassiveConfig)}
+    assert set(texts) == {f.name for f in dataclasses.fields(MassiveConfig)} | set(CAUSE_PATHS)
     # The default comes from the code, so the entry's last sentence giving it is left out, and
     # the paragraphs after the first are the setting's detail.
     assert texts["s3_bucket"] == "Sets the S3 bucket flat files are read from."
     assert "Defaults to" not in texts["reconnect_backoff"]
     assert "EntitlementError" not in texts["delayed_subscriptions"]
-    assert texts["unavailable_symbols"] == (
+    assert texts["on_error.unavailable_symbols"] == (
         "Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its "
         "crypto ticker list doesn't hold the pair."
     )
     details = _config._setting_details()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
     assert "EntitlementError" in details["delayed_subscriptions"][1]
-    assert details["malformed_rows"][1].startswith(
+    assert details["on_error.malformed_rows"][1].startswith(
         "- `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning\n"
     )
 
@@ -1412,6 +1419,27 @@ def test_the_reference_refuses_an_example_that_misses_or_adds_a_setting(
     monkeypatch.setattr(_config, "_EXAMPLE", {**example, "api_key": example[first]})
     with pytest.raises(ValueError, match="not every file setting once"):
         _config.settings_reference()
+
+
+def test_the_reference_refuses_an_example_that_misses_a_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = dict(_config._CAUSE_COMMENTS)
+    del comments["malformed_rows"]
+    monkeypatch.setattr(_config, "_CAUSE_COMMENTS", comments)
+    with pytest.raises(ValueError, match="not every cause once"):
+        _config.settings_reference()
+
+
+def test_the_example_file_writes_each_cause_under_its_comment() -> None:
+    example = _config._example_file()
+    assert (
+        "on_error:\n"
+        "  # A watchlist value that isn't Massive's exact ticker.\n"
+        "  noncanonical_symbols: raise\n"
+        "  # A symbol in Massive's data that the library can't read.\n"
+        "  unreadable_symbols: log  # the default\n"
+    ) in example
 
 
 def test_only_the_generated_part_of_the_page_is_rewritten() -> None:

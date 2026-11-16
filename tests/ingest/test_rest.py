@@ -427,6 +427,7 @@ class ReadArguments(TypedDict, total=False):
     filters: Mapping[str, dm.FilterValue] | None
     limit: int | None
     values: ValueTable | None
+    on_error: dm.ErrorPolicy | None
 
 
 class QueryArguments(ReadArguments, total=False):
@@ -693,7 +694,7 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
     patiences = _Patiences(monkeypatch)
-    reader = _endpoints(session)._reader("crypto pairs")
+    reader = _endpoints(session)._reader("crypto pairs", session._core.policy)
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
@@ -839,7 +840,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
@@ -909,7 +910,7 @@ def _wait_for_pair(
 def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     *, session: dm.MassiveSession, outcome: str
 ) -> None:
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
     refused = dm.EntitlementError("refused", status=403)
@@ -1017,7 +1018,7 @@ DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
 
 def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
     # A call that splits X:DOTUSD from the session's crypto ticker list.
-    reader = _endpoints(m)._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
     return functools.partial(reader.crypto_pair, "X:DOTUSD")
 
 
@@ -1135,7 +1136,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
     caplog.set_level(logging.INFO, LOGGER)
     caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
@@ -1184,7 +1185,7 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         )
 
     monkeypatch.setattr(client, "pages", refused)
-    reader = _endpoints(m)._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
     try:
         maker = _Caller(
             m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
@@ -1213,7 +1214,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
     try:
         maker = _Caller(m, _split_dot(m), console=False)
         clock.wait_for_deadlines([60.0])
@@ -1505,7 +1506,7 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
     # pair fails the table at its first cycle, in code or in a table, never at the call.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    reader = _endpoints(session)._reader("poll")
+    reader = _endpoints(session)._reader("poll", session._core.policy)
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
     planned, left_out = reader._plan_cycle(
@@ -1518,7 +1519,9 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
     ]
     assert left_out == []
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
@@ -1560,7 +1563,9 @@ def test_a_fetch_reports_a_pair_massive_does_not_list_as_a_symbol_with_no_data(
     assert fetch(session, CRYPTO_LAST, symbols=unlisted) == []
     for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
         config = dm.MassiveConfig(
-            api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            on_error=dm.ErrorPolicy(unavailable_symbols=setting),
         )
         with dm.MassiveSession(config) as other:
             serve_pairs(fake_rest)
@@ -1820,7 +1825,9 @@ def test_row_symbols_are_canonical(
     assert fake_rest.get_queries()[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
     # Under RAISE, a spelling the library cannot read fails the request, naming it.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
         assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
@@ -1872,7 +1879,9 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
         bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
@@ -2685,7 +2694,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest_requests.plan_calls(
@@ -2733,7 +2742,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
                 del refusal  # this frame must not hold its own error
 
     monkeypatch.setattr(rest, "shared_params", base)
-    reader = _endpoints(session)._reader("poll")
+    reader = _endpoints(session)._reader("poll", session._core.policy)
     enabled = gc.isenabled()
     gc.disable()
     try:
@@ -2766,7 +2775,7 @@ def test_a_404_without_a_symbol_fails_the_call(
 def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
     calls = rest_requests.plan_calls(
@@ -2821,7 +2830,7 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
@@ -2831,7 +2840,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest_requests.plan_calls(
@@ -2909,7 +2918,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
     table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
@@ -3525,7 +3534,7 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     session: dm.MassiveSession,
 ) -> None:
     # The first call only fails because the second one's failure cancelled its wait.
-    reader = _endpoints(session)._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy)
     stop = _massive.Cancel()
 
     def run(call: rest_requests.Call) -> NoReturn:
@@ -3958,7 +3967,9 @@ def test_a_pair_massive_does_not_list_fails_a_fetch_under_raise_never_at_the_cal
     serve_pairs(fake_rest)
     params = {"date": "2025-03-03"}
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as session:
         pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
@@ -4440,14 +4451,16 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     day = date(2025, 3, 3)
     no_data = (
         r"^stocks\.trades: Massive has no data for 1 \[ZZZZ \(HTTP 404 from "
-        r"/v3/trades/\{stockTicker\}\)\]\. Remove the symbol, or set "
-        r"MassiveConfig\(unavailable_symbols=dm\.OnError\.LOG\)"
+        r"/v3/trades/\{stockTicker\}\)\]\. Remove the symbol; to leave it out and read the "
+        r"others, pass on_error=dm\.ErrorPolicy\(unavailable_symbols=dm\.OnError\.LOG\)"
     )
 
     def session_with(setting: dm.OnError) -> dm.MassiveSession:
         return dm.MassiveSession(
             dm.MassiveConfig(
-                api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
+                api_key="test-key",
+                rest_base_url=fake_rest.url,
+                on_error=dm.ErrorPolicy(unavailable_symbols=setting),
             )
         )
 
@@ -4461,7 +4474,7 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
         with pytest.raises(UnavailableSymbolError, match=no_data):
             history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
         # A read by symbol fails that symbol alone; the others keep their rows.
-        asked = Request(start=day, end=day)
+        asked = Request(start=day, end=day, on_error=m._core.policy)
         window = history_window(TRADES, asked, start=day, end=day, classes=())
         transport = m._core.rest_transport()
         out = transport.history_by_symbol(TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1)
@@ -4470,6 +4483,56 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, UnavailableSymbolError)
     assert re.match(no_data, str(failed.error))
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.RAISE, dm.OnError.LOG])
+def test_each_rest_verb_follows_the_call_s_unavailable_symbols_over_the_session_s(
+    setting: dm.OnError, *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The session and the call disagree: the call's setting decides whether a symbol without
+    # data fails history() and fetch(), and, under RAISE, poll().
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    other = dm.OnError.LOG if setting is dm.OnError.RAISE else dm.OnError.RAISE
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=other),
+    )
+    call = dm.ErrorPolicy(unavailable_symbols=setting)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    serve_pairs(fake_rest)
+    day = date(2025, 3, 3)
+    with dm.MassiveSession(config) as m:
+        pair = query(
+            m, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": day}, on_error=call
+        )
+        assert isinstance(pair, FetchQuery)
+        if setting is dm.OnError.LOG:
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+            assert pair.fetch(wait=True).size == 0
+            return
+        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[ZZZZ \("):
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[X:DOTUSD \("):
+            pair.fetch(wait=True)
+        assert _failed_soon(pair.poll(60))
+
+
+def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The session keeps a row whose symbol the library cannot read; a call under RAISE fails.
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    params = {"from": "AUD", "to": "XXX"}
+    with dm.MassiveSession(config) as m:
+        with pytest.raises(dm.MassiveError, match=r"Massive sent the symbol 'not a pair'"):
+            fetch(m, CONVERSION, params=params, on_error=strict)
+        (row,) = fetch(m, CONVERSION, params=params)
+    assert (row["Symbol"], row["RawSymbol"]) == (None, "not a pair")
 
 
 def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
@@ -4642,7 +4705,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
     boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
-    reader = _endpoints(m)._reader("poll")
+    reader = _endpoints(m)._reader("poll", m._core.policy)
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(
             futures_ns.PRODUCTS,
@@ -4691,7 +4754,7 @@ def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
 def _not_found(
     m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
 ) -> object:
-    reader = _endpoints(m)._reader("call-1")
+    reader = _endpoints(m)._reader("call-1", m._core.policy)
     return reader._not_found(
         error,
         spec=TRADES,
@@ -4781,7 +4844,7 @@ def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
 
 def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSession) -> None:
     # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
-    path = _endpoints(session)._reader("call-1").rest_path(CRYPTO_LAST_PATH)
+    path = _endpoints(session)._reader("call-1", session._core.policy).rest_path(CRYPTO_LAST_PATH)
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
     unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
@@ -4794,8 +4857,8 @@ def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
     serve_pairs(fake_rest)
     ports = session._core._ports
     assert isinstance(ports, SessionClients)
-    assert ports._crypto_pair("X:BTCUSD") == ("BTC", "USD")
-    assert ports._crypto_pair("X:NOPEUSD") == NOT_LISTED
+    assert ports._crypto_pair("X:BTCUSD", session._core.policy) == ("BTC", "USD")
+    assert ports._crypto_pair("X:NOPEUSD", session._core.policy) == NOT_LISTED
 
 
 def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
@@ -4805,7 +4868,7 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
     # and no read reports it again as a symbol with no data.
     unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
     fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
-    reader = _endpoints(session)._reader("poll")
+    reader = _endpoints(session)._reader("poll", session._core.policy)
     request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
     _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
     assert left_out == [

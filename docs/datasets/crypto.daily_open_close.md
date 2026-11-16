@@ -7,7 +7,7 @@ The open and close prices of crypto pairs on one UTC day, with the trades behind
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.crypto.daily_open_close(symbols, date)
+m.crypto.daily_open_close(symbols, date, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair's bar of one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`date`](README.md#date) | The UTC day, as a date such as `"2026-01-02"`. A `datetime` or an instant is refused. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -43,7 +44,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a UTC calendar day. From REST `day`: "The date requested." |
 | `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 UTC of `Date`. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. |
 | `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 UTC of the next day. A summary whose `IsUtc` is false covers its date's day in a zone Massive does not name, so its window is the widest that day has in any zone: from 14 hours before 00:00 UTC of `Date` to 12 hours after 00:00 UTC of the next day, with a WARNING. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `Open` | double | The open price for the symbol in the given time period. |
 | `Close` | double | The close price for the symbol in the given time period. |
 | `ClosingTrades` | String | An array of results containing the requested data. The column holds Massive's value as JSON text. |

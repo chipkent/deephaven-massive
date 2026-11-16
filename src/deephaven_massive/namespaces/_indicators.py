@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import SymbolsLike
+    from deephaven_massive._error_policy import ErrorPolicy
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = ["DATASETS", "IndicatorsNamespace"]
@@ -224,6 +225,7 @@ class IndicatorsNamespace(Namespace):
         order: Order | None,
         limit: int | None,
         filters: Mapping[str, FilterValue] | None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """Validate the arguments every indicator shares and return its query.
 
@@ -240,6 +242,8 @@ class IndicatorsNamespace(Namespace):
             order: The timestamp order, or None.
             limit: The cap on each symbol's rows, or None.
             filters: Further query parameters, or None.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             The dataset's `FetchQuery`.
@@ -272,6 +276,7 @@ class IndicatorsNamespace(Namespace):
             params=params,
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -288,6 +293,7 @@ class IndicatorsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The simple moving average of a ticker's bars, one row per bar.
 
@@ -314,6 +320,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -346,6 +354,7 @@ class IndicatorsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -362,6 +371,7 @@ class IndicatorsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The exponential moving average of a ticker's bars, one row per bar.
 
@@ -388,6 +398,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -420,6 +432,7 @@ class IndicatorsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -436,6 +449,7 @@ class IndicatorsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The relative strength index of a ticker's bars, from 0 to 100, one row per bar.
 
@@ -461,6 +475,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -493,6 +509,7 @@ class IndicatorsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )
 
     @raises_through(_query)
@@ -511,6 +528,7 @@ class IndicatorsNamespace(Namespace):
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The moving average convergence/divergence of a ticker's bars, one row per bar.
 
@@ -539,6 +557,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -575,4 +595,5 @@ class IndicatorsNamespace(Namespace):
             order=order,
             limit=limit,
             filters=filters,
+            on_error=on_error,
         )

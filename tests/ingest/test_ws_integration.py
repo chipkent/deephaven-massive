@@ -25,7 +25,8 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
-from tests._live import streams, summary
+from deephaven_massive.queries import StreamHistoryQuery
+from tests._live import refusals, streams, summary
 from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
@@ -94,6 +95,89 @@ def _wait_until(
         if done(rows) or time.monotonic() >= deadline:
             return rows
         pause.wait(0.25)
+
+
+def _subscribe_minute_bars(
+    config: dm.MassiveConfig,
+    *,
+    wait_rows: WaitRows,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> tuple[int, list[str]]:
+    """Stream `AM.AAPL` in a session of its own, record what happened, and return the outcome.
+
+    Returns:
+        How many rows arrived, and the stream's `Error` and the connection's `LastError`, where
+        set.
+    """
+    session = dm.MassiveSession(config)
+    try:
+        bars = session.stocks.bars("AAPL", dm.Timespan.MINUTE)
+        assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+        table = bars.append_only()
+        rows = wait_rows(session, table, time.monotonic() + _WAIT)
+        for line in stream_report(session):
+            evidence(line)
+        errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
+        errors += [str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]]
+        session.release(table)
+        evidence(f"AM.AAPL rows received: {len(rows)}; errors: {errors or 'none'}")
+    finally:
+        session.close()
+    return len(rows), errors
+
+
+@pytest.mark.settles("8")
+@pytest.mark.timeout(110)
+def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
+    live_config: dm.MassiveConfig,
+    *,
+    recency_label: RecencyLabel,
+    wait_rows: WaitRows,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """What Massive answers when a key whose stocks data it labels delayed subscribes in real time.
+
+    A subscription not listed in `MassiveConfig.delayed_subscriptions` always streams from
+    `socket.massive.com`, the real-time feed. First asks Massive how it labels the key's stocks
+    snapshot (`recency_label`), and skips, quoting the answer, when Massive refused the snapshot
+    or does not label it delayed: the question is about a key whose data it does. Then leaves
+    stocks out of `delayed_subscriptions` and pins them to that host, so the library's own check
+    of the snapshot does not refuse the stream first, subscribes `AM.AAPL`, minute bars, and
+    records the stream's error and the connection's last error. The refusal does not depend on
+    the market being open. Passes when every error is a refusal (`refusals.is_entitlement_text`,
+    such as the library's `refused the subscription to` quoting Massive): the refusal is the
+    evidence the question asks for. Fails on any other error, such as an outage or a taken
+    connection, which says nothing of what Massive allows. Skips, quoting the rows, when Massive
+    served the stream with no error.
+    """
+    answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if not answer.delayed:
+        pytest.skip(
+            f"Massive does not label this key's stocks data delayed ({answer.text()}); the "
+            f"question is about a key whose stocks data it labels delayed"
+        )
+    config = with_delayed(live_config, live_config.delayed_subscriptions - {dm.Subscription.STOCKS})
+    hosts = {**config.websocket_hosts, dm.AssetClass.STOCKS: "socket.massive.com"}
+    rows, errors = _subscribe_minute_bars(
+        dataclasses.replace(config, websocket_hosts=hosts),
+        wait_rows=wait_rows,
+        table_rows=table_rows,
+        stream_report=stream_report,
+        evidence=evidence,
+    )
+    others = [error for error in errors if not refusals.is_entitlement_text(error)]
+    assert not others, f"the stream failed for a reason other than a refusal: {others}"
+    if not errors:
+        pytest.skip(
+            f"Massive served this key real-time rows on socket.massive.com: {rows} AM.AAPL "
+            f"row(s) in {_WAIT:.0f} s, no error"
+        )
 
 
 @pytest.mark.verifies("70")

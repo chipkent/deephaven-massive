@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import Order
+    from deephaven_massive._error_policy import ErrorPolicy
 
 __all__ = ["CATALOG", "NAMESPACE_MODULES", "MassiveSession"]
 
@@ -407,6 +408,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         order: Order | None = None,
         limit: int | None = None,
         filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
         """The current state of tickers of any asset class, from Massive's unified snapshot.
 
@@ -425,6 +427,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 instead.
             filters: Further endpoint parameters, except `type`, which Massive refuses beside
                 tickers.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -462,6 +466,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             params=list_params(sort=sort, order=order),
             filters=filters,
             limit=limit,
+            on_error=on_error,
         )
 
     @raises_through(SessionCore.diagnostics_view)

@@ -37,6 +37,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
+from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
 from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
@@ -324,12 +325,12 @@ def test_publish_waits_for_every_channel_of_a_frame(
         rows: list[tuple[object, ...]],
         *,
         generation: int,
-        rejects: list[_massive.Reject],
+        marks: _massive.RowMarks,
         drift: _massive.DriftReport,
     ) -> None:
         if channel == "Q":
             pause.wait(0.3)
-        deliver(channel, rows, generation=generation, rejects=rejects, drift=drift)
+        deliver(channel, rows, generation=generation, marks=marks, drift=drift)
 
     monkeypatch.setattr(connection, "_on_data", slow_quotes)
     quote = {"ev": "Q", "sym": "AAPL", "bx": 4, "bp": 1.0, "bs": 100, "ax": 7, "ap": 1.1}
@@ -620,17 +621,22 @@ def failed_after_flush(ws_session: WsSession, table: Table) -> bool:
     return bool(table.j_table.isFailed())
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise(
     make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
     dh_input_table: Callable[..., InputTable],
+    raised_by: str,
 ) -> None:
-    ws_session = make_ws_session(noncanonical_symbols=dm.OnError.RAISE)
+    # RAISE set on the session, or on the call over a session that logs.
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=strict if raised_by == "session" else dm.ErrorPolicy())
     watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
     watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
-    result = ws_session.query(TRADES, watchlist).append_only()
+    call = strict if raised_by == "call" else None
+    result = ws_session.query(TRADES, watchlist, on_error=call).append_only()
     ws_session.subscribed("T.AAPL")
     watchlist.add(new_table([string_col("Symbol", ["msft"])]))
     wait_for(lambda: failed_after_flush(ws_session, result))
@@ -680,7 +686,7 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
 def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_raise(
     make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
-    ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE))
     every = ws_session.query(TRADES, dm.ALL).append_only()
     ws_session.subscribed("T.*")
     ws_session.send(trade("BRK/B"))
@@ -693,7 +699,7 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_rais
 def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
     make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
-    ws_session = make_ws_session(unreadable_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE))
     # The row cannot be routed, so no symbol stream may starve on it silently.
     one = ws_session.query(TRADES, ["AAPL"]).append_only()
     ws_session.subscribed("T.AAPL")
@@ -2167,7 +2173,7 @@ def test_a_crypto_stream_names_every_form_of_symbols() -> None:
 def test_a_lookup_with_an_outcome_no_case_names_is_refused(ws_session: WsSession) -> None:
     ws_session.pair_answers["X:QQQUSD"] = "bogus"  # type: ignore[assignment]  # the point
     with pytest.raises(BrokenGuaranteeError, match="lookup has no rule for a value of type str"):
-        ws_session.connections._split(["X:QQQUSD"])
+        ws_session.connections._split(["X:QQQUSD"], DEFAULT_POLICY)
 
 
 def test_every_pair_is_looked_up_off_the_callers_thread(
@@ -2239,7 +2245,7 @@ def test_a_pair_massive_has_no_data_for_is_skipped_and_shown_from_every_source(
 ) -> None:
     # A pair Massive's list does not hold has no data: the stream follows the other pairs,
     # lists it in its Error, and logs it once, at WARNING under LOG and DEBUG under IGNORE.
-    ws_session = make_ws_session(unavailable_symbols=setting)
+    ws_session = make_ws_session(on_error=dm.ErrorPolicy(unavailable_symbols=setting))
     pairs = crypto_watchlist(
         ["X:BTCUSD", "X:ETHTUSD"], source=source, dh_input_table=dh_input_table
     )
@@ -2275,7 +2281,7 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # Never raised at the call: the stream opens and fails, whatever the pair came from.
-    ws_session = make_ws_session(unavailable_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE))
     pairs = crypto_watchlist(
         ["X:BTCUSD", "X:ETHTUSD"], source=source, dh_input_table=dh_input_table
     )
@@ -2285,8 +2291,9 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
     assert row["State"] == "FAILED"
     assert row["Error"] == (
         "crypto stream 1: Massive has no data for 1 [X:ETHTUSD (Massive's crypto ticker list "
-        "does not hold it)]. Remove the pair, or set "
-        "MassiveConfig(unavailable_symbols=dm.OnError.LOG) to skip it and stream the others"
+        "does not hold it)]. Remove the pair; to skip it and stream the others, pass "
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or to "
+        "MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
     )
     sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
     assert not any("ETHT" in topic for topic in sent)
@@ -2408,7 +2415,7 @@ def test_a_pair_whose_currencies_do_not_join_is_skipped_but_is_not_a_missing_sym
 ) -> None:
     # The lookup reported it under unreadable_symbols: unavailable_symbols=RAISE never fails
     # the stream over it.
-    ws_session = make_ws_session(unavailable_symbols=dm.OnError.RAISE)
+    ws_session = make_ws_session(on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE))
     ws_session.pair_answers["X:DOTUSD"] = Unsplit("its currencies do not join", no_data=False)
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
@@ -2490,16 +2497,18 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     connections._post_change(999, frozenset({"X:DOTUSD"}), frozenset())
     connections._schedule_retry(999, 0.0)
     connections._fail(999, dm.MassiveError("gone"))
-    state = ws._PairState()
+    state = ws._PairState(DEFAULT_POLICY)
     assert connections._wait(999, state, skipped={}, waiting=[], failure=None) is None
-    assert ws._PairState().note() is None
+    assert ws._PairState(DEFAULT_POLICY).note() is None
     result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
     (stream_id,) = connections._mine
     updates: list[object] = []
     monkeypatch.setattr(ws_session.session._core, "update_streams", updates.append)
     monkeypatch.setattr(connections, "_core", lambda: None)
-    connections._show_pairs(stream_id, ws._PairState(skipped={"X:ETHTUSD": "not listed"}))
+    connections._show_pairs(
+        stream_id, ws._PairState(DEFAULT_POLICY, skipped={"X:ETHTUSD": "not listed"})
+    )
     monkeypatch.undo()
     assert updates == []
     ws_session.session.release(result)
@@ -2678,11 +2687,11 @@ def test_a_removal_never_overtakes_a_slow_lookup_of_the_same_pair(
     change = ws_session.connections._change_pairs
     done: list[tuple[list[str], list[str]]] = []
 
-    def slow(symbol: str) -> tuple[str, str] | Unsplit:
+    def slow(symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         if symbol == "X:DOTUSD":
             started.set()
             assert gate.wait(TIMEOUT)
-        return lookup(symbol)
+        return lookup(symbol, policy)
 
     def recorded(stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
         change(stream_id, added, removed)
@@ -3565,3 +3574,57 @@ def test_wanted_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> Non
     symbols = object()
     with pytest.raises(BrokenGuaranteeError, match="topics has no rule for a value of type object"):
         ws._wanted(AssetClass.STOCKS, "T", symbols, pairs={})  # type: ignore[arg-type]  # the point: refused at run time
+
+
+# --- The call's error policy -------------------------------------------------------------------
+
+
+def test_calls_that_differ_only_in_their_policy_are_separate_streams(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # A stream follows the policy of the call that opened it, so a call that sets another one
+    # gets its own stream; equal calls still share one.
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    first = ws_session.query(TRADES, ["AAPL"]).append_only()
+    again = ws_session.query(TRADES, ["AAPL"]).append_only()
+    other = ws_session.query(TRADES, ["AAPL"], on_error=strict).append_only()
+    ws_session.subscribed("T.AAPL")
+    assert len(streams_of(ws_session, dh_to_pylist)) == 2
+    for table in (first, again, other):
+        ws_session.session.release(table)
+
+
+def test_a_stream_applies_its_own_call_s_unreadable_setting(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # Two streams of one channel share the conversion of a batch; the spelling the library
+    # cannot read fails only the stream whose call chose RAISE, and the other keeps the row.
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    kept = ws_session.query(TRADES, dm.ALL).append_only()
+    failing = ws_session.query(TRADES, dm.ALL, on_error=strict).append_only()
+    ws_session.subscribed("T.*")
+    ws_session.send(trade("BRK/B"), trade("AAPL"))
+    wait_for(lambda: failed_after_flush(ws_session, failing))
+    rows = {row["StreamId"]: row for row in streams_of(ws_session, dh_to_pylist)}
+    assert [row["State"] for row in rows.values()].count("FAILED") == 1
+    wait_for(lambda: kept.size == 2)
+    assert sorted(dh_to_pylist(kept.view("RawSymbol")), key=str) == [
+        {"RawSymbol": "BRK/B"},
+        {"RawSymbol": None},
+    ]
+
+
+def test_a_crypto_stream_splits_its_pairs_under_its_call_s_policy(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> None:
+    # The session leaves a pair Massive has no data for out; the call's RAISE fails the stream,
+    # and each lookup is given the stream's policy.
+    strict = dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)
+    result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:ETHTUSD"], on_error=strict).append_only()
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith("crypto stream 1: Massive has no data for 1 [X:ETHTUSD")
+    with ws_session.cond:
+        policies = {policy.unavailable_symbols for _, policy in ws_session.pair_policies}
+    assert policies == {dm.OnError.RAISE}

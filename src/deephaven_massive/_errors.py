@@ -758,7 +758,7 @@ class RowDataError(PermanentError):
 
 
 class UnavailableSymbolError(PermanentError):
-    """A symbol Massive has no data for, under `MassiveConfig.unavailable_symbols=RAISE`.
+    """A symbol Massive has no data for, under `unavailable_symbols=RAISE`.
 
     Massive answered HTTP 404 for it, or its crypto ticker list gives no split for the pair
     (`ErrorSource.MASSIVE`); or, in a `poll()` cycle, its path does not take a parameter the

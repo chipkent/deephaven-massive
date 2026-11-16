@@ -29,10 +29,12 @@ EXPECTED_INTERFACE = [
     "RETRYABLE_STATUSES",
     "ReadColumn",
     "ReadPlan",
-    "Reject",
     "RequestGovernor",
     "RestClient",
     "RestPath",
+    "RowFault",
+    "RowMark",
+    "RowMarks",
     "Source",
     "Status",
     "StatusKind",
@@ -72,11 +74,19 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     assert _massive.WsState is ws.WsState
     assert _massive.Status is ws.Status
     assert _massive.StatusKind is ws.StatusKind
-    assert _massive.Reject is ws.Reject
     assert _massive.source is spec.source
     assert _massive.sources is spec.sources
     assert _massive.provenance is spec.provenance
-    shared = ("DriftReport", "DriftSample", "Field", "ParamKind", "Provenance", "RestPath")
+    shared = (
+        "DriftReport",
+        "DriftSample",
+        "Field",
+        "ParamKind",
+        "Provenance",
+        "RestPath",
+        "RowFault",
+        "RowMark",
+    )
     for name in (*shared, "Source"):
         assert getattr(_massive, name) is getattr(types, name)
     assert _massive.Transport is types.Transport

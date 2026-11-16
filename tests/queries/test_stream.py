@@ -288,3 +288,44 @@ def test_ring_accepts_its_lower_bound(
     result = trades(massive_session).ring(1)
     assert result.is_refreshing
     massive_session.release(result)
+
+
+@pytest.mark.parametrize("refreshing", [False, True], ids=["static", "refreshing"])
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_stream_verb_refuses_a_bad_row_when_the_call_raises_and_the_session_logs(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreams,
+    live: Callable[..., InputTable],
+    verb: str,
+    refreshing: bool,
+) -> None:
+    # The `dm.ErrorPolicy` docstring's example: the session skips such a row, this call fails.
+    rows = ["AAPL", "msft"]
+    watchlist = live(*rows) if refreshing else new_table([string_col("Symbol", rows)])
+    q = massive_session.stocks.trades(
+        watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    )
+    call = getattr(q, verb)
+    with pytest.raises(ValueError, match=r"^stocks\.trades: a symbol table holds 'msft'"):
+        call(3) if verb == "ring" else call()
+    assert fake_streams.opened == []
+
+
+@pytest.mark.parametrize("refreshing", [False, True], ids=["static", "refreshing"])
+def test_a_stream_verb_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreams,
+    live: Callable[..., InputTable],
+    refreshing: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strict(massive_session, monkeypatch)
+    rows = ["AAPL", "msft"]
+    watchlist = live(*rows) if refreshing else new_table([string_col("Symbol", rows)])
+    q = massive_session.stocks.trades(
+        watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.LOG)
+    )
+    massive_session.release(q.blink())
+    assert len(fake_streams.opened) == 1

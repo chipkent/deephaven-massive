@@ -237,8 +237,9 @@ def test_derived_columns_follow_the_leading_keys() -> None:
     kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
     assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
     assert kept.columns[2].description.endswith(
-        "When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the "
-        "table instead, and the column is absent."
+        "When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is "
+        "`dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the "
+        "call's own `on_error` keeps it."
     )
     assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
 

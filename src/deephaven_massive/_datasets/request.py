@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, TypeAlias
 
 from deephaven_massive._datasets.symbols import AllSymbols
+from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
 from deephaven_massive._errors import required, required_instance
 
 if TYPE_CHECKING:
@@ -38,11 +39,13 @@ ParamValue: TypeAlias = (
 for a list of dates (`date.any_of`) and numbers for a list of numbers (`strike_price.any_of`);
 the filter check writes each item as its text, so a `Request` stores lists of text."""
 
-StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
-"""The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
-tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which compares
-by the identity of the table's wrapper and holds it strongly while the key exists. A static
-table never reaches a key: it is read first, and its symbols become the tuple."""
+StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols, ResolvedPolicy]"
+"""The identity of a stream: `(dataset name, channel, symbols, policy)`. The symbols are the
+sorted tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which
+compares by the identity of the table's wrapper and holds it strongly while the key exists. A
+static table never reaches a key: it is read first, and its symbols become the tuple. The policy
+is the call's resolved `on_error` (`Request.on_error`), so a call that sets another policy gets
+its own stream, which follows that policy."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +101,8 @@ class Request:
             prefixes only, never a stream.
         refused_venues: What `history()` does with a venue whose flat files S3 refuses when REST
             cannot serve the call (`FlatFileHistory.history`). For venues the call named, the
-            call's `refused_venues` argument, or `MassiveConfig.refused_venues` when it was left
-            out; `LOG` when the call left `venues` out, so the read skips each refused venue
-            with a warning. None for a dataset without venues.
+            policy's `refused_venues` (`on_error`); `LOG` when the call left `venues` out, so
+            the read skips each refused venue with a warning. None for a dataset without venues.
         adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
             parameter; None for datasets without one. Flat files hold only unadjusted bars.
             The REST transport sends it, when not None, as the `adjusted` query parameter;
@@ -118,6 +120,9 @@ class Request:
         value_table: The table passed where the dataset takes one value (`ValueTable`), or
             None. Its parameter is then absent from `params`: each verb reads the table's
             values and sends each one through `for_value`.
+        on_error: The call's setting of every cause: its `on_error` argument, else the
+            session's `MassiveConfig.on_error`, else `ErrorPolicy.DEFAULTS`
+            (`resolve_policy`). Every transport the call reaches reads it.
     """
 
     symbols: NormalizedSymbols | None = None
@@ -132,6 +137,7 @@ class Request:
     filters: tuple[tuple[str, ParamValue], ...] = ()
     limit: int | None = None
     value_table: ValueTable | None = None
+    on_error: ResolvedPolicy = DEFAULT_POLICY
 
     def for_value(self, value: str) -> Request:
         """Return the request that reads one value of the value table, as if passed alone.

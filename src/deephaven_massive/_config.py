@@ -40,7 +40,7 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
@@ -56,6 +56,7 @@ from deephaven_massive._enums import (
     _require_enum,
     subscription_of,
 )
+from deephaven_massive._error_policy import ErrorPolicy, check_policy
 from deephaven_massive._errors import AuthenticationError, ErrorSource
 from deephaven_massive._massive import (
     check_api_key,
@@ -344,82 +345,17 @@ class MassiveConfig:
         s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
 
             Change it only with `s3_endpoint_url`.
-        noncanonical_symbols: Decides what happens to a row of a watchlist or other table you
-            pass whose value isn't Massive's exact ticker or futures product code, such as
-            `SPX` for `I:SPX`. Defaults to `LOG`.
+        on_error: Decides what one bad symbol or row does: fail the table, or skip it and keep
+            going. Defaults to `dm.ErrorPolicy()`, which leaves every cause at
+            `dm.ErrorPolicy.DEFAULTS`.
 
-            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once. A bad row added
-            later then fails the whole live table, even a watchlist read by `fetch()` or
-            `history()`. Under the other values, a row you fix is read like a new one.
+            Set a cause to `dm.OnError.RAISE` when a table must not run past it.
+            `help(dm.ErrorPolicy)` lists the causes. By default each logs, except
+            `refused_venues`, which raises.
 
-            This setting covers only tables. A symbol you pass in code must be Massive's exact
-            ticker, or the call raises `ValueError`. A table whose every row is bad raises
-            `ValueError` too, whatever this setting says.
-        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the
-            library can't read as Massive's ticker. Defaults to `LOG`.
-
-            Set `dm.OnError.RAISE` when a table must fail rather than keep such a row. By
-            default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
-            column. Such a symbol is a library bug. To report it, see
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
-            Under `dm.OnError.RAISE` the table has no `RawSymbol` column.
-
-            A listed crypto pair is unreadable too when its ticker isn't its two currencies
-            written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows. A
-            watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
-        unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
-            answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
-            `LOG`.
-
-            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong.
-
-            A symbol Massive answers with no rows and no error has no rows, whatever this
-            setting says.
-
-            This setting also covers a watchlist symbol a `poll()` can't request with your
-            arguments. For example, an indicator poll with `adjusted=False` can't request a
-            crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
-        malformed_rows: Decides what happens to a line of a Massive flat file that isn't a
-            readable row: it doesn't split into the header's fields, or it isn't UTF-8 text.
-            Defaults to `LOG`.
-
-            Set `dm.OnError.RAISE` when a `history()` read from flat files must have every row
-            of each file it reads.
-
-            - `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning
-              per file with the count of such lines and the first one's row number. The warning
-              never quotes the line.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
-              first such line's row. A `history()` of a live table instead marks every symbol
-              of the read `FAILED` in `m.symbol_reads()`.
-
-            Only a `history()` that reads flat files meets such a line. Under any setting, a
-            file whose every line is malformed fails the read.
-        refused_venues: Decides what a futures `history()` does when Massive refuses the flat
-            files of an exchange the call names in `venues`, as it does for an exchange the
-            plan doesn't include. A call's own `refused_venues` argument overrides it. Defaults
-            to `RAISE`.
-
-            It applies only to exchanges a call names. A call that leaves `venues` out reads
-            every exchange the plan allows: where only flat files can serve it, it skips each
-            one Massive refuses with a warning, whatever this setting says. Set
-            `dm.OnError.LOG` when your calls name exchanges your plan may not cover and should
-            read the ones it does.
-
-            - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
-              exchange, `venues=`, and `refused_venues=`.
-            - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
-              logs one warning with Massive's status and text, and names the exchanges in the
-              table's description. For a watchlist, each symbol's `Transport` in
-              `m.symbol_reads()` names them instead.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
-              description or `m.symbol_reads()` name them.
-
-            It applies only when REST can't serve the call: `dm.ALL`, or
-            `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive
-            refuses the flat files. Under any setting, a call whose every exchange is refused
-            raises `EntitlementError`.
+            A dataset method's `on_error=` overrides this policy for one call. A call that
+            leaves it out, or passes None, uses this policy for every cause, and each cause
+            unset here falls back to `dm.ErrorPolicy.DEFAULTS`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -439,23 +375,17 @@ class MassiveConfig:
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
-    noncanonical_symbols: OnError = OnError.LOG
-    unreadable_symbols: OnError = OnError.LOG
-    unavailable_symbols: OnError = OnError.LOG
-    malformed_rows: OnError = OnError.LOG
-    refused_venues: OnError = OnError.RAISE
+    on_error: ErrorPolicy = field(default_factory=ErrorPolicy)
 
     def __post_init__(self) -> None:
         """Validate every field; freeze the mappings and the subscription set into copies.
 
-        A `noncanonical_symbols`, `unreadable_symbols`, `unavailable_symbols`,
-        `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
-        `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
-        not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
-        `delayed_subscriptions` that is not a set of `dm.Subscription`, a
-        `rest_requests_per_minute` that is not a mapping of `dm.Subscription` to `int`, or a
-        numeric field of a non-numeric type raises `TypeError`; a number that is not positive
-        raises `ValueError`, though `max_outage` may be zero.
+        An `on_error` that is not a `dm.ErrorPolicy`, a `connection_taken` that is not a
+        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a `dm.AssetClass`, a host,
+        URL, or bucket that is not a `str`, a `delayed_subscriptions` that is not a set of
+        `dm.Subscription`, a `rest_requests_per_minute` that is not a mapping of
+        `dm.Subscription` to `int`, or a numeric field of a non-numeric type raises `TypeError`;
+        a number that is not positive raises `ValueError`, though `max_outage` may be zero.
 
         Raises:
             TypeError: If `api_key` is not a `str`.
@@ -519,11 +449,7 @@ class MassiveConfig:
         if self.max_reconnect_backoff < self.reconnect_backoff:
             raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
-        _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
-        _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
-        _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
-        _require_enum(self.malformed_rows, OnError, "malformed_rows")
-        _require_enum(self.refused_venues, OnError, "refused_venues")
+        check_policy(self.on_error)
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
         _check_url("rest_base_url", self.rest_base_url)
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
@@ -1259,19 +1185,37 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
     )
 
 
-def _on_error(node: yaml.Node) -> OnError:
-    """Convert the word of a setting of what to do on an error: `raise`, `log`, or `ignore`.
-
-    The settings are `noncanonical_symbols`, `unreadable_symbols`, `unavailable_symbols`,
-    `malformed_rows`, and `refused_venues` (`_word`).
+def _on_error(node: yaml.Node) -> ErrorPolicy:
+    """Convert `on_error`: a mapping of cause to `raise`, `log`, or `ignore`.
 
     Args:
-        node: The value's node.
+        node: The value's node, such as `{malformed_rows: raise}`.
 
     Returns:
-        The `OnError` member.
+        The policy, setting each cause the mapping names.
+
+    Raises:
+        _SettingsFileError: If the node is not a mapping, a key is not a cause or appears
+            twice, or a setting is not one of the words (`_word`).
     """
-    return _word(node, OnError, "an error setting")
+    causes = [f.name for f in fields(ErrorPolicy)]
+    if not isinstance(node, yaml.MappingNode):
+        raise _SettingsFileError(
+            "must be a mapping of cause to raise, log, or ignore, such as {malformed_rows: raise}",
+            node.start_mark,
+        )
+    settings: dict[str, OnError] = {}
+    for key, value in node.value:
+        cause = _scalar(key, "a cause")
+        if cause not in causes:
+            raise _SettingsFileError(
+                f"has no cause {cause[:_SHOWN_KEY_LENGTH]!r}; the causes are {', '.join(causes)}",
+                key.start_mark,
+            )
+        if cause in settings:
+            raise _SettingsFileError(f"sets {cause!r} twice", key.start_mark)
+        settings[cause] = _word(value, OnError, f"an error setting for {cause}")
+    return ErrorPolicy(**settings)
 
 
 def _connection_taken(node: yaml.Node) -> ConnectionTaken:
@@ -1470,11 +1414,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "rest_base_url": _text,
     "s3_endpoint_url": _text,
     "s3_bucket": _text,
-    "noncanonical_symbols": _on_error,
-    "unreadable_symbols": _on_error,
-    "unavailable_symbols": _on_error,
-    "malformed_rows": _on_error,
-    "refused_venues": _on_error,
+    "on_error": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""
@@ -1665,21 +1605,15 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "max_concurrency": _Example(
         8, "REST requests at a time, and separately flat files read at a time."
     ),
-    "noncanonical_symbols": _Example(
-        OnError.RAISE, "A watchlist value that isn't Massive's exact ticker: log, ignore, or raise."
-    ),
-    "unreadable_symbols": _Example(
-        OnError.LOG,
-        "A symbol in Massive's data that the library can't read: log, ignore, or raise.",
-    ),
-    "unavailable_symbols": _Example(
-        OnError.LOG, "A symbol Massive has no data for: log, ignore, or raise."
-    ),
-    "malformed_rows": _Example(
-        OnError.LOG, "A flat-file line that isn't a readable row: log, ignore, or raise."
-    ),
-    "refused_venues": _Example(
-        OnError.RAISE, "A futures exchange you name that the plan lacks: log, ignore, or raise."
+    "on_error": _Example(
+        ErrorPolicy(
+            noncanonical_symbols=OnError.RAISE,
+            unreadable_symbols=OnError.LOG,
+            unavailable_symbols=OnError.LOG,
+            malformed_rows=OnError.LOG,
+            refused_venues=OnError.RAISE,
+        ),
+        "What each kind of problem does: raise, log, or ignore.",
     ),
     "websocket_hosts": _Example(
         {AssetClass.INDICES: BUSINESS_HOST},
@@ -1711,7 +1645,17 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
 }
 """The example settings file: every setting a file may hold, each once, in the order of the
 page's table, the ones a new user sets first. Its values agree with one account
-(`_EXAMPLE_ACCOUNT`), and the tests load the file and compare each value with these."""
+(`_EXAMPLE_ACCOUNT`), and the tests load the file and compare each value with these. Its
+`on_error` sets every cause, each under its line of `_CAUSE_COMMENTS`."""
+
+_CAUSE_COMMENTS: Final[Mapping[str, str]] = {
+    "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
+    "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
+    "unavailable_symbols": "A symbol Massive has no data for.",
+    "malformed_rows": "A flat-file line that isn't a readable row.",
+    "refused_venues": "A futures exchange you name that the plan lacks.",
+}
+"""The comment above each cause of `on_error` in the example settings file, keyed by cause."""
 
 
 _ATTRIBUTE: Final = re.compile(r"^    (\w+): (.*)$")
@@ -1739,15 +1683,18 @@ _DOCS_PAGE_URL: Final = re.compile(
 and the settings page, itself under `docs/`, writes as a relative link."""
 
 
-def _docstring_entries() -> dict[str, list[list[str]]]:
-    """Read each setting's entry from the `Attributes` section of `MassiveConfig`'s docstring.
+def _docstring_entries(cls: type) -> dict[str, list[list[str]]]:
+    """Read each setting's entry from the `Attributes` section of a class's docstring.
+
+    Args:
+        cls: `MassiveConfig`, or `ErrorPolicy` for the causes of `on_error`.
 
     Returns:
         Each entry's paragraphs, keyed by the setting's name: each paragraph is its lines,
         without the entry's indent, so a list item keeps its `- ` and its continuation lines
         their two extra spaces.
     """
-    doc = inspect.cleandoc(MassiveConfig.__doc__ or "")
+    doc = inspect.cleandoc(cls.__doc__ or "")
     section = doc[doc.index("\nAttributes:\n") :].splitlines()[2:]
     entries: dict[str, list[list[str]]] = {}
     new_paragraph = False
@@ -1767,6 +1714,18 @@ def _docstring_entries() -> dict[str, list[list[str]]]:
     return entries
 
 
+def _entries() -> dict[str, list[list[str]]]:
+    """Read every entry of the reference: each setting's, and each cause's by its path.
+
+    Returns:
+        The paragraphs of each entry of `MassiveConfig`'s docstring, keyed by the setting's
+        name, then those of `ErrorPolicy`'s, keyed by the cause's path, such as
+        `on_error.malformed_rows` (`_cause_path`).
+    """
+    causes = {_cause_path(name): entry for name, entry in _docstring_entries(ErrorPolicy).items()}
+    return {**_docstring_entries(MassiveConfig), **causes}
+
+
 def _setting_texts() -> dict[str, str]:
     """Read each setting's summary: the first paragraph of its docstring entry.
 
@@ -1775,11 +1734,11 @@ def _setting_texts() -> dict[str, str]:
 
     Returns:
         Each setting's summary as one line, without its last sentence when that sentence gives
-        the default, keyed by the setting's name.
+        the default, keyed by the setting's name or the cause's path (`_entries`).
     """
     return {
         name: _DEFAULT_SENTENCE.sub("", " ".join(" ".join(paragraphs[0]).split()))
-        for name, paragraphs in _docstring_entries().items()
+        for name, paragraphs in _entries().items()
     }
 
 
@@ -1787,11 +1746,12 @@ def _setting_details() -> dict[str, list[str]]:
     """Read each setting's detail: the paragraphs of its docstring entry after the summary.
 
     Returns:
-        Each setting's later paragraphs as Markdown, line breaks kept, keyed by its name.
+        Each setting's later paragraphs as Markdown, line breaks kept, keyed by its name or the
+        cause's path (`_entries`).
     """
     return {
         name: ["\n".join(lines) for lines in paragraphs[1:]]
-        for name, paragraphs in _docstring_entries().items()
+        for name, paragraphs in _entries().items()
     }
 
 
@@ -1840,12 +1800,23 @@ def _spellings(members: Iterable[StrEnum]) -> str:
 
 
 _HOSTS_KEY: Final = "websocket_hosts"
-"""The one setting whose value is a mapping; the page names each of its keys by its full path."""
+"""The setting whose value maps asset class to host; the page names each of its keys by its full
+path."""
 
 
 def _host_path(asset_class: AssetClass) -> str:
     """Return the full path of one `websocket_hosts` key, such as `websocket_hosts.indices`."""
     return f"{_HOSTS_KEY}.{asset_class.value}"
+
+
+_POLICY_KEY: Final = "on_error"
+"""The setting whose value is a mapping of cause to setting; the page names each cause by its
+full path."""
+
+
+def _cause_path(cause: str) -> str:
+    """Return the full path of one cause of `on_error`, such as `on_error.malformed_rows`."""
+    return f"{_POLICY_KEY}.{cause}"
 
 
 def _value_forms() -> dict[str, str]:
@@ -1856,8 +1827,9 @@ def _value_forms() -> dict[str, str]:
 
     Returns:
         A sentence fragment per row of the page's table, keyed by the row's setting: each
-        setting a file may hold, except that each key of `websocket_hosts` has its own row,
-        named by its full path (`_host_path`). For example, ``A positive whole number, such
+        setting a file may hold, except that each key of `websocket_hosts` and each cause of
+        `on_error` has its own row, named by its full path (`_host_path`, `_cause_path`). For
+        example, ``A positive whole number, such
         as `4` `` for `max_concurrency`.
     """
     delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
@@ -1875,11 +1847,7 @@ def _value_forms() -> dict[str, str]:
         "flush_interval": "A positive number of seconds, such as `0.1`",
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",
         "max_concurrency": "A positive whole number, such as `4`",
-        "noncanonical_symbols": error_words,
-        "unreadable_symbols": error_words,
-        "unavailable_symbols": error_words,
-        "malformed_rows": error_words,
-        "refused_venues": error_words,
+        **{_cause_path(f.name): error_words for f in fields(ErrorPolicy)},
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "
@@ -1949,7 +1917,8 @@ def _example_file() -> str:
     """Render the example settings file: every setting of `_EXAMPLE`, each under its comment.
 
     A value equal to the setting's default is marked `# the default`. The `websocket_hosts`
-    mapping is written in block form, one asset class per indented line.
+    mapping is written in block form, one asset class per indented line, and so is `on_error`,
+    each cause under its comment (`_CAUSE_COMMENTS`) and marked against `ErrorPolicy.DEFAULTS`.
 
     Returns:
         The file's YAML text.
@@ -1961,7 +1930,13 @@ def _example_file() -> str:
             lines.append("")
         lines.append(f"# {example.comment}")
         marker = "  # the default" if example.value == defaults[name] else ""
-        if isinstance(example.value, Mapping):
+        if isinstance(example.value, ErrorPolicy):
+            lines.append(f"{name}:")
+            default = asdict(ErrorPolicy.DEFAULTS)
+            for cause, setting in asdict(example.value).items():
+                same = "  # the default" if setting == default[cause] else ""
+                lines += [f"  # {_CAUSE_COMMENTS[cause]}", f"  {cause}: {setting.value}{same}"]
+        elif isinstance(example.value, Mapping):
             lines.append(f"{name}:{marker}")
             lines.extend(f"  {key.value}: {host}" for key, host in example.value.items())
         else:
@@ -1976,10 +1951,12 @@ def settings_reference() -> str:
 
     - the example settings file (`_example_file`), which sets every setting;
     - a table with one row per setting a file may hold, in `_EXAMPLE` order, and one per key of
-      `websocket_hosts`, named by its full path: what the setting is for (the first paragraph of
-      its docstring entry), the values a file may write (`_value_forms`), and its default (from
-      the field's own default);
-    - per setting, the rest of its docstring entry: when to change it and what each value does.
+      `websocket_hosts` and per cause of `on_error`, named by its full path: what the setting is
+      for (the first paragraph of its docstring entry), the values a file may write
+      (`_value_forms`), and its default (from the field's own default, or a cause's in
+      `ErrorPolicy.DEFAULTS`);
+    - per setting, and per cause of `on_error`, the rest of its docstring entry: when to change
+      it and what each value does.
 
     Enum members in the docstring's text are shown as a file spells them (`_as_file_words`).
 
@@ -1987,12 +1964,19 @@ def settings_reference() -> str:
         The Markdown that goes between `SETTINGS_REFERENCE_START` and `SETTINGS_REFERENCE_END`.
 
     Raises:
-        ValueError: If `_EXAMPLE` does not hold every setting a file may hold.
+        ValueError: If `_EXAMPLE` does not hold every setting a file may hold, or
+            `_CAUSE_COMMENTS` every cause of `ErrorPolicy`.
     """
     if sorted(_EXAMPLE) != sorted(_CONVERTERS):
         raise ValueError(
             f"the settings reference lists {sorted(_EXAMPLE)}, not every file setting "
             f"once: {sorted(_CONVERTERS)}"
+        )
+    causes = asdict(ErrorPolicy.DEFAULTS)
+    if sorted(_CAUSE_COMMENTS) != sorted(causes):
+        raise ValueError(
+            f"the example file comments on {sorted(_CAUSE_COMMENTS)}, not every cause once: "
+            f"{sorted(causes)}"
         )
     texts = _setting_texts()
     details = _setting_details()
@@ -2013,8 +1997,9 @@ def settings_reference() -> str:
         "### Values and defaults",
         "",
         (
-            f"A key inside the `{_HOSTS_KEY}` mapping is named by its full path: "
-            f"`{_host_path(AssetClass.INDICES)}` is the `indices` key under `{_HOSTS_KEY}`."
+            f"A key inside the `{_HOSTS_KEY}` or `{_POLICY_KEY}` mapping is named by its full "
+            f"path: `{_host_path(AssetClass.INDICES)}` is the `indices` key under "
+            f"`{_HOSTS_KEY}`."
         ),
         "",
         "| Setting | What it's for | Values | Default |",
@@ -2023,6 +2008,12 @@ def settings_reference() -> str:
     for name in _EXAMPLE:
         if name == _HOSTS_KEY:
             lines.extend(_host_row(c, forms[_host_path(c)]) for c in AssetClass)
+            continue
+        if name == _POLICY_KEY:
+            for cause, setting in causes.items():
+                path = _cause_path(cause)
+                text = _as_file_words(texts[path])
+                lines.append(f"| `{path}` | {text} | {forms[path]} | `{setting.value}` |")
             continue
         default = _file_value(defaults[name])
         text = _as_file_words(texts[name])
@@ -2036,9 +2027,11 @@ def settings_reference() -> str:
         "`help(dm.MassiveConfig)` shows the same text in the console, written for Python code.",
     ]
     for name in _EXAMPLE:
-        lines += ["", f"#### {name}"]
-        for paragraph in details[name]:
-            lines += ["", _as_page_links(_as_file_words(paragraph))]
+        entries = [name] + ([_cause_path(c) for c in causes] if name == _POLICY_KEY else [])
+        for entry in entries:
+            lines += ["", f"#### {entry}"]
+            for paragraph in details[entry]:
+                lines += ["", _as_page_links(_as_file_words(paragraph))]
     return "\n".join(lines) + "\n"
 
 

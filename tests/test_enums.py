@@ -246,7 +246,7 @@ def _literal_strings(annotation: object) -> list[str]:
 def _public_callables() -> list[tuple[str, object]]:
     # Every public function and method reachable from the package and its namespaces.
     query = importlib.import_module("deephaven_massive.queries")
-    classes: list[type] = [dm.MassiveSession, dm.MassiveConfig]
+    classes: list[type] = [dm.MassiveSession, dm.MassiveConfig, dm.ErrorPolicy]
     classes += [
         getattr(query, name)
         for name in (
@@ -317,7 +317,7 @@ _CONVERTER_ENUMS = "datasets/test_symbols.py::test_converter_enums_reject_text"
 _CONVERTER_ON_ERROR = (
     "datasets/test_symbols.py::test_a_converter_refuses_an_on_error_that_is_no_member"
 )
-_ON_ERROR_SETTINGS = "test_config.py::test_on_error_settings_are_the_enum"
+_POLICY_CAUSES = "test_error_policy.py::test_a_cause_must_be_the_enum"
 _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects_bad_arguments"
 
 ENUM_PARAMETERS = {
@@ -328,11 +328,14 @@ ENUM_PARAMETERS = {
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"
     ),
-    "MassiveConfig.__init__.noncanonical_symbols": _ON_ERROR_SETTINGS,
-    "MassiveConfig.__init__.unreadable_symbols": _ON_ERROR_SETTINGS,
-    "MassiveConfig.__init__.unavailable_symbols": _ON_ERROR_SETTINGS,
-    "MassiveConfig.__init__.malformed_rows": _ON_ERROR_SETTINGS,
-    "MassiveConfig.__init__.refused_venues": _ON_ERROR_SETTINGS,
+    "ErrorPolicy.__init__.every": (
+        "test_error_policy.py::test_the_setting_for_every_cause_must_be_the_enum"
+    ),
+    "ErrorPolicy.__init__.noncanonical_symbols": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.unreadable_symbols": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.unavailable_symbols": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.malformed_rows": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.refused_venues": _POLICY_CAUSES,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,
     "canonical_symbol.convention": _CONVERTER_ENUMS,
@@ -388,9 +391,6 @@ ENUM_PARAMETERS = {
     "FuturesNamespace.trades.venues": _FUTURES_ENUMS,
     "FuturesNamespace.quotes.venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.venues": _FUTURES_ENUMS,
-    "FuturesNamespace.trades.refused_venues": _FUTURES_ENUMS,
-    "FuturesNamespace.quotes.refused_venues": _FUTURES_ENUMS,
-    "FuturesNamespace.bars.refused_venues": _FUTURES_ENUMS,
     "FuturesNamespace.bars.timespan": (
         "namespaces/test_futures.py::test_bars_take_the_day_timespan"
     ),

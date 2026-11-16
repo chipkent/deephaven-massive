@@ -13,6 +13,7 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import ChannelFamily, Recency
+from deephaven_massive._error_policy import ResolvedPolicy
 from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import clients, flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
@@ -236,7 +237,7 @@ def test_racing_first_stream_calls_keep_one_set_of_connections(
         *,
         resolve_host: Callable[..., HostDecision],
         fetch_rows: Callable[..., list[dict[str, object]]],
-        crypto_pair: Callable[[str], tuple[str, str]],
+        crypto_pair: Callable[[str, ResolvedPolicy], tuple[str, str]],
     ) -> ws.WsConnections:
         connections = real(
             core,

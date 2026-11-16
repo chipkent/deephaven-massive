@@ -8,7 +8,8 @@ earliest day the request asked for (`refused_request`), so a reader can judge it
 own refusal of a stream Massive serves only in real time, on a key whose data Massive labels
 delayed, carries no status (`is_real_time_only_refusal`), so it is not Massive's refusal
 (`is_massive_refusal`). Nor is the library's refusal of delayed data the owner's settings do
-not list (`is_not_listed_text`), which a background read reports only as text.
+not list (`is_not_listed_text`), which a background read reports only as text. A stream's,
+a poll's, or a followed read's refusal is likewise only text (`is_entitlement_text`).
 
 `tests/conftest.py` calls these from its hook and fixtures, and the live run's and tester's
 example runners from their verdicts. Every function here is pure.
@@ -121,6 +122,32 @@ def is_not_listed_text(text: object) -> bool:
         True when it holds `NOT_LISTED_PHRASE`.
     """
     return isinstance(text, str) and NOT_LISTED_PHRASE in text
+
+
+_ENTITLEMENT_MARKS: Final = (
+    "refused the subscription to",
+    "HTTP 403",
+    "NOT_AUTHORIZED",
+    "not entitled",
+    "may not include this data",
+    "(FMV) data needs",
+)
+"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a topic
+Massive's WebSocket server refused (`the WebSocket server <host> refused the subscription to
+<topics>; Massive said: <its message>; <the feed's hint>`), an HTTP 403, a `NOT_AUTHORIZED`
+envelope, and the hints of a refused topic, including a fair-market-value (FMV) topic's."""
+
+
+def is_entitlement_text(text: object) -> bool:
+    """Return whether an error's text (a failed stream's or poll's `Error`) is a refusal.
+
+    Args:
+        text: The error text, or None.
+
+    Returns:
+        True when it holds one of `_ENTITLEMENT_MARKS`.
+    """
+    return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
 
 
 def refused_request(error: BaseException) -> tuple[str | None, date | None]:

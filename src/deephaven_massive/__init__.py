@@ -59,7 +59,8 @@ Settings:
     - `rest_requests_per_minute` keeps a subscription's requests within the limit Massive
       gives your plan from the first request.
 
-    `help(dm.MassiveConfig)` lists every setting.
+    `help(dm.MassiveConfig)` lists every setting. `dm.ErrorPolicy` decides what a bad symbol or
+    row does, for the session or for one call.
 
 Symbols:
     Datasets take Massive's tickers, spelled exactly: `AAPL`, `BRK.B`, `O:SPY271217C00700000`,
@@ -151,6 +152,7 @@ from deephaven_massive._enums import (
     Timeframe,
     Timespan,
 )
+from deephaven_massive._error_policy import ErrorPolicy
 from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
@@ -172,6 +174,7 @@ __all__ = [
     "DateLike",
     "Direction",
     "EntitlementError",
+    "ErrorPolicy",
     "ErrorSource",
     "FilterValue",
     "FuturesVenue",

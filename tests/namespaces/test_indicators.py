@@ -217,7 +217,8 @@ def test_the_vendor_samples_decode_without_drift(
     spec = CATALOG.by_name[f"indicators.{name}"]
     required = [f.column for f in required_fields(spec, rest_path)]
     assert required == ["Timestamp"]
-    batch, drift = to_batch(payload["results"]["values"], rest_path, required=required)
+    batch, drift, marks = to_batch(payload["results"]["values"], rest_path, required=required)
+    assert marks == {}  # every row read whole
     assert drift.extra == drift.missing == frozenset()
     rows = batch.to_pylist()
     assert [{k: row[k] for k in value} for row, value in zip(rows, values, strict=True)] == values

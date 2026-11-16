@@ -2,7 +2,8 @@
 
 Date: 2026-10-31
 
-Status: retired 2026-11-16: its only check was removed with the second, delayed key the live tests no longer read (decision 121)
+Status: open
 
 Only current-data datasets are checked for `DELAYED`. Settled by
-`tests/namespaces/test_stocks_integration.py` (Stocks Basic).
+`tests/namespaces/test_stocks_integration.py`, which needs a key whose past stock data Massive
+labels `DELAYED`.

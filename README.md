@@ -657,6 +657,57 @@ Copy that number into the setting to skip the pause next time.
 [Example 7](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
+<a id="bad-symbols-and-rows"></a>
+
+### Bad symbols and rows
+
+By default, one bad symbol or row never stops a table. The library skips it, reads the rest, and
+logs a warning. A stream or `poll()` table also names each symbol it skips in its `Error` in
+`m.streams()`.
+
+Each kind of problem is a cause. For example, `noncanonical_symbols` is a watchlist row that
+isn't Massive's exact ticker. A `dm.ErrorPolicy` gives each cause one of three settings:
+
+- `dm.OnError.RAISE` fails the call or live table that met the problem.
+- `dm.OnError.LOG` skips the symbol or row and logs a warning.
+- `dm.OnError.IGNORE` skips it with no warning.
+
+One cause raises by default: `refused_venues`. A futures `history()` that only flat files can
+serve raises when Massive refuses an exchange you name in `venues`.
+
+This session raises on every cause except a malformed flat-file line. It skips and logs that
+line. Its call for daily bars logs every problem and keeps going:
+
+```python
+import deephaven_massive as dm
+
+strict = dm.ErrorPolicy(dm.OnError.RAISE, malformed_rows=dm.OnError.LOG)
+m = dm.MassiveSession(dm.MassiveConfig(on_error=strict))
+lenient = dm.ErrorPolicy(dm.OnError.LOG)
+week = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.DAY, on_error=lenient).history(
+    "2026-10-26", "2026-10-30"
+)
+```
+
+`dm.ErrorPolicy`'s first argument sets every cause. Each cause you name overrides it. A call's
+`on_error=` changes only that call. A cause the call leaves unset follows the session's policy,
+then the defaults. A call without `on_error=` uses the session's policy.
+
+In a settings file, `on_error` maps each cause to `raise`, `log`, or `ignore`. This file sets
+the same policy as `strict`:
+
+```yaml
+on_error:
+  noncanonical_symbols: raise
+  unreadable_symbols: raise
+  unavailable_symbols: raise
+  malformed_rows: log
+  refused_venues: raise
+```
+
+[Bad symbols and rows](docs/configuration.md#on-error) on the settings page describes each cause
+and what `raise` does to each kind of read.
+
 <a id="next-steps"></a>
 
 ## Next steps

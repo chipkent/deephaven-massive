@@ -84,16 +84,18 @@ subscription as real-time. Its requests go at full speed until Massive refuses o
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
 write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
-for `[stocks]`, `dm.OnError.RAISE` for `raise`, and
-`{dm.AssetClass.INDICES: "business.massive.com"}` for the `websocket_hosts` mapping above.
+for `[stocks]`, `dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)` for the `on_error` mapping
+`{malformed_rows: raise}`, and `{dm.AssetClass.INDICES: "business.massive.com"}` for the
+`websocket_hosts` mapping above.
 
 <a id="on-error"></a>
 
-### What log, ignore, and raise do
+### Bad symbols and rows
 
-Some settings decide what one bad symbol or row does. By default the library skips it and
-keeps going, so one problem never stops a table. Each such setting covers one cause and takes
-one of three values:
+`on_error` decides what one bad symbol or row does. It holds one setting per kind of problem,
+called a cause. By default the library skips the problem and keeps going, so one problem never
+stops a table. The exception is `refused_venues`, which raises by default. Each cause takes one
+of three values:
 
 | Value | What it does |
 |---|---|
@@ -102,8 +104,7 @@ one of three values:
 | `raise` | Fails whatever met the problem. |
 
 Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`. A library bug logs an error instead of a warning, and `unreadable_symbols`
-keeps its row, as its entry says.
+in `m.streams()`. A symbol the library can't read logs an error instead of a warning.
 
 Under `raise`:
 
@@ -112,7 +113,12 @@ Under `raise`:
 - A live table fails.
 - A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
   `m.symbol_reads()` shows them `FAILED`. A bad watchlist row is the exception, as
-  `noncanonical_symbols` says.
+  `on_error.noncanonical_symbols` says.
+
+To change a cause for one call only, pass the dataset method a policy, such as
+`m.stocks.trades(watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE))`.
+A cause the call leaves unset follows the session's setting. `dm.ErrorPolicy(dm.OnError.RAISE)`
+sets every cause at once.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
@@ -143,20 +149,18 @@ flat_file_symbol_threshold: 50  # the default
 # REST requests at a time, and separately flat files read at a time.
 max_concurrency: 8  # the default
 
-# A watchlist value that isn't Massive's exact ticker: log, ignore, or raise.
-noncanonical_symbols: raise
-
-# A symbol in Massive's data that the library can't read: log, ignore, or raise.
-unreadable_symbols: log  # the default
-
-# A symbol Massive has no data for: log, ignore, or raise.
-unavailable_symbols: log  # the default
-
-# A flat-file line that isn't a readable row: log, ignore, or raise.
-malformed_rows: log  # the default
-
-# A futures exchange you name that the plan lacks: log, ignore, or raise.
-refused_venues: raise  # the default
+# What each kind of problem does: raise, log, or ignore.
+on_error:
+  # A watchlist value that isn't Massive's exact ticker.
+  noncanonical_symbols: raise
+  # A symbol in Massive's data that the library can't read.
+  unreadable_symbols: log  # the default
+  # A symbol Massive has no data for.
+  unavailable_symbols: log  # the default
+  # A flat-file line that isn't a readable row.
+  malformed_rows: log  # the default
+  # A futures exchange you name that the plan lacks.
+  refused_venues: raise  # the default
 
 # The WebSocket host per asset class: index values stream only from business.massive.com.
 websocket_hosts:
@@ -188,7 +192,7 @@ s3_bucket: flatfiles  # the default
 
 ### Values and defaults
 
-A key inside the `websocket_hosts` mapping is named by its full path: `websocket_hosts.indices` is the `indices` key under `websocket_hosts`.
+A key inside the `websocket_hosts` or `on_error` mapping is named by its full path: `websocket_hosts.indices` is the `indices` key under `websocket_hosts`.
 
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
@@ -198,11 +202,11 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
 | `max_concurrency` | Sets how many REST requests the session runs at a time, and separately how many flat files it reads at a time. | A positive whole number, such as `4` | `8` |
-| `noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
-| `unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read as Massive's ticker. | `log`, `ignore`, or `raise` | `log` |
-| `unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
-| `malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
-| `refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. A call's own `refused_venues` argument overrides it. | `log`, `ignore`, or `raise` | `raise` |
+| `on_error.noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unreadable_symbols` | Decides what happens to a row of Massive's data whose symbol the library can't read as Massive's ticker. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
 | `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
 | `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
@@ -286,7 +290,17 @@ cover all the session's calls together. It also sets how many downloads of
 the others wait their turn, and `m.streams()` shows them `LOADING`. A subscription
 with a request limit still keeps to it.
 
-#### noncanonical_symbols
+#### on_error
+
+Set a cause to `raise` when a table must not run past it.
+`help(dm.ErrorPolicy)` lists the causes. By default each logs, except
+`refused_venues`, which raises.
+
+A dataset method's `on_error=` overrides this policy for one call. A call that
+leaves it out, or passes None, uses this policy for every cause, and each cause
+unset here falls back to `dm.ErrorPolicy.DEFAULTS`.
+
+#### on_error.noncanonical_symbols
 
 Set `raise` to catch a typo in a watchlist at once. A bad row added
 later then fails the whole live table, even a watchlist read by `fetch()` or
@@ -296,19 +310,20 @@ This setting covers only tables. A symbol you pass in code must be Massive's exa
 ticker, or the call raises `ValueError`. A table whose every row is bad raises
 `ValueError` too, whatever this setting says.
 
-#### unreadable_symbols
+#### on_error.unreadable_symbols
 
 Set `raise` when a table must fail rather than keep such a row. By
 default the row stays, with a null `Symbol` and Massive's text in a `RawSymbol`
 column. Such a symbol is a library bug. To report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
-Under `raise` the table has no `RawSymbol` column.
+Only the session's setting decides the column. Under `raise` in
+`MassiveConfig`, no table has a `RawSymbol` column, whatever a call sets.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
 written together. Under `log` or `ignore` it gets no rows. A
 watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
 
-#### unavailable_symbols
+#### on_error.unavailable_symbols
 
 Set `raise` when a missing symbol means your list is wrong.
 
@@ -319,7 +334,7 @@ This setting also covers a watchlist symbol a `poll()` can't request with your
 arguments. For example, an indicator poll with `adjusted=False` can't request a
 crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
 
-#### malformed_rows
+#### on_error.malformed_rows
 
 Set `raise` when a `history()` read from flat files must have every row
 of each file it reads.
@@ -335,7 +350,7 @@ of each file it reads.
 Only a `history()` that reads flat files meets such a line. Under any setting, a
 file whose every line is malformed fails the read.
 
-#### refused_venues
+#### on_error.refused_venues
 
 It applies only to exchanges a call names. A call that leaves `venues` out reads
 every exchange the plan allows: where only flat files can serve it, it skips each
@@ -344,7 +359,7 @@ one Massive refuses with a warning, whatever this setting says. Set
 read the ones it does.
 
 - `raise` makes `history()` raise `EntitlementError`, naming the
-  exchange, `venues=`, and `refused_venues=`.
+  exchange and the setting.
 - `log` skips every file of each refused exchange over the whole range,
   logs one warning with Massive's status and text, and names the exchanges in the
   table's description. For a watchlist, each symbol's `Transport` in

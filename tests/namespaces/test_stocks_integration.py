@@ -21,6 +21,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, WireError, source
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -566,13 +567,15 @@ def test_cash_dividends_are_never_adjusted(
 
     Finds the year's most recent special cash dividend of a common stock with no later split
     (`m.stocks.dividends`) and records the stock's day bars from a week before its ex-dividend
-    date to two days after, with `adjusted=true` and `adjusted=false`. Passes when the ratio
-    of the adjusted to the as-traded close takes no step across the ex-dividend date: the same
-    ratio on every day, so `adjusted` concerns splits only, as the library documents, and an
-    adjustment for the dividend would show as a step on the ex-date. It tries up to three such
-    dividends, two requests each, after the run's search for them (`special_dividends`, up to
-    seven requests, sent once a run): at most 13 stock requests. Skips when the year had no such
-    dividend with bars.
+    date to two days after, with `adjusted=true` and `adjusted=false`, trying the next
+    dividend while a stock's bars differ by basis or miss a side of the ex-date (a thinly
+    traded stock may not trade for days). Passes when the ratio of the adjusted to the
+    as-traded close takes no step across the ex-dividend date: the same ratio on every day, so
+    `adjusted` concerns splits only, as the library documents, and an adjustment for the
+    dividend would show as a step on the ex-date. It tries up to three such dividends, two
+    requests each, after the run's search for them (`special_dividends`, up to seven requests,
+    sent once a run): at most 13 stock requests. Skips when no dividend tried has bars on both
+    sides.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -587,12 +590,17 @@ def test_cash_dividends_are_never_adjusted(
         traded = _days(
             live_session, dividend.symbol, span=span, adjusted=False, table_rows=table_rows
         )
-        if adjusted and adjusted.keys() == traded.keys():
+        ex_date = dividend.ex_date.isoformat()
+        both_sides = bool(adjusted) and min(adjusted) < ex_date <= max(adjusted)
+        if both_sides and adjusted.keys() == traded.keys():
             found = dividend, adjusted, traded
             break
-        evidence(f"{dividend.symbol} {span[0]}..{span[1]}: bars missing on a basis; next")
+        evidence(
+            f"{dividend.symbol} {span[0]}..{span[1]}: days {sorted(adjusted)} adjusted, "
+            f"{sorted(traded)} as traded: no bar on a basis or on a side of the ex-date; next"
+        )
     if found is None:
-        pytest.skip(f"no recent special cash dividend with bars: {dividends}")
+        pytest.skip(f"no recent special cash dividend with bars around it: {dividends}")
     dividend, adjusted, traded = found
     ratios = {
         day: float(adjusted[day]["Close"]) / float(traded[day]["Close"]) for day in sorted(adjusted)
@@ -603,8 +611,6 @@ def test_cash_dividends_are_never_adjusted(
     )
     before = [r for day, r in ratios.items() if day < dividend.ex_date.isoformat()]
     after = [r for day, r in ratios.items() if day >= dividend.ex_date.isoformat()]
-    assert before, f"no bar before the ex-date {dividend.ex_date}"
-    assert after, f"no bar on or after the ex-date {dividend.ex_date}"
     steps = [r / before[-1] - 1 for r in (*before, *after)]
     assert all(abs(step) <= _SAME_PRICE for step in steps), f"the ratio steps: {ratios}"
 
@@ -951,3 +957,69 @@ def test_day_file_before_a_split_is_as_traded(
     evidence(f"{symbol} {_DAY_FILE} {before}: {rows}; REST as-traded close {rest_close}")
     assert rows, f"no {symbol} row in the {before} day file"
     assert abs(float(str(rows[0]["close"])) / rest_close - 1) < _SPLIT_TOLERANCE / 10
+
+
+def _previous_bar_status(client: RestClient) -> str:
+    """Return the envelope status of AAPL's previous day bar, as Massive labels it for a key.
+
+    Returns:
+        The status, such as `"OK"` or `"DELAYED"`.
+    """
+    return client.get(
+        source(Transport.REST, "/v2/aggs/ticker/{stocksTicker}/prev"),
+        {"stocksTicker": _SYMBOL},
+        {},
+        bucket="stocks",
+    ).status
+
+
+@pytest.mark.verifies("73")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_past_stock_data_is_served_with_the_default_config(
+    live_config: dm.MassiveConfig,
+    *,
+    live_rest: RestClient,
+    previous_trading_day: date,
+    evidence: Evidence,
+) -> None:
+    """The previous day's bar and a past day's open and close fetch on the default config.
+
+    Massive labels past data `DELAYED` on some keys, though its rows are final, so only
+    datasets of the market's current state are checked against
+    `MassiveConfig.delayed_subscriptions`. The question needs a key whose past data Massive
+    labels `DELAYED`: the test reads AAPL's previous day bar raw, records the envelope status,
+    and skips, quoting it, when the status is not `DELAYED`. A session on the key with no
+    subscription listed then reads AAPL's `previous_day_bar` and its `daily_open_close` of the
+    last trading day before the run. Fails if the library refuses either read as delayed data
+    the settings do not list (an `EntitlementError` whose source is `ErrorSource.USER`, which
+    the test catches so the live-test hook does not skip on it), or if either returns no row.
+
+    Raises:
+        EntitlementError: When Massive refuses a read, which skips the test, quoting Massive.
+    """
+    status = _previous_bar_status(live_rest)
+    evidence(f"the key's previous day bar envelope status: {status!r}")
+    if status != "DELAYED":
+        pytest.skip(
+            f"Massive labels this key's past stock data {status!r}; the question is about a key "
+            f"whose past data it labels DELAYED"
+        )
+    session = dm.MassiveSession(with_delayed(live_config, frozenset()))
+    try:
+        previous = session.stocks.previous_day_bar(_SYMBOL).fetch(wait=True)
+        evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
+        day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch(wait=True)
+        evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
+    except dm.EntitlementError as error:
+        if error.source is not dm.ErrorSource.USER:
+            raise  # Massive's refusal: the live-test hook skips, quoting it
+        # The settings' refusal of delayed data is the failure the question asks about; the
+        # hook would report it as a skip.
+        refusal = " ".join(str(error).split())
+        evidence(f"the library refused past data on the default config: {refusal}")
+        pytest.fail(f"the library refused past data on the default config: {refusal}")
+    finally:
+        session.close()
+    assert previous.size == 1, "previous_day_bar returned no row"
+    assert day.size == 1, f"daily_open_close returned no row for {previous_trading_day}"

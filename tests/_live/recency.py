@@ -7,7 +7,8 @@ Massive sends a key whose data it labels delayed, real-time, or not at all; the
 `recency_label` fixture of `tests/conftest.py` sends them the request the library's own host
 decision reads (`host_decision.SNAPSHOT_PROBES`) and hands back one `RecencyAnswer`: the labels
 Massive gave, none, or Massive's refusal. Only a test whose question is about the label reads
-it; it decides nothing for the run.
+it, and it decides only that test's outcome, such as a skip, quoting the answer, when the key
+is not the kind the question is about; it decides nothing else for the run.
 """
 
 from __future__ import annotations

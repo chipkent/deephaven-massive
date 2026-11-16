@@ -45,11 +45,13 @@ from deephaven_massive._datasets.timestamps import first_failure, masked_instant
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     index_underlyings,
+    log_unreadable,
     unreadable_symbol_message,
 )
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._massive import DriftReport, DriftSample, to_batch
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.withheld import without_unread_keys
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -96,8 +98,10 @@ class RowConverter:
             that are not filled from the request.
         required_on_error: The required columns of an error row (`is_error_row`): only
             its symbol key, so a ticker the plan does not include keeps its row.
-        symbols: How a symbol read from the rows becomes canonical (`WireSymbols`), and
-            what a spelling the library cannot read does.
+        symbols: How a symbol read from the rows becomes canonical (`WireSymbols`).
+        unreadable: The read's `unreadable_symbols` setting: what a spelling the library
+            cannot read does.
+        raw_symbol: Whether the schema has `RawSymbol`, which the session decides.
         symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
             from the request.
         time_name: The dataset's time column (`row_times.time_column`), whose epoch `0` is
@@ -111,6 +115,8 @@ class RowConverter:
     required: frozenset[str]
     required_on_error: frozenset[str]
     symbols: WireSymbols
+    unreadable: OnError
+    raw_symbol: bool
     symbol_key: str | None
     time_name: str
 
@@ -122,6 +128,7 @@ class RowConverter:
         rest_path: RestPath,
         *,
         unreadable_symbols: OnError,
+        raw_symbol: bool,
     ) -> RowConverter:
         """Prepare the conversion from the path's generated fields and the dataset's schema.
 
@@ -129,13 +136,15 @@ class RowConverter:
             catalog: The catalog, for the dataset's merged schema.
             spec: The dataset.
             rest_path: The path.
-            unreadable_symbols: The session's setting for a symbol spelling the library
-                cannot read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
+            unreadable_symbols: The read's setting for a symbol spelling the library cannot
+                read.
+            raw_symbol: Whether the schema has the `RawSymbol` column
+                (`SessionCore.raw_symbol`).
 
         Returns:
             The converter.
         """
-        schema = catalog.dataset_schema(spec, raw_symbol=not effect_of(unreadable_symbols).fails)
+        schema = catalog.dataset_schema(spec, raw_symbol=raw_symbol)
         renamed = {c.column: c for c in rename(spec, rest_path)}
         symbol = renamed.get("Symbol")
         # The rows' own symbol field, unless the key is filled from the request.
@@ -147,9 +156,9 @@ class RowConverter:
             arrow_schema=schema.arrow_schema(),
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
             required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
-            symbols=WireSymbols(
-                spec.name, spec.asset_class, unreadable_symbols, spec.symbols_as_written
-            ),
+            symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
+            unreadable=unreadable_symbols,
+            raw_symbol=raw_symbol,
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
             time_name=time_column(spec.times),
         )
@@ -187,10 +196,11 @@ class RowConverter:
         for part, required in ((good, self.required), (flagged, self.required_on_error)):
             if not part:
                 continue
-            batch, decoded = to_batch(part, self.rest_path, required=required)
+            decoded_rows, decoded, marks = to_batch(part, self.rest_path, required=required)
+            batch, unread = without_unread_keys(decoded_rows, marks)
             batch, checked = self._apply(batch, symbol)
             batches.append(batch)
-            drift = drift.merge(decoded).merge(checked)
+            drift = drift.merge(decoded).merge(unread).merge(checked)
         if rows and not any(batch.num_rows for batch in batches):
             raise RowDataError(
                 f"{self.dataset}: every row of a page of {len(rows)} was dropped, so Massive's "
@@ -222,8 +232,8 @@ class RowConverter:
 
         Raises:
             RowDataError: If a row's symbol is a spelling the library cannot read and the
-                session's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a
-                row keeps a null `Symbol` and the text in `RawSymbol`.
+                read's `unreadable_symbols` is `RAISE`; under `LOG` and `IGNORE` such a row
+                keeps a null `Symbol`, and the text in `RawSymbol` where the schema has it.
         """
         rows = batch.num_rows
         arrays: dict[str, pa.Array] = {}
@@ -273,12 +283,17 @@ class RowConverter:
             library cannot read, whose `Symbol` is null.
 
         Raises:
-            RowDataError: If a symbol is a spelling the library cannot read and the session's
-                `unreadable_symbols` is `RAISE`.
+            RowDataError: If a symbol is a spelling the library cannot read and the read's
+                `unreadable_symbols` is `RAISE`; otherwise each such spelling is logged once
+                (`log_unreadable`).
         """
         read = self.symbols.read(sent, {})
-        if read.unreadable and not self.symbols.keeps:
-            raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
+        if read.unreadable:
+            if effect_of(self.unreadable).fails:
+                raise RowDataError(unreadable_symbol_message(self.dataset, read.unreadable))
+            log_unreadable(
+                self.dataset, read.unreadable, self.unreadable, raw_symbol=self.raw_symbol
+            )
         return read.symbols, read.raw
 
     def _converted_instants(

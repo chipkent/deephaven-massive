@@ -7,13 +7,21 @@ OPRA's administrative messages, including FLEX trade notices, streamed in real t
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.options.admin_messages()
+m.options.admin_messages(*, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`
 - Read from: WebSocket
 
 [Dataset index](README.md)
+
+## Arguments
+
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
+| Argument | Description |
+| --- | --- |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

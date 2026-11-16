@@ -31,15 +31,21 @@ block then goes through pure Arrow operations, in this order:
 1. the symbol filter (`pyarrow.compute.is_in` on the symbol header);
 2. the key check on the surviving rows: a row whose key header (`ReadPlan.required`) is empty
    or does not parse as its type, or whose time header the plan's converter cannot place
-   (`ReadPlan.to_ns`), is dropped and counted; if every row of the requested symbols in the
-   whole file is dropped, the file raises after its last block, since that is the sign of a
+   (`ReadPlan.to_ns`), cannot be placed; if every row of the requested symbols in the whole
+   file has such a key, the file raises after its last block, since that is the sign of a
    change in the file's format rather than of one odd row (one block can hold a single row of
    an illiquid symbol, so the rule is never applied to a block alone);
-3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds;
-4. on the rows left, the conversion of every other header to its type, and the parsing of list
+3. the half-open `[start, end)` filter on the time header, in epoch nanoseconds, which keeps a
+   row whose time cannot be read, since no window can place it;
+4. on the rows left, the conversion of every header to its type, and the parsing of list
    headers (`"12,37"` becomes `[12, 37]`): a value that does not parse is null, and its header
    is reported in `DriftReport.unconvertible` with the first such text; then the rename from
    CSV headers to the library's column names.
+
+A row left that the reader could not read whole is marked in the block's `RowMarks`:
+`RowFault.UNREADABLE_KEYS` for a key from step 2, else `RowFault.UNCONVERTIBLE_VALUES` for a
+value from step 4. A key-marked row's other values add no `unconvertible` drift. What happens
+to a marked row is the library's decision.
 
 Instants stay in the file's own unit: the library converts them. Only an empty CSV field is
 null; text such as `NA` or `NULL` is data (both are valid tickers). A typed value's surrounding
@@ -58,6 +64,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import dataclasses
 import functools
 import gzip
 import io
@@ -74,17 +81,24 @@ import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 
 from deephaven_massive._massive.net.errors import WireError, WireFailure
-from deephaven_massive._massive.spec.types import DriftReport, DriftSample
+from deephaven_massive._massive.spec.types import (
+    DriftReport,
+    DriftSample,
+    RowFault,
+    RowMarker,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Mapping
     from concurrent.futures import Executor, Future
     from types import TracebackType
 
+    from deephaven_massive._massive.spec.types import RowMarks
+
 __all__ = ["FlatFile", "ReadColumn", "ReadPlan"]
 
 _SAMPLE_LIMIT: Final = 200
-"""How many characters of a value's text a drift sample or a dropped row's reason quotes."""
+"""How many characters of a value's text a drift sample or a marked row's reason quotes."""
 
 _READ_FAILURES: Final = (OSError, EOFError, zlib.error)
 """The failures of reading or decompressing a file, raised after the rows read before them."""
@@ -206,9 +220,9 @@ class ReadPlan:
             or None to keep every time (futures named by date, whose rows the library keeps
             by their session).
         to_ns: Converts the time header's epoch integers to epoch nanoseconds by its declared
-            unit. It returns the nanoseconds, null where a value cannot be placed (it
-            overflows, or lies outside the range the unit allows), and why the first such
-            value cannot, or `""` when every value can. Such a row is dropped.
+            unit: null where a value cannot be placed (it overflows, or lies outside the range
+            the unit allows). Such a row's key cannot be read.
+        unplaced: Why `to_ns` cannot place one epoch integer, for its row's mark.
         block_size: Bytes of decompressed CSV per block, and the longest header line read.
         chunk_size: Bytes of decompressed CSV the reader cuts the file into, after a line
             end, to parse each piece on its own: a multiple of `block_size`.
@@ -218,7 +232,7 @@ class ReadPlan:
             text, and the rows parsed from it, whatever the file's length.
         required: The key headers every file must have, such as the symbol and time headers;
             a file that lacks one fails before its first block, and a row whose value of one
-            is empty or does not parse is dropped.
+            is empty or does not parse is marked `RowFault.UNREADABLE_KEYS`.
     """
 
     columns: tuple[ReadColumn, ...]
@@ -226,7 +240,8 @@ class ReadPlan:
     symbols: pa.Array | None
     time_header: str
     window_ns: tuple[int, int] | None
-    to_ns: Callable[[pa.Array], tuple[pa.Array, str]]
+    to_ns: Callable[[pa.Array], pa.Array]
+    unplaced: Callable[[int], str]
     block_size: int
     chunk_size: int
     parse_threads: int
@@ -245,15 +260,15 @@ class FlatFile:
         ::
 
             with client.open("us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz") as file:
-                for batch, drift in file.batches(plan):
+                for batch, drift, marks in file.batches(plan):
                     ...
 
     Attributes:
         rows_read: The rows `batches()` has read from the file so far, every symbol's.
         rows_of_symbols: Of those, the rows of the plan's symbols (all of them when the plan
             names none).
-        rows_kept: Of those, the rows `batches()` yielded: a readable key, inside the plan's
-            window. The three tell a caller which step emptied a file.
+        rows_kept: Of those, the rows `batches()` yielded: inside the plan's window, or with a
+            time it cannot read. The three tell a caller which step emptied a file.
         malformed_lines: The lines `batches()` skipped as malformed: a line that is not UTF-8
             text, or one Arrow could not split into the header's fields: too few or too many,
             or a quote that does not close (which takes the lines after it, up to the next
@@ -353,7 +368,9 @@ class FlatFile:
         """
         self._body.close()
 
-    def batches(self, plan: ReadPlan) -> Generator[tuple[pa.RecordBatch, DriftReport], None, None]:
+    def batches(
+        self, plan: ReadPlan
+    ) -> Generator[tuple[pa.RecordBatch, DriftReport, RowMarks], None, None]:
         """Decode the file block by block, keeping the rows the plan asks for.
 
         Reads the header line first and matches columns by name. A line that is not UTF-8
@@ -371,12 +388,15 @@ class FlatFile:
             plan: What to read and which rows to keep.
 
         Yields:
-            The kept rows of each block, and the block's `DriftReport`: `extra` holds the
-            headers the plan does not document (dropped) and `missing` the documented headers
-            the file lacks (null), the same for every block of a file; `unconvertible` the
-            headers that held, in some kept row, text that does not parse as their type
-            (null), and `dropped_rows` the rows of the requested symbols dropped for a key
-            (`ReadPlan.required`, `ReadPlan.to_ns`), with the first one's reason.
+            The kept rows of each block; the block's `DriftReport`: `extra` holds the headers
+            the plan does not document (dropped) and `missing` the documented headers the file
+            lacks (null), the same for every block of a file, and `unconvertible` the headers
+            that held, in some kept row whose keys could be read, text that does not parse as
+            their type (null); and the block's `RowMarks`, by index into its rows: a key
+            (`ReadPlan.required`, `ReadPlan.to_ns`) empty, unparseable, or not placeable
+            (`RowFault.UNREADABLE_KEYS`, the reason naming the header and the value), or
+            another header's text that does not parse (`RowFault.UNCONVERTIBLE_VALUES`). Each
+            mark's symbol is the row's symbol header as written.
 
         Raises:
             WireError: If the body is not gzip, is truncated or corrupt, or the connection
@@ -385,8 +405,8 @@ class FlatFile:
                 the header names a column twice or lacks a key header of `plan.required`
                 (before the first block, naming the headers); or, after its last block, if
                 every row of the file was malformed, or the file held rows of the requested
-                symbols and every one of them was dropped for a key, naming the first one's
-                reason. Every message names the file.
+                symbols and every one of them had a key that cannot be read, naming the first
+                one's reason. Every message names the file.
         """
         read_types = {column.header: column.read_type for column in plan.columns}
         try:
@@ -400,7 +420,7 @@ class FlatFile:
             if not text.peek(1):
                 # A header and no rows. Arrow refuses an empty body, and the drift still has
                 # to reach the library, so the file is one empty batch.
-                yield _empty(plan), headers
+                yield _empty(plan), headers, _NO_MARKS
                 return
             options = (
                 pacsv.ReadOptions(
@@ -423,23 +443,23 @@ class FlatFile:
                     check_utf8=False,
                 ),
             )
-            # Rows of the requested symbols the file held, and how many of them were dropped.
-            held = dropped = 0
+            # Rows of the requested symbols the file held, and how many had a key unread.
+            held = unread = 0
             reason = ""
-            for rows, drift, considered, read in self._blocks(text, plan, options):
-                self.rows_read += read
-                self.rows_of_symbols += considered
-                self.rows_kept += rows.num_rows
-                held += considered
-                dropped += drift.dropped_rows
-                reason = reason or drift.dropped_reason
-                yield rows, headers.merge(drift)
+            for block in self._blocks(text, plan, options):
+                self.rows_read += block.read
+                self.rows_of_symbols += block.considered
+                self.rows_kept += block.rows.num_rows
+                held += block.considered
+                unread += block.unread
+                reason = reason or block.unread_reason
+                yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
                 raise self._error(
                     f"every one of its {self.malformed_lines} lines is malformed, so the file's "
                     f"format may have changed; the first: {self.malformed_reason}"
                 )
-            if held and dropped == held:
+            if held and unread == held:
                 raise self._error(
                     f"every one of the {held} rows of the requested symbols was dropped, so the "
                     f"file's format may have changed; the first: {reason}"
@@ -465,7 +485,7 @@ class FlatFile:
         text: gzip.GzipFile,
         plan: ReadPlan,
         options: tuple[pacsv.ReadOptions, pacsv.ConvertOptions],
-    ) -> Generator[tuple[pa.RecordBatch, DriftReport, int, int], None, None]:
+    ) -> Generator[_Block, None, None]:
         """Parse and filter the file's rows chunk by chunk on a small pool, in file order.
 
         The calling thread decompresses the file and cuts the text after a line end into
@@ -483,8 +503,7 @@ class FlatFile:
             options: How Arrow reads the file's rows: its read and convert options.
 
         Yields:
-            What `_apply` returns for each block, then the block's row count (every symbol's),
-            in file order.
+            What `_apply` returns for each block, in file order.
 
         Raises:
             The errors of decompressing and parsing (`pyarrow.ArrowException`, `OSError`,
@@ -495,7 +514,7 @@ class FlatFile:
         parse = functools.partial(self._parse, plan=plan, options=options)
         rows_before = 0  # rows read in the chunks handed on, for the first skipped row's number
 
-        def handed(parsed: _Parsed) -> list[tuple[pa.RecordBatch, DriftReport, int, int]]:
+        def handed(parsed: _Parsed) -> list[_Block]:
             nonlocal rows_before
             blocks, rows, malformed = parsed
             if malformed.rows:
@@ -540,9 +559,9 @@ class FlatFile:
             options: How Arrow reads the file's rows: its read and convert options.
 
         Returns:
-            What `_apply` returns for each block with the block's row count, or one empty
-            block when the chunk has no row left, so the consumer still checks for cancellation
-            and sees the chunk's skipped lines; the rows Arrow read; and the lines skipped.
+            What `_apply` returns for each block, or one empty block when the chunk has no row
+            left, so the consumer still checks for cancellation and sees the chunk's skipped
+            lines; the rows Arrow read; and the lines skipped.
         """
         read_options, convert_options = options
         malformed = _Malformed()
@@ -557,9 +576,9 @@ class FlatFile:
                 parse_options=pacsv.ParseOptions(invalid_row_handler=malformed.skip),
                 convert_options=convert_options,
             )
-            blocks = [(*self._apply(b, plan), b.num_rows) for b in table.to_batches()]
+            blocks = [self._apply(b, plan) for b in table.to_batches()]
             rows = table.num_rows
-        return blocks or [(_empty(plan), DriftReport(), 0, 0)], rows, malformed
+        return blocks or [_Block(_empty(plan))], rows, malformed
 
     def _header(self, text: gzip.GzipFile, plan: ReadPlan) -> list[str]:
         """Read and parse the file's header line, and require the plan's key headers.
@@ -610,83 +629,218 @@ class FlatFile:
             kind=WireFailure.UNREADABLE,
         )
 
-    def _apply(
-        self, block: pa.RecordBatch, plan: ReadPlan
-    ) -> tuple[pa.RecordBatch, DriftReport, int]:
-        """Filter one block, drop the rows whose key cannot be read, and convert the rest.
+    def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> _Block:
+        """Filter one block, mark the rows it cannot read whole, and convert it.
 
         Args:
             block: One block as the CSV reader read it, every header as text.
             plan: What to keep.
 
         Returns:
-            The kept rows, possibly none, in the plan's columns; the block's own drift: the
-            rows dropped for a key (`_keyed`), and the headers that held text that does not
-            parse (`unconvertible`, with the first such text as the sample); and how many rows
-            of the requested symbols the block held, for the whole-file rule of `batches`.
+            The block's kept rows, possibly none, in the plan's columns, with their drift and
+            marks, and its counts for the whole-file rule of `batches`.
         """
+        read = block.num_rows
         if plan.symbols is not None:
             block = block.filter(pc.is_in(block[plan.symbol_header], value_set=plan.symbols))
         considered = block.num_rows
-        block, drift, nanos = self._keyed(block, plan)
-        if plan.window_ns is not None:
-            start, end = plan.window_ns
-            if nanos is None:  # the time header is no key of this plan
-                times, _ = _parsed(block[plan.time_header], _read_type(plan, plan.time_header))
-                nanos, _ = plan.to_ns(times)
-            block = block.filter(pc.and_(pc.greater_equal(nanos, start), pc.less(nanos, end)))
+        keys = self._keyed(block, plan)
+        first = keys.reasons[min(keys.reasons)][1] if keys.reasons else ""
+        block, keyed = _windowed(block, keys, plan)
+        rows, drift, marks = self._converted(block, keyed, plan)
+        return _Block(rows, drift, marks, considered, len(keys.reasons), first, read)
+
+    def _converted(
+        self, block: pa.RecordBatch, keyed: Mapping[int, tuple[str, str]], plan: ReadPlan
+    ) -> tuple[pa.RecordBatch, DriftReport, RowMarks]:
+        """Convert a filtered block's headers to their types, and mark the rows not read whole.
+
+        Args:
+            block: The block's kept rows, every header as text.
+            keyed: Each kept row whose key cannot be read, with its key's column and why.
+            plan: The plan, for its columns.
+
+        Returns:
+            The rows in the plan's columns; the drift of the headers whose text does not parse
+            in a row whose keys could be read; and the marks.
+        """
+        marker = RowMarker()
+        symbols = block[plan.symbol_header]
+        for row in sorted(keyed):
+            key_column, reason = keyed[row]
+            symbol = symbols[row].as_py()
+            marker.mark(
+                RowFault.UNREADABLE_KEYS, row, field=key_column, reason=reason, symbol=symbol
+            )
         arrays = []
         odd: dict[str, DriftSample] = {}
+        # A row whose key cannot be read is converted with no text: its values are never
+        # published, and its odd text must not change how the column's other rows convert.
+        unread = pa.array([row in keyed for row in range(block.num_rows)]) if keyed else None
         for column in plan.columns:
             sent = block[column.header]
+            if unread is not None and (
+                column.read_type != pa.string() or column.list_type is not None
+            ):
+                sent = pc.if_else(unread, pa.scalar(None, sent.type), sent)
             values, failed = _parsed(sent, column.read_type, column.list_type)
             if failed is not None:
-                first = pc.filter(sent, failed)[0].as_py()
-                odd[column.header] = DriftSample(None, first[:_SAMPLE_LIMIT])
+                self._mark_unfit(sent, failed, column, symbols=symbols, marker=marker, odd=odd)
             arrays.append(values)
         rows = pa.RecordBatch.from_arrays(arrays, names=[c.column for c in plan.columns])
-        return rows, drift.merge(DriftReport(unconvertible=frozenset(odd), samples=odd)), considered
+        return rows, DriftReport(unconvertible=frozenset(odd), samples=odd), marker.marks()
 
-    def _keyed(
-        self, block: pa.RecordBatch, plan: ReadPlan
-    ) -> tuple[pa.RecordBatch, DriftReport, pa.Array | None]:
-        """Drop the rows of a block whose key header is empty, does not parse, or cannot be placed.
+    @staticmethod
+    def _mark_unfit(
+        sent: pa.Array,
+        failed: pa.Array,
+        column: ReadColumn,
+        *,
+        symbols: pa.Array,
+        marker: RowMarker,
+        odd: dict[str, DriftSample],
+    ) -> None:
+        """Mark the rows whose text of one header does not parse, and record the header's drift.
+
+        A row whose key cannot be read has no text here (`_converted`), so it keeps that fault
+        and adds no drift; a row an earlier header marked keeps its first such header.
+
+        Args:
+            sent: The header's text in each kept row.
+            failed: Where it does not parse.
+            column: The header's column.
+            symbols: Each kept row's symbol text.
+            marker: Receives the marks.
+            odd: Receives the header and its first such text.
+        """
+        for row in pc.indices_nonzero(failed).to_pylist():
+            text = sent[row].as_py()[:_SAMPLE_LIMIT]
+            marker.mark(
+                RowFault.UNCONVERTIBLE_VALUES,
+                row,
+                field=column.column,
+                reason=f"{column.header} holds {text!r}, which is not {column.read_type}",
+                symbol=symbols[row].as_py(),
+            )
+            odd.setdefault(column.header, DriftSample(None, text))
+
+    def _keyed(self, block: pa.RecordBatch, plan: ReadPlan) -> _Keys:
+        """Find the rows of a block whose key header is empty, does not parse, or cannot be placed.
 
         A key header (`ReadPlan.required`) is empty or does not parse as its type, or, when the
         time header is a key, its value is one the plan's converter cannot place
-        (`ReadPlan.to_ns`). The time header is then converted here once, for the window too.
+        (`ReadPlan.to_ns`). The time header is then converted here once, for the window too. A
+        row with several such keys is marked for the first header, in name order.
 
         Args:
             block: The block's rows of the requested symbols, every header as text.
             plan: The plan, for its key headers and time converter.
 
         Returns:
-            The rows kept, still as text; the drift of the rows dropped (`dropped_rows`, and a
-            reason naming the header, and the value, of the first header that dropped a row;
-            the library names the file); and the kept rows' times in epoch nanoseconds, or None
-            when the time header is no key.
+            Each such row's index with its first header's column and why (naming the header
+            and quoting the value), and the rows' times in epoch nanoseconds, or None when the
+            time header is no key.
         """
-        keep = pa.repeat(pa.scalar(value=True), block.num_rows)
+        reasons: dict[int, tuple[str, str]] = {}
         nanos: pa.Array | None = None
-        reason = ""
+        columns = {c.header: c.column for c in plan.columns}
         for header in sorted(plan.required):
             sent = block[header]
             read_type = _read_type(plan, header)
             values, failed = _parsed(sent, read_type)
             bad = pc.is_null(sent) if failed is None else pc.or_(pc.is_null(sent), failed)
-            if not reason and pc.any(bad).as_py():
-                reason = _unreadable_key(header, sent, bad=bad, read_type=read_type)
+            unplaced = None
             if header == plan.time_header:
-                nanos, problem = plan.to_ns(values)
-                bad = pc.or_(bad, pc.and_(pc.is_valid(values), pc.is_null(nanos)))
-                reason = reason or problem
-            keep = pc.and_(keep, pc.invert(bad))
-        if pc.all(keep, min_count=0).as_py():  # an empty block keeps every row it has
-            return block, DriftReport(), nanos
-        rows = block.num_rows
-        block = block.filter(keep)
-        dropped = DriftReport(dropped_rows=rows - block.num_rows, dropped_reason=reason)
-        return block, dropped, None if nanos is None else nanos.filter(keep)
+                nanos = plan.to_ns(values)
+                unplaced = pc.and_(pc.is_valid(values), pc.is_null(nanos))
+                bad = pc.or_(bad, unplaced)
+            for row in pc.indices_nonzero(bad).to_pylist():
+                if row in reasons:
+                    continue
+                text = sent[row].as_py()
+                if text is None:
+                    why = f"a row has no {header}"
+                elif unplaced is not None and unplaced[row].as_py():
+                    why = plan.unplaced(values[row].as_py())
+                else:
+                    why = f"{header} holds {text[:_SAMPLE_LIMIT]!r}, which is not {read_type}"
+                reasons[row] = (columns[header], why)
+        return _Keys(reasons, nanos)
+
+
+def _windowed(
+    block: pa.RecordBatch, keys: _Keys, plan: ReadPlan
+) -> tuple[pa.RecordBatch, Mapping[int, tuple[str, str]]]:
+    """Keep a block's rows inside the plan's window, and those whose time cannot be read.
+
+    Args:
+        block: The block's rows of the requested symbols, every header as text.
+        keys: The rows whose key cannot be read, and the rows' times (`FlatFile._keyed`).
+        plan: The plan, for its window and time header.
+
+    Returns:
+        The kept rows, and each of them whose key cannot be read, by its index among them.
+    """
+    if plan.window_ns is None:
+        return block, keys.reasons
+    start, end = plan.window_ns
+    nanos = keys.nanos
+    if nanos is None:  # the time header is no key of this plan
+        times, _ = _parsed(block[plan.time_header], _read_type(plan, plan.time_header))
+        nanos = plan.to_ns(times)
+        inside = pc.and_(pc.greater_equal(nanos, start), pc.less(nanos, end))
+    else:  # a time that cannot be read stays for its mark: no window can place it
+        within = pc.and_(pc.greater_equal(nanos, start), pc.less(nanos, end))
+        inside = pc.or_(pc.fill_null(within, fill_value=False), pc.is_null(nanos))
+    keep = pc.fill_null(inside, fill_value=False)
+    if not keys.reasons:  # no mark to carry: one Arrow filter
+        return block.filter(keep), {}
+    kept = pc.indices_nonzero(keep).to_pylist()
+    at = {row: index for index, row in enumerate(kept)}
+    keyed = {at[row]: why for row, why in keys.reasons.items() if row in at}
+    return block.take(pa.array(kept, pa.int64())), keyed
+
+
+@dataclass(frozen=True, slots=True)
+class _Keys:
+    """The rows of a block whose key cannot be read, and the block's times.
+
+    Attributes:
+        reasons: Each such row's index, with its first such header's column and why.
+        nanos: Every row's time in epoch nanoseconds, null where it cannot be read; None when
+            the time header is no key of the plan.
+    """
+
+    reasons: Mapping[int, tuple[str, str]]
+    nanos: pa.Array | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Block:
+    """One block's rows as the reader hands them on, and its counts for the whole-file rule.
+
+    Attributes:
+        rows: The kept rows, in the plan's columns.
+        drift: The block's own drift: the headers that held text that does not parse, in a row
+            whose keys could be read.
+        marks: The kept rows it could not read whole, by index into `rows`.
+        considered: The block's rows of the requested symbols, before the window.
+        unread: How many of those had a key that cannot be read.
+        unread_reason: Why the first of them could not be read; `""` when none.
+        read: The block's rows, every symbol's.
+    """
+
+    rows: pa.RecordBatch
+    drift: DriftReport = dataclasses.field(default_factory=DriftReport)
+    marks: RowMarks = dataclasses.field(default_factory=lambda: _NO_MARKS)
+    considered: int = 0
+    unread: int = 0
+    unread_reason: str = ""
+    read: int = 0
+
+
+_NO_MARKS: Final[RowMarks] = MappingProxyType({})
+"""The marks of a block whose every row was read whole."""
 
 
 class _Malformed:
@@ -811,9 +965,9 @@ def _text_lines(chunk: bytes, malformed: _Malformed) -> bytes:
     return b"".join(kept)
 
 
-_Parsed: TypeAlias = tuple[list[tuple[pa.RecordBatch, DriftReport, int, int]], int, _Malformed]
-"""One parsed chunk: what `_apply` returns for each block with the block's row count, the
-chunk's rows Arrow read, and the rows it skipped."""
+_Parsed: TypeAlias = tuple[list[_Block], int, _Malformed]
+"""One parsed chunk: what `_apply` returns for each block, the chunk's rows Arrow read, and the
+rows it skipped."""
 
 
 def _in_order(
@@ -903,25 +1057,6 @@ def _read_type(plan: ReadPlan, header: str) -> pa.DataType:
         The header's `ReadColumn.read_type`.
     """
     return next(c.read_type for c in plan.columns if c.header == header)
-
-
-def _unreadable_key(header: str, sent: pa.Array, *, bad: pa.Array, read_type: pa.DataType) -> str:
-    """Return why the first row whose key header is empty or does not parse was dropped.
-
-    Args:
-        header: The key header.
-        sent: Its text in each row.
-        bad: Where its text is empty or does not parse; true somewhere.
-        read_type: The type it is read as.
-
-    Returns:
-        `"a row has no <header>"` when the first such row's field is empty, or `"<header>
-        holds '<text>', which is not <type>"`.
-    """
-    text = sent[pc.index(bad, True).as_py()].as_py()
-    if text is None:
-        return f"a row has no {header}"
-    return f"{header} holds {text[:_SAMPLE_LIMIT]!r}, which is not {read_type}"
 
 
 _TEXT_OF: Final[Mapping[pa.DataType, str]] = MappingProxyType(

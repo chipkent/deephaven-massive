@@ -117,16 +117,22 @@ def test_trades_and_quotes_stream_and_have_history(massive_session: dm.MassiveSe
         assert every._request.venues == tuple(dm.FuturesVenue)
         assert every._request.refused_venues is dm.OnError.RAISE
         assert "venues=" in repr(every)
-        skips = factory("ESZ5", venues={dm.FuturesVenue.CME}, refused_venues=dm.OnError.LOG)
+        skips = factory(
+            "ESZ5",
+            venues={dm.FuturesVenue.CME},
+            on_error=dm.ErrorPolicy(refused_venues=dm.OnError.LOG),
+        )
         assert skips._request.refused_venues is dm.OnError.LOG
         assert "refused_venues=dm.OnError.LOG" in repr(skips)
         # Without named venues, refused_venues has nothing to decide.
-        ignored = factory("ESZ5", refused_venues=dm.OnError.RAISE)
+        ignored = factory("ESZ5", on_error=dm.ErrorPolicy(refused_venues=dm.OnError.RAISE))
         assert ignored._request.refused_venues is dm.OnError.LOG
 
 
 def test_refused_venues_left_out_follows_the_session() -> None:
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="k", refused_venues=dm.OnError.IGNORE))
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="k", on_error=dm.ErrorPolicy(refused_venues=dm.OnError.IGNORE))
+    )
     try:
         cme = {dm.FuturesVenue.CME}
         for q in (
@@ -136,7 +142,10 @@ def test_refused_venues_left_out_follows_the_session() -> None:
         ):
             assert q._request.refused_venues is dm.OnError.IGNORE
         bars = m.futures.bars(
-            "ESZ5", dm.Timespan.MINUTE, venues=cme, refused_venues=dm.OnError.RAISE
+            "ESZ5",
+            dm.Timespan.MINUTE,
+            venues=cme,
+            on_error=dm.ErrorPolicy(refused_venues=dm.OnError.RAISE),
         )
         assert bars._request.refused_venues is dm.OnError.RAISE
         assert m.stocks.trades("AAPL")._request.refused_venues is None
@@ -157,11 +166,11 @@ _PLAIN = "text"
             "venues must be a set of dm.FuturesVenue, such as",
         ),
         (lambda f: f.bars("ESZ5", _PLAIN), "timespan must be dm.Timespan"),
-        (lambda f: f.trades("ESZ5", refused_venues=_PLAIN), "refused_venues must be dm.OnError"),
-        (lambda f: f.quotes("ESZ5", refused_venues=_PLAIN), "refused_venues must be dm.OnError"),
+        (lambda f: f.trades("ESZ5", on_error=_PLAIN), "on_error must be dm.ErrorPolicy"),
+        (lambda f: f.quotes("ESZ5", on_error=_PLAIN), "on_error must be dm.ErrorPolicy"),
         (
-            lambda f: f.bars("ESZ5", dm.Timespan.MINUTE, refused_venues=_PLAIN),
-            "refused_venues must be dm.OnError",
+            lambda f: f.bars("ESZ5", dm.Timespan.MINUTE, on_error=_PLAIN),
+            "on_error must be dm.ErrorPolicy",
         ),
         (lambda f: f.snapshots("ESZ5", order=_PLAIN), "order must be dm.Order"),
         (lambda f: f.contracts(order=_PLAIN), "order must be dm.Order"),

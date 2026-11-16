@@ -59,7 +59,7 @@ def test_path_values_are_percent_encoded_whole() -> None:
 
 
 def test_a_path_value_with_a_slash_is_refused() -> None:
-    # Massive answers 404 for a `%2F` segment, so such a value could never succeed.
+    # Massive serves no data for a `%2F` segment (404, or a 307), so such a value never succeeds.
     with pytest.raises(ValueError, match=r"path parameters \['stockTicker'\] contain '/'"):
         query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
 

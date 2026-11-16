@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._enums import AssetClass, ChannelFamily
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import Cancel, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import (
@@ -219,17 +220,18 @@ class SessionClients:
         """
         return self.rest().resolve_host(asset_class, family)
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str] | Unsplit:
+    def _crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote through the session's REST transport.
 
         Args:
             symbol: A canonical crypto ticker.
+            policy: The stream's resolved policy (`RestTransport.crypto_pair`).
 
         Returns:
             `(base, quote)`, from the list the REST transport keeps for the session, or why
             the pair has none (`Unsplit`).
         """
-        return self.rest().crypto_pair(symbol)
+        return self.rest().crypto_pair(symbol, policy)
 
     def _fetch_rows(
         self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
