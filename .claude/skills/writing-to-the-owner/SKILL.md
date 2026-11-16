@@ -57,7 +57,8 @@ certain, is.
 touched) and it is easy to change afterwards: PR order and splits, scheduling, private names,
 internal log levels and tuning, test mechanics, low-level implementation or DRY questions, and
 any column name the naming policy settles (`_massive/refresh/naming.py`; raise only a real gap
-in the policy, never a single column).
+in the policy, never a single column). A mechanical fix to text a merged change made untrue,
+such as a stale sentence in `AGENTS.md`, is not an owner question either.
 Have a Fable agent check anything you are tempted to ask that a top-1% developer would find
 obvious; it should not reach the owner. List every choice you made yourself under **Decided**,
 one line each, so the owner can object. Each line states the choice itself (the new name, the
