@@ -23,7 +23,6 @@ threads of one read. The REST transport (`rest.py`) reads the pages, and the hos
 
 from __future__ import annotations
 
-import functools
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -379,22 +378,20 @@ def keep_window(
     if window is None:
         return batch
     names = batch.schema.names
-    masks = []
-    keys = []
+    bounds = []
     if window.sessions is not None and DATE in names:
-        keys.append(DATE)
         sessions = batch.column(DATE)
-        masks.append(pc.greater_equal(sessions, pa.scalar(window.sessions.first.isoformat())))
-        masks.append(pc.less_equal(sessions, pa.scalar(window.sessions.last.isoformat())))
+        first = pc.greater_equal(sessions, pa.scalar(window.sessions.first.isoformat()))
+        last = pc.less_equal(sessions, pa.scalar(window.sessions.last.isoformat()))
+        bounds.append((DATE, pc.and_(first, last)))
     if window.times is not None and time in names:
-        keys.append(time)
         times = batch.column(time)
-        masks.append(pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type)))
-        masks.append(pc.less(times, pa.scalar(window.times.end_ns, times.type)))
-    if not masks:
+        start = pc.greater_equal(times, pa.scalar(window.times.start_ns, times.type))
+        end = pc.less(times, pa.scalar(window.times.end_ns, times.type))
+        bounds.append((time, pc.and_(start, end)))
+    if not bounds:
         return batch
-    inside = functools.reduce(pc.and_, masks)
-    return batch.filter(in_window(batch, inside, keys=keys))
+    return batch.filter(in_window(batch, bounds))
 
 
 def is_error_row(row: Mapping[str, object]) -> bool:

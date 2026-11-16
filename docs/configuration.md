@@ -107,10 +107,11 @@ in `m.streams()`.
 
 A row of Massive's data the library can't read whole is never published, whatever the setting:
 the setting of its cause (`unreadable_keys`, `unreadable_symbols`, or `unconvertible_values`)
-decides only whether the table fails and how loudly the log reports the row. When Massive sends
-rows of your symbols inside your call's window and the library can read none of them whole, the
-call fails whatever the setting, since Massive's format has most likely changed. Rows outside
-the window count neither way.
+decides only whether the table fails and how loudly the log reports the row. When a REST page
+or a flat file holds rows of your symbols inside your call's window and the library can read
+none of them whole, the call fails whatever the setting, even after other pages or files were
+read, since Massive's format has most likely changed. Rows outside the window count neither
+way.
 
 Under `raise`:
 

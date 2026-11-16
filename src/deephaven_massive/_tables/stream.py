@@ -1155,6 +1155,26 @@ class _Drift:
     where: str
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamProblems:
+    """One stream's withheld rows of one flush, for its session once the flush lock is released.
+
+    Attributes:
+        sink: The stream.
+        events: Its problem events.
+        lost: Its withheld rows as drift, for its `SchemaDrift`.
+        logged: The plan's withheld rows as drift, for the session's `DriftRegistry`, when the
+            stream's policy logs them above DEBUG; None when it does not.
+        where: The flush thread and channel.
+    """
+
+    sink: StreamSink
+    events: tuple[ProblemEvent, ...]
+    lost: DriftReport
+    logged: DriftReport | None
+    where: str
+
+
 def _do_nothing() -> None:
     """Do nothing: the default `on_new_generation` of a `Flusher`."""
 
@@ -1209,6 +1229,7 @@ class Flusher:
         "_symbol_runs",
         "_symbols",
         "_thread",
+        "_unrouted",
         "routes",
     )
 
@@ -1255,6 +1276,8 @@ class Flusher:
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
+        # Flush-lock state: per routed plan, the same run of rows with no readable symbol.
+        self._unrouted: dict[ChannelPlan, tuple[int, str]] = {}
         # Flush-lock state: per routed plan and symbol, the same run (`_counted_symbols`).
         self._symbol_runs: dict[ChannelPlan, dict[str, tuple[int, str]]] = {}
         # Flush-lock state: the drift a flush found, merged per (streams, where), which the
@@ -1262,7 +1285,7 @@ class Flusher:
         self._drift: dict[tuple[tuple[StreamSink, ...], str], DriftReport] = {}
         # Flush-lock state: the problem events a flush found, per stream, which it hands to
         # their sessions once it has released the flush lock (`_report_events`).
-        self._events: list[tuple[StreamSink, tuple[ProblemEvent, ...]]] = []
+        self._events: list[_StreamProblems] = []
         # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
         self._new_generation = False
         # Guarded by the backlog lock, a leaf lock.
@@ -1505,6 +1528,8 @@ class Flusher:
             self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
         if self._runs:  # and their runs of dropped rows
             self._runs = {p: run for p, run in self._runs.items() if p in plans}
+        if self._unrouted:
+            self._unrouted = {p: run for p, run in self._unrouted.items() if p in plans}
         if self._symbol_runs:
             self._symbol_runs = {p: r for p, r in self._symbol_runs.items() if p in plans}
 
@@ -1603,8 +1628,7 @@ class Flusher:
             readers = self._withheld(plan, withheld, readers)
             if not readers:
                 return
-        logged = any(logs_withheld(withheld.counts(), r.policy) for r in readers)
-        drift = converted.drift.merge(withheld.drift) if logged else converted.drift
+        drift = converted.drift
         if drift.fields_drifted or drift.dropped_rows:
             where = f"{self._thread.name} channel {plan.channel}"
             self._found(tuple(readers), drift, where=where)
@@ -1654,7 +1678,11 @@ class Flusher:
                 stream_id=sink.stream_id,
                 holds=holds,
             )
-            self._events.append((sink, found))
+            lost = DriftReport(
+                dropped_rows=sum(counts.values()), dropped_reason=withheld.first_reason
+            )
+            logged = withheld.drift if logs_withheld(counts, sink.policy) else None
+            self._events.append(_StreamProblems(sink, found, lost, logged, where))
             failure = failure_of(
                 counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
             )
@@ -1758,12 +1786,17 @@ class Flusher:
         """
         if converted.batch.num_rows:
             self._runs.pop(plan, None)
+            self._unrouted.pop(plan, None)
             return False
         # A batch holds a row, so a flush that publishes none withheld at least one.
         withheld = converted.withheld
+        unrouted = withheld.total - sum(withheld.by_symbol().values())
+        named = self._counted_unrouted(
+            plan, unrouted, reason=withheld.first_reason, readers=readers
+        )
         ended = _extend_run(self._runs, plan, dropped=withheld.total, reason=withheld.first_reason)
         if ended is None:
-            return False
+            return named
         count, reason = ended
         failure = MassiveError(
             library_bug(
@@ -1775,6 +1808,43 @@ class Flusher:
         )
         whole = plan.symbol_field is None
         failing = [sink for sink in readers if whole or sink.receives_all]
+        self._fail_each(failing, failure)
+        return named or len(failing) == len(readers)
+
+    def _counted_unrouted(
+        self, plan: ChannelPlan, rows: int, *, reason: str, readers: list[StreamSink]
+    ) -> bool:
+        """Count withheld rows whose symbol could not be read; fail the named streams at the limit.
+
+        Such a row could have been any named stream's, so once `DROPPED_RUN_LIMIT` of them
+        arrive in a row with no row of the plan published, every stream of named symbols
+        fails, as the dataset's run fails a `dm.ALL` stream (`_counted`): no stream would
+        otherwise ever learn that it receives nothing.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            rows: The flush's withheld rows with no readable symbol.
+            reason: Why the flush's first withheld row was withheld.
+            readers: The dataset's streams on the channel.
+
+        Returns:
+            True when every stream was failed.
+        """
+        if not rows or plan.symbol_field is None:
+            return False
+        ended = _extend_run(self._unrouted, plan, dropped=rows, reason=reason)
+        if ended is None:
+            return False
+        count, first = ended
+        failure = MassiveError(
+            library_bug(
+                f"{plan.dataset}: the last {count} rows of channel {plan.channel} with no symbol "
+                "the library could read were withheld, and none was published, so Massive's "
+                f"format has most likely changed; the first: {first}"
+            ),
+            source=ErrorSource.LIBRARY,
+        )
+        failing = [sink for sink in readers if not sink.receives_all]
         self._fail_each(failing, failure)
         return len(failing) == len(readers)
 
@@ -1919,20 +1989,32 @@ class Flusher:
             known.clear()
         return converted
 
-    def _report_events(self, events: list[tuple[StreamSink, tuple[ProblemEvent, ...]]]) -> None:
-        """Hand a flush's problem events to each stream's session, with no lock held.
+    def _report_events(self, events: list[_StreamProblems]) -> None:
+        """Hand a flush's withheld rows to each stream's session, with no lock held.
 
-        A session that raises is logged at ERROR, and the others still get theirs.
+        Each stream's session gets its events and adds the rows it lost to the stream's
+        `SchemaDrift`, under any policy. Each session logs a plan's withheld rows once, through
+        its `DriftRegistry`, when some stream's policy logs them. A session that raises is
+        logged at ERROR, and the others still get theirs.
 
         Args:
-            events: Each stream's events of the flush.
+            events: Each stream's withheld rows of the flush.
         """
-        for sink, found in events:
+        logged: set[tuple[SessionCore, str, str]] = set()
+        for found in events:
+            sink = found.sink
             core = sink.core()
             if core is None:
                 continue
             try:
-                core.problems(found)
+                core.problems(found.events)
+                core.record_stream_drift(sink.stream_id, Transport.WS, found.lost)
+                once = (core, sink.plan.dataset, found.where)
+                if found.logged is not None and once not in logged:
+                    logged.add(once)
+                    core.drift.report(
+                        sink.plan.dataset, Transport.WS, found.logged, where=found.where
+                    )
             except Exception:
                 logger.exception(
                     "%s: could not report the withheld rows of stream %d. %s",

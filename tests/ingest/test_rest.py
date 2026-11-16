@@ -5041,3 +5041,21 @@ def test_a_row_whose_ticker_list_cannot_be_read_is_withheld_not_left_out(
     assert [(e.cause, e.field, e.rows) for e in events] == [
         (RowFault.UNCONVERTIBLE_VALUES, "Tickers", 1)
     ]
+
+
+def test_a_marked_row_whose_readable_list_names_none_of_the_tickers_is_left_out(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its list was read and names none of the request's tickers, so whatever else is wrong with
+    # it, it is no row of the request: left out, with no event and no failure.
+    page = Reply(
+        envelope(
+            [{"benzinga_id": 1, "tickers": ["MSFT"]}, {"benzinga_id": "x", "tickers": ["TSLA"]}]
+        )
+    )
+    fake_rest.reply(LISTED_PATH, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
+    assert events == []

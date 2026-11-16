@@ -210,9 +210,10 @@ These protect the owner's repository, money, and secrets.
   - **Only a problem that affects every row fails the table whatever the setting:**
     authentication, a closed session, a plan without the dataset, a refusal of everything a call
     asked for, a read for which Massive sent rows inside the requested symbols and window and
-    the library could read none of them whole (on REST judged per page, on flat files per file,
-    on a stream by its dataset's run on the channel; rows outside the window count neither
-    way), and a library defect.
+    the library could read none of them whole (on REST judged per page, on flat files per file;
+    rows outside the window count neither way), a stream that receives the whole channel whose
+    dataset's run on it is withheld, a stream of named symbols whose symbol's run, or the run of
+    rows with no readable symbol, is withheld, and a library defect.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the

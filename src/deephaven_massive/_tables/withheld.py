@@ -187,24 +187,31 @@ def marked_count(rows: _Rows) -> int:
     return int(rows.num_rows - rows.column(FAULT).null_count)
 
 
-def in_window(rows: _Rows, inside: pa.Array, *, keys: Sequence[str]) -> pa.Array:
-    """Return the rows a window keeps: those inside it, and those it cannot place.
+def in_window(rows: _Rows, bounds: Sequence[tuple[str, pa.Array]]) -> pa.Array:
+    """Return the rows a window keeps: those inside every bound, a marked unreadable key aside.
 
-    A marked row whose time or session is null could not have its key read, and no window can
-    place it, so it stays to be withheld and reported. A row outside the window is neither
-    published nor reported, whatever else is wrong with it.
+    A window bounds rows by their time, their session, or both. A marked row whose bounded key
+    is null could not have that key read, and no bound can place it, so that bound keeps it,
+    to be withheld and reported; every other bound still judges it. A row outside a bound is
+    neither published nor reported, whatever else is wrong with it.
 
     Args:
         rows: The rows, with the mark columns.
-        inside: Where each row lies in the window; null where a key it is judged by is null.
-        keys: The columns the window judges a row by: its time, its session, or both.
+        bounds: Each bounded key column, with where each row's value lies inside the bound
+            (null where the value is null).
 
     Returns:
         The mask of the rows to keep.
     """
-    unread = functools.reduce(pc.or_, (pc.is_null(rows.column(key)) for key in keys))
-    unplaced = pc.and_(unread, pc.is_valid(rows.column(FAULT)))
-    return pc.or_(pc.fill_null(inside, fill_value=False), unplaced)
+    marked = pc.is_valid(rows.column(FAULT))
+    kept = (
+        pc.or_(
+            pc.fill_null(inside, fill_value=False),
+            pc.and_(pc.is_null(rows.column(key)), marked),
+        )
+        for key, inside in bounds
+    )
+    return functools.reduce(pc.and_, kept)
 
 
 @dataclass(frozen=True, slots=True)
