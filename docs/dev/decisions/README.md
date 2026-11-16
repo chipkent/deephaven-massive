@@ -66,7 +66,9 @@ the file, and show its text in the pull request (decision 120).
 - `absorbed by [M](<M's file>)`: decision M now holds this ruling; the file is a pointer.
 - `moved to <page, section>`: the rule lives on that page, and the file is a pointer.
 
-A pointer file has only its heading, `Date:`, and `Status:` lines.
+A pointer file has only its heading, `Date:`, and `Status:` lines. A `moved to` pointer names
+each place its rule now lives, as a path in backticks with the section or phrase there in double
+quotes, joined by `; `. A record superseded whole may also be a pointer.
 
 ## The slug
 

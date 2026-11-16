@@ -29,8 +29,9 @@ show data from outside the range.
 
 ## Consequences
 
-A range that ends mid-bar drops that bar. Its refusal of unexpected crypto stamps was replaced
-by decision 70.
+A range that ends mid-bar drops that bar. Futures trades and quotes named by dates are read one
+session at a time. This record's refusal of unexpected crypto stamps was replaced by decision
+70.
 
 ## Rule
 

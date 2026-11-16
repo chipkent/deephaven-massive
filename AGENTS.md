@@ -318,7 +318,8 @@ These protect the owner's repository, money, and secrets.
 - **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
   user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
   owner's ruling that set one, and the rule links it (`decision N`). A verification item is a
-  fact about Massive that only a live read settles and whose answer changes the code.
+  fact about Massive or Deephaven that only a live read settles and whose answer changes the
+  code.
   Each decision is one file, `docs/dev/decisions/NNNN-slug.md`, and each verification item one
   file in `docs/dev/verification-items/`; the folder README gives the format, and
   `writing-a-record` says how to write one. The slug says when

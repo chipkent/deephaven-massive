@@ -2,4 +2,4 @@
 
 Date: 2026-10-26
 
-Status: moved to `src/deephaven_massive/_massive/rest/client.py`, "Thread-safety"
+Status: moved to `src/deephaven_massive/_massive/rest/client.py`, "Thread-safety"; `src/deephaven_massive/_massive/ws/client.py`, "**Threading.**"

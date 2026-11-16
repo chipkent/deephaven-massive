@@ -2,4 +2,4 @@
 
 Date: 2026-10-29
 
-Status: moved to `src/deephaven_massive/_ingest/rate_limits.py`, "Patience"
+Status: moved to `src/deephaven_massive/_ingest/rate_limits.py`, "**Patience.**"; `src/deephaven_massive/_ingest/rate_limits.py`, "**Buckets.**"; `src/deephaven_massive/_ingest/rate_limits.py`, "**Sharing.**"

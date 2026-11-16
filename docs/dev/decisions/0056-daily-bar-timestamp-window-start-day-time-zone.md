@@ -2,7 +2,7 @@
 
 Date: 2026-10-28
 
-Status: partly superseded: its refusal of unexpected stamps by [70](0070-unexpected-bar-timestamp-warns-never-drops-bars.md), and their handling by [85](0085-unexpected-period-timestamp-kept-null-date-no-relabel.md)
+Status: accepted
 
 ## Question
 

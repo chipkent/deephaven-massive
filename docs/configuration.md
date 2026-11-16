@@ -51,7 +51,8 @@ m = dm.MassiveSession(config)
 `from_file()` with no path reads the file that the `DEEPHAVEN_MASSIVE_CONFIG_FILE` environment
 variable names. `dm.MassiveConfig()` never reads a settings file or that variable.
 
-To change one setting of a file in code, replace it in the result:
+A setting the file names replaces its default, and a setting you replace in code replaces the
+file's. To change one setting of a file in code, replace it in the result:
 
 ```python
 import dataclasses

@@ -18,11 +18,11 @@ does not fit its column, a row whose key cannot be read), what does the table do
 
 A value that does not fit its column becomes null, with one WARNING per dataset and field. An
 unreadable flat-file line follows `MassiveConfig.malformed_rows`: `LOG`, the default, drops it
-and logs it once with a count; `IGNORE` drops it with no log line; `RAISE` fails the read. An
-extra field is dropped and logged. A REST response or flat file with no convertible row fails
-its read; the record does not say what happens to a WebSocket message with no convertible row.
-The owner ruled on 2026-10-30 that the choices are to fail, to log and go on, or to go on
-silently, with logging the default; recorded in PR #514.
+and logs it once with a count; `IGNORE` drops it with no warning, logging it only at DEBUG;
+`RAISE` fails the read. An extra field is dropped and logged. A REST response or flat file with
+no convertible row fails its read; the record does not say what happens to a WebSocket message
+with no convertible row. The owner ruled on 2026-10-30 that the choices are to fail, to log and
+go on, or to go on silently, with logging the default; recorded in PR #514.
 
 ## Reason
 

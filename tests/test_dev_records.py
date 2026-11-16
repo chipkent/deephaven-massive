@@ -58,9 +58,10 @@ RECORD_FLOOR: Final = 30
 FORM_DATE: Final = "2026-11-15"
 """The day the records took their present form; a verification item after it asks a question."""
 
-_POINTER: Final = re.compile(r"Status: (absorbed by|moved to) (.+)")
+_POINTER: Final = re.compile(r"Status: (absorbed by|moved to|superseded by) (.+)")
 _MOVED: Final = re.compile(r"`([^`]+)`(?:, \"([^\"]+)\")?")
-_CITATION: Final = re.compile(r"\bdecisions? (\d+)\b")
+"""One target of a `moved to` pointer; several are joined by `; `."""
+_CITATION: Final = re.compile(r"\bdecisions? (\d+(?:(?:,? and |, )\d+)*)\b", re.IGNORECASE)
 _DATE_LINE: Final = re.compile(r"^Date: (\d{4}-\d{2}-\d{2})$", re.MULTILINE)
 
 
@@ -159,31 +160,38 @@ def decision_problems(name: str, text: str, names: set[str], *, root: Path) -> l
         return []
     lines = [line for line in text.splitlines() if line.strip()]
     pointer = next((_POINTER.fullmatch(line) for line in lines if _POINTER.fullmatch(line)), None)
-    if pointer is not None:
-        problems = (
-            []
-            if len(lines) == 3
-            else [f"{name}: a pointer holds only its heading, date, and status"]
+    # A superseded record that keeps its sections is a record; without them it is a pointer.
+    if pointer is not None and not (
+        pointer.group(1) == "superseded by" and any(line.startswith("## ") for line in lines)
+    ):
+        shape = (
+            len(lines) == 3
+            and bool(_HEADING.match(lines[0]))
+            and lines[1].startswith("Date: ")
+            and lines[2].startswith("Status: ")
         )
-        if pointer.group(1) == "absorbed by":
+        problems = [] if shape else [f"{name}: a pointer holds only its heading, date, and status"]
+        if pointer.group(1) in {"absorbed by", "superseded by"}:
             target = _LINK.search(pointer.group(2))
             if target and target.group(2) in names:
                 target_text = (DECISIONS / target.group(2)).read_text(encoding="utf-8")
                 if _POINTER.search(target_text):
-                    problems.append(f"{name}: absorbed by {target.group(2)}, which is a pointer")
+                    problems.append(f"{name}: points at {target.group(2)}, which is a pointer")
         else:
-            problems += moved_problems(name, pointer.group(2), root)
+            for moved in pointer.group(2).split("; "):
+                problems += moved_problems(name, moved, root)
         return problems
     problems = []
     headings = tuple(line[3:] for line in lines if line.startswith("## "))
     if headings != SECTIONS:
         problems.append(f"{name}: the sections are {headings}, not {SECTIONS}")
     body = text.split("\nStatus:", 1)[-1].split("\n", 1)[-1]
-    words = len([word for word in body.split() if word != "##" and word not in SECTIONS])
+    prose = [line for line in body.splitlines() if not line.startswith("## ")]
+    words = len(" ".join(prose).split())
     if words > RECORD_WORDS:
         problems.append(f"{name}: the body is {words} words, over {RECORD_WORDS}")
-    title = lines[0]
-    if len(title) > TITLE_LENGTH or "`" in title:
+    title = lines[0].split(". ", 1)[-1]
+    if len(title) >= TITLE_LENGTH or "`" in title:
         problems.append(f"{name}: the title is over {TITLE_LENGTH} characters or holds code")
     return problems
 
@@ -193,15 +201,15 @@ def moved_problems(name: str, target: str, root: Path) -> list[str]:
 
     Args:
         name: The pointer's file name.
-        target: The text after `moved to`: a path in backticks, then optionally a comma and the
-            section heading or rule name in double quotes.
+        target: One target after `moved to`: a path in backticks, then optionally a comma and
+            the section heading or rule name in double quotes.
         root: The repository root the path is relative to.
 
     Returns:
         A line when the target is not in that form, the path is not a file, or the file does not
         hold the quoted text.
     """
-    match = _MOVED.match(target)
+    match = _MOVED.fullmatch(target)
     if match is None:
         return [f'{name}: moved to {target!r}, not a `path` and an optional "section"']
     page = root / match.group(1)
@@ -231,7 +239,8 @@ def citation_problems(root: Path, names: set[str]) -> list[str]:
     return [
         f"{page.relative_to(root)}: decision {number} has no file"
         for page in pages
-        for number in _CITATION.findall(page.read_text(encoding="utf-8"))
+        for group in _CITATION.findall(page.read_text(encoding="utf-8"))
+        for number in re.findall(r"\d+", group)
         if int(number) not in numbers
     ]
 
@@ -485,3 +494,68 @@ def test_a_citation_of_a_missing_decision_is_reported(tmp_path: Path) -> None:
 def test_a_new_item_s_title_asks_its_question(title: str, date: str, count: int) -> None:
     text = f"{title}\n\nDate: {date}\n\nStatus: open\n\nBody.\n"
     assert len(item_problems("0130-field-sent-on-wire.md", text)) == count
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Decision 9999 sets it.\n",
+        "As decisions 7 and 9999 say.\n",
+        "As decisions 7, 83, and 9999 say.\n",
+    ],
+    ids=["capitalized", "a pair", "a list"],
+)
+def test_every_number_of_a_grouped_or_capitalized_citation_is_checked(
+    tmp_path: Path, text: str
+) -> None:
+    (tmp_path / "AGENTS.md").write_text(text)
+    assert citation_problems(tmp_path, _NAMES) == ["AGENTS.md: decision 9999 has no file"]
+
+
+def test_a_pointer_may_name_several_targets() -> None:
+    status = 'moved to `AGENTS.md`, "Layers"; `docs/dev/public-api.md`'
+    text = f"{_POINTER_HEAD}Status: {status}\n"
+    assert decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT) == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    ['moved to `AGENTS.md`, "No such rule', "moved to `AGENTS.md`, 'Layers'"],
+    ids=["an unclosed quote", "single quotes"],
+)
+def test_a_target_with_trailing_text_is_reported(status: str) -> None:
+    text = f"{_POINTER_HEAD}Status: {status}\n"
+    problems = decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT)
+    assert len(problems) == 1
+    assert "not a `path`" in problems[0]
+
+
+def test_a_pointer_without_its_date_is_reported() -> None:
+    text = '# 7. Configuration\n\nStatus: moved to `AGENTS.md`, "Layers"\n\nOld rule.\n'
+    problems = decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT)
+    assert problems == [
+        "0007-configuration-one-object.md: a pointer holds only its heading, date, and status"
+    ]
+
+
+def test_a_superseded_pointer_names_a_record_and_a_superseded_record_keeps_its_sections() -> None:
+    status = "superseded by [83](0083-never-mix-history-and-live-no-backfill.md)"
+    pointer = f"{_POINTER_HEAD}Status: {status}\n"
+    record = _RECORD.replace("accepted", status)
+    for text in (pointer, record):
+        assert decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT) == []
+
+
+def test_a_section_name_in_the_prose_counts_as_a_word() -> None:
+    text = _RECORD.replace("Text.", "Rule " * 51)
+    problems = decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT)
+    assert any("over 300" in problem for problem in problems)
+
+
+def test_the_title_is_measured_without_its_number() -> None:
+    text = _RECORD.replace("Configuration goes through one object", "x" * 89)
+    assert decision_problems("0007-configuration-one-object.md", text, _NAMES, root=_ROOT) == []
+    longer = _RECORD.replace("Configuration goes through one object", "x" * 90)
+    assert (
+        len(decision_problems("0007-configuration-one-object.md", longer, _NAMES, root=_ROOT)) == 1
+    )

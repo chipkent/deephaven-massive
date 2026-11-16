@@ -16,10 +16,11 @@ previous day's bar?
 
 ## Ruling
 
-Massive's one-row endpoints are `m.stocks.last_trade`, `last_quote`, and `previous_day_bar`,
-likewise under the other classes, each with the ordinary `fetch()` and `poll()`. There is no
-`latest()` method on `trades`, `quotes`, or `bars`. From the design documents, condensed into
-records in PR #514, dated 2026-10-29; no owner words are on record.
+Massive's one-row endpoints are `m.stocks.last_trade`, `last_quote`, and `previous_day_bar`, and
+the same datasets under each other class Massive serves them for, each with the ordinary
+`fetch()` and `poll()`. There is no `latest()` method on `trades`, `quotes`, or `bars`. From the
+design documents, condensed into records in PR #514, dated 2026-10-29; no owner words are on
+record.
 
 ## Reason
 

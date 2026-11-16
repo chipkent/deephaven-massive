@@ -2,4 +2,4 @@
 
 Date: 2026-10-26
 
-Status: moved to `src/deephaven_massive/_ingest/rate_limits.py`, "Sharing"
+Status: moved to `src/deephaven_massive/_ingest/rate_limits.py`, "Sharing"; `src/deephaven_massive/_ingest/rest.py`, "single-flight"

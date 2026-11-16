@@ -19,6 +19,8 @@ gate, and what to do when a refresh adds something new.
   (JDK 17 or later).
 - **The hand input**: the only place a person adds knowledge the vendor's specifications lack.
   Every entry carries its reason. Tests check most tables for one, but not all: write it anyway.
+  Hand input names, groups, and verifies; it never lists a schema's columns, and an entry that
+  names something the snapshot no longer generates fails the refresh.
   - `refresh/lexicon.py`: lexicon entries, `SHAPES`, and `IDENTITY`;
   - `refresh/overrides.py`: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES`,
     `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,

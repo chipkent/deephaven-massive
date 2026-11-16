@@ -2,4 +2,4 @@
 
 Date: 2026-10-23
 
-Status: moved to `AGENTS.md`, "Agents never merge"
+Status: moved to `AGENTS.md`, "Agents never merge"; `AGENTS.md`, "`uv.lock` is not committed"

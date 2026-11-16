@@ -2,4 +2,4 @@
 
 Date: 2026-10-26
 
-Status: absorbed by [116](0116-tls-handshake-retried-unless-certificate-failure.md)
+Status: moved to `src/deephaven_massive/_massive/flatfiles/client.py`, "**Certificate authorities.**"; `src/deephaven_massive/_massive/flatfiles/client.py`, "**Retries.**"; `docs/dev/decisions/0116-tls-handshake-retried-unless-certificate-failure.md`

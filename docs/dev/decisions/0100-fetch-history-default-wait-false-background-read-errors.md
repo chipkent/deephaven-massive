@@ -30,11 +30,11 @@ later, so the default result stays refreshing though it never changes again.
 
 ## Consequences
 
-An argument error or a closed session still raises at the call; what Massive answers later
-fails the table, logged and shown in `m.streams()` `Error`. A script that reads rows on the
-next line gets none, unless it passes `wait=True`. A `try`/`except` around a default call no
-longer catches Massive's answers. Every background read runs on the session's read pool of
-`max_concurrency` threads.
+There is no `Future`, since its `result()` could not wait inside a console command. An argument
+error or a closed session still raises at the call. A script that reads rows on the next line
+gets none, unless it passes `wait=True`, and a `try` around a default call no longer catches
+Massive's answers. Every background read runs on the session's read pool of `max_concurrency`
+threads.
 
 ## Rule
 

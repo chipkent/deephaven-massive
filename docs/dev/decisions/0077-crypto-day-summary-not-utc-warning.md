@@ -2,4 +2,4 @@
 
 Date: 2026-10-30
 
-Status: absorbed by [70](0070-unexpected-bar-timestamp-warns-never-drops-bars.md)
+Status: moved to `docs/datasets/crypto.daily_open_close.md`, "A summary whose `IsUtc` is false"

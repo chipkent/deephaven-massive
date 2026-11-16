@@ -16,8 +16,8 @@ None recorded: one path was proposed.
 
 Before `0.1.0` nothing is kept or aliased. From `0.1.0`, when the owner asks for a public
 change, the agent says whether it breaks code written to the last release's documented behavior
-and which version number comes next, and asks before making it. In `0.x` a break raises the
-minor version. The owner ruled on 2026-11-11 that the API is not broken without their
+and which version number comes next, and asks before making a breaking one. In `0.x` a break
+raises the minor version. The owner ruled on 2026-11-11 that the API is not broken without their
 permission, and that they are told when a change breaks; recorded in PR #580.
 
 ## Reason
