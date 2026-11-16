@@ -3559,3 +3559,9 @@ def test_a_streams_row_and_description_name_its_recency(
     [row] = streams_of(custom_session, dh_to_pylist)
     assert (row["Host"], row["Recency"]) == (decision.host, decision.recency.value)
     custom_session.session.release(result)
+
+
+def test_wanted_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    symbols = object()
+    with pytest.raises(BrokenGuaranteeError, match="topics has no rule for a value of type object"):
+        ws._wanted(AssetClass.STOCKS, "T", symbols, pairs={})  # type: ignore[arg-type]  # the point: refused at run time

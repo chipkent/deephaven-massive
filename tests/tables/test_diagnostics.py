@@ -251,6 +251,12 @@ def test_describe_symbols(dh_exec_ctx: ExecutionContext) -> None:
     assert describe_symbols(table) == (None, "reactive table")
 
 
+def test_describe_symbols_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    message = "summary has no rule for a value of type object"
+    with pytest.raises(BrokenGuaranteeError, match=message):
+        describe_symbols(object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
 def _diagnostics(exec_ctx: ExecutionContext) -> Diagnostics:
     # The session passes its reaper's `release_later`; releasing at once is the same here, where
     # no table is ever failed.
