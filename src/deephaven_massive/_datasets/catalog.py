@@ -260,8 +260,9 @@ class DatasetSpec:
     returns every row its endpoint returns: a REST endpoint that answers one row per symbol
     (the last trade, the previous day's bar) is a one-row dataset of its own, in the same kind
     as the stream and history dataset of its class. A `bars` dataset needs H and no F; with
-    S its query streams only the bars that have a channel. Every other
-    combination is rejected when the spec is created.
+    S, a call's query is a `StreamHistoryQuery` only for the bars that have a channel, and a
+    `HistoryQuery` for the rest (`bar_query_class`). Every other combination is rejected when
+    the spec is created.
 
     Example:
         ::

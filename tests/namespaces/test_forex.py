@@ -42,6 +42,7 @@ from deephaven_massive.namespaces import _forex as forex
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
-NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
 """The refusal of a stream of bars Massive doesn't stream."""
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -120,7 +120,7 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
     [
         (forex.QUOTES, StreamHistoryQuery),
         (forex.LAST_QUOTE, FetchQuery),
-        (forex.BARS, StreamHistoryQuery),
+        (forex.BARS, HistoryQuery),
         (forex.PREVIOUS_DAY_BAR, FetchQuery),
         (forex.FMV, StreamQuery),
         (forex.SNAPSHOTS, FetchQuery),
@@ -271,15 +271,12 @@ def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> No
         ((dm.Timespan.DAY, 2), False),
     ],
 )
-def test_every_bars_call_is_one_class_and_only_some_stream(
+def test_only_bars_that_stream_get_the_stream_methods(
     massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], streams: bool
 ) -> None:
     timespan, multiplier = case
     query = massive_session.forex.bars("C:EURUSD", timespan, multiplier=multiplier)
-    assert type(query) is StreamHistoryQuery  # every bars call, streaming or not
-    if not streams:
-        with pytest.raises(ValueError, match=NOT_STREAMED):
-            query.blink()
+    assert type(query) is (StreamHistoryQuery if streams else HistoryQuery)
     assert query._request == Request(
         symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )

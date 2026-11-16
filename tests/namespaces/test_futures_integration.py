@@ -31,6 +31,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._live import futures_bar_buckets
 from tests._live.calendar import months_before
 from tests._live.ticker_lists import accepts
@@ -763,8 +764,12 @@ def test_streamed_futures_dates_and_one_second_ends(
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
-    minutes = live_session.futures.bars(contract, dm.Timespan.MINUTE).append_only()
-    seconds = live_session.futures.bars(contract, dm.Timespan.SECOND).append_only()
+    minute_bars = live_session.futures.bars(contract, dm.Timespan.MINUTE)
+    second_bars = live_session.futures.bars(contract, dm.Timespan.SECOND)
+    assert isinstance(minute_bars, StreamHistoryQuery)  # 1-minute bars stream
+    assert isinstance(second_bars, StreamHistoryQuery)  # 1-second bars stream
+    minutes = minute_bars.append_only()
+    seconds = second_bars.append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
     status, due = rows_due("futures")
     deadline = time.monotonic() + _STREAM_WAIT

@@ -25,6 +25,7 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._live import streams
 
 if TYPE_CHECKING:
@@ -111,7 +112,9 @@ def _subscribe_minute_bars(
     """
     session = dm.MassiveSession(config)
     try:
-        table = session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
+        bars = session.stocks.bars("AAPL", dm.Timespan.MINUTE)
+        assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+        table = bars.append_only()
         rows = wait_rows(session, table, time.monotonic() + _WAIT)
         for line in stream_report(session):
             evidence(line)

@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
 
-NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
 """The refusal of a stream of bars Massive doesn't stream."""
 
 OWNER = "namespaces/indices"
@@ -336,15 +335,12 @@ def test_values_history_from_flat_files_needs_credentials(
         (dm.Timespan.WEEK, 1, False),
     ],
 )
-def test_every_bars_call_is_one_class_and_only_some_stream(
+def test_only_bars_that_stream_get_the_stream_methods(
     m: dm.MassiveSession, case: tuple[dm.Timespan, int, bool]
 ) -> None:
     timespan, multiplier, streams = case
     q = m.indices.bars("I:SPX", timespan, multiplier=multiplier)
-    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
-    if not streams:
-        with pytest.raises(ValueError, match=NOT_STREAMED):
-            q.blink()
+    assert type(q) is (StreamHistoryQuery if streams else HistoryQuery)
     assert q._request.symbols == ("I:SPX",)
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
@@ -500,7 +496,7 @@ def test_factories_return_the_class_of_their_dataset() -> None:
     assert query_class(indices.PREVIOUS_DAY_BAR) is FetchQuery
     assert query_class(indices.SNAPSHOTS) is FetchQuery
     assert query_class(indices.DAILY_OPEN_CLOSE) is FetchQuery
-    assert query_class(indices.BARS) is StreamHistoryQuery
+    assert query_class(indices.BARS) is HistoryQuery
 
 
 @pytest.mark.parametrize("spec", indices.DATASETS, ids=lambda spec: spec.name)
@@ -867,11 +863,13 @@ def test_a_frame_lands_in_blink(
 ) -> None:
     indices = ws_session.session.indices
     if topic.startswith("V."):
-        blink = indices.values("I:SPX").blink()
-    elif topic.startswith("A."):
-        blink = indices.bars("I:SPX", dm.Timespan.SECOND).blink()
+        query = indices.values("I:SPX")
     else:
-        blink = indices.bars("I:SPX", dm.Timespan.MINUTE).blink()
+        span = dm.Timespan.SECOND if topic.startswith("A.") else dm.Timespan.MINUTE
+        bars = indices.bars("I:SPX", span)
+        assert isinstance(bars, StreamHistoryQuery)  # 1-second and 1-minute bars stream
+        query = bars
+    blink = query.blink()
     seen = blink_to_append_only(blink)
     ws_session.subscribed(topic)
     ws_session.publish(*json.loads(load_fixture(OWNER, fixture)))

@@ -40,6 +40,7 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -367,7 +368,7 @@ class CryptoNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
-    ) -> StreamHistoryQuery:
+    ) -> StreamHistoryQuery | HistoryQuery:
         """Open, high, low, close, and volume bars of crypto pairs, over any time window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, and weeks run
@@ -380,9 +381,11 @@ class CryptoNamespace(Namespace):
             multiplier: Units per bar.
 
         Returns:
-            A query that reads history, and streams 1-second and 1-minute bars at
-            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
-            columns, plans, and methods:
+            A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
+            Massive streams, with the stream methods and `history()`; a `HistoryQuery`, with
+            `history()` only, for any other bars. A type checker allows a stream method on the
+            result only after `isinstance(q, StreamHistoryQuery)`. Its columns, plans, and
+            methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.bars.md.
 
         Raises:
@@ -401,7 +404,7 @@ class CryptoNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=StreamHistoryQuery,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

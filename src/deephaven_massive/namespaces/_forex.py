@@ -40,6 +40,7 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -344,7 +345,7 @@ class ForexNamespace(Namespace):
         timespan: Timespan,
         *,
         multiplier: int = 1,
-    ) -> StreamHistoryQuery:
+    ) -> StreamHistoryQuery | HistoryQuery:
         """Aggregate bars of currency pairs: open, high, low, close, and volume per window.
 
         Each row is one bar of `multiplier` times `timespan`. Days are UTC days, though the
@@ -359,9 +360,11 @@ class ForexNamespace(Namespace):
             multiplier: Units per bar.
 
         Returns:
-            A query that reads history, and streams 1-second and 1-minute bars at
-            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
-            columns, plans, and methods:
+            A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
+            Massive streams, with the stream methods and `history()`; a `HistoryQuery`, with
+            `history()` only, for any other bars. A type checker allows a stream method on the
+            result only after `isinstance(q, StreamHistoryQuery)`. Its columns, plans, and
+            methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/forex.bars.md.
 
         Raises:
@@ -380,7 +383,7 @@ class ForexNamespace(Namespace):
         return build_query(
             self._core,
             BARS,
-            query_type=StreamHistoryQuery,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,
