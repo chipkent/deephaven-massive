@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Final
 
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._live.calendar import trading_day_before
 from tests._live.live_run.reply_examples import DATA, REFUSAL, Example, skip_reason
 from tests._live.live_run.stream_capture import diagnostics_rows
@@ -88,6 +89,20 @@ def _last_year(today: date) -> tuple[date, date]:
     return today - timedelta(days=365), today - timedelta(days=1)
 
 
+def _stock_minute_bars(m: MassiveSession, _: date) -> Table:
+    """Return the 1-minute bars of two stocks, streamed into an append-only table."""
+    bars = m.stocks.bars(["AAPL", "NVDA"], dm.Timespan.MINUTE)
+    assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+    return bars.append_only()
+
+
+def _crypto_minute_bars(m: MassiveSession, _: date) -> Table:
+    """Return the 1-minute bars of one crypto pair, streamed into an append-only table."""
+    bars = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE)
+    assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+    return bars.append_only()
+
+
 CALLS: Final[dict[str, Callable[[MassiveSession, date], Table | None]]] = {
     "nvda-daily-2024-06-adjusted": lambda m, _: m.stocks.bars("NVDA", dm.Timespan.DAY).history(
         "2024-06-03", "2024-06-14", source=_REST, wait=True
@@ -127,12 +142,8 @@ CALLS: Final[dict[str, Callable[[MassiveSession, date], Table | None]]] = {
     "refusal-futures-starter": lambda m, _: m.futures.snapshots(
         dm.ALL, product_code="ES", limit=1
     ).fetch(wait=True),
-    "stream-stock-minute-bars": lambda m, _: m.stocks.bars(
-        ["AAPL", "NVDA"], dm.Timespan.MINUTE
-    ).append_only(),
-    "stream-crypto-minute-bars": lambda m, _: m.crypto.bars(
-        "X:BTCUSD", dm.Timespan.MINUTE
-    ).append_only(),
+    "stream-stock-minute-bars": _stock_minute_bars,
+    "stream-crypto-minute-bars": _crypto_minute_bars,
     "stream-forex-quotes": lambda m, _: m.forex.quotes("C:EURUSD").append_only(),
 }
 """Each example's code, by its name in `reply_examples.EXAMPLES`: it runs on a session and

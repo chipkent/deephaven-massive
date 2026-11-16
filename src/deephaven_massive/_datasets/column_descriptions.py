@@ -136,6 +136,13 @@ _WINDOW_END: Final = (
 )
 """The first sentences of every bars dataset's `TimestampEnd`."""
 
+_INTRADAY_END: Final = (
+    "An intraday bar ends at Massive's `e` where the WebSocket sends one, else its length after "
+    "its start; a WARNING says when the two differ."
+)
+"""How an intraday bar's `TimestampEnd` is filled, on every class."""
+
+
 _INDEX_HOUR: Final = (
     "For indices that end is an hour later, 01:00 New York time, since whether an index day bar "
     "covers the New York or the Chicago day is not verified."
@@ -313,11 +320,9 @@ def _end_sentence(spec: DatasetSpec) -> str:
         )
     if spec.asset_class is AssetClass.FUTURES:
         return (
-            f"{_WINDOW_END} An intraday bar ends its length after its start (a one-second "
-            "WebSocket bar at Massive's `e` as sent, with a WARNING when that is not one "
-            "second after its start); a bar of a session or "
-            "longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is "
-            "its last session. history() returns a bar of several sessions, or of a week or "
+            f"{_WINDOW_END} {_INTRADAY_END} A bar of a session or longer ends at 17:00 "
+            "Chicago time on its label, Massive's `session_end_date`, which is its last "
+            "session. history() returns a bar of several sessions, or of a week or "
             f"longer, only once no later session can still join it. {_FINISHED_ROWS} A bar of "
             "several sessions or longer read before its last session passes that test once its "
             "latest session so far has ended, though later sessions can still join it."
@@ -329,8 +334,8 @@ def _end_sentence(spec: DatasetSpec) -> str:
     )
     later = f" {_INDEX_HOUR}" if indices else ""
     return (
-        f"{_WINDOW_END} An intraday bar ends its length after its start; a bar of a day or longer "
-        f"at {where} after its window's last day.{later} {_FINISHED_ROWS}"
+        f"{_WINDOW_END} {_INTRADAY_END} A bar of a day or longer ends at {where} after its "
+        f"window's last day.{later} {_FINISHED_ROWS}"
     )
 
 

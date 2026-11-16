@@ -2,7 +2,8 @@
 
 Two rules over the factory methods live here too. The annotation rule: for every dataset of
 the catalog, the return annotation of its factory method is the class `query_class` derives
-from the spec (for `bars`, `StreamHistoryQuery`, with `timespan` required), and every public
+from the spec (for `bars` that stream, `StreamHistoryQuery | HistoryQuery`, with `timespan`
+required), and every public
 factory method maps to exactly one dataset. The summary rule: every factory's docstring starts with
 its `DatasetSpec.summary`. Each rule is a function over a session class and a catalog, so it
 is checked against the real tree and against synthetic namespaces that break it.
@@ -306,28 +307,45 @@ def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSessio
     assert build(massive_session, TRADES_SPEC, symbols=dm.ALL)._request.symbols is dm.ALL
 
 
-def test_every_bars_call_builds_one_class(massive_session: dm.MassiveSession) -> None:
-    # The timespan no longer picks a class: the stream methods refuse bars that don't stream.
+def test_the_timespan_picks_the_class_of_a_bars_call(massive_session: dm.MassiveSession) -> None:
+    # Only the bars Massive streams get the stream methods.
     q = build(massive_session, STOCK_BARS, symbols="AAPL", timespan=Timespan.MINUTE)
     assert type(q) is StreamHistoryQuery
     q = build(massive_session, FUTURES_BARS, symbols="ESZ5", timespan=Timespan.SESSION)
-    assert type(q) is StreamHistoryQuery
-    assert type(build(massive_session, STOCK_BARS, symbols="AAPL")) is StreamHistoryQuery
+    assert type(q) is HistoryQuery
 
 
 def test_venues_are_a_set_of_the_enum(massive_session: dm.MassiveSession) -> None:
-    q = build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={FuturesVenue.CME})
+    q = build(
+        massive_session,
+        FUTURES_BARS,
+        symbols="ESZ5",
+        timespan=Timespan.SESSION,
+        venues={FuturesVenue.CME},
+    )
     assert q._request.venues == (FuturesVenue.CME,)
     # Left out, every venue the plan allows, each refused one skipped with a warning.
-    every = build(massive_session, FUTURES_BARS, symbols="ESZ5")._request
+    every = build(massive_session, FUTURES_BARS, symbols="ESZ5", timespan=Timespan.SESSION)._request
     assert (every.venues, every.refused_venues) == (tuple(FuturesVenue), dm.OnError.LOG)
     # A dataset whose flat files are not per venue has none.
     plain = build(massive_session, DIVIDENDS)._request
     assert (plain.venues, plain.refused_venues) == (None, None)
     with pytest.raises(TypeError, match=r"venues must be a set of dm\.FuturesVenue"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues="cme")  # type: ignore[arg-type]  # the point: refused at run time
+        build(
+            massive_session,
+            FUTURES_BARS,
+            symbols="ESZ5",
+            timespan=Timespan.SESSION,
+            venues="cme",  # type: ignore[arg-type]  # the point: refused at run time
+        )
     with pytest.raises(TypeError, match=r"venues must hold only dm\.FuturesVenue members, not str"):
-        build(massive_session, FUTURES_BARS, symbols="ESZ5", venues={"cme"})  # type: ignore[arg-type]  # the point: refused at run time
+        build(
+            massive_session,
+            FUTURES_BARS,
+            symbols="ESZ5",
+            timespan=Timespan.SESSION,
+            venues={"cme"},  # type: ignore[arg-type]  # the point: refused at run time
+        )
 
 
 def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSession) -> None:
@@ -509,11 +527,18 @@ def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSessio
 
 def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
     spec = STOCK_BARS
-    q = build_query(massive_session._core, spec, query_type=Query, symbols=["AAPL"], adjusted=False)
+    q = build_query(
+        massive_session._core,
+        spec,
+        query_type=Query,
+        symbols=["AAPL"],
+        timespan=Timespan.DAY,
+        adjusted=False,
+    )
     assert q._request.adjusted is False
     assert (
         build_query(
-            massive_session._core, spec, query_type=Query, symbols=["AAPL"]
+            massive_session._core, spec, query_type=Query, symbols=["AAPL"], timespan=Timespan.DAY
         )._request.adjusted
         is None
     )
@@ -523,6 +548,7 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
             spec,
             query_type=Query,
             symbols=["AAPL"],
+            timespan=Timespan.DAY,
             adjusted="false",  # type: ignore[arg-type]  # the point: refused at run time
         )
     # One channel only: adjusted never travels in params, where a transport could drop it.
@@ -532,6 +558,7 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
             spec,
             query_type=Query,
             symbols=["AAPL"],
+            timespan=Timespan.DAY,
             params={"adjusted": False},
         )
 
@@ -547,6 +574,7 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
             STOCK_BARS,
             query_type=Query,
             symbols=["AAPL"],
+            timespan=Timespan.DAY,
             filters={"adjusted": True},
         )
 
@@ -739,6 +767,23 @@ def summary_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[st
     return problems
 
 
+def _declared_classes(spec: DatasetSpec) -> tuple[type[Query], ...]:
+    """Return the classes a dataset's factory must declare it returns, in their order.
+
+    A bars dataset that streams declares both classes a call can give: `StreamHistoryQuery`
+    for the bars Massive streams and `HistoryQuery` for the rest (`bar_query_class`).
+
+    Args:
+        spec: The dataset.
+
+    Returns:
+        The classes, one unless the dataset is bars that stream.
+    """
+    if spec.is_bars and spec.has_channels:
+        return (StreamHistoryQuery, HistoryQuery)
+    return (query_class(spec),)
+
+
 def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list[str]:
     """Return every break of the annotation rule.
 
@@ -748,7 +793,8 @@ def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list
 
     Returns:
         One message per factory without a spec, spec without a factory, or factory whose return
-        annotation is not the class its spec derives.
+        annotation is not the class its spec derives: for a bars dataset that streams, both
+        classes a call can give (`bar_query_class`).
     """
     factories = _factory_map(session)
     problems = [f"{name}: a factory with no dataset" for name in sorted(factories - specs.keys())]
@@ -759,8 +805,11 @@ def annotation_problems(session: type, specs: Mapping[str, DatasetSpec]) -> list
         else:
             if spec.is_bars:
                 problems.extend(_bar_problems(name, factory))
-            if _hints(factory)["return"] is not query_class(spec):
-                problems.append(f"{name}: the factory must return {query_class(spec).__name__}")
+            declared = _hints(factory)["return"]
+            expected = _declared_classes(spec)
+            if (typing.get_args(declared) or (declared,)) != expected:
+                shown = " | ".join(cls.__name__ for cls in expected)
+                problems.append(f"{name}: the factory must return {shown}")
     return problems
 
 
@@ -772,7 +821,7 @@ class _Good(Namespace):
     __slots__ = ()
     _path: ClassVar[str] = "stocks"
 
-    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> StreamHistoryQuery:
+    def bars(self, timespan: Timespan, *, multiplier: int = 1) -> StreamHistoryQuery | HistoryQuery:
         raise NotImplementedError
 
     def dividends(self) -> FetchQuery:
@@ -796,7 +845,7 @@ class _Bad(Namespace):
     def news(self) -> FetchQuery:  # no dataset is named options.news
         raise NotImplementedError
 
-    def minute_bars(self) -> HistoryQuery:  # bars stream, so this must be a StreamHistoryQuery
+    def minute_bars(self) -> HistoryQuery:  # bars that stream must declare both classes
         raise NotImplementedError
 
 
@@ -858,9 +907,9 @@ def test_the_annotation_rule_reports_every_mismatch() -> None:
         "options.news: a factory with no dataset",
         "snapshots: a factory with no dataset",
         "options.bars: timespan must be required, with no default",
-        "options.bars: the factory must return StreamHistoryQuery",
+        "options.bars: the factory must return StreamHistoryQuery | HistoryQuery",
         "options.trades: the factory must return StreamQuery",
-        "options.minute_bars: the factory must return StreamHistoryQuery",
+        "options.minute_bars: the factory must return StreamHistoryQuery | HistoryQuery",
         "options.splits: a dataset with no factory",
     ]
 
@@ -1139,15 +1188,65 @@ def test_a_declared_class_the_dataset_cannot_give_is_a_library_defect(
     assert str(info.value).startswith(
         "m.stocks.trades gives a StreamQuery, not the FetchQuery it declares. "
     )
-    # A subclass of the declared class is what the declaration promises.
+    # A subclass of the declared class is what the declaration promises: bars declare
+    # `HistoryQuery`, and minute bars, which stream, are a `StreamHistoryQuery`.
     minute = build_query(
+        massive_session._core,
+        STOCK_BARS,
+        query_type=HistoryQuery,
+        symbols=["AAPL"],
+        timespan=Timespan.MINUTE,
+    )
+    assert type(minute) is StreamHistoryQuery
+    hourly = build_query(
         massive_session._core,
         STOCK_BARS,
         query_type=HistoryQuery,
         symbols=["AAPL"],
         timespan=Timespan.HOUR,
     )
-    assert type(minute) is StreamHistoryQuery
+    assert type(hourly) is HistoryQuery
+
+
+_BAR_SYMBOLS = {
+    AssetClass.STOCKS: "AAPL",
+    AssetClass.OPTIONS: "O:AAPL250117C00150000",
+    AssetClass.FUTURES: "ESZ5",
+    AssetClass.INDICES: "I:SPX",
+    AssetClass.FOREX: "C:EURUSD",
+    AssetClass.CRYPTO: "X:BTCUSD",
+}
+"""A valid symbol of each asset class that has bars."""
+
+
+@pytest.mark.parametrize(
+    "spec", [spec for spec in CATALOG.by_name.values() if spec.is_bars], ids=lambda spec: spec.name
+)
+def test_every_bars_call_builds_a_class_its_method_declares(
+    massive_session: dm.MassiveSession, spec: DatasetSpec
+) -> None:
+    # Every class the method declares is built for some call, and no call builds another.
+    declared = _declared_classes(spec)
+    built = {
+        type(
+            build_query(
+                massive_session._core,
+                spec,
+                query_type=HistoryQuery,
+                symbols=[_BAR_SYMBOLS[spec.single_class]],
+                timespan=timespan,
+                multiplier=multiplier,
+            )
+        )
+        for timespan in Timespan
+        for multiplier in (1, 5)
+    }
+    assert built == set(declared)
+
+
+def test_a_bars_call_without_a_timespan_is_refused(massive_session: dm.MassiveSession) -> None:
+    with pytest.raises(TypeError, match="timespan"):
+        build_query(massive_session._core, STOCK_BARS, query_type=HistoryQuery, symbols=["AAPL"])
 
 
 def test_bar_periods_are_left_to_massive() -> None:

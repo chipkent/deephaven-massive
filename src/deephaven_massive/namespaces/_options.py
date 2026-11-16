@@ -74,6 +74,7 @@ from deephaven_massive.namespaces._query_building import (
 )
 from deephaven_massive.queries import (
     FetchQuery,
+    HistoryQuery,
     NoSymbolStreamQuery,
     StreamHistoryQuery,
     StreamQuery,
@@ -575,7 +576,7 @@ class OptionsNamespace(Namespace):
         multiplier: int = 1,
         adjusted: bool = True,
         on_error: ErrorPolicy | None = None,
-    ) -> StreamHistoryQuery:
+    ) -> StreamHistoryQuery | HistoryQuery:
         """Aggregate bars (open, high, low, close, volume) of US-listed options contracts.
 
         Each row is one contract's bar of `multiplier` times `timespan`. The dataset's page, linked
@@ -593,9 +594,11 @@ class OptionsNamespace(Namespace):
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
 
         Returns:
-            A query that reads history, and streams 1-second and 1-minute bars at
-            `multiplier=1`. Its stream methods refuse any other bars with `ValueError`. Its
-            columns, plans, and methods:
+            A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
+            Massive streams, with the stream methods and `history()`; a `HistoryQuery`, with
+            `history()` only, for any other bars. A type checker allows a stream method on the
+            result only after `isinstance(q, StreamHistoryQuery)`. Its columns, plans, and
+            methods:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.bars.md.
 
         Raises:
@@ -608,13 +611,17 @@ class OptionsNamespace(Namespace):
         Example:
             ::
 
+                from deephaven_massive.queries import StreamHistoryQuery
+
                 contract = m.options.chain("AAPL", limit=1).fetch().view("Symbol")
-                minute = m.options.bars(contract, dm.Timespan.MINUTE).append_only()
+                bars = m.options.bars(contract, dm.Timespan.MINUTE)
+                assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+                minute = bars.append_only()
         """
         return build_query(
             self._core,
             BARS,
-            query_type=StreamHistoryQuery,
+            query_type=HistoryQuery,
             symbols=symbols,
             timespan=timespan,
             multiplier=multiplier,

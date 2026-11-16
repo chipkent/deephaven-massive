@@ -27,7 +27,7 @@ fields and, for bars of a day or longer, moved their stamps to the start of thei
 (`stamp_rule`). The vendor's own time fields feed these columns through the
 dataset's declared keys and are not kept beside them: the bar start (`t`, `s`,
 `window_start`) becomes `TimestampStart`, the WebSocket bar end `e` becomes `TimestampEnd`
-(recomputed except for futures one-second bars, see below), and the futures
+as sent, and the futures
 `session_end_date` and the open-close `from` and `day` become `Date`.
 
 **The windows.**
@@ -35,9 +35,9 @@ dataset's declared keys and are not kept beside them: the bar start (`t`, `s`,
 - **Tick.** `Date` is the day zone's date of `Timestamp`; for futures it is Massive's
   `session_end_date`, or on the WebSocket, which sends none, the 17:00 Chicago rule corrected
   by the schedules (`SessionDates`), null for a row they cannot place.
-- **Intraday bar of n units.** `TimestampStart` is Massive's start and `TimestampEnd` the start
-  plus n units (for a futures one-second WebSocket bar, Massive's `e` as sent, and the start
-  plus one second only where Massive sends no `e`).
+- **Intraday bar of n units.** `TimestampStart` is Massive's start and `TimestampEnd` Massive's
+  `e` as sent where the WebSocket sends one, else the start plus n units, Massive's documented
+  length (REST and flat-file bars carry no end).
   `Date` is the start's date, null when the bar ends on a later date; for futures it is the
   session as for ticks, null when the bar crosses 17:00 Chicago time.
 - **1-day bar.** 00:00 of the day to 00:00 of the next day (01:00 New York time for indices);
@@ -823,7 +823,7 @@ class TimeRule:
         return self._long_bars(rows, timespan)
 
     def _intraday(self, rows: _Rows, session_dates: SessionDates | None) -> _Rows:
-        """Fill an intraday bar: its end is its start plus its length.
+        """Fill an intraday bar: its end is Massive's `e`, else its start plus its length.
 
         Args:
             rows: The batch.
@@ -834,9 +834,7 @@ class TimeRule:
         """
         timespan = required(self.timespan, f"{self.dataset}'s bar timespan")
         start = _to_int(rows.column(START))
-        end = pc.add(start, unit_ns(timespan) * self.multiplier)
-        if self._futures and timespan is Timespan.SECOND:
-            end = self._sent_end(rows, end)
+        end = self._sent_end(rows, pc.add(start, unit_ns(timespan) * self.multiplier))
         last = pc.subtract(end, 1)
         if self._futures:
             dates = self._sessions(rows, start, session_dates)
@@ -852,17 +850,18 @@ class TimeRule:
         return _set(rows, END, pc.cast(end, _INSTANT))
 
     def _sent_end(self, rows: _Rows, computed: pa.Array) -> pa.Array:
-        """Return a futures one-second bar's end: Massive's `e`, or its start plus one second.
+        """Return an intraday bar's end: Massive's `e`, or its start plus its length.
 
         The library supplies Massive's data as sent, so `TimestampEnd` keeps `e` even when it
-        is not the start plus one second (Massive's documented futures one-second sample spans
-        60 seconds from `s` to `e`). Such a disagreement is logged once per process, at
-        WARNING, with both ends, so whoever reads the table learns that a window is not one
-        second long. A row without `e` ends at its start plus one second.
+        is not the start plus the bar's length (Massive's documented futures one-second sample
+        spans 60 seconds from `s` to `e`). Such a disagreement is logged once per dataset per
+        process, at WARNING, with both ends, so whoever reads the table learns that a window is
+        not the bar's length. A row without `e` (every REST and flat-file bar, and a WebSocket
+        bar that omits it) ends at its start plus its length.
 
         Args:
             rows: The batch, whose `TimestampEnd` holds Massive's `e` where the source sends it.
-            computed: The start plus one second, epoch nanoseconds.
+            computed: The start plus the bar's length, epoch nanoseconds.
 
         Returns:
             The ends, epoch nanoseconds.
@@ -871,16 +870,15 @@ class TimeRule:
         differs = pc.fill_null(pc.not_equal(sent, computed), fill_value=False)
         if pc.any(differs).as_py():
             first = pc.filter(sent, differs)[0].as_py()
-            plus_one = pc.filter(computed, differs)[0].as_py()
+            length = pc.filter(computed, differs)[0].as_py()
             log_once(
                 logger,
-                f"futures-second-end:{self.dataset}",
-                "%s: a one-second bar's end from Massive (%d ns) is not its start plus one "
-                "second (%d ns); TimestampEnd keeps Massive's e, so the bar's window is not "
-                "one second long",
+                f"bar-end:{self.dataset}",
+                "%s: a bar's end from Massive (%d ns) is not its start plus its length (%d ns); "
+                "TimestampEnd keeps Massive's e, so the bar's window is not its length",
                 self.dataset,
                 first,
-                plus_one,
+                length,
                 level=logging.WARNING,
             )
         return pc.coalesce(sent, computed)

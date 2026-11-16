@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._fakes.rest import Reply, envelope
 from tests._live.live_run import replies, reply_examples
 from tests._live.plans import TIERS, LivePlans
@@ -206,9 +207,14 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
 
         fake_ws_server.wait_for(lambda _: failed())
 
+    def minute_bars(m: MassiveSession, _: date) -> Table:
+        bars = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE)
+        assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+        return bars.append_only()
+
     status, reason = replies.run_example(
         reply_examples.Example("refused-bars", expects=reply_examples.REFUSAL, stream=True),
-        lambda m, _: m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).append_only(),
+        minute_bars,
         open_session=open_ws,
         folder=tmp_path,
         today=TODAY,
@@ -255,7 +261,9 @@ def test_every_example_has_its_code_and_no_code_lacks_an_example() -> None:
     assert list(replies.CALLS) == [e.name for e in reply_examples.EXAMPLES]
 
 
-def test_every_example_asks_through_the_public_verbs() -> None:
+def test_every_example_asks_through_the_public_verbs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An example that checks its bars query streams before it streams takes the recorder as one.
+    monkeypatch.setattr(replies, "StreamHistoryQuery", _Recorder)
     for example in reply_examples.EXAMPLES:
         calls: list[str] = []
         session: MassiveSession = _Recorder(calls)  # type: ignore[assignment]  # records the verbs

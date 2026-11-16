@@ -88,6 +88,7 @@ from deephaven_massive._errors import (
     library_bug,
     required,
     source_of,
+    unmatched_form,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
@@ -781,12 +782,19 @@ def describe_symbols(symbols: NormalizedSymbols) -> tuple[int | None, str]:
         `(count, text)`: for a list, its length and the first twenty symbols joined by
         commas with a `(+N more)` suffix when truncated; for `dm.ALL`, `(None, "ALL")`; for
         a reactive table, `(None, "reactive table")`.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
-    if isinstance(symbols, AllSymbols):
-        return None, "ALL"
-    if isinstance(symbols, SymbolTable):
-        return None, "reactive table"
-    return symbol_list_text(len(symbols), symbols[:SYMBOLS_LISTED])
+    match symbols:
+        case tuple():
+            return symbol_list_text(len(symbols), symbols[:SYMBOLS_LISTED])
+        case AllSymbols():
+            return None, "ALL"
+        case SymbolTable():
+            return None, "reactive table"
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("a stream's symbol summary", symbols))
 
 
 def symbol_list_text(count: int, first: Sequence[str]) -> tuple[int, str]:

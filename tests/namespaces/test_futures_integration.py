@@ -31,6 +31,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
+from deephaven_massive.queries import StreamHistoryQuery
 from tests._live import futures_bar_buckets
 from tests._live.calendar import months_before
 from tests._live.ticker_lists import accepts
@@ -756,15 +757,18 @@ def test_streamed_futures_dates_and_one_second_ends(
     acknowledgement. Records each row's `Date`, the `m.streams()` errors (a schedule miss shows
     there), and the one-second bars' `TimestampStart` and `TimestampEnd`, with the WARNING the
     library logs when Massive's `e` is not the start plus one second. Passes when every
-    one-second bar spans one second: `TimestampEnd` is the later of the start plus one second
-    and Massive's `e`, so a longer span means Massive's bars span more, as its documented sample
-    (60 seconds) suggests. Reading the rest: no miss confirms the calendar. A refused stream
-    skips, naming the plan.
+    one-second bar spans one second: `TimestampEnd` is Massive's `e` as sent, so another span
+    means Massive's bars span that, as its documented sample (60 seconds) suggests. Reading the
+    rest: no miss confirms the calendar. A refused stream skips, naming the plan.
     """
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     contract = front_contract("ES", datetime.now(_CHICAGO).date())
-    minutes = live_session.futures.bars(contract, dm.Timespan.MINUTE).append_only()
-    seconds = live_session.futures.bars(contract, dm.Timespan.SECOND).append_only()
+    minute_bars = live_session.futures.bars(contract, dm.Timespan.MINUTE)
+    second_bars = live_session.futures.bars(contract, dm.Timespan.SECOND)
+    assert isinstance(minute_bars, StreamHistoryQuery)  # 1-minute bars stream
+    assert isinstance(second_bars, StreamHistoryQuery)  # 1-second bars stream
+    minutes = minute_bars.append_only()
+    seconds = second_bars.append_only()
     acked = wait_acked(live_session, 2, time.monotonic() + _STREAM_WAIT)
     status, due = rows_due("futures")
     deadline = time.monotonic() + _STREAM_WAIT
@@ -777,9 +781,8 @@ def test_streamed_futures_dates_and_one_second_ends(
     evidence(f"{contract} minute-bar Dates: {sorted({str(r['Date']) for r in rows})}")
     spans = [(r["TimestampStart"], (r["TimestampEnd"] - r["TimestampStart"]) / 1e9) for r in bars]
     evidence(f"one-second bars (start, end - start in s): {spans[:5]}")
-    evidence(
-        f"end warnings: {[r.getMessage() for r in caplog.records if 'one-second' in r.message]}"
-    )
+    warned = [r.getMessage() for r in caplog.records if "start plus its length" in r.message]
+    evidence(f"end warnings: {warned}")
     skip_if_not_entitled(live_session, "Futures Starter")
     assert acked >= 2, f"Massive acknowledged {acked} of the 2 topics"
     if not due:
@@ -787,7 +790,7 @@ def test_streamed_futures_dates_and_one_second_ends(
     assert rows or bars, f"no futures bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
     assert bars, f"no one-second bar arrived in {_STREAM_WAIT:.0f} s, though one was due"
     longer = [span for span in spans if span[1] != 1.0]
-    assert not longer, f"one-second bars spanning more than a second: {longer[:5]}"
+    assert not longer, f"one-second bars spanning other than a second: {longer[:5]}"
 
 
 def _midnight(day: date) -> datetime:

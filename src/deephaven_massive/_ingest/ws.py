@@ -245,12 +245,19 @@ def _wanted(
         `(symbols, topics)`: for `dm.ALL`, None and the channel's wildcard; for a symbol
         list, the symbols and their topics; for a reactive table, two empty sets, which its
         watch fills once it starts.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
-    if isinstance(symbols, AllSymbols):
-        return None, frozenset({wildcard(channel)})
-    if isinstance(symbols, SymbolTable):
-        return frozenset(), frozenset()
-    return frozenset(symbols), stream_topics(asset_class, channel, symbols, pairs=pairs)
+    match symbols:
+        case tuple():
+            return frozenset(symbols), stream_topics(asset_class, channel, symbols, pairs=pairs)
+        case AllSymbols():
+            return None, frozenset({wildcard(channel)})
+        case SymbolTable():
+            return frozenset(), frozenset()
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("a stream's starting topics", symbols))
 
 
 def _pairs_to_split(asset_class: AssetClass, symbols: NormalizedSymbols) -> frozenset[str]:

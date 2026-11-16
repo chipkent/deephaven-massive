@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
-NOT_STREAMED = r"\.blink\(\): only 1-second and 1-minute bars at multiplier=1 stream"
 """The refusal of a stream of bars Massive doesn't stream."""
 
 OWNER = "namespaces/futures"
@@ -217,15 +216,12 @@ def test_an_exhausted_generator_is_no_symbols(massive_session: dm.MassiveSession
         ((dm.Timespan.WEEK, 2), False),
     ],
 )
-def test_every_bars_call_is_one_class_and_only_some_stream(
+def test_only_bars_that_stream_get_the_stream_methods(
     massive_session: dm.MassiveSession, bar: tuple[Any, int], streams: bool
 ) -> None:
     timespan, multiplier = bar
     q = massive_session.futures.bars("ESZ5", timespan, multiplier=multiplier)
-    assert type(q) is StreamHistoryQuery  # every bars call, streaming or not
-    if not streams:
-        with pytest.raises(ValueError, match=NOT_STREAMED):
-            q.blink()
+    assert type(q) is (StreamHistoryQuery if streams else HistoryQuery)
     assert q._request.timespan is timespan
     assert q._request.multiplier == multiplier
 
@@ -472,7 +468,7 @@ def _spec(name: str) -> DatasetSpec:
     [
         ("trades", StreamHistoryQuery),
         ("quotes", StreamHistoryQuery),
-        ("bars", StreamHistoryQuery),
+        ("bars", HistoryQuery),
         ("snapshots", FetchQuery),
         ("contracts", FetchQuery),
         ("products", FetchQuery),
@@ -1142,8 +1138,7 @@ def test_one_frame_lands_in_blink(
     else:
         assert (row["Open"], row["Close"], row["Volume"]) == (6994.5, 6995.0, 91.0)
         assert row["DollarVolume"] == 1353.1
-        # The end is the start plus the bar's length; for a one-second bar, the later of that
-        # and Massive's `e`, which agree here.
+        # The end is Massive's `e`, which here is the start plus the bar's length.
         length = 1_000 if frame["ev"] == "A" else 60_000
         assert row["TimestampEnd"] == at_ms(frame["s"] + length)
     ws_session.session.release(live)
