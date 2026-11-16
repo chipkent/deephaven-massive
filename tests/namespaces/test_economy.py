@@ -124,7 +124,8 @@ def test_the_vendor_sample_decodes_without_drift(
 ) -> None:
     payload = json.loads(load_fixture(OWNER, f"{series.method}.json"))
     rest_path = source(Transport.REST, series.path)
-    batch, drift = to_batch(payload["results"], rest_path, required=())
+    batch, drift, marks = to_batch(payload["results"], rest_path, required=())
+    assert marks == {}  # every row read whole
     assert drift.extra == drift.missing == frozenset()
     row = batch.to_pylist()[0]
     assert row["Date"] == series.day

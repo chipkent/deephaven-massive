@@ -55,6 +55,7 @@ from deephaven_massive._datasets.filters import (
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, OnError, Order, Timespan, _require_enum
+from deephaven_massive._error_policy import ErrorPolicy, check_policy, resolve_policy
 from deephaven_massive._errors import ErrorSource, MassiveError, library_bug, required
 from deephaven_massive._massive import ParamKind
 from deephaven_massive._tables.time_text import deephaven_time_text
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
     from deephaven_massive._datasets.request import ParamValue
     from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolsLike
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -565,41 +567,33 @@ def _check_axis(
 
 
 def _venue_choice(
-    core: SessionCore, spec: DatasetSpec, *, venues: object, refused_venues: object
+    spec: DatasetSpec, *, venues: object, policy: ResolvedPolicy
 ) -> tuple[tuple[FuturesVenue, ...] | None, OnError | None]:
     """Return the venues a futures `history()` reads and what it does with a refused one.
 
     A dataset's flat files are per venue when its prefix holds the `{venue}` placeholder. When
-    the call names its venues, a refused one follows the call's `refused_venues`, or
-    `MassiveConfig.refused_venues` when the call left that out. When the call left `venues`
-    out, it reads every venue the plan allows: each one S3 refuses is skipped and logged, as
-    `dm.OnError.LOG` does, whatever `refused_venues` says.
+    the call names its venues, a refused one follows the call's `refused_venues` setting. When
+    the call left `venues` out, it reads every venue the plan allows: each one S3 refuses is
+    skipped and logged, as `dm.OnError.LOG` does, whatever `refused_venues` says.
 
     Args:
-        core: The session core, for `MassiveConfig.refused_venues`.
         spec: The dataset.
         venues: The `venues` argument as passed; None when it was left out.
-        refused_venues: The `refused_venues` argument as passed; None when it was left out.
+        policy: The call's resolved policy, for its `refused_venues`.
 
     Returns:
         The venues in `FuturesVenue` order (`futures_venues`) and the `Request.refused_venues`
         member; (None, None) for a dataset without venues.
 
     Raises:
-        TypeError: The errors of `futures_venues` for a named `venues`, and the error of
-            `_require_enum` for a `refused_venues` that is neither None nor a `dm.OnError`.
+        TypeError: The errors of `futures_venues` for a named `venues`.
         ValueError: The error of `futures_venues` for an empty `venues`.
     """
     if not any("{venue}" in prefix for prefix in spec.flat_file_prefixes.values()):
         return None, None
-    policy = (
-        core.config.refused_venues
-        if refused_venues is None
-        else _require_enum(refused_venues, OnError, "refused_venues")
-    )
     if venues is None:
         return tuple(FuturesVenue), OnError.LOG
-    return futures_venues(venues), policy
+    return futures_venues(venues), policy.refused_venues
 
 
 def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
@@ -798,7 +792,6 @@ def build_query(
     timespan: Timespan | None = None,
     multiplier: int = 1,
     venues: AbstractSet[FuturesVenue] | None = None,
-    refused_venues: OnError | None = None,
     adjusted: bool | None = None,
     start: DateLike | None = None,
     end: DateLike | None = None,
@@ -807,6 +800,7 @@ def build_query(
     filters: Mapping[str, FilterValue] | None = None,
     limit: int | None = None,
     values: ValueTable | None = None,
+    on_error: ErrorPolicy | None = None,
 ) -> _Q:
     """Validate one dataset call and return its query.
 
@@ -841,9 +835,6 @@ def build_query(
         venues: For a dataset with venues, the futures venues whose flat files `history()`
             reads, as the call named them; None when the call left them out, for every venue
             the plan allows (`_venue_choice`). Ignored for a dataset without venues.
-        refused_venues: For a dataset with venues, what `history()` does with a named venue
-            whose flat files S3 refuses; None when the call left it out, for
-            `MassiveConfig.refused_venues` (`_venue_choice`).
         adjusted: Whether bars are adjusted for splits, for a dataset with an `adjusted`
             parameter; None for a dataset without one (`Request.adjusted`).
         start: The lower bound of the dataset's time axis, or None for an open start: a date
@@ -869,6 +860,9 @@ def build_query(
         values: A table passed where the dataset takes one value (`value_table`), or None.
             Its parameter must be None in `params`, which still reserves it from `filters`;
             the verbs send each of the table's values as that parameter.
+        on_error: The call's policy, or None for none. Each cause it leaves unset takes the
+            session's setting, then `ErrorPolicy.DEFAULTS`'s (`resolve_policy`), and the
+            request holds the result (`Request.on_error`).
 
     Returns:
         An instance of the spec's query class (`query_class`, or `bar_query_class` for a
@@ -886,7 +880,8 @@ def build_query(
             `.desc` suffix of `sort` (`Catalog.takes_param`). Where some path has `order`, the REST
             transport sends it as is there, folds it into `sort` on a path without it, and fails the
             verb on a chosen path that has neither.
-        TypeError: If `adjusted` is neither None nor a `bool`.
+        TypeError: If `adjusted` is neither None nor a `bool`, or `on_error` neither None nor a
+            `dm.ErrorPolicy` (`check_policy`).
 
     Invalid symbols, enum arguments, venues, time bounds, a `sort`, parameters, or filters
     raise the `TypeError` or `ValueError` of the helper that checks them (`check_symbols` in
@@ -920,7 +915,10 @@ def build_query(
         if filters is None
         else _filters(spec, filters, typed=params or {}, arguments=arguments or {})
     )
-    read_venues, refused = _venue_choice(core, spec, venues=venues, refused_venues=refused_venues)
+    policy = resolve_policy(
+        None if on_error is None else check_policy(on_error), core.config.on_error
+    )
+    read_venues, refused = _venue_choice(spec, venues=venues, policy=policy)
     request = Request(
         symbols=normalized,
         timespan=timespan,
@@ -936,6 +934,7 @@ def build_query(
         # an empty result rather than an error (the dividends, sent `limit=0`, did).
         limit=None if limit is None else require_positive_int("limit", limit),
         value_table=values,
+        on_error=policy,
     )
     return made_query(cls, core=core, spec=spec, request=request, call=QueryCall(f"m.{spec.name}"))
 
@@ -954,6 +953,7 @@ def list_query(
     order: Order | None = None,
     limit: int | None = None,
     filters: Mapping[str, FilterValue] | None = None,
+    on_error: ErrorPolicy | None = None,
 ) -> FetchQuery:
     """Build the query of a REST list dataset from its factory's arguments.
 
@@ -978,6 +978,7 @@ def list_query(
         order: The sort direction, or None for the endpoint's default.
         limit: The cap on the total number of rows, or None for every row.
         filters: The `filters` mapping, or None.
+        on_error: The call's policy, or None for none (`build_query`).
 
     Returns:
         The query.
@@ -999,6 +1000,7 @@ def list_query(
         arguments=arguments,
         filters=filters,
         limit=limit,
+        on_error=on_error,
     )
 
 

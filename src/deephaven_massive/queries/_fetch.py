@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ValueTable
+    from deephaven_massive._enums import OnError
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["MINIMUM_POLL_INTERVAL", "FetchQuery"]
@@ -101,18 +102,25 @@ def _interval(value: object) -> timedelta:
 
 
 def _read_value_table(
-    core: SessionCore, spec: DatasetSpec, values: ValueTable, *, query: str, live: bool = False
+    core: SessionCore,
+    spec: DatasetSpec,
+    values: ValueTable,
+    *,
+    query: str,
+    noncanonical: OnError,
+    live: bool = False,
 ) -> tuple[str, ...]:
     """Read a table passed where the dataset takes one value, once, as `_read_symbol_table` does.
 
     A row that is not a value the dataset takes (an underlying that is not a stock or index
-    ticker) follows `MassiveConfig.noncanonical_symbols` (`SymbolRowRule.for_values`).
+    ticker) follows the call's `noncanonical_symbols` (`SymbolRowRule.for_values`).
 
     Args:
-        core: The session core, for its execution context and its `noncanonical_symbols`.
+        core: The session core, for its execution context.
         spec: The dataset.
         values: The boxed table and the argument it stands for.
         query: The `repr` of the query whose verb reads it, which the messages name.
+        noncanonical: The call's `noncanonical_symbols` (`Request.on_error`).
         live: True for a verb that follows the table or re-reads it, which may start on a
             table with no row yet.
 
@@ -124,7 +132,7 @@ def _read_value_table(
             for a static read, if it holds no value at all; under `RAISE`, the `ValueError` of
             `read_symbols` for a bad row.
     """
-    rule = SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols)
+    rule = SymbolRowRule.for_values(spec, values, noncanonical)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, values.table, stream_id=None)
     if rows.skipped and not rows.symbols:
@@ -322,7 +330,14 @@ class FetchQuery(Query):
             The refreshing result (`open_followed_read`).
         """
         spec, core = self._spec, self._core
-        call_time = _read_symbol_table(core, spec, symbols, query=repr(self), live=True)
+        call_time = _read_symbol_table(
+            core,
+            spec,
+            symbols,
+            query=repr(self),
+            noncanonical=self._request.on_error.noncanonical_symbols,
+            live=True,
+        )
         request = replace(self._request, symbols=call_time)
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, the first read checks them
@@ -345,7 +360,7 @@ class FetchQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=symbols.table,
-            rule=SymbolRowRule.of(spec, core.config.noncanonical_symbols),
+            rule=SymbolRowRule.of(spec, self._request.on_error.noncanonical_symbols),
             reread=Reread.ALWAYS,
             plan=plan,
             note=note if recency is None else f"{note} {recency}",
@@ -372,7 +387,13 @@ class FetchQuery(Query):
         if values.table.is_refreshing:
             return self._followed_value_fetch(call, values, wait=wait)
         spec, core = self._spec, self._core
-        names = _read_value_table(core, spec, values, query=repr(self))
+        names = _read_value_table(
+            core,
+            spec,
+            values,
+            query=repr(self),
+            noncanonical=self._request.on_error.noncanonical_symbols,
+        )
         request = self._static_request()
         rest = core.rest_transport()
         if not wait:  # a parameter error raises now
@@ -416,7 +437,14 @@ class FetchQuery(Query):
                 f"both at every cycle, or pass one of them as a static snapshot, such as "
                 f"{values.argument}=table.snapshot()"
             )
-        call_time = _read_value_table(core, spec, values, query=repr(self), live=True)
+        call_time = _read_value_table(
+            core,
+            spec,
+            values,
+            query=repr(self),
+            noncanonical=self._request.on_error.noncanonical_symbols,
+            live=True,
+        )
         request = self._static_request()
         rest = core.rest_transport()
         if call_time:  # a parameter error raises now; with none, each read checks them
@@ -442,7 +470,9 @@ class FetchQuery(Query):
             call=call,
             query=repr(self),
             symbol_table=values.table,
-            rule=SymbolRowRule.for_values(spec, values, core.config.noncanonical_symbols),
+            rule=SymbolRowRule.for_values(
+                spec, values, self._request.on_error.noncanonical_symbols
+            ),
             reread=Reread.ALWAYS,
             plan=plan,
             note=note if recency is None else f"{note} {recency}",
@@ -518,11 +548,21 @@ class FetchQuery(Query):
             )
         if isinstance(self._request.symbols, SymbolTable):
             _read_symbol_table(
-                self._core, self._spec, self._request.symbols, query=repr(self), live=True
+                self._core,
+                self._spec,
+                self._request.symbols,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+                live=True,
             )
         if self._request.value_table is not None:
             _read_value_table(
-                self._core, self._spec, self._request.value_table, query=repr(self), live=True
+                self._core,
+                self._spec,
+                self._request.value_table,
+                query=repr(self),
+                noncanonical=self._request.on_error.noncanonical_symbols,
+                live=True,
             )
         logger.debug(
             "%s poll(): every %.3f s, mode %s -> %s",

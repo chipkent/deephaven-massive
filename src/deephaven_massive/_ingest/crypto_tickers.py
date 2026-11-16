@@ -175,7 +175,7 @@ class CryptoTickerList:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
             reader: The read the lookup serves, whose patience and error conversion the list's
                 requests use.
-            unreadable: The session's `MassiveConfig.unreadable_symbols`.
+            unreadable: The call's `unreadable_symbols` setting (`Request.on_error`).
             cancel: A background read's stop token: once it is set, the list's pages and the
                 wait for another caller's read of it stop, and the call raises. None when only
                 the session's close should stop them.

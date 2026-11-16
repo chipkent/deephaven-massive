@@ -34,6 +34,7 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, FuturesVenue, NotBars, Order, Timespan
+from deephaven_massive._error_policy import DEFAULT_POLICY
 from deephaven_massive._ingest.rest_requests import fetch_paths, plan_calls
 from deephaven_massive._massive import Transport
 from deephaven_massive._session import CATALOG
@@ -118,6 +119,7 @@ def build(
     params: Mapping[str, object] | None = None,
     filters: Mapping[str, dm.FilterValue] | None = None,
     limit: int | None = None,
+    on_error: dm.ErrorPolicy | None = None,
 ) -> Query:
     # Most tests build a list dataset without symbols, which only filter it; the refusal of
     # None for a dataset that needs symbols has its own test.
@@ -135,6 +137,7 @@ def build(
         params=params,
         filters=filters,
         limit=limit,
+        on_error=on_error,
     )
 
 
@@ -206,6 +209,44 @@ def test_build_query_normalizes_the_request(massive_session: dm.MassiveSession) 
         ("frequency_lte", 12),
     )
     assert hash(q)
+
+
+def test_the_request_holds_the_call_s_policy_over_the_session_s() -> None:
+    session_policy = dm.ErrorPolicy(dm.OnError.IGNORE, refused_venues=dm.OnError.LOG)
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="k", on_error=session_policy))
+    try:
+        plain = build(m, DIVIDENDS, symbols=["AAPL"])._request.on_error
+        assert plain.malformed_rows is dm.OnError.IGNORE  # the session's
+        assert plain.refused_venues is dm.OnError.LOG
+        strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
+        called = build(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)._request.on_error
+        assert called.malformed_rows is dm.OnError.RAISE  # the call's
+        assert called.unavailable_symbols is dm.OnError.IGNORE  # unset in the call: the session's
+        q = m.stocks.dividends(["AAPL"], on_error=strict)
+        assert q._request.on_error == called
+        assert "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)" in repr(q)
+    finally:
+        m.close()
+
+
+def test_a_request_built_without_a_session_policy_follows_the_defaults(
+    massive_session: dm.MassiveSession,
+) -> None:
+    assert build(massive_session, DIVIDENDS, symbols=["AAPL"])._request.on_error == DEFAULT_POLICY
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [dm.OnError.RAISE, "raise", {"malformed_rows": "raise"}],
+    ids=["member", "text", "map"],
+)
+def test_the_call_s_policy_must_be_an_error_policy(
+    massive_session: dm.MassiveSession, policy: object
+) -> None:
+    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+        build(massive_session, DIVIDENDS, symbols=["AAPL"], on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+        massive_session.stocks.trades("AAPL", on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_build_query_without_symbols_or_axis(massive_session: dm.MassiveSession) -> None:
@@ -631,7 +672,10 @@ def _hints(function: Callable[..., object]) -> dict[str, Any]:
         **vars(collections.abc),
         **vars(dt),
         **{name: getattr(queries, name) for name in queries.__all__},
-        **{name: getattr(dm, name) for name in ("SymbolsLike", "DateLike", "FilterValue")},
+        **{
+            name: getattr(dm, name)
+            for name in ("SymbolsLike", "DateLike", "FilterValue", "ErrorPolicy")
+        },
         **vars(_enums),
         "AbstractSet": collections.abc.Set,
         "Literal": Literal,

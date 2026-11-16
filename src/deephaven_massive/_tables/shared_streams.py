@@ -269,7 +269,7 @@ class SharedStreams:
                 (`"MassiveSession #1 is closed; ..."`).
         """
         core = required(self._core(), "the session")  # held until the call returns: live_set.py
-        key: StreamKey = (spec.name, channel, request.symbol_key())
+        key: StreamKey = (spec.name, channel, request.symbol_key(), request.on_error)
         scope: LivenessScope | None = None
         handle, opened = self._acquire(
             core, spec, request, key=key, channel=channel, query=query, verb=verb

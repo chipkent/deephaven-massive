@@ -7,7 +7,7 @@ Open-market insider purchases and sales, summed per company and transaction day.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.filings.insider_activity(symbols=None, *, issuer_cik=None, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.filings.insider_activity(symbols=None, *, issuer_cik=None, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -30,6 +30,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Takes no key today, since the arguments above cover every endpoint parameter. Any key raises `ValueError`. Keys: none. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

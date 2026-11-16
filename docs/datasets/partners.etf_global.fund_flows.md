@@ -7,7 +7,7 @@ Daily fund flows, net asset value, and shares outstanding of US-listed ETFs.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.etf_global.fund_flows(symbols=None, *, sort=None, order=None, limit=None, filters=None)
+m.partners.etf_global.fund_flows(symbols=None, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -27,6 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`. Keys: `composite_ticker_gt`, `composite_ticker_gte`, `composite_ticker_lt`, `composite_ticker_lte`, `effective_date`, `effective_date_gt`, `effective_date_gte`, `effective_date_lt`, `effective_date_lte`, `processed_date`, `processed_date_gt`, `processed_date_gte`, `processed_date_lt`, `processed_date_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -42,7 +43,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF on exchanges." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. |
 | `FundFlow` | double | The net daily capital flow into or out of the ETF through the creation and redemption process, where positive values indicate inflows and negative values indicate outflows. |
 | `Nav` | double | The net asset value per share, representing the per-share value of the ETF's underlying holdings. |

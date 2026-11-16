@@ -32,6 +32,7 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
+from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
@@ -195,11 +196,14 @@ def start(
     stop: threading.Event | None = None,
     interval: float = 60.0,
     values: ValueTable | None = None,
+    call: dm.ErrorPolicy | None = None,
 ) -> Table:
+    # `call` is the call's own policy, resolved over the session's as a dataset method does.
+    policy = resolve_policy(call, m._core.config.on_error)
     return open_poll(
         m._core,
         spec=DIVIDENDS,
-        request=Request(symbols=symbols, value_table=values),
+        request=Request(symbols=symbols, value_table=values, on_error=policy),
         interval=timedelta(seconds=interval),
         mode=mode,
         query="<Query test>",
@@ -211,6 +215,18 @@ def start(
         clock=clock,
         stop=threading.Event() if stop is None else stop,
     )
+
+
+def raise_noncanonical(
+    m: dm.MassiveSession, raised_by: str, monkeypatch: pytest.MonkeyPatch
+) -> dm.ErrorPolicy | None:
+    # Sets `noncanonical_symbols` to RAISE on the session ("session"), or returns it as the
+    # call's policy over a session that logs ("call").
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    if raised_by == "call":
+        return strict
+    monkeypatch.setattr(m._core, "config", dataclasses.replace(m._core.config, on_error=strict))
+    return None
 
 
 def until(condition: Callable[[], bool]) -> None:
@@ -1081,7 +1097,8 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
-    start(massive_session, script=script, pollers=pollers, clock=clock)
+    # Held to the end: a collected table stops its poller before the check can reach it.
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
     checked: list[poll.Poller] = []
 
     def broken(self: poll.Poller) -> None:
@@ -1093,6 +1110,7 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
         pollers.check_running()
     assert checked == [poller_of(pollers)]
     assert any("checking a poll()'s running cycle failed" in m for m in caplog.messages)
+    del table
 
 
 def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
@@ -1188,6 +1206,7 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
     del table
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_bad_value_fails_the_poll_under_raise(
     *,
     dh_input_table: Callable[..., InputTable],
@@ -1197,14 +1216,19 @@ def test_a_bad_value_fails_the_poll_under_raise(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
+    raised_by: str,
 ) -> None:
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
+    call = raise_noncanonical(massive_session, raised_by, monkeypatch)
     codes, values = product_codes(dh_input_table, "ES")
     script.rows()
     table = start(
-        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+        massive_session,
+        script=script,
+        pollers=pollers,
+        clock=clock,
+        symbols=None,
+        values=values,
+        call=call,
     )
     clock.wait_for_sleepers(1)
     codes.add(new_table([string_col("ProductCode", [" CL"])]))
@@ -1246,6 +1270,7 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     assert script.symbols == [("AAPL",)]
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_raise(
     *,
     massive_session: dm.MassiveSession,
@@ -1255,15 +1280,19 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
     dh_input_table: Callable[..., InputTable],
+    raised_by: str,
 ) -> None:
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
+    call = raise_noncanonical(massive_session, raised_by, monkeypatch)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     script.rows()
     table = start(
-        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+        massive_session,
+        script=script,
+        pollers=pollers,
+        clock=clock,
+        symbols=SymbolTable(watch),
+        call=call,
     )
     clock.wait_for_sleepers(1)
     watch.add(new_table([string_col("Symbol", ["msft"])]))
@@ -1849,6 +1878,29 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target
 
 
+def test_a_poll_fails_on_a_late_bad_row_when_its_call_raises_and_the_session_logs(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    q = build_query(
+        rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=watch, on_error=strict
+    )
+    table = q.poll(60)
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: watch.size == 2)
+    clock.advance(60)
+    until(lambda: bool(table.j_table.isFailed()))
+    assert len(fake_rest.requests) == 1
+
+
 SMA_STOCK = "/v1/indicators/sma/{stockTicker}"
 SMA_CRYPTO = "/v1/indicators/sma/{cryptoTicker}"
 SMA = DatasetSpec(
@@ -2017,7 +2069,9 @@ def ignoring_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.IGNORE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.IGNORE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -2032,7 +2086,9 @@ def raising_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -2091,8 +2147,10 @@ def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
         "indicators.sma poll(): X:BTCUSD cannot be polled: /v1/indicators/sma/{cryptoTicker} "
-        "does not take ['adjusted']. Remove the symbol, or set MassiveConfig("
-        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+        "does not take ['adjusted']. Remove the symbol; to leave it out and keep polling the "
+        "others, pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset "
+        "method or to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the "
+        "settings file"
     )
     assert fake_rest.requests == []
 
@@ -2112,8 +2170,9 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
         f"indicators.sma: Massive has no data for 1 [MSFT (HTTP 404 from {SMA_STOCK})]. "
-        "Remove the symbol, or set MassiveConfig(unavailable_symbols=dm.OnError.LOG) to leave "
-        "it out and read the others"
+        "Remove the symbol; to leave it out and read the others, pass "
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or "
+        "to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
     )
 
 
