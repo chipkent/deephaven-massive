@@ -1545,7 +1545,8 @@ def _place_combo_trades(
         placements = {
             code: _session_holding(spans.get(code, {}), stamp) for code in candidates.codes
         }
-        if len(set(placements.values())) > 1:
+        held = {"none" if placed.startswith("none") else placed for placed in placements.values()}
+        if len(held) > 1:  # every "none of [...]" is one answer: no session holds the trade
             tally[_PLACED_APART] += 1
         for code, placed in placements.items():
             verdict = (
