@@ -205,6 +205,7 @@ from deephaven_massive._massive import (
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
@@ -542,6 +543,9 @@ class _Transform:
         seen: What the read's futures files showed of other sessions' rows, for the
             sessions the read may have left incomplete (`FlatFileRead.uncertain`); its own
             per call, shared by the call's reader threads.
+        tally: The read's count of its rows of the read's symbols and window, and of those
+            withheld, across its files (`ReadTally`); its own per call, shared by the call's
+            reader threads.
     """
 
     dataset: str
@@ -559,6 +563,7 @@ class _Transform:
     policy: ResolvedPolicy
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
+    tally: ReadTally = field(default_factory=ReadTally)
 
     @classmethod
     def build(
@@ -954,13 +959,12 @@ class FlatFileHistory:
         s3://<bucket>/<key> at <endpoint>: HTTP 404 (404: Not Found); check MassiveConfig
         s3_bucket and s3_endpoint_url"`), or answers another error, a file's connection drops
         part-way on its first read and on each of its three rereads, a file is not the
-        expected gzip CSV (for example, it lacks the symbol or time header), a file's every
-        row of the requested symbols was dropped because its key could not be read (`"...
-        timestamp unit mismatch for <dataset>.<column>: ..."`, naming the file), or the session
-        is closed during the call. Errors that come from S3 carry its `x-amz-request-id` as
-        `request_id`. An extra or missing documented header, a value that does not parse, and
-        a row dropped for its key are not errors: they log a WARNING once per header, and per
-        dataset for dropped rows, each session.
+        expected gzip CSV (for example, it lacks the symbol or time header), or the session is
+        closed during the call. `RowDataError` when the library could read none of the rows of
+        the read's symbols and window whole, across all its files. Errors that come from S3
+        carry its `x-amz-request-id` as `request_id`. An extra or missing documented header, a
+        value that does not parse, and a withheld row are not errors: they log a WARNING once
+        per header, and per dataset for withheld rows, each session.
         """
         prefix = spec.flat_file_prefixes[timespan_key(request.timespan)]
         transform = _Transform.build(
@@ -1148,6 +1152,9 @@ class FlatFileHistory:
             MassiveError: If `stop` was set: the read was cancelled.
             EntitlementError: If `refusals` is set and S3 refused every venue of the call
                 (`RefusedVenues.every_venue_refused`).
+            RowDataError: If the library could read none of the rows of the read's symbols
+                and window whole, across all its files (`ReadTally.check`), whatever its
+                policy.
         """
         cancel = Cancel(*(() if stop is None else (stop,)))
         workers = min(self._core.config.max_concurrency, len(keys))
@@ -1236,6 +1243,7 @@ class FlatFileHistory:
                 days=unread,
                 exec_ctx=self._core.exec_ctx,
             )
+        transform.tally.check(spec.name, source=f"the flat files of {transform.prefix}")
         refused = () if refusals is None else refusals.venues()
         return FlatFileRead(
             tuple(kept),
@@ -1655,10 +1663,10 @@ class FlatFileHistory:
             RowDataError: Under `malformed_rows=RAISE`, at the first block handed on after the
                 file's first malformed line (`_malformed_message`); every chunk hands on one,
                 so a run of such lines fails the read before the file ends. Under a `RAISE`
-                cause, at the first block with a withheld row of that cause. And after the
-                last block, when the file held rows the read asked for and the library could
-                read none of them whole, the sign of a change in the file's format, whatever
-                the policy.
+                cause, at the first block with a withheld row of that cause. A file whose
+                rows are all withheld never fails the read on its own: once the file is read,
+                its rows of the read's symbols and window, and those withheld, are added to
+                the read's tally (`_Transform.tally`), which `_read` checks.
         """
         tables: list[Table] = []
         pending: list[pa.RecordBatch] = []
@@ -1695,12 +1703,7 @@ class FlatFileHistory:
         every = merged(parts)
         if every.groups:
             self._report_withheld(transform, every, where=file.location)
-        if asked and every.total == asked:
-            raise RowDataError(
-                f"{transform.dataset}: the library could read none of the {asked} rows of the "
-                f"read's symbols and window in {file.location} whole, so Massive's format may "
-                f"have changed; the first: {every.first_reason}"
-            )
+        transform.tally.add(asked, every)
         self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
         if file.malformed_lines:
             _log_malformed(transform.dataset, file, setting)

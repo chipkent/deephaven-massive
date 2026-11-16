@@ -743,8 +743,9 @@ class CutShortError(MassiveError):
 class RowDataError(PermanentError):
     """Rows from Massive that break their dataset's schema.
 
-    A REST page whose every row was dropped because a key could not be read (one odd row is
-    dropped and counted, never raised), a symbol spelling the library cannot read under
+    A read whose every row of its symbols and window the library could not read whole (one
+    such row is withheld and counted, never raised), a withheld row of a cause the policy
+    sets to `RAISE`, a symbol spelling the library cannot read under
     `unreadable_symbols=RAISE` (a listed crypto pair whose currencies do not join to it
     included), a flat-file line that is not a readable row under
     `malformed_rows=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the

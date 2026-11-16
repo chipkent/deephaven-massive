@@ -929,7 +929,7 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     with pytest.raises(
         RowDataError,
         match=r"^stocks\.trades: the library could read none of the 1 rows of the read's "
-        rf"symbols and window in {re.escape(LOCATION.format(TRADES_0303))} whole, so Massive's "
+        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so Massive's "
         r"format may have changed; the first: timestamp unit mismatch for "
         r"stocks\.trades\.Timestamp: 1741012200000 ns is outside 1990 to 2100\. "
         + re.escape(LIBRARY_BUG)
@@ -968,6 +968,26 @@ def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
         match=r"the library could read none of the \d rows of the read's symbols and window",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+
+
+def test_a_file_whose_rows_are_all_unreadable_beside_a_file_read_whole_fails_nothing(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read is judged across its files: one file of unreadable rows withholds them and
+    # reports them, and the other file's rows are published.
+    next_day = INSIDE + 86_400 * 10**9
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + unfit_price(1, INSIDE)))
+    fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(2, next_day)))
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
+    assert pick(t, "Id") == [("2",)]
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+    ]
 
 
 def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
