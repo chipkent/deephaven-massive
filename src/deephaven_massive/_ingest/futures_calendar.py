@@ -113,6 +113,7 @@ __all__ = [
     "FuturesCalendar",
     "RowFetch",
     "ScheduledSession",
+    "contracts_query",
 ]
 
 logger = logging.getLogger(__name__)
@@ -298,6 +299,28 @@ def _lookup_keys(items: list[object]) -> tuple[set[str], set[str], list[object]]
             case _:
                 strays.append(entry)
     return tickers, products, strays
+
+
+def contracts_query(tickers: tuple[str, ...], today: date, *, page: int) -> dict[str, object]:
+    """Return the query of one contracts-list lookup of tickers' products.
+
+    It reads the week up to today's session, so each ticker answers a row a day, not every day
+    of its history, which made a lookup of 100 tickers take seconds or time out.
+
+    Args:
+        tickers: At most `TICKERS_PER_REQUEST` tickers.
+        today: Today's futures session.
+        page: The page size: the path's largest.
+
+    Returns:
+        The query, by wire name.
+    """
+    return {
+        "ticker.any_of": tickers,
+        "date.gte": today - _LISTED_DAYS,
+        "date.lte": today,
+        "limit": page,
+    }
 
 
 def _chunks(keys: Iterable[str]) -> list[tuple[str, ...]]:
@@ -859,12 +882,7 @@ class FuturesCalendar:
             today: Today's futures session.
             answers: Receives the products found, the tickers the list lacks, and the failures.
         """
-        query = {
-            "ticker.any_of": chunk,
-            "date.gte": today - _LISTED_DAYS,
-            "date.lte": today,
-            "limit": self._contracts_page,
-        }
+        query = contracts_query(chunk, today, page=self._contracts_page)
         try:
             rows = self._read(self._contracts_path, query)
         except MassiveError as error:
