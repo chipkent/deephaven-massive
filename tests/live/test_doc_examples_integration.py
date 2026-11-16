@@ -263,16 +263,17 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
     """Whether the hook and Examples 1 to 6 and 13 fill with real data, at a declared pace.
 
     Runs them back to back in one console while a session that declares stocks limited
-    (`rest_basic_subscriptions`, a user setting) holds the key's rate governor, so every
-    session's stock requests keep to 5 a minute. The setting paces from the first request, so
-    this test never exercises Massive's refusal of a request past its limit and the pause
-    after it; `test_the_free_examples_fill_with_no_setting` does, when Massive limits stocks.
+    (`rest_requests_per_minute`, a user setting: the owner's stocks limit, else 5) holds the
+    key's rate governor, so every session's stock requests keep to it. The setting paces from
+    the first request, so this test never exercises Massive's refusal of a request past its
+    limit and the pause after it; `test_the_free_examples_fill_with_no_setting` does, when
+    Massive limits stocks.
 
     Asserts what `_run_free_examples` checks.
     """
     evidence("paced by the setting: Massive's refusal of a request past its limit is not exercised")
-    limited = live_config.rest_basic_subscriptions | {dm.Subscription.STOCKS}
-    pacer = dm.MassiveSession(dataclasses.replace(live_config, rest_basic_subscriptions=limited))
+    limited = {dm.Subscription.STOCKS: 5, **live_config.rest_requests_per_minute}
+    pacer = dm.MassiveSession(dataclasses.replace(live_config, rest_requests_per_minute=limited))
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():

@@ -974,19 +974,19 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     assert clock.waits == []
 
 
-def test_a_refusal_naming_the_per_minute_maximum_paces_the_bucket(
+def test_a_refusal_naming_the_per_minute_maximum_pauses_a_window_and_tells_the_hook(
     fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     heard: list[tuple[str, str, bool]] = []
 
-    def hook(bucket: str, error: WireError, *, basic: bool) -> None:
-        heard.append((bucket, error.message, basic))
+    def hook(bucket: str, error: WireError, *, per_minute: bool) -> None:
+        heard.append((bucket, error.message, per_minute))
 
     rest = RestClient(
         _KEY, base_url=fake_rest.url, max_concurrency=1, governor=_governor(clock), on_refused=hook
     )
-    basic = Reply({"message": "You've exceeded the maximum requests per minute."}, status=429)
-    fake_rest.reply("/v3/trades/AAPL", basic, _ok())
+    per_minute = Reply({"message": "You've exceeded the maximum requests per minute."}, status=429)
+    fake_rest.reply("/v3/trades/AAPL", per_minute, _ok())
     fake_rest.reply("/v3/trades/MSFT", Reply({"message": "busy"}, status=429), _ok())
     rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     rest.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="options")
@@ -1001,9 +1001,10 @@ def test_a_refusal_naming_the_per_minute_maximum_paces_the_bucket(
         ),
         ("options", "HTTP 429 from GET /v3/trades/MSFT on 127.0.0.1: busy", False),
     ]
-    # A paced bucket pauses a whole window; an unpaced one 15 s.
+    # A per-minute refusal pauses a whole window; any other 15 s. Massive answered nothing in
+    # the refused minute, so the retry's answer teaches no limit.
     assert clock.waits == [61.0, 15.0]
-    assert rest.governor.snapshot()[0].learned
+    assert rest.governor.snapshot()[0].learned is None
     rest.close()
 
 
@@ -1019,7 +1020,7 @@ def test_the_client_waits_for_its_bucket_s_slot(
     fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     rest = _client(fake_rest, governor=governor)
     fake_rest.reply("/v3/trades/AAPL", _ok())
     for _ in range(6):
@@ -1419,7 +1420,7 @@ class _Call:
 def _full(clock: FakeClock, fake_rest: FakeRestServer) -> RequestGovernor:
     """Return a governor whose Basic stocks bucket has spent its five slots."""
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     fake_rest.reply("/v3/trades/AAPL", _ok())
     rest = _client(fake_rest, governor=governor)
     for _ in range(5):
@@ -1611,7 +1612,7 @@ def test_a_hook_that_raises_still_pauses_the_bucket_and_reports_the_attempt(
 ) -> None:
     governor = _governor(clock)
 
-    def interrupted(bucket: str, error: WireError, *, basic: bool) -> None:
+    def interrupted(bucket: str, error: WireError, *, per_minute: bool) -> None:
         raise KeyboardInterrupt
 
     rest = RestClient(
@@ -1700,7 +1701,7 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     rest = _client(fake_rest, governor=governor)
 
     def unreachable(*_: object, **__: object) -> None:

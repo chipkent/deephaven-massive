@@ -13,7 +13,6 @@ from deephaven_massive._massive.rest import batch, client, response
 from deephaven_massive._massive.spec import types, values
 
 EXPECTED_INTERFACE = [
-    "BASIC_REQUESTS_PER_MINUTE",
     "BucketState",
     "Cancel",
     "CapturedReply",

@@ -155,9 +155,9 @@ Each of these has a source. Check it again before you write:
 - `deephaven server` prints a line starting `Deephaven is running at` and opens the Deephaven
   IDE in the browser, signed in (`deephaven_server/cli.py`). `-Xmx4g` is the example on
   Deephaven's install page; no source gives a minimum memory or a startup time.
-- The `MassiveConfig` settings a new user needs are `rest_basic_subscriptions` (free Basic
-  plans, five requests a minute) and `delayed_subscriptions` (Starter and Developer plans that
-  stream late).
+- The `MassiveConfig` settings a new user needs are `rest_requests_per_minute` (each
+  subscription's request limit, when Massive limits it) and `delayed_subscriptions` (Starter
+  and Developer plans that stream late).
 
 <a id="teaching-plan"></a>
 

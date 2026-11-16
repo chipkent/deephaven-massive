@@ -16,11 +16,11 @@ of three forms:
 - A single value: a word, a number, or a URL, such as `raise`, `600`, or
   `https://api.massive.com`. Write a word in lower case, exactly as
   [Values and defaults](#settings-table) shows it.
-- A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` and
-  `rest_basic_subscriptions` are the two lists.
+- A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` is the
+  only list.
 - A mapping, one `key: value` line per entry, indented under the setting's name.
-  `websocket_hosts` is the only mapping. Its keys are asset classes, and its values are
-  hostnames.
+  `websocket_hosts` maps asset classes to hostnames, and `rest_requests_per_minute` maps
+  subscriptions to whole numbers.
 
 This file uses all three forms:
 
@@ -77,9 +77,9 @@ too, `HTTPS_PROXY`, and so are your company's certificate authorities and the lo
 
 ## Settings
 
-Most files start with your plans: `delayed_subscriptions` and `rest_basic_subscriptions`
+Most files start with your plans: `delayed_subscriptions` and `rest_requests_per_minute`
 match the session to what you've bought. A file that leaves both out treats every
-subscription as bought on a real-time plan.
+subscription as real-time, with no request limit until Massive refuses a request.
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
 write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
@@ -125,8 +125,10 @@ This file sets every setting, and a line marked `# the default` can be left out.
 # Plans that stream 15 minutes late: Stocks Starter and Options Developer.
 delayed_subscriptions: [options, stocks]
 
-# Subscriptions on the free Basic plan, held to five requests a minute.
-rest_basic_subscriptions: [currencies, futures]
+# REST requests a minute Massive allows each subscription it limits.
+rest_requests_per_minute:
+  currencies: 5
+  futures: 5
 
 # Seconds a stream or poll() table rides out an outage before it fails; 0 fails at once.
 max_outage: 600
@@ -190,7 +192,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
 | `delayed_subscriptions` | Lists the subscriptions whose plan gets Massive's delayed data, as Stocks Starter and Developer do, so their streams and snapshots work. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
-| `rest_basic_subscriptions` | Lists the subscriptions on Massive's free Basic plan, so their requests keep to Basic's five a minute from the start. | A list of any of `stocks`, `options`, `indices`, `currencies`, or `futures`, such as `[options]`, or `[]` for none | `[]` |
+| `rest_requests_per_minute` | Sets how many REST requests a minute Massive allows each subscription, so its requests keep to that pace from the first one. | A mapping of any of `stocks`, `options`, `indices`, `currencies`, or `futures` to a positive whole number, such as `{options: 5}`, or `{}` for none | `{}` |
 | `max_outage` | Sets how many seconds a stream or `poll()` table may stay cut off from Massive before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
@@ -233,16 +235,16 @@ Leave a delayed subscription out, and a stream of its current data raises
 `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
 `history()` and other past data don't depend on this setting.
 
-#### rest_basic_subscriptions
+#### rest_requests_per_minute
 
-Each of the five subscriptions has a free Basic plan, and every subscription you
-haven't bought is on it: list each of those. Leave out each one you
-pay for, on any plan, Starter included: a listed subscription's requests are held to
-five a minute.
+List each subscription Massive limits, with its limit on your plan, such as 5 for
+`stocks`. Leave out a subscription Massive doesn't limit.
 
-A Basic subscription you leave out runs at full speed until Massive first refuses
-one of its requests for the rate limit. From then on, it keeps to five a minute. The
-limit is shared by every session in this server that uses your key.
+A limited subscription you leave out runs at full speed until Massive refuses one
+of its requests for the rate limit (HTTP 429, "exceeded the maximum requests per
+minute"). From then on, it keeps to the number of its requests Massive answered in
+the minute of that refusal, which the log gives; a number you list wins over it.
+The limit is shared by every session in this server that uses your key.
 `m.rate_limits()` shows each subscription's pace.
 
 #### max_outage

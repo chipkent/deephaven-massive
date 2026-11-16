@@ -43,7 +43,7 @@ on. A miss past the loaded sessions asks for a reload of its product, at most on
 `RELOAD_SPACING`, and the sessions are reloaded once a day as the dates move on.
 
 **Rate limits.** Every lookup is charged to the futures subscription's rate governor bucket,
-in a lane of its own, so on a Basic subscription it waits its turn with the session's other
+in a lane of its own, so on a paced subscription it waits its turn with the session's other
 futures reads. Each lookup listens to a cancellation token that follows the calendar's, which
 `close` sets: a lookup still waiting for the governor then stops at once.
 
@@ -128,7 +128,7 @@ class RowFetch(Protocol):
 RELOAD_SPACING: Final = timedelta(minutes=10)
 """The least time between two loads of one product's schedule, or two lookups of one
 contract: a miss asks for a reload, and a stream of misses must not spend the session's
-request budget (Basic keys allow 5 requests a minute)."""
+request budget (Massive may limit the subscription to a few requests a minute)."""
 
 _RELOAD_DAILY: Final = timedelta(days=1)
 """How old a product's loaded schedule may get before it is loaded again, so the sessions

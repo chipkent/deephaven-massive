@@ -629,25 +629,29 @@ each on its own plan. Two settings match a session to your plans:
 | Setting | Set it when | What changes |
 |---|---|---|
 | `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
-| `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
+| `rest_requests_per_minute` | Massive limits how many REST requests a minute a subscription may make | Its requests keep to the limit you give from the first one, shared by every session in this server that uses your key. Without the setting, the session runs at full speed until Massive's first rate-limit error, pauses a minute, and then keeps to the number of requests Massive answered in the minute of that error. |
 
-This session is for an account that has bought only Stocks Starter. Every product you haven't
-bought is on its free Basic plan:
+This session's stocks plan streams delayed data, and Massive limits each of its other
+subscriptions to five requests a minute:
 
 ```python
 import deephaven_massive as dm
 
 config = dm.MassiveConfig(
     delayed_subscriptions={dm.Subscription.STOCKS},
-    rest_basic_subscriptions={
-        dm.Subscription.OPTIONS,
-        dm.Subscription.INDICES,
-        dm.Subscription.CURRENCIES,
-        dm.Subscription.FUTURES,
+    rest_requests_per_minute={
+        dm.Subscription.OPTIONS: 5,
+        dm.Subscription.INDICES: 5,
+        dm.Subscription.CURRENCIES: 5,
+        dm.Subscription.FUTURES: 5,
     },
 )
 m = dm.MassiveSession(config)
 ```
+
+To find a subscription's limit, read it once without the setting. After Massive's first
+rate-limit error, the `RequestsPerMinute` column of `m.rate_limits()` shows the limit the session
+learned.
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
 [Example 7](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every

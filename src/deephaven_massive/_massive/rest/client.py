@@ -5,9 +5,9 @@ transport (urllib3, with TLS and proxy settings from `net.http`, and a cap on th
 size of a response body), bearer authentication, the retry schedule of `net.retry` for
 transient failures, and `next_url` paging. When each attempt may start is the
 `RequestGovernor`'s decision (`rest.governor`): the client takes a permit of the request's
-bucket (its Massive subscription) before every attempt and reports how it ended, so
-a Basic subscription is paced and a refused one pauses, together with every other client that
-shares the governor. Encoding lives in `rest.query`, decoding and error mapping in
+bucket (its Massive subscription) before every attempt and reports how it ended, so a
+subscription with a known limit is paced and a refused one pauses, together with every other
+client that shares the governor. Encoding lives in `rest.query`, decoding and error mapping in
 `rest.response`, and conversion to Arrow in `rest.batch`.
 
 **Thread-safety.** One client serves a whole session: the caller thread, every poller, and
@@ -79,7 +79,7 @@ from deephaven_massive._massive.net.retry import (
     transient_wait,
 )
 from deephaven_massive._massive.net.slots import ConnectionSlots
-from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
+from deephaven_massive._massive.rest.governor import UNLIMITED, is_rate_limit_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import (
     RequestTarget,
@@ -181,14 +181,14 @@ def _new_pool(proxy: str | None) -> urllib3.PoolManager:
 class RefusalHook(Protocol):
     """What a `RestClient` calls for every HTTP 429, before its governor pauses the bucket."""
 
-    def __call__(self, bucket: str, error: WireError, *, basic: bool) -> None:
+    def __call__(self, bucket: str, error: WireError, *, per_minute: bool) -> None:
         """Note a refusal; called on the requesting thread, it must not block or raise.
 
         Args:
             bucket: The refused request's bucket.
             error: The refusal: status 429, the path, the request id, and Massive's message.
-            basic: Whether the message named the per-minute maximum, the mark of a Basic
-                subscription (`rest.governor.is_basic_refusal`).
+            per_minute: Whether the message named the per-minute maximum, which says the
+                subscription has a limit per minute (`rest.governor.is_rate_limit_refusal`).
         """
 
 
@@ -244,10 +244,10 @@ class RestClient:
     that echoes it has it replaced with `***` before it is decoded (`net.redaction`), so no row,
     error, or log line can quote it. Requests go to the base URL's host only: a `next_url` that
     points elsewhere is refused. Every attempt first takes a permit of its subscription's bucket
-    from the `RequestGovernor` (which paces a Basic subscription and pauses one Massive
-    refused); transient failures are retried per `net.retry`, and failures are raised as
-    `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3 or JSON exception
-    escapes.
+    from the `RequestGovernor` (which paces a subscription at its declared or learned limit
+    and pauses one Massive refused); transient failures are retried per `net.retry`, and
+    failures are raised as `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3
+    or JSON exception escapes.
 
     Example:
         ::
@@ -979,10 +979,10 @@ class RestClient:
         attempt is then made again once the governor allows; the next permit fails instead,
         with status 429, if the call's patience cannot cover the pause.
         """
-        basic = is_basic_refusal(failure.message)
+        per_minute = is_rate_limit_refusal(failure.message)
         try:
             if self._on_refused is not None:
-                self._on_refused(permit.bucket, failure, basic=basic)
+                self._on_refused(permit.bucket, failure, per_minute=per_minute)
         finally:
             self._pause(permit, failure, response)
 

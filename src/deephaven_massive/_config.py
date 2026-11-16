@@ -25,9 +25,7 @@ a file spells them, and how they are documented.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
 evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
-so the library learns the tier from REST evidence instead), the REST rate of a Basic
-subscription (5 requests per minute, a wire constant; `rest_basic_subscriptions` only names the
-subscriptions on Basic), and the JSON codec. The wire
+so the library learns the tier from REST evidence instead), and the JSON codec. The wire
 package owns the codec: it uses `orjson` when the optional extra `deephaven-massive[orjson]` is
 installed and the standard library otherwise, and logs the choice once at INFO.
 """
@@ -79,7 +77,7 @@ __all__ = [
     "REALTIME_HOST",
     "SETTINGS_REFERENCE_END",
     "SETTINGS_REFERENCE_START",
-    "HostMap",
+    "FrozenMap",
     "MassiveConfig",
     "delayed_fix",
     "environment_text",
@@ -230,17 +228,18 @@ class MassiveConfig:
             `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
             `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
             `history()` and other past data don't depend on this setting.
-        rest_basic_subscriptions: Lists the subscriptions on Massive's free Basic plan, so their
-            requests keep to Basic's five a minute from the start. Defaults to an empty set.
+        rest_requests_per_minute: Sets how many REST requests a minute Massive allows each
+            subscription, so its requests keep to that pace from the first one. Defaults to an
+            empty mapping.
 
-            Each of the five subscriptions has a free Basic plan, and every subscription you
-            haven't bought is on it: list each of those. Leave out each one you
-            pay for, on any plan, Starter included: a listed subscription's requests are held to
-            five a minute.
+            List each subscription Massive limits, with its limit on your plan, such as 5 for
+            `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
 
-            A Basic subscription you leave out runs at full speed until Massive first refuses
-            one of its requests for the rate limit. From then on, it keeps to five a minute. The
-            limit is shared by every session in this server that uses your key.
+            A limited subscription you leave out runs at full speed until Massive refuses one
+            of its requests for the rate limit (HTTP 429, "exceeded the maximum requests per
+            minute"). From then on, it keeps to the number of its requests Massive answered in
+            the minute of that refusal, which the log gives; a number you list wins over it.
+            The limit is shared by every session in this server that uses your key.
             `m.rate_limits()` shows each subscription's pace.
         websocket_hosts: Streams an asset class from a WebSocket host you name instead of the one
             the library picks, such as `business.massive.com` for index values. Defaults to an empty
@@ -434,7 +433,7 @@ class MassiveConfig:
     max_outage: float = 300.0
     flat_file_symbol_threshold: int = 50
     max_concurrency: int = 8
-    rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
+    rest_requests_per_minute: Mapping[Subscription, int] = field(default_factory=dict)
     delayed_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
     rest_base_url: str = "https://api.massive.com"
@@ -447,15 +446,16 @@ class MassiveConfig:
     refused_venues: OnError = OnError.RAISE
 
     def __post_init__(self) -> None:
-        """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
+        """Validate every field; freeze the mappings and the subscription set into copies.
 
         A `noncanonical_symbols`, `unreadable_symbols`, `unavailable_symbols`,
         `malformed_rows`, or `refused_venues` that is not a `dm.OnError`, a
         `connection_taken` that is not a `dm.ConnectionTaken`, a `websocket_hosts` key that is
         not a `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
-        `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
-        `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
-        number that is not positive raises `ValueError`, though `max_outage` may be zero.
+        `delayed_subscriptions` that is not a set of `dm.Subscription`, a
+        `rest_requests_per_minute` that is not a mapping of `dm.Subscription` to `int`, or a
+        numeric field of a non-numeric type raises `TypeError`; a number that is not positive
+        raises `ValueError`, though `max_outage` may be zero.
 
         Raises:
             TypeError: If `api_key` is not a `str`.
@@ -530,8 +530,8 @@ class MassiveConfig:
         _check_url("s3_endpoint_url", self.s3_endpoint_url)
         _check_bucket(self.s3_bucket)
         object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))
-        basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
-        object.__setattr__(self, "rest_basic_subscriptions", basic)
+        limits = _validate_request_limits(self.rest_requests_per_minute)
+        object.__setattr__(self, "rest_requests_per_minute", limits)
         delayed = _validate_subscriptions(self.delayed_subscriptions, "delayed_subscriptions")
         _check_delayed_subscriptions(delayed, self.websocket_hosts)
         object.__setattr__(self, "delayed_subscriptions", delayed)
@@ -712,7 +712,7 @@ _CURRENCY_CLASSES: Final = frozenset(
 
 
 def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]:
-    """Validate a set of subscriptions (`rest_basic_subscriptions`, `delayed_subscriptions`).
+    """Validate a set of subscriptions (`delayed_subscriptions`).
 
     Args:
         value: The value passed for the field.
@@ -723,10 +723,8 @@ def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]
 
     Raises:
         TypeError: If `value` is not a set (a `set`, a `frozenset`, or another
-            `collections.abc.Set`), or holds anything but `dm.Subscription` members. Forex
-            or crypto (as text or as a `dm.AssetClass`) is refused with a message naming
-            `dm.Subscription.CURRENCIES`, the one subscription that covers both; any other
-            text names the matching member, as `_require_enum` does.
+            `collections.abc.Set`), or holds anything but `dm.Subscription` members, as
+            `_require_subscription` says.
     """
     if not isinstance(value, AbstractSet):
         raise TypeError(
@@ -734,17 +732,64 @@ def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]
             f"{{dm.Subscription.STOCKS}}, not {type(value).__name__}"
         )
     for item in value:
-        if (
-            isinstance(item, str)
-            and not isinstance(item, Subscription)
-            and item.casefold() in _CURRENCY_CLASSES
-        ):
-            raise TypeError(
-                f"{name} must hold dm.Subscription members; forex and crypto "
-                "are one subscription, dm.Subscription.CURRENCIES"
-            )
-        _require_enum(item, Subscription, f"each {name} member")
+        _require_subscription(item, name, f"each {name} member")
     return frozenset(value)
+
+
+def _require_subscription(item: object, name: str, what: str) -> Subscription:
+    """Return a member of a subscription setting after checking that it is a `dm.Subscription`.
+
+    Args:
+        item: The member as passed.
+        name: The setting's name, for messages.
+        what: How `_require_enum`'s message names the member, such as `"each ... member"`.
+
+    Returns:
+        `item`, narrowed to `Subscription`.
+
+    Raises:
+        TypeError: If `item` is not a `dm.Subscription`. Forex or crypto (as text or as a
+            `dm.AssetClass`) is refused with a message naming `dm.Subscription.CURRENCIES`,
+            the one subscription that covers both; any other text names the matching member,
+            as `_require_enum` does.
+    """
+    if (
+        isinstance(item, str)
+        and not isinstance(item, Subscription)
+        and item.casefold() in _CURRENCY_CLASSES
+    ):
+        raise TypeError(
+            f"{name} must hold dm.Subscription members; forex and crypto "
+            "are one subscription, dm.Subscription.CURRENCIES"
+        )
+    return _require_enum(item, Subscription, what)
+
+
+def _validate_request_limits(value: object) -> Mapping[Subscription, int]:
+    """Validate `rest_requests_per_minute` and return a read-only, hashable copy.
+
+    Args:
+        value: The value passed for the field.
+
+    Returns:
+        The requests per minute of each subscription.
+
+    Raises:
+        TypeError: If `value` is not a mapping, a key is not a `dm.Subscription` (as
+            `_require_subscription` says), or a limit is not an `int`.
+        ValueError: If a limit is below 1.
+    """
+    name = "rest_requests_per_minute"
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            f"{name} must be a mapping of dm.Subscription to requests per minute, such as "
+            f"{{dm.Subscription.STOCKS: 5}}, not {type(value).__name__}"
+        )
+    limits: dict[Subscription, int] = {}
+    for key, limit in value.items():
+        subscription = _require_subscription(key, name, f"each {name} key")
+        limits[subscription] = require_positive_int(f"{name}[{subscription.value}]", limit)
+    return FrozenMap(limits)
 
 
 DELAYED_PREFIX: Final = "delayed."
@@ -942,55 +987,59 @@ def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, st
                 f"'delayed.massive.com', got {without_userinfo(value)!r}"
             )
         hosts[asset_class] = value
-    return HostMap(hosts)
+    return FrozenMap(hosts)
 
 
-class HostMap(Mapping[AssetClass, str]):
-    """The read-only, hashable `websocket_hosts` mapping of a `MassiveConfig`.
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class FrozenMap(Mapping[_K, _V]):
+    """A read-only, hashable mapping field of a `MassiveConfig` (`websocket_hosts`, limits).
 
     `MassiveConfig` is a frozen dataclass compared and hashed by value, so its fields must be
     hashable; a dict or `MappingProxyType` is not. Equal mappings hash equally.
     """
 
-    __slots__ = ("_hosts",)
+    __slots__ = ("_items",)
 
-    def __init__(self, hosts: Mapping[AssetClass, str]) -> None:
-        """Copy the validated hosts.
-
-        Args:
-            hosts: Hostname per asset class.
-        """
-        self._hosts: Mapping[AssetClass, str] = dict(hosts)
-
-    @override
-    def __getitem__(self, key: AssetClass) -> str:
-        """Return the host pinned for an asset class.
+    def __init__(self, items: Mapping[_K, _V]) -> None:
+        """Copy the validated items.
 
         Args:
-            key: The asset class.
-
-        Returns:
-            The hostname.
+            items: The mapping's items.
         """
-        return self._hosts[key]
+        self._items: Mapping[_K, _V] = dict(items)
 
     @override
-    def __iter__(self) -> Iterator[AssetClass]:
-        """Iterate over the pinned asset classes.
+    def __getitem__(self, key: _K) -> _V:
+        """Return the value of a key.
+
+        Args:
+            key: The key.
 
         Returns:
-            An iterator of asset classes.
+            Its value.
         """
-        return iter(self._hosts)
+        return self._items[key]
+
+    @override
+    def __iter__(self) -> Iterator[_K]:
+        """Iterate over the keys.
+
+        Returns:
+            An iterator of the keys.
+        """
+        return iter(self._items)
 
     @override
     def __len__(self) -> int:
-        """Count the pinned asset classes.
+        """Count the keys.
 
         Returns:
-            How many hosts are pinned.
+            How many keys the mapping holds.
         """
-        return len(self._hosts)
+        return len(self._items)
 
     @override
     def __hash__(self) -> int:
@@ -999,7 +1048,7 @@ class HostMap(Mapping[AssetClass, str]):
         Returns:
             The hash of the frozen set of items.
         """
-        return hash(frozenset(self._hosts.items()))
+        return hash(frozenset(self._items.items()))
 
     @override
     def __repr__(self) -> str:
@@ -1008,7 +1057,7 @@ class HostMap(Mapping[AssetClass, str]):
         Returns:
             For example `{<AssetClass.STOCKS: 'stocks'>: 'delayed.massive.com'}`.
         """
-        return repr(dict(self._hosts))
+        return repr(dict(self._items))
 
 
 # --- The settings file -------------------------------------------------------------------------
@@ -1264,6 +1313,34 @@ def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
     return frozenset(found)
 
 
+def _request_limits(node: yaml.Node) -> dict[Subscription, int]:
+    """Convert `rest_requests_per_minute`: a mapping of subscription word to a whole number.
+
+    Args:
+        node: The value's node.
+
+    Returns:
+        The requests per minute of each subscription; the constructor checks each one.
+
+    Raises:
+        _SettingsFileError: If the node is not a mapping, a key is not a subscription's word or
+            appears twice, or a limit is not a whole number.
+    """
+    if not isinstance(node, yaml.MappingNode):
+        raise _SettingsFileError(
+            "must be a mapping of subscription to requests per minute, such as {stocks: 5}, "
+            "or {} for none",
+            node.start_mark,
+        )
+    limits: dict[Subscription, int] = {}
+    for key, value in node.value:
+        subscription = _word(key, Subscription, "a subscription")
+        if subscription in limits:
+            raise _SettingsFileError(f"limits {subscription.value!r} twice", key.start_mark)
+        limits[subscription] = _count(value)
+    return limits
+
+
 def _hosts(node: yaml.Node) -> dict[AssetClass, str]:
     """Convert `websocket_hosts`: a mapping of asset-class word to hostname.
 
@@ -1387,7 +1464,7 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "max_outage": _seconds,
     "flat_file_symbol_threshold": _count,
     "max_concurrency": _count,
-    "rest_basic_subscriptions": _subscriptions,
+    "rest_requests_per_minute": _request_limits,
     "delayed_subscriptions": _subscriptions,
     "flush_interval": _seconds,
     "rest_base_url": _text,
@@ -1571,9 +1648,9 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         frozenset({Subscription.STOCKS, Subscription.OPTIONS}),
         "Plans that stream 15 minutes late: Stocks Starter and Options Developer.",
     ),
-    "rest_basic_subscriptions": _Example(
-        frozenset({Subscription.CURRENCIES, Subscription.FUTURES}),
-        "Subscriptions on the free Basic plan, held to five requests a minute.",
+    "rest_requests_per_minute": _Example(
+        {Subscription.CURRENCIES: 5, Subscription.FUTURES: 5},
+        "REST requests a minute Massive allows each subscription it limits.",
     ),
     "max_outage": _Example(
         600.0,
@@ -1792,8 +1869,8 @@ def _value_forms() -> dict[str, str]:
     forms = {
         "delayed_subscriptions": f"A list of any of {_spellings(delayed)}, such as "
         "`[stocks]`, or `[]` for none",
-        "rest_basic_subscriptions": f"A list of any of {_spellings(Subscription)}, such as "
-        "`[options]`, or `[]` for none",
+        "rest_requests_per_minute": f"A mapping of any of {_spellings(Subscription)} to a "
+        "positive whole number, such as `{options: 5}`, or `{}` for none",
         "max_outage": "A number of seconds, `0` or more, such as `600`",
         "flush_interval": "A positive number of seconds, such as `0.1`",
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",

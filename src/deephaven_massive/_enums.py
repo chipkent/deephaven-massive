@@ -551,24 +551,23 @@ class Subscription(StrEnum):
     """One of Massive's five subscriptions, each with its own plan and REST request limit.
 
     Massive sells its data as five subscriptions, one per asset class, with forex and crypto sharing
-    `CURRENCIES`. Each has its own plan, such as Stocks Basic or Options Starter, and the plan sets
-    its REST request limit: five a minute on a free Basic plan, and no limit on a paid one. All the
-    API keys of your account share the limits.
+    `CURRENCIES`. Each has its own plan, and the plan sets how many REST requests a minute it
+    allows, if it limits them. All the API keys of your account share the limits.
 
-    List your Basic subscriptions in `MassiveConfig.rest_basic_subscriptions`, so their requests
-    keep to the limit from the first one; otherwise the library slows down after Massive's first
-    refusal. `m.rate_limits()` shows each subscription's state. Datasets Massive assigns to no
-    subscription, such as reference, economy, and partner data, share a limit of their own, `other`,
-    which the library learns from Massive's refusals.
+    Give each limited subscription's limit in `MassiveConfig.rest_requests_per_minute`, so its
+    requests keep to it from the first one; otherwise the library slows down after Massive's
+    first refusal. `m.rate_limits()` shows each subscription's state. Datasets Massive assigns to
+    no subscription, such as reference, economy, and partner data, share a limit of their own,
+    `other`, which the library learns from Massive's refusals.
 
     Example:
         ::
 
             import deephaven_massive as dm
 
-            # Paid stocks; free options and currencies (forex and crypto).
+            # Options and currencies (forex and crypto) limited to 5 requests a minute.
             config = dm.MassiveConfig(
-                rest_basic_subscriptions={dm.Subscription.OPTIONS, dm.Subscription.CURRENCIES}
+                rest_requests_per_minute={dm.Subscription.OPTIONS: 5, dm.Subscription.CURRENCIES: 5}
             )
     """
 

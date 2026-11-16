@@ -188,7 +188,7 @@ def test_a_spent_minute_its_refusal_and_when_it_frees(
     if not refused:
         pytest.skip(
             f"Massive answered {_LIMIT + 2} requests of {name} in a minute though "
-            "rest_basic_subscriptions lists it"
+            "rest_requests_per_minute lists it"
         )
     unassigned_statuses: list[int] = []
     for number in range(1, 2 * _LIMIT + 1):
@@ -231,7 +231,7 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     as Massive's knowledge base says reference endpoints are counted on their own. One
     sequence after a single pause of 61 s, so earlier requests have left Massive's window,
     on the first subscription the owner's settings file says Massive limits
-    (`rest_basic_subscriptions`) whose tickers a market lists (indices, else currencies, else
+    (`rest_requests_per_minute`) whose tickers a market lists (indices, else currencies, else
     stocks: `classes.TICKER_MARKETS`); it skips when the file lists none of them:
 
     1. Sends the class's own request five times, which spends its minute; Massive answers each.
@@ -252,10 +252,10 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     to the class rather than to `other`.
     """
     names = list(classes.TICKER_MARKETS)
-    listed = [n for n in names if dm.Subscription(n) in live_config.rest_basic_subscriptions]
+    listed = [n for n in names if dm.Subscription(n) in live_config.rest_requests_per_minute]
     if not listed:
         pytest.skip(
-            "list indices, currencies, or stocks in rest_basic_subscriptions of your settings "
+            "list indices, currencies, or stocks in rest_requests_per_minute of your settings "
             "file if Massive limits it; this test spends its minute"
         )
     name, request = listed[0], by_class[listed[0]]
@@ -290,7 +290,7 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     if status != 429:
         pytest.skip(
             f"Massive answered 6 requests of {name} in a minute though "
-            "rest_basic_subscriptions lists it"
+            "rest_requests_per_minute lists it"
         )
     assert not charged, f"Massive charged the lookups of markets {charged} to {name}"
 

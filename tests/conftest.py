@@ -1873,7 +1873,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
     lease = _live_governors().lease(
         api_key=config.api_key,
         base_url=config.rest_base_url,
-        basic=config.rest_basic_subscriptions,
+        limits=config.rest_requests_per_minute,
         label="live test progress",
         listener=_ignore,
     )
@@ -2113,7 +2113,7 @@ def limited_subscription(live_config: MassiveConfig) -> Subscription:
     """Return the subscription the rate-limit tests spend: one the owner says Massive limits.
 
     The owner's settings file names the subscriptions Massive limits to a few requests a
-    minute (`rest_basic_subscriptions`); the first of them in `_LIMITED_ORDER` is returned.
+    minute (`rest_requests_per_minute`); the first of them in `_LIMITED_ORDER` is returned.
     Nothing is asked of Massive to choose it.
 
     Args:
@@ -2122,12 +2122,12 @@ def limited_subscription(live_config: MassiveConfig) -> Subscription:
     Returns:
         The subscription; the test is skipped when the settings list none.
     """
-    listed = live_config.rest_basic_subscriptions
+    listed = live_config.rest_requests_per_minute
     for name in _LIMITED_ORDER:
         if dm.Subscription(name) in listed:
             return dm.Subscription(name)
     pytest.skip(
-        "list the subscription Massive limits in rest_basic_subscriptions of your settings "
+        "list the subscription Massive limits in rest_requests_per_minute of your settings "
         f"file ({CONFIG_FILE_VARIABLE}); these tests spend its minute"
     )
 
@@ -2552,8 +2552,8 @@ def live_config(pytestconfig: pytest.Config) -> MassiveConfig:
     The key is `MASSIVE_API_KEY`, and the S3 credentials come from their variables when set.
     When `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the owner's settings file, its
     `delayed_subscriptions` (the subscriptions Massive serves this key delayed, so their
-    streams use the delayed feed), `rest_basic_subscriptions` (the subscriptions Massive limits
-    to a few requests a minute, paced from the first request), and `websocket_hosts` are
+    streams use the delayed feed), `rest_requests_per_minute` (the limit of each subscription
+    Massive limits, paced from the first request), and `websocket_hosts` are
     passed through, as the owner's own sessions would read them; every other setting keeps its
     default, so a test's assertions about defaults hold. Without the file, nothing is listed.
 
@@ -2572,7 +2572,7 @@ def live_config(pytestconfig: pytest.Config) -> MassiveConfig:
     configured: MassiveConfig = dm.MassiveConfig(
         api_key=api_key,
         delayed_subscriptions=settings.delayed_subscriptions,
-        rest_basic_subscriptions=settings.rest_basic_subscriptions,
+        rest_requests_per_minute=settings.rest_requests_per_minute,
         websocket_hosts=settings.websocket_hosts,
     )
     return configured
@@ -2630,7 +2630,7 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
     lease = _live_governors().lease(
         api_key=live_config.api_key,
         base_url=live_config.rest_base_url,
-        basic=live_config.rest_basic_subscriptions,
+        limits=live_config.rest_requests_per_minute,
         label="live tests",
         listener=_ignore,
     )

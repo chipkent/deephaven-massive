@@ -815,7 +815,7 @@ class Poller:
         """Log the start and the end of a run of cycles that end after their interval.
 
         A late cycle leaves the table behind the interval the user asked for: its requests are
-        paced at a Basic subscription's limit, or held by a rate-limit pause. The first late
+        paced at a subscription's limit, or held by a rate-limit pause. The first late
         cycle of a run logs one WARNING, and the first cycle in time again logs at INFO.
 
         Args:

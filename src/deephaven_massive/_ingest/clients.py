@@ -70,7 +70,7 @@ class SessionClients:
 
         No client is created yet. The lease comes from the process's registry
         (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
-        declaring its `rest_basic_subscriptions`; its release is registered as a session
+        declaring its `rest_requests_per_minute`; its release is registered as a session
         closer. The governor's listener and the source of the `m.rate_limits()` rows are the
         core's diagnostics, which hold no reference to the core.
 
@@ -85,7 +85,7 @@ class SessionClients:
         self._lease = rate_limits.GOVERNORS.lease(
             api_key=config.api_key,
             base_url=config.rest_base_url,
-            basic=config.rest_basic_subscriptions,
+            limits=config.rest_requests_per_minute,
             label=core.label,
             listener=diagnostics.rate_limits_changed,
         )
@@ -143,7 +143,7 @@ class SessionClients:
             state = self._rest
         if state is None:
             config = core.config
-            warnings = rate_limits.RateLimitNotices(core.label, config.rest_basic_subscriptions)
+            warnings = rate_limits.RateLimitNotices(core.label, config.rest_requests_per_minute)
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,

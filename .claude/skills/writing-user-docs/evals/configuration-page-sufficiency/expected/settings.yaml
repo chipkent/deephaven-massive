@@ -4,11 +4,11 @@
 # needs no setting: a proxy is the HTTPS_PROXY environment variable.
 1:
   delayed_subscriptions: [stocks]
-  rest_basic_subscriptions: [indices, currencies, futures]
+  rest_requests_per_minute: {indices: 5, currencies: 5, futures: 5}
 2:
   noncanonical_symbols: raise
 3:
-  rest_basic_subscriptions: [options, currencies, futures]
+  rest_requests_per_minute: {options: 5, currencies: 5, futures: 5}
   websocket_hosts:
     indices: business.massive.com
 4: {}
@@ -22,4 +22,4 @@
   max_concurrency: 16
 9:
   delayed_subscriptions: [futures]
-  rest_basic_subscriptions: [stocks, options, indices]
+  rest_requests_per_minute: {stocks: 5, options: 5, indices: 5}
