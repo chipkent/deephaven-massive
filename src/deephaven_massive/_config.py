@@ -222,7 +222,8 @@ class MassiveConfig:
             label. Defaults to an empty set.
 
             Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
-            minutes late, or 10 for futures. Never list
+            minutes late, or 10 for futures. Fair market value (FMV) streams always use
+            `business.massive.com`, the one host Massive documents for them. Never list
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
