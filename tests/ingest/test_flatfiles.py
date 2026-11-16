@@ -4351,3 +4351,28 @@ def test_a_price_a_double_would_round_withholds_its_row(
     assert [(e.cause, e.field, e.rows) for e in events] == [
         (RowFault.UNCONVERTIBLE_VALUES, "Price", 1)
     ]
+
+
+def test_an_ignored_unconvertible_value_withholds_its_row_with_no_warning(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
+    events = capture_problems(session, monkeypatch)
+    quiet = dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL, on_error=quiet)
+    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
+    assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "2", "4"]
+    # The header's drift still warns once; the withheld count does not.
+    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
+        unconvertible_header("size", "lots")
+    ]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "Size", 1)
+    ]
