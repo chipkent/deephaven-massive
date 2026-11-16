@@ -2,8 +2,7 @@
 
 Every `dm.MassiveConfig` setting is here: what it does, the values it takes, its default, and
 when to change it. Keep your choices in a settings file, and every console and script loads the
-same ones. [Every setting in one file](#example-settings-file) shows each setting in place;
-change its plan lists to match your own plans.
+same ones. [Every setting in one file](#example-settings-file) shows each setting in place.
 
 <a id="write-a-settings-file"></a>
 
@@ -19,9 +18,9 @@ of three forms:
 - A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` is the
   only list.
 - A mapping, one `key: value` line per entry, indented under the setting's name. A short
-  mapping also fits in braces on one line, such as `{stocks: 5}`; `{}` is an empty one.
-  `websocket_hosts` maps asset classes to hostnames, and `rest_requests_per_minute` maps
-  subscriptions to whole numbers.
+  mapping also fits in braces on one line, such as `{stocks: 5}`, or `{}` for none. The
+  mappings are `websocket_hosts` (asset class to hostname), `rest_requests_per_minute`
+  (subscription to requests a minute), and `on_error` (cause to `raise`, `log`, or `ignore`).
 
 This file uses all three forms:
 
@@ -79,8 +78,8 @@ too, `HTTPS_PROXY`, and so are your company's certificate authorities and the lo
 ## Settings
 
 Most files start with your plans: `delayed_subscriptions` and `rest_requests_per_minute`
-match the session to what you've bought. A file that leaves both out treats every
-subscription as real-time. Its requests go at full speed until Massive refuses one.
+match the session to what you've bought. A file without `delayed_subscriptions` treats every
+subscription as real-time.
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
 write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
@@ -126,7 +125,7 @@ sets every cause at once.
 
 ### Every setting in one file
 
-This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account with Stocks Starter, Options Developer, and Indices Business, and Currencies and Futures limited to five requests a minute:
+This file sets every setting, and a line marked `# the default` can be left out. Change the other values to match your account:
 
 ```yaml
 # Plans that stream 15 minutes late: Stocks Starter and Options Developer.
@@ -244,6 +243,8 @@ Leave a delayed subscription out, and a stream of its current data raises
 
 List each subscription Massive limits, with its limit in requests a minute, such as
 5 for `stocks`. Leave out a subscription Massive doesn't limit.
+Massive's article on its request limits gives each limit:
+https://massive.com/knowledge-base/article/what-is-the-request-limit-for-massives-restful-apis.
 
 Leave a limited subscription out, and the session learns its limit from Massive's
 first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session

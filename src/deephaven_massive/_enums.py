@@ -544,11 +544,11 @@ class ConnectionTaken(StrEnum):
 
 
 class Subscription(StrEnum):
-    """One of Massive's five subscriptions, each with its own plan and REST request limit.
+    """One of Massive's five subscriptions, each with its own plan.
 
-    Massive sells its data as five subscriptions, one per asset class, with forex and crypto sharing
-    `CURRENCIES`. Each has its own plan. A plan may limit how many REST requests a minute the
-    subscription makes. All the API keys of your account share the limits.
+    Massive sells its data as five subscriptions, one per asset class, with forex and crypto
+    sharing `CURRENCIES`. A subscription's plan may limit how many REST requests a minute it
+    makes. All the API keys of your account share the limits.
 
     Give each limited subscription's limit in `MassiveConfig.rest_requests_per_minute`, so its
     requests keep to it from the first one. Without it, the library slows down after Massive's

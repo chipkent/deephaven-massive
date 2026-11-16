@@ -234,6 +234,8 @@ class MassiveConfig:
 
             List each subscription Massive limits, with its limit in requests a minute, such as
             5 for `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
+            Massive's article on its request limits gives each limit:
+            https://massive.com/knowledge-base/article/what-is-the-request-limit-for-massives-restful-apis.
 
             Leave a limited subscription out, and the session learns its limit from Massive's
             first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session
@@ -1577,9 +1579,8 @@ class _Example(NamedTuple):
 
 
 _EXAMPLE_ACCOUNT: Final = (
-    "This file sets every setting, and a line marked `# the default` can be left out. Its "
-    "other values suit an account with Stocks Starter, Options Developer, and Indices Business, "
-    "and Currencies and Futures limited to five requests a minute:"
+    "This file sets every setting, and a line marked `# the default` can be left out. Change "
+    "the other values to match your account:"
 )
 """The sentence before the example settings file: the account its values agree with."""
 
