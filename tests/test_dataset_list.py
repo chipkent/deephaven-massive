@@ -101,7 +101,10 @@ def test_every_dataset_has_its_call() -> None:
             "The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.",
             "Units per bar.",
             "Adjusts volume as well as prices.",
-            "What a bad symbol or row does in this call (`dm.ErrorPolicy`).",
+            (
+                "What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the "
+                "default, takes each cause from the session's `MassiveConfig.on_error`."
+            ),
         ),
         # Each verb's call, with its positional arguments, and its docstring's summary.
         methods=calls["stocks.bars"].methods,

@@ -79,6 +79,10 @@ PAID_SECTIONS: Final = (
 
 UNRUN_SECTIONS: Final = {
     "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
+    "bad-symbols-and-rows": (
+        "it sets error policies, which tests/test_docs.py checks; its one read is Example 1's "
+        "daily bars"
+    ),
 }
 """The README sections with Python blocks that the live run of the examples leaves out, and why."""
 

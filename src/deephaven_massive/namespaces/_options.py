@@ -465,7 +465,8 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -504,7 +505,8 @@ class OptionsNamespace(Namespace):
         Args:
             symbols: Option contracts. `dm.ALL` is refused; use `chain(underlying)` for every
                 contract of an underlying.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -544,7 +546,8 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -591,7 +594,8 @@ class OptionsNamespace(Namespace):
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts for splits of the underlying.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -643,7 +647,8 @@ class OptionsNamespace(Namespace):
                 `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the
                 flat files.
             adjusted: Adjusts for splits of the underlying.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -686,7 +691,8 @@ class OptionsNamespace(Namespace):
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -721,7 +727,8 @@ class OptionsNamespace(Namespace):
         query has no `last_by()`. There is no history.
 
         Args:
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -775,7 +782,8 @@ class OptionsNamespace(Namespace):
             limit: The most rows to return, in total. A table of underlyings caps every underlying's
                 requests instead.
             filters: Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -848,7 +856,8 @@ class OptionsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"ticker_gte": "O:AAPL"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -933,7 +942,8 @@ class OptionsNamespace(Namespace):
             limit: The most rows in total without `symbols`. With them, it counts per contract, so
                 it has no effect.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1017,7 +1027,8 @@ class OptionsNamespace(Namespace):
                 flat files.
             date: The trading day, as a date; a `datetime` raises.
             adjusted: Adjusts for splits of the underlying.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

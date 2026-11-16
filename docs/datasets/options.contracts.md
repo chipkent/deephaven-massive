@@ -31,7 +31,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows in total without `symbols`. With them, it counts per contract, so it has no effect. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"strike_price_gte": 100}`. Keys: `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

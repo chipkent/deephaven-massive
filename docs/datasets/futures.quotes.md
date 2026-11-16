@@ -23,7 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL` for every contract. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. Left out, it reads every exchange your plan allows. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

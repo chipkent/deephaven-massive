@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`timespan`](README.md#timespan) | The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`adjusted`](README.md#adjusted) | Adjusts volume as well as prices. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

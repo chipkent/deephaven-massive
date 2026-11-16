@@ -28,7 +28,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"parent_name": "Amazon Inc"}`. Keys: `channel`, `channel_any_of`, `consumer_type`, `consumer_type_any_of`, `name`, `name_any_of`, `name_gt`, `name_gte`, `name_lt`, `name_lte`, `parent_name`, `parent_name_any_of`, `parent_name_gt`, `parent_name_gte`, `parent_name_lt`, `parent_name_lte`, `user_country`, `user_country_any_of`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

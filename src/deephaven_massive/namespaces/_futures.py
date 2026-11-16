@@ -339,7 +339,8 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -388,7 +389,8 @@ class FuturesNamespace(Namespace):
                 contract.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -447,7 +449,8 @@ class FuturesNamespace(Namespace):
             multiplier: Units per bar.
             venues: The exchanges whose flat files `history()` reads. Left out, it reads
                 every exchange your plan allows.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -514,7 +517,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead, and a table of product codes caps every code's requests.
             filters: Further endpoint parameters, such as `{"ticker_gte": "ES"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -584,7 +588,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead, and a table of product codes caps every code's requests.
             filters: Further endpoint parameters, such as `{"active": True}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -660,7 +665,8 @@ class FuturesNamespace(Namespace):
             limit: The most rows to return, in total. A table of product codes caps every code's
                 requests instead.
             filters: Further endpoint parameters, such as `{"sector": "precious"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -711,7 +717,8 @@ class FuturesNamespace(Namespace):
 
         Args:
             limit: The most rows to return, in total.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -754,7 +761,8 @@ class FuturesNamespace(Namespace):
                 table of them in a `ProductCode` column works too. Leave it out for every product.
             limit: The most rows to return, in total. A table of product codes caps every code's
                 requests instead.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -817,7 +825,8 @@ class FuturesNamespace(Namespace):
                 requests instead.
             filters: Further endpoint parameters, such as `{"trading_venue": "XCME"}`. Don't pass
                 `session_end_date`, which `start` and `end` set.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

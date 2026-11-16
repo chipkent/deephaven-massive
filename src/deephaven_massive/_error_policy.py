@@ -45,14 +45,17 @@ class ErrorPolicy:
 
     A row of Massive's data the library can't read whole is never published, whatever the
     setting: its cause's setting decides only whether the table fails and how loudly the log
-    reports it. When a REST page or a flat file holds rows of your symbols inside your call's
-    window and the library can read none of them whole, the call fails whatever the setting,
-    even after other pages or files were read, since Massive's format has most likely changed.
-    Rows outside the window count neither way.
+    reports it. When the library can read none of the rows of your symbols inside your call's
+    window whole, across all the pages or files the call read, the call fails whatever the
+    setting, since Massive's format has most likely changed. Rows outside the window count
+    neither way. A live stream judges runs of rows instead, and a few reads are still judged in
+    parts: https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error
+    lists each.
 
     Set a session's policy with `dm.MassiveConfig(on_error=...)`. Set one call's policy with any
     dataset method's `on_error=` argument. Each cause takes the first setting it finds: the
-    call's, then the session's, then `ErrorPolicy.DEFAULTS`. By default every cause logs,
+    call's, then the session's, then `ErrorPolicy.DEFAULTS`. A call that leaves `on_error` out,
+    or passes None, sets no cause, so the session decides. By default every cause logs,
     except `refused_venues`, which raises. A live call whose policy changes any cause's
     setting gets its own stream in `m.streams()`.
 

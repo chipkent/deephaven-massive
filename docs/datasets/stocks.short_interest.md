@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. Keys: `avg_daily_volume`, `avg_daily_volume_any_of`, `avg_daily_volume_gt`, `avg_daily_volume_gte`, `avg_daily_volume_lt`, `avg_daily_volume_lte`, `days_to_cover`, `days_to_cover_any_of`, `days_to_cover_gt`, `days_to_cover_gte`, `days_to_cover_lt`, `days_to_cover_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

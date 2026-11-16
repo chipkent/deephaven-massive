@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"rating_action": "upgrades"}`. Keys: `benzinga_analyst_id`, `benzinga_analyst_id_any_of`, `benzinga_analyst_id_gt`, `benzinga_analyst_id_gte`, `benzinga_analyst_id_lt`, `benzinga_analyst_id_lte`, `benzinga_firm_id`, `benzinga_firm_id_any_of`, `benzinga_firm_id_gt`, `benzinga_firm_id_gte`, `benzinga_firm_id_lt`, `benzinga_firm_id_lte`, `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte`, `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`, `importance`, `importance_gt`, `importance_gte`, `importance_lt`, `importance_lte`, `last_updated`, `last_updated_gt`, `last_updated_gte`, `last_updated_lt`, `last_updated_lte`, `price_target_action`, `price_target_action_any_of`, `price_target_action_gt`, `price_target_action_gte`, `price_target_action_lt`, `price_target_action_lte`, `rating_action`, `rating_action_any_of`, `rating_action_gt`, `rating_action_gte`, `rating_action_lt`, `rating_action_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

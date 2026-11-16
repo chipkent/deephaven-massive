@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of the rows. Here it works without `sort` too. |
 | [`limit`](README.md#limit) | The most rows: in total for `symbols=None`, per ticker when tickers are named. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ipo_status": "pending"}`. Keys: `ipo_status`, `isin`, `us_code`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of product codes caps every code's requests instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"trading_venue": "XCME"}`. Don't pass `session_end_date`, which `start` and `end` set. Keys: `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

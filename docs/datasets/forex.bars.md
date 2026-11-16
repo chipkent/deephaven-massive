@@ -24,7 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`symbols`](README.md#symbols) | Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair. `history()` takes `dm.ALL` for one-minute and one-day bars. |
 | [`timespan`](README.md#timespan) | The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

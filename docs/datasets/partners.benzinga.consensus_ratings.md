@@ -24,7 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | US stock tickers. `dm.ALL` is refused; pass a list of tickers. |
 | [`filters`](README.md#filters) | The range of the ratings to count, such as `{"date_gte": "2026-01-01"}`; leave it out to count every rating. Keys: `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
