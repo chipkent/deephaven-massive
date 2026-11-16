@@ -458,3 +458,18 @@ def test_a_wrapped_question_s_second_line_is_not_its_answer(check: ModuleType) -
         "  > the documented examples?\n"
     )
     assert len(check.find_problems(body, [], "")) == 1
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "  > Should this guard stay as it is?  \n  > Yes.\n",
+        "  > Should this guard remain? Please explain.\n  >\n  > Yes, keep it.\n",
+    ],
+    ids=["trailing spaces after the question", "a blank line between question and answer"],
+)
+def test_a_question_and_its_answer_on_their_own_lines_stay_apart(
+    check: ModuleType, quote: str
+) -> None:
+    body = f"- The owner approved on 2026-11-15:\n{quote}"
+    assert check.find_problems(body, [], "") == []

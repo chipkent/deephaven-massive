@@ -83,9 +83,10 @@ DATE: Final = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 #: Paired quotation marks, straight or curly, and a blockquote line: each a quotation.
 QUOTATIONS: Final = re.compile(r'"([^"]*)"|“([^”]*)”|^\s*>\s*(\S.*)$', re.MULTILINE)
 #: A blockquote line that does not end a question, and the next blockquote line that goes on with
-#: it: Markdown wraps one paragraph across lines, so the two are one quotation.
+#: it: Markdown wraps one paragraph across lines, so the two are one quotation. A blank `>`
+#: line ends the paragraph, and trailing spaces after a `?` still end the question.
 WRAPPED_BLOCKQUOTE: Final = re.compile(
-    r"^(\s*>\s*\S[^\n]*?)(?<!\?)[ \t]*\n\s*>\s*(?=\S)", re.MULTILINE
+    r"^([ \t]*>[ \t]*[^\n]*[^?\s])[ \t]*\n[ \t]*>[ \t]*(?=\S)", re.MULTILINE
 )
 #: A question of fifteen characters or more, so a stray "?" in a short quotation is not one.
 QUESTION_LENGTH: Final = 15
