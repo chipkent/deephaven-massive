@@ -57,6 +57,9 @@ MAX_FAILURES: Final = 2
 MAX_CONDITION_SKIPS: Final = 3
 """Attempts a check skipped for a condition gets before the skip is final."""
 
+STATUSES: Final = frozenset({"passed", "failed", "error", "refused", "skipped", "interrupted"})
+"""The results a runner reports for a check (`record`)."""
+
 ROW_RULES: Final = 1
 """The version of the rule that a stream check passes only when rows reached its table. Before
 it, a stream passed on Massive's acknowledgement alone, which Massive sends with the market
@@ -343,7 +346,13 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
             it was, still due).
         reason: The reason; `""` for a pass.
         day: The New York date of the run, ISO.
+
+    Raises:
+        ValueError: When the status is none of `STATUSES`; the check is left as it was.
     """
+    if status not in STATUSES:
+        msg = f"{check.name}: unknown status {status!r}; expected one of {sorted(STATUSES)}"
+        raise ValueError(msg)
     if status == "interrupted":
         return
     check.last_run, check.rerun = day, False
@@ -362,7 +371,7 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
         check.passed_rules = ROW_RULES
     elif status in {"failed", "error"}:
         check.failures += 1
-    else:  # a skip for a condition of the moment
+    else:  # "skipped", the one status left, for a condition of the moment
         check.condition_skips += 1
 
 

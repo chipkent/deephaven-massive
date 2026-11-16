@@ -6,9 +6,11 @@ wire errors name the status, the request, and Massive's text) and its status. A 
 request reaching beyond the history the key keeps (`is_timeframe_refusal`) also names the
 earliest day the request asked for (`refused_request`), so a reader can judge it. The library's
 own refusal of a stream Massive serves only in real time, on a key whose data Massive labels
-delayed, carries no status (`is_real_time_only_refusal`).
+delayed, carries no status (`is_real_time_only_refusal`), so it is not Massive's refusal
+(`is_massive_refusal`).
 
-`tests/conftest.py` calls these from its hook and fixtures. Every function here is pure.
+`tests/conftest.py` calls these from its hook and fixtures, and the live run's and tester's
+example runners from their verdicts. Every function here is pure.
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ import urllib.parse
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive import EntitlementError
+from deephaven_massive import EntitlementError, ErrorSource
+from deephaven_massive._massive import WireEntitlementError
 from tests._live.classes import class_of_path
 
 if TYPE_CHECKING:
@@ -55,6 +58,27 @@ def is_timeframe_refusal(error: BaseException) -> bool:
         True for a refusal of the request's timeframe.
     """
     return TIMEFRAME_PHRASE in str(error).lower().replace("\u2019", "'")
+
+
+def is_massive_refusal(error: BaseException) -> bool:
+    """Return whether an error is Massive's refusal of a request, not one the library made.
+
+    Args:
+        error: The error.
+
+    Returns:
+        True for the wire's `WireEntitlementError` (an HTTP 403, a `NOT_AUTHORIZED` envelope,
+        an S3 403), or an `EntitlementError` whose `source` is `ErrorSource.MASSIVE` and that
+        carries Massive's `status`; False for any other error, the library's own refusals
+        included, such as a real-time-only stream's, which carries no status.
+    """
+    if isinstance(error, WireEntitlementError):
+        return True
+    return (
+        isinstance(error, EntitlementError)
+        and error.source is ErrorSource.MASSIVE
+        and error.status is not None
+    )
 
 
 def is_real_time_only_refusal(error: BaseException) -> bool:

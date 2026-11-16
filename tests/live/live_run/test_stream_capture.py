@@ -1012,3 +1012,24 @@ def test_a_stream_refused_as_it_opened_counts_once() -> None:
     )
     assert refused == [f"crypto-bars: {error}", "HTTP 403 not entitled to forex.quotes"]
     assert broken == []
+
+
+def test_each_refusal_at_opening_absorbs_one_failed_row() -> None:
+    """Two streams refused alike, one as it opened and one later, are two refusals."""
+    error = "HTTP 403 NOT_AUTHORIZED: not entitled to crypto.bars"
+    refused, broken = stream_capture.split_failures([error, error], [f"first-stream: {error}"])
+    assert refused == [f"first-stream: {error}", error]
+    assert broken == []
+
+
+def test_a_stream_the_settings_refused_later_is_not_listed_not_broken() -> None:
+    """The settings' refusal of delayed data can fail a stream after it opened."""
+    error = (
+        "stocks streams would be delayed (Massive reports timeframe=DELAYED), and "
+        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+    )
+    opened = f"{NOT_LISTED}stocks-trades: {error}"
+    refused, broken = stream_capture.split_failures([error, error], [opened])
+    assert refused == [opened, f"{NOT_LISTED}{error}"]
+    assert broken == []
+    assert stream_capture.unopened_verdict(refused) == ("skipped", opened)

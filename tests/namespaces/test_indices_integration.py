@@ -148,12 +148,13 @@ def test_index_ticker_spelling_on_every_index_endpoint(
     Records the ticker keys of the body and of the first row, then the library's `Symbol` for
     the same datasets, 5 more. Each request or call Massive refuses is recorded with Massive's
     refusal and the rest still run; the test skips, quoting the first refusal, when Massive
-    answered no raw request. Passes when every row the library returns carries the index with
-    its `I:` prefix in `Symbol`, whichever spelling the endpoint sent; the raw lines show
-    which endpoints drop the prefix.
+    answered no raw request and refused at least one, and no other raw request failed. Passes
+    when every row the library returns carries the index with its `I:` prefix in `Symbol`,
+    whichever spelling the endpoint sent; the raw lines show which endpoints drop the prefix.
     """
     answered = 0
     refused: list[str] = []
+    failed: list[str] = []
     for path, path_params, query in _raw_requests(_INDEX, recent_monday):
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
@@ -162,7 +163,8 @@ def test_index_ticker_spelling_on_every_index_endpoint(
             evidence(f"{path}: not entitled: {refused[-1]}")
             continue
         except WireError as error:
-            evidence(f"{path}: {type(error).__name__}: {error}")
+            failed.append(f"{path}: {type(error).__name__}: {error}")
+            evidence(failed[-1])
             continue
         answered += 1
         body = page.body if isinstance(page.body, dict) else {}
@@ -200,9 +202,9 @@ def test_index_ticker_spelling_on_every_index_endpoint(
             evidence(f"library {name}: not entitled: {refusals.refusal_line(error)}")
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
-    if not answered and refused:
+    if not answered and refused and not failed:
         pytest.skip(f"refused: every raw request; the first: {refused[0]}")
-    assert answered
+    assert answered, f"no raw request was answered; failed: {failed}"
     assert not misspelled, f"library rows without {_INDEX} in Symbol: {misspelled}"
 
 

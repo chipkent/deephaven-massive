@@ -85,3 +85,20 @@ def test_the_librarys_refusal_of_a_real_time_only_stream_is_matched() -> None:
     massive = EntitlementError(str(raised.value), status=403)
     assert not refusals.is_real_time_only_refusal(massive)
     assert not refusals.is_real_time_only_refusal(ValueError(str(raised.value)))
+
+
+@pytest.mark.parametrize(
+    ("error", "massive"),
+    [
+        (WireEntitlementError("AccessDenied on us_stocks_sip/x.csv.gz", status=403), True),
+        (EntitlementError("HTTP 403: not entitled", status=403), True),
+        (EntitlementError("streams only in real time"), False),
+        (EntitlementError("not entitled", status=403, source=ErrorSource.LIBRARY), False),
+        (EntitlementError("delayed", status=403, source=ErrorSource.USER), False),
+        (ValueError("HTTP 403: not entitled"), False),
+    ],
+    ids=["wire", "massive", "no-status", "library", "user", "other"],
+)
+def test_only_massives_own_refusal_counts_as_massives(error: Exception, *, massive: bool) -> None:
+    """An entitlement error the library built, with no status or another source, is not one."""
+    assert refusals.is_massive_refusal(error) is massive

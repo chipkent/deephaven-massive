@@ -167,11 +167,12 @@ def test_ticker_spellings_of_every_flat_file(
     Passes when at least one file was read and the library reads every recorded ticker of each
     file (futures as written); a spelling it cannot read must join the symbol's wire spellings
     before symbol filters match those rows. Skips, quoting Massive's first refusal, when Massive
-    refuses every prefix.
+    refused a prefix, no file was read, and no read failed otherwise.
     """
     read = 0
     unreadable: dict[str, list[str]] = {}
     refused: list[str] = []
+    failed: list[str] = []
     for prefix in sources(Transport.FLAT_FILES):
         venue = "cme" if "{venue}" in prefix else None
         try:
@@ -181,7 +182,8 @@ def test_ticker_spellings_of_every_flat_file(
             evidence(f"{prefix}: refused: {refused[-1]}")
             continue
         except WireError as error:
-            evidence(f"{prefix}: {type(error).__name__}: {error}")
+            failed.append(f"{prefix}: {type(error).__name__}: {error}")
+            evidence(failed[-1])
             continue
         if result is None:
             evidence(f"{prefix}: no file for {recent_monday}")
@@ -195,9 +197,9 @@ def test_ticker_spellings_of_every_flat_file(
         if odd:
             evidence(f"{prefix}: tickers the library cannot read {odd[:8]}")
             unreadable[prefix] = odd
-    if not read and refused:
+    if not read and refused and not failed:
         pytest.skip(f"refused: every prefix; the first: {refused[0]}")
-    assert read
+    assert read, f"no file was read; failed reads: {failed}"
     assert not unreadable, f"tickers the library cannot read: {unreadable}"
 
 
@@ -231,10 +233,13 @@ def test_auto_minute_bars_through_today_match_rest(
     day through today on `AUTO` and on `REST`, and records each source's bars per day and the
     fill warning. Today's bars keep arriving between the two reads, and Massive may serve the
     key's recent bars late, so only the minutes that start before the latest minute both reads
-    hold are compared.
-    Passes when both reads hold the same days among the minutes that ended before the first read
-    began, the same minutes (`TimestampStart`) per day
-    before that minute, and no minute twice: no day missing or doubled where the sources meet.
+    hold are compared. A late bar may also be published between the reads, so when REST holds a
+    day that `AUTO` lacks among the minutes that ended before the first read began, `AUTO` reads
+    again, after REST, and that read's days count: a day `AUTO` truly misses stays missing.
+    Passes when REST holds bars to compare, both reads hold the same days among the minutes that
+    ended before the first read began, the same minutes (`TimestampStart`) per day before the
+    latest minute both hold, and no minute twice: no day missing or doubled where the sources
+    meet.
     Skips on a day that is not a trading day, when there is nothing to fill, and when the
     previous day's file is not published yet, when `AUTO` reads REST for both days and the test
     would compare REST with REST.
@@ -243,12 +248,14 @@ def test_auto_minute_bars_through_today_match_rest(
     if not calendar.is_trading_day(today):
         pytest.skip(f"not exercised: {today} is not a trading day, so no day is filled from REST")
     query = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE, adjusted=False)
-    whole: dict[str, list[tuple[str, int]]] = {}
-    started = time.time_ns()
-    for chosen in (dm.HistorySource.AUTO, dm.HistorySource.REST):
+
+    def minute_bars(chosen: dm.HistorySource) -> list[tuple[str, int]]:
         table = query.history(previous_trading_day, today, source=chosen, wait=True)
         rows = table_rows(table.view(["Date", "TimestampStart"]))
-        whole[chosen.value] = sorted((str(r["Date"]), int(r["TimestampStart"])) for r in rows)
+        return sorted((str(r["Date"]), int(r["TimestampStart"])) for r in rows)
+
+    started = time.time_ns()
+    whole = {s.value: minute_bars(s) for s in (dm.HistorySource.AUTO, dm.HistorySource.REST)}
     cutoff = min((max(stamp for _, stamp in bars) for bars in whole.values() if bars), default=0)
     read = {name: [bar for bar in bars if bar[1] < cutoff] for name, bars in whole.items()}
     for name, bars in read.items():
@@ -262,7 +269,12 @@ def test_auto_minute_bars_through_today_match_rest(
     if any(previous_trading_day.isoformat() in fill for fill in fills):
         pytest.skip(f"not exercised: the {previous_trading_day} file is not published yet")
     auto, rest = read["auto"], read["rest"]
-    finished = {name: _days_ended_by(bars, started) for name, bars in whole.items()}
+    assert rest, f"REST holds no AAPL minute bar to compare from {previous_trading_day} to {today}"
+    finished = {name: _days_ended_by(held, started) for name, held in whole.items()}
+    if finished["auto"] != finished["rest"]:
+        # A bar Massive published between the two reads: AUTO reads again, after REST.
+        finished["auto"] = _days_ended_by(minute_bars(dm.HistorySource.AUTO), started)
+        evidence(f"days differ; AUTO read again, after REST, holds {finished['auto']}")
     assert finished["auto"] == finished["rest"], f"AUTO read days {finished}"
     assert len(set(auto)) == len(auto), "AUTO holds a minute twice"
     assert auto == rest, (

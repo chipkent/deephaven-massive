@@ -200,6 +200,7 @@ def test_the_free_examples_fill_with_no_setting(
     monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
     table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
     """Whether the hook and Examples 1 to 6 and 13 fill with no setting, by a new reader's path.
@@ -219,7 +220,12 @@ def test_the_free_examples_fill_with_no_setting(
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
+            _run_free_examples(
+                run,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
             _record_stocks_limit(live_config, table_rows=table_rows, evidence=evidence)
     finally:
         run.console.close()
@@ -251,6 +257,7 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
     tmp_path: Path,
     console_command: ConsoleCommand,
     table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
     """Whether the hook and Examples 1 to 6 and 13 fill with real data, at a declared pace.
@@ -269,13 +276,24 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
+            _run_free_examples(
+                run,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
     finally:
         run.console.close()
         pacer.close()
 
 
-def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) -> None:
+def _run_free_examples(
+    run: _Run,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
     """Run the hook and Examples 1 to 6 and 13 in one console, and check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
@@ -284,80 +302,110 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
     each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
     four previous closes, and the previous closes of the three Yahoo tickers that end it,
     under Massive's spellings. Example 13 and Example 6's edit run as written; what they do is
-    the library's, which `tests/test_docs.py` checks.
+    the library's, which `tests/test_docs.py` checks. Each example reads in the background,
+    so Massive's refusal fails its table instead of raising: after each wait, a refusal in its
+    session's `m.streams()` skips the test, quoting Massive, before its rows are checked.
     """
-    ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
+    ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "m", "apple")}
     keep = {
-        "read-daily-bars": ("apple",),
-        "whole-market-day": ("day", "busiest"),
-        "compare-stocks": ("returns",),
-        "chart-closes": ("nvda",),
+        "read-daily-bars": ("m", "apple"),
+        "whole-market-day": ("m", "day", "busiest"),
+        "compare-stocks": ("m", "returns"),
+        "chart-closes": ("m", "nvda"),
     }
     for anchor, names in keep.items():
         ran[anchor] = run.section(anchor, *names)
-    _check_history_examples(ran, table_rows=table_rows, evidence=evidence)
-    news = run.section("follow-the-news", "headlines")
-    _check_news(news["headlines"], table_rows=table_rows, evidence=evidence)
+    _check_history_examples(
+        ran, table_rows=table_rows, skip_if_not_entitled=skip_if_not_entitled, evidence=evidence
+    )
+    news = run.section("follow-the-news", "m", "headlines")
+    _check_news(
+        news, table_rows=table_rows, skip_if_not_entitled=skip_if_not_entitled, evidence=evidence
+    )
     opening, edit = doc_examples.section_blocks(README, "drive-with-a-watchlist")
-    closes = run.paste([opening], "drive-with-a-watchlist", "closes")["closes"]
+    watched = run.paste([opening], "drive-with-a-watchlist", "m", "closes")
+    closes = watched["closes"]
     first = {"AAPL", "MSFT", "AMZN", "GOOGL"}
     filled = _wait(lambda: _symbols(table_rows(closes)) == first, _FILL_WAIT)
     evidence(f"example 6: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
+    skip_if_not_entitled(watched["m"])
     assert filled, f"Example 6's closes did not fill within {_FILL_WAIT:.0f} s"
     run.paste([edit], "drive-with-a-watchlist edit")
-    yahoo = run.section("convert-symbols", "yahoo_closes")["yahoo_closes"]
+    converting = run.section("convert-symbols", "m", "yahoo_closes")
+    yahoo = converting["yahoo_closes"]
     converted = {"AAPL", "BRK.B", "BACpL"}
     filled = _wait(lambda: _symbols(table_rows(yahoo)) == converted, _FILL_WAIT)
     evidence(f"example 6, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
+    skip_if_not_entitled(converting["m"])
     assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
     run.section("stop-live-tables")
 
 
 def _check_history_examples(
-    ran: dict[str, Names], *, table_rows: TableRows, evidence: Evidence
+    ran: dict[str, Names],
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
 ) -> None:
     """Check the hook and Examples 1 to 4: real bars, in plausible numbers.
 
-    Each reads in the background, so each check first waits for its table to fill.
+    Each reads in the background, so each check first waits for its table to fill, then skips,
+    quoting Massive, when Massive refused a read of the example's session.
     """
 
-    def when_filled(table: Table, enough: Callable[[int], bool]) -> list[dict[str, Any]]:
+    def when_filled(
+        names: Names, table: Table, enough: Callable[[int], bool]
+    ) -> list[dict[str, Any]]:
         _wait(lambda: enough(len(table_rows(table))), _FILL_WAIT)
+        skip_if_not_entitled(names["m"])
         return table_rows(table)
 
-    year = when_filled(ran["hook"]["apple"], lambda rows: rows >= 240)
+    year = when_filled(ran["hook"], ran["hook"]["apple"], lambda rows: rows >= 240)
     evidence(f"hook: {len(year)} daily bars of AAPL")
     assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
 
     first = ran["read-daily-bars"]["apple"]
-    week = when_filled(first, lambda rows: rows == 5)
+    week = when_filled(ran["read-daily-bars"], first, lambda rows: rows == 5)
     evidence(f"example 1: {len(week)} bars, dates {[row['Date'] for row in week]}")
     assert len(week) == 5, "Example 1 reads five trading days"
     assert set(_BAR_COLUMNS) <= set(first.column_names)
 
     market = ran["whole-market-day"]
-    day = when_filled(market["day"], lambda rows: rows > 1000)
+    day = when_filled(market, market["day"], lambda rows: rows > 1000)
     otc = [row["Symbol"] for row in day if row.get("Otc")]
     evidence(f"example 2: {len(day)} stocks, {len(otc)} over the counter")
     assert len(day) > 1000, "Example 2's day holds every listed US stock"
     assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
-    assert len(when_filled(market["busiest"], lambda rows: rows == 20)) == 20
+    assert len(when_filled(market, market["busiest"], lambda rows: rows == 20)) == 20
 
     compared = ran["compare-stocks"]["returns"]
     filled = _wait(lambda: _symbols(table_rows(compared)) == _STOCKS, _FILL_WAIT)
+    skip_if_not_entitled(ran["compare-stocks"]["m"])
     returns = table_rows(compared)
     evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}, filled: {filled}")
     assert filled, f"Example 3's returns did not fill within {_FILL_WAIT:.0f} s"
 
-    nvda = when_filled(ran["chart-closes"]["nvda"], lambda rows: rows >= 240)
+    nvda = when_filled(ran["chart-closes"], ran["chart-closes"]["nvda"], lambda rows: rows >= 240)
     evidence(f"example 4: {len(nvda)} daily bars of NVDA")
     assert len(nvda) >= 240, "Example 4's year of Nvidia's daily bars is short"
 
 
-def _check_news(headlines: Table, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Check Example 5: headlines for each stock, at most ten each."""
+def _check_news(
+    ran: Names,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Check Example 5: headlines for each stock, at most ten each.
+
+    Skips, quoting Massive, when Massive refused a read of its session.
+    """
     asked = {"AAPL", "NVDA", "TSLA"}
+    headlines = ran["headlines"]
     filled = _wait(lambda: _symbols(table_rows(headlines)) == asked, _FILL_WAIT)
+    skip_if_not_entitled(ran["m"])
     rows = table_rows(headlines)
     counts = {symbol: sum(row["Symbol"] == symbol for row in rows) for symbol in sorted(asked)}
     evidence(f"example 5: articles per stock {counts}, every stock in by the wait: {filled}")
@@ -492,10 +540,10 @@ def _check_snapshot(
     """Check Example 7: a snapshot of three stocks, with the columns its text names.
 
     The snapshot reads in the background, so Massive's refusal fails its table instead of
-    raising: the check waits for rows or a failed read in `m.streams()`, and skips, quoting
-    Massive, on a refusal. Massive empties its snapshots from 03:30 to 04:00 New York time,
-    and on the delayed feed refills them later by a lag the tests do not know, so there an
-    empty snapshot is recorded, not failed.
+    raising: the check waits for rows or a failed read in `m.streams()`, skips, quoting
+    Massive, on a refusal, and fails on any other failed read. Massive empties its snapshots
+    from 03:30 to 04:00 New York time, and on the delayed feed refills them later by a lag the
+    tests do not know, so there an empty snapshot is recorded, not failed.
 
     Args:
         ran: Example 7's `m` and `snapshot`.
@@ -507,13 +555,14 @@ def _check_snapshot(
     session, snapshot = ran["m"], ran["snapshot"]
     reads = session.streams()
 
-    def settled() -> bool:
-        failed = any(row["State"] == "FAILED" for row in table_rows(reads))
-        return failed or bool(table_rows(snapshot))
+    def failed() -> list[str]:
+        return [str(row["Error"]) for row in table_rows(reads) if row["State"] == "FAILED"]
 
-    _wait(settled, _FILL_WAIT)
+    _wait(lambda: bool(failed()) or bool(table_rows(snapshot)), _FILL_WAIT)
+    errors = failed()
     session.release(reads)
     skip_if_not_entitled(session)
+    assert not errors, f"Example 7's snapshot read failed: {errors}"
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
     rows = table_rows(snapshot)
     evidence(f"example 7: {[(r['Symbol'], r['DayClose']) for r in rows]}")
@@ -733,6 +782,9 @@ _TESTER_LINES: Final = (
 """The starts of the three lines the tester guide's example 10 prints, as it says, on a key
 Massive refuses the live minute bars and the bars of 2015 to."""
 
+_SERVED_2015: Final = "bars from 2015: no error"
+"""The start of the line example 10 prints when Massive served the bars of 2015."""
+
 _REFUSED_TOPIC: Final = "AM.AAPL"
 _REJECTED_KEY: Final = "not only a bad key"
 """How a failed stream's error quotes Massive's refusal of the topic, and how it says Massive
@@ -754,11 +806,14 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     Runs the example as the guide gives it with the main key. It sends the key's stocks two
     requests, each of which may wait out a limited subscription's pace inside the console's
     patience. The guide describes a key Massive refuses the bars of 2015 and the live minute
-    bars to: when Massive served either, the test records the printed lines and skips, saying
-    what Massive served. Otherwise it passes when it prints the guide's three lines (the
-    latest trade and the bars from 2015 refused with `EntitlementError`, the live bars
-    opened), and the `stocks.bars` row of `streams` reads `FAILED` with one of the guide's two
-    outcomes: Massive's refusal of `AM.AAPL`, or Massive's rejection of the key.
+    bars to: when Massive served either, shown by the example's line for the bars of 2015, or
+    by a running `stocks.bars` stream whose topic Massive acknowledged or that published rows,
+    the test records the printed lines and skips, saying what Massive served. Otherwise it
+    passes when it prints the guide's three lines (the latest trade and the bars from 2015
+    refused with `EntitlementError`, the live bars opened), and the `stocks.bars` row of
+    `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
+    `AM.AAPL`, or Massive's rejection of the key. A missing line or a stream that settled
+    neither way fails it.
     """
     code = guide_blocks(TESTER_GUIDE.read_text(encoding="utf-8"))[10]
     run = _console(tmp_path, console_command, evidence)
@@ -778,16 +833,21 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
                 lambda: any(r["State"] == "FAILED" for r in bars(names["streams"])), _REFUSAL_WAIT
             )
             rows = bars(names["streams"])
-            for row in table_rows(names["connections"]):
-                evidence(f"connection {row['AssetClass']} {row['State']} {row['LastError']!r}")
+            connections = table_rows(names["connections"])
+            for row in connections:
+                evidence(
+                    f"connection {row['AssetClass']} {row['State']} acked {row['AckedTopics']} "
+                    f"{row['LastError']!r}"
+                )
             names.clear()
     finally:
         run.console.close()
     evidence(f"stocks.bars: {[(row['State'], row['Error']) for row in rows]}")
     served = []
-    if not any(line.startswith(_TESTER_LINES[2]) for line in printed):
+    if any(line.startswith(_SERVED_2015) for line in printed):
         served.append("the bars from 2015")
-    if [row["State"] for row in rows] != ["FAILED"]:
+    acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
+    if [row["State"] for row in rows] == ["RUNNING"] and (acked or rows[0]["RowsPublished"]):
         served.append("the live minute bars")
     if served:
         pytest.skip(

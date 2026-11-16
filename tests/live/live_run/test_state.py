@@ -271,3 +271,13 @@ def test_a_stream_pass_from_before_rows_were_required_runs_again(group: str, nam
     other.status = "passed"
     assert not is_due(other, DAY)
     assert run_state.key("g", "n") == "g n"
+
+
+def test_an_unknown_status_is_refused_and_leaves_the_check_as_it_was() -> None:
+    state = _state()
+    check = check_of(state, "evidence", "t")
+    before = repr(check)
+    with pytest.raises(ValueError, match="unknown status 'skiped'"):
+        record(state, check, status="skiped", reason="closed market", day=DAY)
+    assert repr(check) == before
+    assert check.condition_skips == 0

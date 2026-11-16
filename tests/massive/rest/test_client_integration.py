@@ -31,7 +31,7 @@ import deephaven_massive as dm
 from deephaven_massive._massive import Transport, source
 from deephaven_massive._massive.net.http import new_ssl_context
 from deephaven_massive._massive.rest.query import request_target
-from tests._live import classes
+from tests._live import classes, summary
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -111,6 +111,27 @@ def send(live_config: MassiveConfig) -> Iterator[Callable[[Request], tuple[int, 
     pool.clear()
 
 
+_ANSWERS = (200, 404, 429)
+"""The statuses a limited subscription's request counts by: answered (the options request's
+expired contract answers 404, which counts against the minute the same) or refused for the
+minute."""
+
+
+def _require_answer(status: int, described: str, what: str) -> None:
+    """Skip on Massive's refusal of the key, and fail on any status but an answer or a 429.
+
+    A 403 or a 500 is no evidence that Massive did not limit the subscription.
+
+    Args:
+        status: The response's HTTP status.
+        described: Its rate-limit headers and message.
+        what: The request, for the reason.
+    """
+    if status == 403:
+        pytest.skip(f"{summary.REFUSED}HTTP 403 for {what}: {described}")
+    assert status in _ANSWERS, f"{what}: HTTP {status}; {described}"
+
+
 @pytest.mark.integration_rate_limits
 @pytest.mark.settles("65", "67")
 @pytest.mark.verifies("66")
@@ -142,11 +163,13 @@ def test_a_spent_minute_its_refusal_and_when_it_frees(
        that slides from each request, one at a minute boundary a fixed window, and one later
        than 60 s after the last answered request means refused requests count against it.
 
-    The evidence answers each question. The test skips when Massive answers the first seven
-    requests of the subscription: the owner's settings say Massive limits it and Massive's
-    answer disagrees, and the rest of the evidence would say nothing. It asserts that none of
-    the first five requests of data outside every subscription was refused with HTTP 429: the
-    library charges that data to a bucket of its own, never to the spent subscription.
+    The evidence answers each question. A 403 for the subscription's request skips the test,
+    quoting Massive, and another status that is neither an answer nor a 429 fails it. The test
+    skips when Massive answers the first seven requests of the subscription: the owner's
+    settings say Massive limits it and Massive's answer disagrees, and the rest of the evidence
+    would say nothing. It asserts that none of the first five requests of data outside every
+    subscription was refused with HTTP 429: the library charges that data to a bucket of its
+    own, never to the spent subscription.
     """
     name = limited_subscription.value
     request = by_class[name]
@@ -156,6 +179,7 @@ def test_a_spent_minute_its_refusal_and_when_it_frees(
     for number in range(1, _LIMIT + 3):
         status, described = send(request)
         evidence(f"{name} request {number} at {time.monotonic() - start:.1f} s: HTTP {status}")
+        _require_answer(status, described, f"{name} request {number}")
         if status == 429:
             evidence(f"the first refusal: {described}")
             refused = True
@@ -219,7 +243,9 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
     Records each answer's status, rate-limit headers, and time. The test asserts that the
     first five requests were answered (otherwise another client of the key used the class),
     and skips when Massive answers the last, since the lookups' answers then say nothing:
-    the owner's settings say Massive limits the class and Massive's answer disagrees. Passes
+    the owner's settings say Massive limits the class and Massive's answer disagrees. A 403 for
+    the class's request skips the test, quoting Massive, and another status that is neither an
+    answer nor a 429 fails it. Passes
     when, besides, no lookup of the class's own market was refused with HTTP 429: Massive
     counts it elsewhere, as the library assumes. A refused lookup means Massive charges it to
     the class, so the library must charge market-filtered lookups, and the crypto ticker list,
@@ -244,6 +270,7 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
         spent.append(status)
         evidence(f"{name} request {number} at {time.monotonic() - start:.1f} s: HTTP {status}")
         evidence(f"    {described}")
+        _require_answer(status, described, f"{name} request {number}")
     for market in (*markets, other_market):
         status, described = send(("/v3/reference/tickers", {}, {"market": market, "limit": 1}))
         whose = "another class's, the control" if market == other_market else name
@@ -258,6 +285,7 @@ def test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class(
         f"{name} request after the lookups at {time.monotonic() - start:.1f} s: HTTP {status}; "
         f"{described}"
     )
+    _require_answer(status, described, f"{name} request after the lookups")
     assert 429 not in spent, f"{name} refused one of its first five requests: another client?"
     if status != 429:
         pytest.skip(

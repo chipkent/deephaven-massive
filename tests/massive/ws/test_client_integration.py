@@ -476,7 +476,7 @@ def test_form_of_the_forex_quote_exchange_id(
         evidence(line)
     for quote in quotes[:5]:
         evidence(f"raw C: x={quote.get('x')!r} ({type(quote.get('x')).__name__}) {quote}")
-    _skip_if_refused(acked)
+    _skip_if_refused(records)
     assert "C.EUR-USD" in acked.acked(), f"not acknowledged: {acked.status_lines()}"
     if status == "closed":
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")

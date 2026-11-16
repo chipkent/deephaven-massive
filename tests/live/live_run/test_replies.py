@@ -248,6 +248,29 @@ def test_an_unlisted_delay_skips_as_not_listed_and_massive_refusal_stays_refused
     )
 
 
+def test_an_entitlement_error_the_library_built_fails_not_refused() -> None:
+    """A refusal with no status of Massive's, such as a real-time-only stream's, is no reply."""
+    example = _example("market-status")
+    built = dm.EntitlementError("streams only in real time")
+    assert replies._verdict(example, error=built, stream_error="", count=1) == (
+        "failed",
+        "EntitlementError: streams only in real time",
+    )
+
+
+def test_a_stream_the_settings_refused_later_skips_as_not_listed() -> None:
+    """The settings' refusal can fail a stream after it opened, in `m.streams()` alone."""
+    example = _example("market-status")
+    error = (
+        "stocks streams would be delayed (Massive reports timeframe=DELAYED), and "
+        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+    )
+    assert replies._verdict(example, error=None, stream_error=error, count=1) == (
+        "skipped",
+        f"not listed as delayed: {error}",
+    )
+
+
 def test_every_example_has_its_code_and_no_code_lacks_an_example() -> None:
     assert list(replies.CALLS) == [e.name for e in reply_examples.EXAMPLES]
 

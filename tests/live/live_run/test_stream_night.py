@@ -293,6 +293,11 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
         "failed",
         "futures-trades: 2 rows after 16:00 Chicago close dated 2026-11-04=2, not 2026-11-05",
     )
+    # The delayed feed's lag excuses a quiet hour, never a row with the wrong `Date`.
+    assert verdict(quiet=(_utc(3, day=5),), wrong=(wrong,), delayed=True) == (
+        "failed",
+        "futures-trades: 2 rows after 16:00 Chicago close dated 2026-11-04=2, not 2026-11-05",
+    )
 
 
 def test_the_summary_gathers_the_nights_findings(tmp_path: Path) -> None:

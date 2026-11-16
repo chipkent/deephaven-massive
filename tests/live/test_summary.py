@@ -135,6 +135,24 @@ def test_a_question_with_a_failed_test_is_not_verified() -> None:
     ]
 
 
+def test_a_test_that_errors_after_a_refusal_skip_is_not_verified() -> None:
+    """A skip reason recorded in the call does not excuse an error in the teardown."""
+    settled = {"passes": ((), ("7",)), "torn": ((), ("7",))}
+    lines = summary.question_lines(
+        settled,
+        {"passes": "passed", "torn": "error"},
+        {"torn": _REFUSAL},
+        titles={},
+        narrowed=False,
+    )
+    assert lines == [
+        "verified 0 of 1:",
+        "ran, evidence to read, 0 of 1:",
+        "not verified (failed or skipped otherwise), 1 of 1:",
+        "    7",
+    ]
+
+
 def _marker_items(source: str) -> set[str]:
     """Return the items named by the `verifies` and `settles` markers in a module's source."""
     items: set[str] = set()

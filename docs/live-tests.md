@@ -62,8 +62,10 @@ The connection-limit tests run last and alone, because they disturb the key's co
    ```
 
    A weekday run in market hours covers more, because a stream test checks rows only while its
-   market is open. The rate-limit tests spend the first subscription your settings file lists
-   in `rest_basic_subscriptions`, and skip when it lists none.
+   market is open. The rate-limit tests spend a subscription your settings file lists in
+   `rest_basic_subscriptions`, whatever order the file lists them in: the first listed of
+   indices, futures, options, stocks, and currencies, or, for the ticker-lookup test, of
+   indices, currencies, and stocks. They skip when the file lists none of these.
 
    The command also runs every README example as written and checks it against its text. Its
    streaming examples check the most from 09:50 to 15:55 New York time.

@@ -11,20 +11,25 @@ longer limited:
    line from its standard input, which the parent writes when the person presses Enter.
 3. A's row is recorded and A is closed. Once a minute, a fresh session that declares nothing
    sends six one-request calls (`ANSWERED_CALLS`), until Massive answers all six without an
-   HTTP 429 and within one minute (`ANSWERED_WITHIN`), so calls the library paced by a limit it
-   still holds do not count; then, 65 seconds later, session B, which declares nothing, sends
-   ten one-request calls, recording each one's send and answer times and B's rows.
+   HTTP 429 or another failed call and within one minute (`ANSWERED_WITHIN`), so calls the
+   library paced by a limit it still holds do not count; then, 65 seconds later, session B,
+   which declares nothing, sends ten one-request calls, recording each one's send and answer
+   times and B's rows.
 4. One round whose ten calls are all answered within 30 seconds with no refusal passes. A
    refusal (Massive still limits) closes B and repeats the round a minute later; the whole
    wait after Enter is limited to 15 minutes.
 
+A call counts as answered when it returns (the options call's expired contract answers HTTP
+404, which the library reads as no data). A round with an HTTP 429 is refused, whatever else
+its calls raised; in a round without one, a call that raised is a failed call.
+
 The verdicts: `passed`; `failed: library paced` (no refusal, but a call waited more than 30 s);
+`failed: a call of a round of ten failed: <its error>`;
 `failed: Massive refused a round of ten` (the 15 minutes ended on refused rounds); and
 `failed: Massive kept limiting for 15 minutes` (six calls were never answered within a minute
-without a refusal),
-which records a rehearsal, not the check's result. Everything goes to `upgrade-check.json` in
-the attempt's folder. It judges by timings and Massive's answers, never by states seen in a
-refreshing table.
+without a refusal or a failed call), which records a rehearsal, not the check's result.
+Everything goes to `upgrade-check.json` in the attempt's folder. It judges by timings and
+Massive's answers, never by states seen in a refreshing table.
 """
 
 from __future__ import annotations
@@ -193,10 +198,12 @@ def round_of_calls(
 
     Returns:
         The round: its calls (`sent`, `seconds`, `error`), B's row, the HTTP 429 replies
-        (`refusals`), whether Massive refused a request (`refused`), whether every call was
+        (`refusals`), whether Massive refused a request (`refused`), the errors of the calls
+        that raised (`failed`), whether every call was
         answered within 30 s (`fast`), and the seconds all its calls took (`seconds`).
     """
     calls: list[dict[str, Any]] = []
+    failed: list[str] = []
     statuses: list[int | None] = []
     set_reply_capture(lambda reply: statuses.append(reply.status))
     try:
@@ -208,6 +215,7 @@ def round_of_calls(
                     CALLS[subscription](m)
                 except dm.MassiveError as raised:
                     error = f"{type(raised).__name__}: {raised}"
+                    failed.append(error)
                 seconds = round(waits.monotonic() - started, 3)
                 calls.append({"sent": sent, "seconds": seconds, "error": error})
             row = _row(m, subscription)
@@ -221,6 +229,7 @@ def round_of_calls(
         "row": row,
         "refusals": refusals,
         "refused": refusals > 0,
+        "failed": failed,
         "fast": fast,
         "seconds": seconds,
     }
@@ -258,17 +267,21 @@ def run_upgrade_check(
         if not upgraded:
             seen = round_of_calls(open_session, subscription, waits, count=ANSWERED_CALLS)
             record.answered.append(seen)
-            if seen["refused"] or seen["seconds"] > ANSWERED_WITHIN:
+            if seen["refused"] or seen["failed"] or seen["seconds"] > ANSWERED_WITHIN:
                 waits.sleep(60.0)
                 continue
             upgraded = True
             waits.sleep(FRESH_MINUTE)
         result = round_of_calls(open_session, subscription, waits)
         record.rounds.append(result)
-        if not result["refused"]:
+        if result["refused"]:
+            waits.sleep(60.0)
+            continue
+        if result["failed"]:
+            record.verdict = f"failed: a call of a round of ten failed: {result['failed'][0]}"
+        else:
             record.verdict = "passed" if result["fast"] else "failed: library paced"
-            break
-        waits.sleep(60.0)
+        break
     if not record.verdict:
         record.verdict = (
             "failed: Massive refused a round of ten"

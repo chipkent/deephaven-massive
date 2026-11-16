@@ -16,8 +16,10 @@ and its reason; each result also goes to the attempt's results file, which the p
 (`live_run`).
 
 An example Massive refused is recorded `refused`, quoting the refusal: its replies hold
-Massive's answer. Otherwise it passes when its expected replies were captured: data (no error,
-and at least one reply), or any reply.
+Massive's answer. One whose data the owner's settings refused (Massive labels it delayed and
+`delayed_subscriptions` does not list its subscription) is skipped as not listed, and one the
+library refused otherwise fails. Otherwise it passes when its expected replies were captured:
+data (no error, and at least one reply), or any reply.
 """
 
 from __future__ import annotations
@@ -33,9 +35,10 @@ from typing import TYPE_CHECKING, Final
 import deephaven_massive as dm
 from deephaven_massive._massive import set_reply_capture
 from deephaven_massive.queries import StreamHistoryQuery
+from tests._live import refusals
 from tests._live.calendar import trading_day_before
 from tests._live.live_run.reply_examples import DATA, Example
-from tests._live.live_run.stream_capture import diagnostics_rows, is_refusal
+from tests._live.live_run.stream_capture import diagnostics_rows, is_not_listed, is_refusal
 from tests._live.summary import NOT_LISTED, REFUSED
 
 if TYPE_CHECKING:
@@ -241,25 +244,50 @@ def _verdict(
         count: How many replies were captured.
 
     Returns:
-        `(status, reason)`: an example Massive refused is `refused`, its reason starting
-        `summary.REFUSED` and quoting the refusal; one the settings refused, an
-        `EntitlementError` whose `source` is `ErrorSource.USER` (delayed data of a subscription
-        `delayed_subscriptions` does not list), is `skipped`, its reason starting
-        `summary.NOT_LISTED` and quoting the library's message.
+        `(status, reason)`: `failed` when no reply was captured; a refusal's verdict
+        (`_refusal_verdict`); else `failed` for a `DATA` example that raised or whose stream
+        failed, and `passed` otherwise.
     """
     if count == 0:
         raised = f": {type(error).__name__}: {error}" if error is not None else ""
         return "failed", f"no reply was captured{raised}"
-    if isinstance(error, dm.EntitlementError) and error.source is dm.ErrorSource.USER:
-        return "skipped", NOT_LISTED + " ".join(str(error).split())
-    if isinstance(error, dm.EntitlementError):
-        return "refused", REFUSED + " ".join(str(error).split())
-    if is_refusal(stream_error):
-        return "refused", REFUSED + " ".join(stream_error.split())
+    refused = _refusal_verdict(error, stream_error)
+    if refused is not None:
+        return refused
     if example.expects == DATA and (error is not None or stream_error):
         shown = f"{type(error).__name__}: {error}" if error is not None else stream_error
         return "failed", shown
     return "passed", ""
+
+
+def _refusal_verdict(error: BaseException | None, stream_error: str) -> tuple[str, str] | None:
+    """Judge an example that was refused, by Massive, the settings, or the library.
+
+    Args:
+        error: What it raised, or None.
+        stream_error: A failed stream's error, or `""`.
+
+    Returns:
+        `(status, reason)`: an example Massive refused (`refusals.is_massive_refusal`, or a
+        failed stream's refusal, `stream_capture.is_refusal`) is `refused`, its reason starting
+        `summary.REFUSED` and quoting the refusal; one the settings refused, an
+        `EntitlementError` whose `source` is `ErrorSource.USER` or a failed stream's error that
+        says so (`stream_capture.is_not_listed`: delayed data of a subscription
+        `delayed_subscriptions` does not list), is `skipped`, its reason starting
+        `summary.NOT_LISTED` and quoting the library's message; any other `EntitlementError`,
+        which the library made, is `failed`. None when nothing refused it.
+    """
+    if isinstance(error, dm.EntitlementError) and error.source is dm.ErrorSource.USER:
+        return "skipped", NOT_LISTED + " ".join(str(error).split())
+    if error is not None and refusals.is_massive_refusal(error):
+        return "refused", REFUSED + " ".join(str(error).split())
+    if isinstance(error, dm.EntitlementError):
+        return "failed", f"{type(error).__name__}: {error}"
+    if is_not_listed(stream_error):
+        return "skipped", NOT_LISTED + " ".join(stream_error.split())
+    if is_refusal(stream_error):
+        return "refused", REFUSED + " ".join(stream_error.split())
+    return None
 
 
 def run_responses(

@@ -505,7 +505,8 @@ def night_verdict(
         `("passed", why)`, its reason the gaps and a refused stream, if any; `("refused",
         "refused: <error>")`, or `("skipped", "not listed as delayed: <error>")`, when every
         stream was refused (`unopened_verdict`); `("skipped", why)` for quiet
-        hours of a delayed unit; or `("failed", why)`.
+        hours of a delayed unit, unless a boundary row carries the wrong `Date`, which the
+        feed's lag cannot explain; or `("failed", why)`.
     """
     minutes = round(gaps.total_seconds() / 60)
     if broken or (refused and len(refused) >= streams):
@@ -514,6 +515,12 @@ def night_verdict(
         return "failed", f"gaps {minutes}"
     if errors:
         return "failed", errors[0]
+    if wrong:
+        w = wrong[0]
+        return "failed", (
+            f"{w['stream']}: {w['wrong']} rows {w['side']} {w['boundary']} dated "
+            f"{w['dates']}, not {w['expected']}"
+        )
     if quiet:
         first = quiet[0].astimezone(NEW_YORK)
         why = (
@@ -521,12 +528,6 @@ def night_verdict(
             f"{first:%a %H:%M %Z}"
         )
         return ("skipped", f"{why}, on the delayed feed") if delayed else ("failed", why)
-    if wrong:
-        w = wrong[0]
-        return "failed", (
-            f"{w['stream']}: {w['wrong']} rows {w['side']} {w['boundary']} dated "
-            f"{w['dates']}, not {w['expected']}"
-        )
     notes = [f"gaps {minutes}"] if minutes else []
     notes += [refusal_note(refused)] if refused else []
     return "passed", "; ".join(notes)

@@ -146,8 +146,28 @@ def is_refusal(error: str) -> bool:
     return any(mark in error for mark in REFUSAL_MARKS)
 
 
+NOT_LISTED_MARK: Final = "is not in MassiveConfig.delayed_subscriptions"
+"""Text that marks a failed stream's error as the settings' refusal of delayed data: the
+library's message names the setting that would accept it (`recency_labels.delayed_refusal`)."""
+
+
+def is_not_listed(error: str) -> bool:
+    """Tell whether a failed stream's error is the settings' refusal of delayed data.
+
+    Massive labels the data delayed and the owner's settings do not list its subscription in
+    `delayed_subscriptions`; the library refuses it, as the stream opens or later.
+
+    Args:
+        error: The stream's `Error`.
+
+    Returns:
+        True when it holds `NOT_LISTED_MARK`.
+    """
+    return NOT_LISTED_MARK in error
+
+
 def split_failures(failed: list[str], opened: list[str]) -> tuple[list[str], list[str]]:
-    """Split a unit's failures into Massive's refusals and the others.
+    """Split a unit's failures into refusals, Massive's and the settings', and the others.
 
     Args:
         failed: The errors of its failed streams (`failed_streams`).
@@ -155,14 +175,28 @@ def split_failures(failed: list[str], opened: list[str]) -> tuple[list[str], lis
             (`refusal_recorded`), Massive's and the settings' alike.
 
     Returns:
-        The refusals, those at opening first, and the other failures. A stream refused as it
-        opened may also leave a failed row with the same error; it counts once, as the
-        refusal at opening.
+        The refusals, those at opening first, and the other failures. A failed stream's
+        settings refusal (`is_not_listed`) is the error after `summary.NOT_LISTED`, as one at
+        opening is. A stream refused as it opened may also leave a failed row with the same
+        error; each refusal at opening absorbs at most one such row, so two streams refused
+        alike count twice.
     """
-    later = [
-        f for f in failed if is_refusal(f) and not any(" ".join(f.split()) in o for o in opened)
-    ]
-    return opened + later, [f for f in failed if not is_refusal(f)]
+    unmatched = list(opened)
+    later: list[str] = []
+    others: list[str] = []
+    for error in failed:
+        if not (is_refusal(error) or is_not_listed(error)):
+            others.append(error)
+            continue
+        line = " ".join(error.split())
+        match = next((o for o in unmatched if line in o), None)
+        if match is not None:
+            unmatched.remove(match)
+        elif is_not_listed(error):
+            later.append(NOT_LISTED + error)
+        else:
+            later.append(error)
+    return opened + later, others
 
 
 @contextlib.contextmanager

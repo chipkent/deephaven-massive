@@ -2454,6 +2454,7 @@ def test_a_live_test_checks_ci_and_its_key_before_anything_else() -> None:
     body = fixture.body[1:] if ast.get_docstring(fixture) else fixture.body
     guard, first = body[0], body[1]
     assert isinstance(guard, ast.If)
+    assert ast.unparse(guard.test) == "request.node.get_closest_marker(_INTEGRATION) is None"
     assert [type(statement) for statement in guard.body] == [ast.Return]
     assert not guard.orelse
     assert ast.unparse(first) == "key_check.live_key()"

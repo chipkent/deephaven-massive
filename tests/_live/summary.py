@@ -8,11 +8,11 @@ sorts every question the run touched:
 - verified: every test of it ran and passed, and at least one asserts it;
 - ran, evidence to read: every test of it passed, but none asserts it;
 - refused by Massive: a test of it skipped because Massive refused a request (its skip reason
-  starts with `REFUSED`), and every other test of it passed or skipped so too;
+  starts with `REFUSED`), and every other test of it passed or skipped as refused or not
+  listed: listing a subscription would not answer the question while Massive refuses a test;
 - not listed as delayed: a test of it skipped because Massive labels the data delayed and the
   owner's settings file does not list its subscription in `delayed_subscriptions` (its skip
-  reason starts with `NOT_LISTED`), and every other test of it passed or skipped as one of
-  these two;
+  reason starts with `NOT_LISTED`), and every other test of it passed or skipped so too;
 - not verified: failed or skipped otherwise, or partly run (a `-k` or path selection left out
   some of its tests).
 
@@ -135,7 +135,12 @@ def question_lines(
     for item in sorted(ran, key=item_order):
         every = [(t, v) for t, (s, v) in settled.items() if item in s or item in v]
         tests = [(t, v) for t, v in every if t in outcome]
-        others = [reasons.get(t, "") for t, _ in tests if outcome[t] != "passed"]
+        # A failed or errored test is not verified, whatever skip reason its call recorded.
+        others = [
+            reasons.get(t, "") if outcome[t] == "skipped" else outcome[t]
+            for t, _ in tests
+            if outcome[t] != "passed"
+        ]
         if len(tests) < len(every):
             unverified["partly run"].append(f"{item} ({len(tests)} of {len(every)} tests ran)")
         elif not others:

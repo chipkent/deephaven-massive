@@ -21,8 +21,9 @@ For each example it writes, under the output folder:
 - `summary.txt`: one line per example, with its outcome and how long it took.
 
 Every text it writes passes through the secret filter (`SecretFilter.clean`). An example
-ends `passed`; `refused by Massive` when it raised Massive's `EntitlementError`, which is
-expected on a free key; `not listed as delayed` when it raised the `EntitlementError` of the
+ends `passed`; `refused by Massive` when it raised Massive's `EntitlementError`, one whose
+`source` is `ErrorSource.MASSIVE` and that carries Massive's `status`, which is expected on a
+free key; `not listed as delayed` when it raised the `EntitlementError` of the
 library's settings (its `source` is `ErrorSource.USER`: Massive labels the data delayed and the
 settings file does not list its subscription in `delayed_subscriptions`); or `failed` with any
 other error, which is a finding to report. A stream that Massive refuses fails after its
@@ -61,6 +62,7 @@ from deephaven.table import Table
 import deephaven_massive as dm
 from deephaven_massive._config import CONFIG_FILE_VARIABLE
 from deephaven_massive._tables.liveness import new_scope, release_scope
+from tests._live.refusals import is_massive_refusal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Mapping
@@ -382,13 +384,29 @@ def run_example(
     try:
         with lock(), contextlib.redirect_stdout(printed):
             namespace.update(runpy.run_path(str(path), init_globals=namespace))
-    except dm.EntitlementError as refusal:
-        status = NOT_LISTED if refusal.source is dm.ErrorSource.USER else REFUSED
-        error = f"{type(refusal).__name__}: {refusal}"
     except Exception as failure:  # noqa: BLE001 - any other error of an example is a finding
-        headline = f"{type(failure).__name__}: {str(failure).strip().partition(chr(10))[0]}"
-        status, error = FAILED, f"{headline}\n{traceback.format_exc()}"
+        status, error = _failure_outcome(failure)
     return Outcome(path.name, status, round(clock() - start, 1), error), printed.getvalue()
+
+
+def _failure_outcome(failure: Exception) -> tuple[str, str]:
+    """Judge what an example raised.
+
+    Args:
+        failure: The error, being handled.
+
+    Returns:
+        The status and the error's text: `NOT_LISTED` for the settings' `EntitlementError`
+        (its `source` is `ErrorSource.USER`), `REFUSED` for Massive's
+        (`refusals.is_massive_refusal`), each with its type and message; otherwise `FAILED`,
+        with its first line and its traceback, the library's own refusals included.
+    """
+    if isinstance(failure, dm.EntitlementError) and failure.source is dm.ErrorSource.USER:
+        return NOT_LISTED, f"{type(failure).__name__}: {failure}"
+    if is_massive_refusal(failure):
+        return REFUSED, f"{type(failure).__name__}: {failure}"
+    headline = f"{type(failure).__name__}: {str(failure).strip().partition(chr(10))[0]}"
+    return FAILED, f"{headline}\n{traceback.format_exc()}"
 
 
 def tables_of(namespace: dict[str, Any]) -> dict[str, Table]:

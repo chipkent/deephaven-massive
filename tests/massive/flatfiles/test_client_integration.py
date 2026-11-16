@@ -130,10 +130,8 @@ def test_a_weekend_key_is_missing_not_refused(
     directly, to record the status, S3's error code, and the content type, and opens it through the
     client. Passes when the Sunday's key is missing.
 
-    Raises:
-        WireError: When the Sunday's key is refused (HTTP 403, `WireEntitlementError`) or
-            answers a 404 that is not `NoSuchKey`; the answer is recorded first, and fails
-            the test.
+    A Sunday's key refused (HTTP 403, `WireEntitlementError`) or answering a 404 that is not
+    `NoSuchKey` fails the test, the answer recorded first; only the Monday's refusal skips it.
     """
     control = live_flat_files.open(object_key(_DAY_FILE, recent_monday))
     evidence(f"control {recent_monday}: {'exists' if control is not None else 'missing'}")
@@ -158,7 +156,8 @@ def test_a_weekend_key_is_missing_not_refused(
         file = live_flat_files.open(key)
     except WireError as error:
         evidence(f"{key}: the client raised {type(error).__name__}: {error}")
-        raise
+        # Failed here: re-raised, a refusal would reach the live-test hook, which skips it.
+        pytest.fail(f"{key} is not missing: {type(error).__name__}: {error} ({answer})")
     if file is not None:
         file.close()
     assert file is None, f"{key} exists ({answer})"

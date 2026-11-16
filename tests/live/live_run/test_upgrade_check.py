@@ -221,6 +221,57 @@ def test_a_failed_call_is_recorded_with_its_error(
     assert all(c["error"].startswith("MassiveError") for c in result["calls"])
 
 
+FORBIDDEN = Reply(envelope(status="ERROR", message="not entitled"), status=403)
+
+
+def test_six_failed_calls_are_no_upgrade(
+    *,
+    fake_rest: FakeRestServer,
+    open_session: Callable[[], MassiveSession],
+    tmp_path: Path,
+    rest_clock: FakeClock,
+) -> None:
+    """Calls that fail fast draw no 429, but Massive answered none of them."""
+    fake_rest.reply(PREV, LIMITED, BAR, FORBIDDEN)  # session A learns the limit, then 403s
+    record = upgrade_check.run_upgrade_check(
+        "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
+    )
+    assert record.verdict == "failed: Massive kept limiting for 15 minutes"
+    assert record.rounds == []
+    assert record.answered
+    assert all(a["failed"] and not a["refused"] for a in record.answered)
+
+
+def test_a_failed_call_in_a_round_of_ten_fails_the_check(
+    *,
+    fake_rest: FakeRestServer,
+    open_session: Callable[[], MassiveSession],
+    tmp_path: Path,
+    rest_clock: FakeClock,
+) -> None:
+    # Six calls answered, then session B's second call is refused the data.
+    fake_rest.reply(PREV, LIMITED, *[BAR] * 7, FORBIDDEN)
+    record = upgrade_check.run_upgrade_check(
+        "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
+    )
+    [round_] = record.rounds
+    assert not round_["refused"]
+    assert record.verdict.startswith("failed: a call of a round of ten failed: EntitlementError")
+
+
+def test_a_404_is_an_answer_and_other_errors_are_failed_calls(
+    fake_rest: FakeRestServer, open_session: Callable[[], MassiveSession], rest_clock: FakeClock
+) -> None:
+    # The fake answers 404 to the options call's contract, as Massive does an expired one: the
+    # library leaves the contract out and raises nothing.
+    result = upgrade_check.round_of_calls(open_session, "options", _Time(rest_clock).waits())
+    assert [c["error"] for c in result["calls"]] == [""] * upgrade_check.ROUND_CALLS
+    assert result["failed"] == []
+    fake_rest.reply(PREV, FORBIDDEN)
+    result = upgrade_check.round_of_calls(open_session, "stocks", _Time(rest_clock).waits())
+    assert len(result["failed"]) == upgrade_check.ROUND_CALLS
+
+
 def test_each_subscription_has_a_one_request_call() -> None:
     assert set(upgrade_check.CALLS) == set(SUBSCRIPTIONS)
 
