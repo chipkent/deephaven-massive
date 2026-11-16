@@ -57,6 +57,7 @@ __all__ = [
     "mark_failures",
     "marked_count",
     "merged",
+    "placed",
     "setting_of",
     "with_marks",
     "withhold_rows",
@@ -212,6 +213,41 @@ def in_window(rows: _Rows, bounds: Sequence[tuple[str, pa.Array]]) -> pa.Array:
         for key, inside in bounds
     )
     return functools.reduce(pc.and_, kept)
+
+
+def placed(rows: _Rows, keep: Callable[[_Rows], pa.Array]) -> _Rows:
+    """Keep the rows a judgment of their keys keeps; a row whose key could not be read stays.
+
+    Some windows are judged only after the time columns are filled, such as the whole-bar
+    window (`row_times.whole`), and a row whose key could not be read cannot be filled. So
+    the rows whose keys read, marked for another fault or not, are judged without their mark
+    columns, and a row with an unreadable key stays, to be withheld and reported, as
+    `in_window` keeps it.
+
+    Args:
+        rows: The rows, with the mark columns.
+        keep: Given the rows whose keys read, without the mark columns, the mask of those to
+            keep.
+
+    Returns:
+        The rows kept, in order, with their mark columns.
+    """
+    if not rows.num_rows:
+        return rows
+    faults = rows.column(FAULT)
+    unplaced = _one_array(
+        pc.fill_null(pc.equal(faults, RowFault.UNREADABLE_KEYS.value), fill_value=False)
+    )
+    keyed = rows.filter(pc.invert(unplaced))
+    verdict = _one_array(keep(keyed.drop_columns(list(MARK_COLUMNS))))
+    return rows.filter(pc.replace_with_mask(unplaced, pc.invert(unplaced), verdict))
+
+
+def _one_array(values: pa.Array | pa.ChunkedArray) -> pa.Array:
+    """Return a table column's chunks as one array, and a batch's column as it is."""
+    if isinstance(values, pa.ChunkedArray):
+        return values.combine_chunks()
+    return values
 
 
 @dataclass(frozen=True, slots=True)

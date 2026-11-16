@@ -4114,6 +4114,47 @@ def test_a_futures_session_bar_ends_when_its_session_is_over(
     )
 
 
+@pytest.mark.parametrize(
+    "on_error",
+    [None, dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)],
+    ids=["default", "raise"],
+)
+def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: dm.ErrorPolicy | None,
+) -> None:
+    # At noon on 03-28 the two-session bucket of 03-27 and 03-28 is still open, so it is not
+    # the read's, though its label lies in the range. Its close can't be read, yet the read
+    # gives no rows, reports nothing, and never fails.
+    noon = datetime(2024, 3, 28, 12, tzinfo=CHICAGO)
+    monkeypatch.setattr(history_source, "_now", lambda: noon)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    row = {
+        "ticker": "ESM4",
+        "session_end_date": "2024-03-28",
+        "window_start": epoch_ns(datetime(2024, 3, 27, tzinfo=UTC)),
+        "close": "x",
+    }
+    fake_rest.reply("/futures/v1/aggs/ESM4", Reply(envelope([row])))
+    out = history(
+        session,
+        FUTURES_BARS,
+        start="2024-03-25",
+        end=None,
+        symbols=["ESM4"],
+        timespan=Timespan.SESSION,
+        multiplier=2,
+        on_error=on_error,
+    )
+    assert fake_rest.get_queries()
+    assert out == []
+    assert events == []
+
+
 def test_fetch_rows_reads_every_page_raw(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

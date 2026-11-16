@@ -132,7 +132,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches_now
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
-from deephaven_massive._datasets.row_times import START, StampRule, time_rule
+from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying, log_unreadable
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
@@ -181,7 +181,6 @@ from deephaven_massive._ingest.rest_rows import (
     UNDERLYING,
     RowConverter,
     keep_window,
-    whole_bars,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 from deephaven_massive._ingest.stop_tokens import as_cancel
@@ -207,6 +206,7 @@ from deephaven_massive._tables.withheld import (
     failure_of,
     logs_withheld,
     mark,
+    placed,
     withhold_rows,
 )
 
@@ -1239,15 +1239,18 @@ class RestReader:
         record: Callable[[DriftReport], None] | None,
         tally: ReadTally,
     ) -> list[pa.RecordBatch]:
-        """Keep a page's rows of the window, withhold its marked rows, fill and keep whole bars.
+        """Keep a page's rows of the window and its whole bars, withhold its marked rows, and fill.
 
         The rows the library could not read whole are withheld (`withheld.withhold_rows`) after
-        the window, which keeps a marked row it cannot place, and before the time columns are
-        filled. The withheld rows count in the page's drift, give the session their problem
-        events, and log each unreadable symbol spelling once at the level the read's
-        `unreadable_symbols` gives. The page's rows inside the window, and those withheld, are
-        added to `tally`, which the read's entry point checks after its last part
-        (`ReadTally.check`), so a page whose rows are all withheld never fails a read on its
+        the window, which keeps a marked row it cannot place, and after the whole-bar window
+        (`row_times.whole`), judged on the filled time columns of the rows whose keys read
+        (`withheld.placed`), so a bar that is not the read's is never reported or counted;
+        and before the time columns are filled for good. The withheld rows count in the page's
+        drift, give the session their problem events, and log each unreadable symbol spelling
+        once at the level the read's `unreadable_symbols` gives. The page's rows inside the
+        window, and those withheld, are added to `tally`, which the read's entry point checks
+        after its last part (`ReadTally.check`), so a page whose rows are all withheld never
+        fails a read on its
         own. Logs one DEBUG line per page with the rows left after each step, so an empty table
         can be traced to the step that emptied it.
 
@@ -1277,6 +1280,11 @@ class RestReader:
         windowed = pa.Table.from_batches(
             [keep_window(batch, window, time=time_name) for batch in batches]
         )
+        if window is not None and window.bars is not None:
+            # Judge each bar against the whole-bar window before withholding it, so a bar
+            # outside it is neither reported nor counted, whatever is wrong with it.
+            bounds = window.bars
+            windowed = placed(windowed, lambda rows: whole(fill(rows), bounds))
         symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
         withheld = withhold_rows(windowed, symbol=symbol)
         if withheld.groups:
@@ -1285,7 +1293,7 @@ class RestReader:
             self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
         tally.add(asked, withheld, source=where)
-        whole = [whole_bars(fill(batch), window) for batch in withheld.rows.to_batches()]
+        kept = [fill(batch) for batch in withheld.rows.to_batches()]
         logger.debug(
             "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",
             page,
@@ -1293,9 +1301,9 @@ class RestReader:
             considered,
             windowed.num_rows,
             withheld.total,
-            sum(batch.num_rows for batch in whole),
+            sum(batch.num_rows for batch in kept),
         )
-        return whole
+        return kept
 
     def _report_withheld(self, spec: DatasetSpec, withheld: Withheld, *, where: str) -> None:
         """Fail on a page's withheld rows under `RAISE`, or report them and go on.

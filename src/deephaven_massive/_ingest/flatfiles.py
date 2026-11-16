@@ -153,7 +153,7 @@ from deephaven_massive._datasets.row_times import (
     TimeRule,
     time_column,
     time_rule,
-    within,
+    whole,
 )
 from deephaven_massive._datasets.source_columns import RoundedFields, rename, required_fields
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, option_roots
@@ -216,6 +216,7 @@ from deephaven_massive._tables.withheld import (
     mark,
     mark_failures,
     merged,
+    placed,
     with_marks,
     withhold_rows,
 )
@@ -670,7 +671,8 @@ class _Transform:
         (`row_times.TimeRule.fill`). The lists are already parsed, the rows already
         filtered, and a documented header the file lacks already a column of nulls, by the
         reader. A bar whose window does not lie in the window is dropped
-        (`row_times.within`).
+        (`row_times.whole`), judged before the rows are withheld
+        (`withheld.placed`).
 
         Every row the library cannot read whole is withheld (`withheld.withhold_rows`) before
         the time columns are filled: a key the reader could not read, its time included
@@ -720,9 +722,15 @@ class _Transform:
         for name in MARK_COLUMNS:
             rows = rows.append_column(name, batch[name])
         rows = mark_failures(self._stamped(rows), (*failures, *rounded.failures()))
+        if self.bars is not None:
+            # Judge each bar against the whole-bar window before withholding it, so a bar
+            # outside it is neither reported nor counted, whatever is wrong with it.
+            bounds = self.bars
+            rows = placed(
+                rows, lambda block: whole(self.times.fill(block, received=received), bounds)
+            )
         withheld = withhold_rows(rows, symbol="Symbol")
-        filled = self.times.fill(withheld.rows, received=received)
-        kept = filled if self.bars is None else within(filled, self.bars)
+        kept = self.times.fill(withheld.rows, received=received)
         drift = DriftReport(unconvertible=frozenset(odd), samples=odd)
         return kept, drift.merge(rounded.drift()), withheld
 
