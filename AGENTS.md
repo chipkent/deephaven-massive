@@ -165,12 +165,14 @@ These protect the owner's repository, money, and secrets.
   - **A ticker Massive has no data for gives no rows by default** (decision 104), because that
     is Massive's answer, not an error. `unavailable_symbols` governs an HTTP 404 and a crypto
     pair missing from Massive's crypto ticker list. An empty 200 is no rows under any setting.
-  - **The library never sends a request only to check a ticker.** Users check Massive's lists,
-    such as `m.reference.tickers()`.
+  - **The library never sends a request only to check a ticker**, because whether a ticker
+    exists is Massive's answer to give. Users check Massive's lists, such as
+    `m.reference.tickers()`.
   - **The library takes only Massive's canonical ticker as a symbol** (decisions 58 and 104),
     because most of Massive's endpoints answer an unknown ticker with an empty 200
-    (verification item 62), so a typo looks like a quiet day. A form on Massive's ticker lists
-    that the library refuses is a library defect.
+    (verification item 62), so a typo looks like a quiet day. In code, a non-canonical symbol
+    raises `ValueError`. In a table, its row follows `noncanonical_symbols`. A form on
+    Massive's ticker lists that the library refuses is a library defect.
   - **The library refuses any other value only** when it is the wrong Python type, when the
     library can't express it in a request, or when sending it would return wrong data with no
     error. Each such check says which, with its evidence. Beyond ticker spelling, the library
